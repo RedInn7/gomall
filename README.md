@@ -2,16 +2,12 @@
 
 **基于 gin+gorm+mysql读写分离 的一个电子商场**
 
-本项目改自于作者[Congz](https://github.com/congz666)的[电子商城](https://github.com/congz666/cmall-go)
+
 去除了一些如第三方登录，极验，第三方支付等功能，新增了MySQL读写分离、ELK日志体系、AES对称加密进行数据脱敏等。
-在此也非常感谢作者开源！🫡
 
 此项目比较全面，比较适合小白入门`web开发`
 
 # 更新说明
-**V2版本，结构较比V1版本有很大的改动**
-**全部转化成 controller、dao、service 模式，更加符合企业开发**
-
 考虑到部分同学的基础，所以V2版本的技术栈只有mysql，redis，docker。
 
 而 ELK，MQ，Jaeger，Prometheus 这部分都集成在V3版本，并且V3版本的项目结构进行部分重构。
@@ -21,10 +17,7 @@
 其中我个人用到的测试sql数据都放在了`config/sql/`文件当中
 
 # 前端 (coding)🧑🏻‍💻
-
-项目前端地址：[react-mall](https://github.com/CocaineCong/react-mall)
-
-前端采用`react+antd+axios+redux`,还在coding,功能还不完善,也希望有意向的同学可以一起完善
+本项目专注后端，暂不提供前端，不过可以使用postman进行调用
 
 
 # 项目运行✨
@@ -104,9 +97,9 @@ make env-up tools build # 拉起项目环境、编译Agent、构建项目二进�
 - [x] 支付密码支持6位
 
 # 主要依赖
-| 名称           | 版本      |
-|--------------|---------|
-| golang       | 1.18    |
+| 名称         | 版本    |
+| ------------ | ------- |
+| golang       | 1.23    |
 | gin          | v1.9.0  |
 | gorm         | v1.9.6  |
 | mysql        | v1.5.0  |
@@ -243,7 +236,7 @@ rabbitMq:
 选择导入文件
 ![选择导入接口文件](doc/2.选择文件.png)
 
-![导入](doc/3.导入.png)
+![导入](doc/导入.png)
 
 效果
 
