@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -111,6 +112,10 @@ func (s *OrderSrv) OrderShow(ctx context.Context, req *types.OrderShowReq) (resp
 		util.LogrusObj.Error(err)
 		return
 	}
+	if order == nil || order.ID == 0 {
+		return nil, errors.New("没找到数据")
+	}
+
 	if conf.Config.System.UploadModel == consts.UploadModelLocal {
 		order.ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + order.ImgPath
 	}
@@ -126,7 +131,18 @@ func (s *OrderSrv) OrderDelete(ctx context.Context, req *types.OrderDeleteReq) (
 		util.LogrusObj.Error(err)
 		return
 	}
-	err = dao.NewOrderDao(ctx).DeleteOrderById(req.OrderId, u.Id)
+	db := dao.NewOrderDao(ctx)
+	var ret *types.OrderListResp
+	ret, err = db.ShowOrderById(req.OrderId, u.Id)
+	if err != nil {
+		util.LogrusObj.Error("ShowOrderById失败，err:", err)
+		return nil, err
+	}
+	if ret == nil || ret.ID == 0 {
+		return nil, errors.New("没有查找到数据")
+	}
+
+	err = db.DeleteOrderById(req.OrderId, u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return

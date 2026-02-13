@@ -62,8 +62,8 @@ func ParseToken(token string) (*Claims, error) {
 }
 
 // ParseRefreshToken 验证用户token
-func ParseRefreshToken(aToken, rToken string) (newAToken, newRToken string, err error) {
-	accessClaim, err := ParseToken(aToken)
+func ParseRefreshToken(accessToken, rToken string) (newAToken, newRToken string, err error) {
+	accessClaim, err := ParseToken(accessToken)
 	if err != nil {
 		log.LogrusObj.Infoln("[debug1]err==", err)
 		return

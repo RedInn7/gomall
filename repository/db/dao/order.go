@@ -2,7 +2,6 @@ package dao
 
 import (
 	"context"
-
 	"gorm.io/gorm"
 
 	"github.com/CocaineCong/gin-mall/repository/db/model"
