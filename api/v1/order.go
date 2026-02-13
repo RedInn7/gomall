@@ -5,12 +5,11 @@ import (
 
 	"github.com/CocaineCong/gin-mall/consts"
 
-	"github.com/gin-gonic/gin"
-
 	"github.com/CocaineCong/gin-mall/pkg/utils/ctl"
 	"github.com/CocaineCong/gin-mall/pkg/utils/log"
 	"github.com/CocaineCong/gin-mall/service"
 	"github.com/CocaineCong/gin-mall/types"
+	"github.com/gin-gonic/gin"
 )
 
 func CreateOrderHandler() gin.HandlerFunc {
