@@ -41,13 +41,13 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 	err = dao.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		uId := u.Id
 
-		payment, err := dao.NewOrderDaoByDB(tx).GetOrderById(req.OrderId, uId)
+		order, err := dao.NewOrderDaoByDB(tx).GetOrderById(req.OrderId, uId)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
-		money := payment.Money
-		num := payment.Num
+		money := order.Money
+		num := order.Num
 		money = money * float64(num)
 
 		userDao := dao.NewUserDaoByDB(tx)
@@ -64,7 +64,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			return err
 		}
 		if moneyFloat-money < 0.0 { // 金额不足进行回滚
-			log.LogrusObj.Error(err)
+			log.LogrusObj.Error("金额不足,moneyFloat:", moneyFloat)
 			return errors.New("金币不足")
 		}
 
@@ -109,6 +109,10 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			log.LogrusObj.Error(err)
 			return err
 		}
+		if product.Num-num < 0 {
+			log.LogrusObj.Error("存在超卖问题")
+			return errors.New("存在超卖问题")
+		}
 		product.Num -= num
 		err = productDao.UpdateProduct(uint(req.ProductID), product)
 		if err != nil { // 更新商品数量减少失败，回滚
@@ -117,8 +121,8 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 		}
 
 		// 更新订单状态
-		payment.Type = consts.OrderTypePendingShipping
-		err = dao.NewOrderDaoByDB(tx).UpdateOrderById(req.OrderId, uId, payment)
+		order.Type = consts.OrderTypePendingShipping
+		err = dao.NewOrderDaoByDB(tx).UpdateOrderById(req.OrderId, uId, order)
 		if err != nil { // 更新订单失败，回滚
 			log.LogrusObj.Error(err)
 			return err
