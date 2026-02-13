@@ -30,6 +30,14 @@ func (dao *AddressDao) GetAddressByAid(aId, uId uint) (address *model.Address, e
 	return
 }
 
+func (dao *AddressDao) GetAddressByuId(uId uint) (address []*model.Address, err error) {
+	err = dao.DB.Model(&model.Address{}).
+		Where(" user_id = ?", uId).Find(&address).
+		Error
+
+	return
+}
+
 // ListAddressByUid 根据 User Id 获取User
 func (dao *AddressDao) ListAddressByUid(uid uint) (r []*types.AddressResp, err error) {
 	err = dao.DB.Model(&model.Address{}).

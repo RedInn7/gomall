@@ -71,10 +71,9 @@ func NewRouter() *gin.Engine {
 			authed.POST("carts/update", api.UpdateCartHandler()) // 购物车id
 			authed.POST("carts/delete", api.DeleteCartHandler())
 
-			// 收获地址操作
+			// 地址操作
 			authed.POST("addresses/create", api.CreateAddressHandler())
 			authed.GET("addresses/show", api.ShowAddressHandler())
-			authed.GET("addresses/list", api.ListAddressHandler())
 			authed.POST("addresses/update", api.UpdateAddressHandler())
 			authed.POST("addresses/delete", api.DeleteAddressHandler())
 

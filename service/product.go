@@ -67,7 +67,7 @@ func (s *ProductSrv) ProductShow(ctx context.Context, req *types.ProductShowReq)
 func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileHeader, req *types.ProductCreateReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
-		log.LogrusObj.Error(err)
+		log.LogrusObj.Error("获取用户信息失败，err==", err)
 		return nil, err
 	}
 	uId := u.Id
@@ -81,7 +81,7 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		path, err = util.UploadToQiNiu(tmp, files[0].Size)
 	}
 	if err != nil {
-		log.LogrusObj.Error(err)
+		log.LogrusObj.Error("上传图片失败，err:", err)
 		return
 	}
 	product := &model.Product{
@@ -101,7 +101,7 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 	productDao := dao.NewProductDao(ctx)
 	err = productDao.CreateProduct(product)
 	if err != nil {
-		log.LogrusObj.Error(err)
+		log.LogrusObj.Error("创建产品失败，err:", err)
 		return
 	}
 

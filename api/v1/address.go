@@ -3,8 +3,6 @@ package v1
 import (
 	"net/http"
 
-	"github.com/CocaineCong/gin-mall/consts"
-
 	"github.com/gin-gonic/gin"
 
 	"github.com/CocaineCong/gin-mall/pkg/utils/ctl"
@@ -38,41 +36,9 @@ func CreateAddressHandler() gin.HandlerFunc {
 // ShowAddressHandler 展示某个收货地址
 func ShowAddressHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.AddressGetReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
-			return
-		}
 
 		l := service.GetAddressSrv()
-		resp, err := l.AddressShow(ctx.Request.Context(), &req)
-		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
-			return
-		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
-	}
-}
-
-// ListAddressHandler 展示收货地址
-func ListAddressHandler() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		var req types.AddressListReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
-			return
-		}
-		if req.PageSize == 0 {
-			req.PageSize = consts.BasePageSize
-		}
-
-		l := service.GetAddressSrv()
-		resp, err := l.AddressList(ctx.Request.Context(), &req)
+		resp, err := l.AddressShow(ctx.Request.Context())
 		if err != nil {
 			log.LogrusObj.Infoln(err)
 			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))

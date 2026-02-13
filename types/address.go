@@ -7,10 +7,6 @@ type AddressServiceReq struct {
 	Address string `form:"address" json:"address"`
 }
 
-type AddressGetReq struct {
-	Id uint `form:"id" json:"id"`
-}
-
 type AddressListReq struct {
 	BasePage
 }

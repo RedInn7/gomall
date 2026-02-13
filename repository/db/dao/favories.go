@@ -63,18 +63,30 @@ func (dao *FavoritesDao) CreateFavorite(favorite *model.Favorite) (err error) {
 }
 
 // FavoriteExistOrNot 判断是否存在
-func (dao *FavoritesDao) FavoriteExistOrNot(pId, uId uint) (exist bool, err error) {
+func (dao *FavoritesDao) FavoriteExistOrNot(uId uint, pid uint) (exist bool, err error) {
 	var count int64
-	err = dao.DB.Model(&model.Favorite{}).
-		Where("product_id=? AND user_id=?", pId, uId).Count(&count).Error
-	if count == 0 || err != nil {
-		return false, err
+	db := dao.DB.Model(&model.Favorite{}).
+		Where("user_id=?", uId)
+	if pid != 0 {
+		db = db.Where("product_id=?", pid)
 	}
-	return true, err
+	err = db.Count(&count).Error
 
+	if err != nil {
+		return
+	}
+	return count > 0, nil
 }
 
 // DeleteFavoriteById 删除收藏夹
 func (dao *FavoritesDao) DeleteFavoriteById(fId uint) error {
 	return dao.DB.Where("id=?", fId).Delete(&model.Favorite{}).Error
+}
+
+func (dao *FavoritesDao) DeleteFavoriteByUserIdAndProductId(userId uint, productId uint) error {
+	db := dao.DB.Where("user_id=?", userId)
+	if productId != 0 {
+		db = db.Where("product_id=?", productId)
+	}
+	return db.Delete(&model.Favorite{}).Error
 }
