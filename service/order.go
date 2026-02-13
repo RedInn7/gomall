@@ -48,15 +48,9 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 		Num:       int(req.Num),
 		Money:     float64(req.Money),
 		Type:      1,
-	}
-	addressDao := dao.NewAddressDao(ctx)
-	address, err := addressDao.GetAddressByAid(req.AddressID, u.Id)
-	if err != nil {
-		util.LogrusObj.Error(err)
-		return
+		AddressID: req.AddressID,
 	}
 
-	order.AddressID = address.ID
 	number := fmt.Sprintf("%09v", rand.New(rand.NewSource(time.Now().UnixNano())).Int31n(1000000000))
 	productNum := strconv.Itoa(int(req.ProductID))
 	userNum := strconv.Itoa(int(u.Id))

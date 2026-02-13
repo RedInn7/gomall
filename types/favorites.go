@@ -17,7 +17,8 @@ type FavoriteCreateReq struct {
 }
 
 type FavoriteDeleteReq struct {
-	Id uint `form:"id" json:"id"`
+	Id        uint `form:"user_id" json:"id"`
+	ProductId uint `form:"product_id" json:"product_id"`
 }
 
 type FavoriteListResp struct {

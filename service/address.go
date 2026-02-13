@@ -45,26 +45,22 @@ func (s *AddressSrv) AddressCreate(ctx context.Context, req *types.AddressCreate
 	return
 }
 
-func (s *AddressSrv) AddressShow(ctx context.Context, req *types.AddressGetReq) (resp interface{}, err error) {
+func (s *AddressSrv) AddressShow(ctx context.Context) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
 	}
 
-	address, err := dao.NewAddressDao(ctx).GetAddressByAid(req.Id, u.Id)
+	address, err := dao.NewAddressDao(ctx).GetAddressByuId(u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
 	}
 
-	resp = &types.AddressResp{
-		ID:        address.ID,
-		UserID:    address.UserID,
-		Name:      address.Name,
-		Phone:     address.Phone,
-		Address:   address.Address,
-		CreatedAt: address.CreatedAt.Unix(),
+	resp = &types.DataListResp{
+		Item:  address,
+		Total: int64(len(address)),
 	}
 
 	return
