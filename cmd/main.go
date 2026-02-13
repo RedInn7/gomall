@@ -2,13 +2,12 @@ package main
 
 import (
 	"fmt"
-
 	conf "github.com/CocaineCong/gin-mall/config"
 	util "github.com/CocaineCong/gin-mall/pkg/utils/log"
+	snowflake "github.com/CocaineCong/gin-mall/pkg/utils/snowflake"
 	"github.com/CocaineCong/gin-mall/repository/cache"
 	"github.com/CocaineCong/gin-mall/repository/db/dao"
 	"github.com/CocaineCong/gin-mall/routes"
-
 	_ "github.com/apache/skywalking-go"
 )
 
@@ -24,7 +23,7 @@ func loading() {
 	conf.InitConfig()
 	dao.InitMySQL()
 	cache.InitCache()
-
+	snowflake.InitSnowflake(1)
 	//rabbitmq.InitRabbitMQ() // 如果需要接入RabbitMQ可以打开这个注释
 	//es.InitEs()             // 如果需要接入ELK可以打开这个注释
 	//kafka.InitKafka()

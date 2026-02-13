@@ -63,7 +63,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			log.LogrusObj.Error(err)
 			return err
 		}
-		if moneyFloat-money < 0.0 { // 金额不足进行回滚
+		if moneyFloat-money < 0.0 {
 			log.LogrusObj.Error("金额不足")
 			return errors.New("金额不足")
 		}

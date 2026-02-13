@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/CocaineCong/gin-mall/pkg/utils/snowflake"
 	"math/rand"
 	"strconv"
 	"sync"
@@ -56,8 +57,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 	productNum := strconv.Itoa(int(req.ProductID))
 	userNum := strconv.Itoa(int(u.Id))
 	number = number + productNum + userNum
-	orderNum, _ := strconv.ParseUint(number, 10, 64)
-	order.OrderNum = orderNum
+	order.OrderNum = uint64(snowflake.GenSnowflakeID())
 
 	orderDao := dao.NewOrderDao(ctx)
 	err = orderDao.CreateOrder(order)
@@ -69,7 +69,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 	// 订单号存入Redis中，设置过期时间
 	data := redis.Z{
 		Score:  float64(time.Now().Unix()) + 15*time.Minute.Seconds(),
-		Member: orderNum,
+		Member: order.OrderNum,
 	}
 	cache.RedisClient.ZAdd(cache.RedisContext, OrderTimeKey, data)
 
