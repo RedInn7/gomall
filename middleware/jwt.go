@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"github.com/CocaineCong/gin-mall/pkg/utils/log"
 	"github.com/gin-gonic/gin"
 
 	"github.com/CocaineCong/gin-mall/consts"
@@ -29,6 +30,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		newAccessToken, newRefreshToken, err := util.ParseRefreshToken(accessToken, refreshToken)
 		if err != nil {
 			code = e.ErrorAuthCheckTokenFail
+			log.LogrusObj.Infoln("ParseRefreshToken 错误，err:", err)
 		}
 		if code != e.SUCCESS {
 			c.JSON(200, gin.H{
@@ -42,6 +44,7 @@ func AuthMiddleware() gin.HandlerFunc {
 		}
 		claims, err := util.ParseToken(newAccessToken)
 		if err != nil {
+			log.LogrusObj.Infoln("ParseToken 错误，err:", err)
 			code = e.ErrorAuthCheckTokenFail
 			c.JSON(200, gin.H{
 				"status": code,
