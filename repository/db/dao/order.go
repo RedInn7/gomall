@@ -2,7 +2,9 @@ package dao
 
 import (
 	"context"
+	"github.com/CocaineCong/gin-mall/consts"
 	"gorm.io/gorm"
+	"time"
 
 	"github.com/CocaineCong/gin-mall/repository/db/model"
 	"github.com/CocaineCong/gin-mall/types"
@@ -109,4 +111,31 @@ func (dao *OrderDao) DeleteOrderById(id, uId uint) error {
 func (dao *OrderDao) UpdateOrderById(id, uId uint, order *model.Order) error {
 	return dao.DB.Where("id = ? AND user_id = ?", id, uId).
 		Updates(order).Error
+}
+
+func (dao *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*model.Order, err error) {
+	expireTime := time.Now().Add(-time.Duration(minutes) * time.Minute)
+	err = dao.DB.Model(&model.Order{}).Where(
+		"type=? and created_at <=?", consts.UnPaid, expireTime).
+		Limit(limit).
+		Find(&orders).Error
+
+	return
+}
+
+func (dao *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
+	res := dao.DB.Model(&model.Order{}).Where(
+		"order_num=? and type=?", orderNum, consts.UnPaid).
+		Update("type", consts.Cancelled)
+
+	if res.Error != nil {
+		return false, res.Error
+	}
+
+	return res.RowsAffected > 0, nil
+
+}
+
+func NewOrderDaoWithDB(db *gorm.DB) *OrderDao {
+	return &OrderDao{DB: db}
 }
