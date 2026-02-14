@@ -2,6 +2,7 @@ package dao
 
 import (
 	"context"
+	"errors"
 
 	"gorm.io/gorm"
 
@@ -93,4 +94,22 @@ func (dao *ProductDao) SearchProduct(info string, page types.BasePage) (products
 		Error
 
 	return
+}
+
+func (dao *ProductDao) RollbackStock(productId uint, num int) (bool, error) {
+	res := dao.DB.Model(&model.Product{}).
+		Where("id=?", productId).
+		Update("num", gorm.Expr("num+?", num))
+
+	if res.Error != nil {
+		return false, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return false, errors.New("回滚失败")
+	}
+	return true, nil
+}
+
+func NewProductDaoWithDB(db *gorm.DB) *ProductDao {
+	return &ProductDao{DB: db}
 }
