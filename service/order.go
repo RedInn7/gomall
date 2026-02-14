@@ -3,10 +3,7 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"github.com/CocaineCong/gin-mall/pkg/utils/snowflake"
-	"math/rand"
-	"strconv"
 	"sync"
 	"time"
 
@@ -49,15 +46,10 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 		BossID:    req.BossID,
 		Num:       int(req.Num),
 		Money:     float64(req.Money),
-		Type:      1,
+		Type:      consts.UnPaid,
 		AddressID: req.AddressID,
+		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 	}
-
-	number := fmt.Sprintf("%09v", rand.New(rand.NewSource(time.Now().UnixNano())).Int31n(1000000000))
-	productNum := strconv.Itoa(int(req.ProductID))
-	userNum := strconv.Itoa(int(u.Id))
-	number = number + productNum + userNum
-	order.OrderNum = uint64(snowflake.GenSnowflakeID())
 
 	orderDao := dao.NewOrderDao(ctx)
 	err = orderDao.CreateOrder(order)
@@ -66,7 +58,6 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 		return
 	}
 
-	// 订单号存入Redis中，设置过期时间
 	data := redis.Z{
 		Score:  float64(time.Now().Unix()) + 15*time.Minute.Seconds(),
 		Member: order.OrderNum,
