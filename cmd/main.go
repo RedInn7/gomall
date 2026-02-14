@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
-	conf "github.com/CocaineCong/gin-mall/config"
-	"github.com/CocaineCong/gin-mall/initialize"
-	util "github.com/CocaineCong/gin-mall/pkg/utils/log"
-	snowflake "github.com/CocaineCong/gin-mall/pkg/utils/snowflake"
-	"github.com/CocaineCong/gin-mall/repository/cache"
-	"github.com/CocaineCong/gin-mall/repository/db/dao"
-	"github.com/CocaineCong/gin-mall/routes"
+	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/initialize"
+	util "github.com/RedInn7/gomall/pkg/utils/log"
+	snowflake "github.com/RedInn7/gomall/pkg/utils/snowflake"
+	"github.com/RedInn7/gomall/repository/cache"
+	"github.com/RedInn7/gomall/repository/db/dao"
+	"github.com/RedInn7/gomall/routes"
 	_ "github.com/apache/skywalking-go"
 )
 

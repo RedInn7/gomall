@@ -5,8 +5,8 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/CocaineCong/gin-mall/pkg/utils/log"
-	"github.com/CocaineCong/gin-mall/repository/db/model"
+	"github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 type UserDao struct {

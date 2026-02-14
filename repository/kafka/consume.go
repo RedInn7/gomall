@@ -4,7 +4,7 @@ import (
 	"github.com/Shopify/sarama"
 	"go.uber.org/zap"
 
-	"github.com/CocaineCong/gin-mall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 type ConsumerGroupHandler func(message *sarama.ConsumerMessage) error

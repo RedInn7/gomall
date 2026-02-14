@@ -3,8 +3,8 @@ package service
 import (
 	"context"
 	"errors"
-	util "github.com/CocaineCong/gin-mall/pkg/utils/log"
-	"github.com/CocaineCong/gin-mall/repository/db/dao"
+	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/db/dao"
 	"gorm.io/gorm"
 )
 

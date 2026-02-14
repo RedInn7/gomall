@@ -3,7 +3,7 @@ package email
 import (
 	"gopkg.in/mail.v2"
 
-	conf "github.com/CocaineCong/gin-mall/config"
+	conf "github.com/RedInn7/gomall/config"
 )
 
 type EmailSender struct {

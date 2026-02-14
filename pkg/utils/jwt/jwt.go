@@ -2,12 +2,12 @@ package jwt
 
 import (
 	"errors"
-	"github.com/CocaineCong/gin-mall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
 
-	"github.com/CocaineCong/gin-mall/consts"
+	"github.com/RedInn7/gomall/consts"
 )
 
 var jwtSecret = []byte("FanOne")

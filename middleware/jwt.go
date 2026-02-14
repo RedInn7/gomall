@@ -1,13 +1,13 @@
 package middleware
 
 import (
-	"github.com/CocaineCong/gin-mall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/gin-gonic/gin"
 
-	"github.com/CocaineCong/gin-mall/consts"
-	"github.com/CocaineCong/gin-mall/pkg/e"
-	"github.com/CocaineCong/gin-mall/pkg/utils/ctl"
-	util "github.com/CocaineCong/gin-mall/pkg/utils/jwt"
+	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/e"
+	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	util "github.com/RedInn7/gomall/pkg/utils/jwt"
 )
 
 // AuthMiddleware token验证中间件

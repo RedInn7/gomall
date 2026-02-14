@@ -7,16 +7,16 @@ import (
 	"mime/multipart"
 	"sync"
 
-	conf "github.com/CocaineCong/gin-mall/config"
-	"github.com/CocaineCong/gin-mall/consts"
-	"github.com/CocaineCong/gin-mall/pkg/utils/ctl"
-	"github.com/CocaineCong/gin-mall/pkg/utils/email"
-	"github.com/CocaineCong/gin-mall/pkg/utils/jwt"
-	"github.com/CocaineCong/gin-mall/pkg/utils/log"
-	util "github.com/CocaineCong/gin-mall/pkg/utils/upload"
-	"github.com/CocaineCong/gin-mall/repository/db/dao"
-	"github.com/CocaineCong/gin-mall/repository/db/model"
-	"github.com/CocaineCong/gin-mall/types"
+	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	"github.com/RedInn7/gomall/pkg/utils/email"
+	"github.com/RedInn7/gomall/pkg/utils/jwt"
+	"github.com/RedInn7/gomall/pkg/utils/log"
+	util "github.com/RedInn7/gomall/pkg/utils/upload"
+	"github.com/RedInn7/gomall/repository/db/dao"
+	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/types"
 )
 
 var UserSrvIns *UserSrv

@@ -5,13 +5,13 @@ import (
 	"errors"
 	"sync"
 
-	conf "github.com/CocaineCong/gin-mall/config"
-	"github.com/CocaineCong/gin-mall/consts"
-	"github.com/CocaineCong/gin-mall/pkg/utils/ctl"
-	util "github.com/CocaineCong/gin-mall/pkg/utils/log"
-	"github.com/CocaineCong/gin-mall/repository/db/dao"
-	"github.com/CocaineCong/gin-mall/repository/db/model"
-	"github.com/CocaineCong/gin-mall/types"
+	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/db/dao"
+	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/types"
 )
 
 var FavoriteSrvIns *FavoriteSrv

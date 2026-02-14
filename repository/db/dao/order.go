@@ -2,12 +2,12 @@ package dao
 
 import (
 	"context"
-	"github.com/CocaineCong/gin-mall/consts"
+	"github.com/RedInn7/gomall/consts"
 	"gorm.io/gorm"
 	"time"
 
-	"github.com/CocaineCong/gin-mall/repository/db/model"
-	"github.com/CocaineCong/gin-mall/types"
+	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/types"
 )
 
 type OrderDao struct {

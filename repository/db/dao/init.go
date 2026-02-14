@@ -12,7 +12,7 @@ import (
 	"gorm.io/gorm/schema"
 	"gorm.io/plugin/dbresolver"
 
-	conf "github.com/CocaineCong/gin-mall/config"
+	conf "github.com/RedInn7/gomall/config"
 )
 
 var (

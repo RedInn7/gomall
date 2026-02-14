@@ -7,9 +7,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 
-	conf "github.com/CocaineCong/gin-mall/config"
-	"github.com/CocaineCong/gin-mall/pkg/e"
-	"github.com/CocaineCong/gin-mall/pkg/utils/ctl"
+	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/pkg/e"
+	"github.com/RedInn7/gomall/pkg/utils/ctl"
 )
 
 func ErrorResponse(ctx *gin.Context, err error) *ctl.TrackedErrorResponse {

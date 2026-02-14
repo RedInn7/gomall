@@ -6,12 +6,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/CocaineCong/gin-mall/consts"
-	"github.com/CocaineCong/gin-mall/pkg/e"
-	"github.com/CocaineCong/gin-mall/pkg/utils/ctl"
-	"github.com/CocaineCong/gin-mall/pkg/utils/log"
-	"github.com/CocaineCong/gin-mall/service"
-	"github.com/CocaineCong/gin-mall/types"
+	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/e"
+	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	"github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/service"
+	"github.com/RedInn7/gomall/types"
 )
 
 func UserRegisterHandler() gin.HandlerFunc {
