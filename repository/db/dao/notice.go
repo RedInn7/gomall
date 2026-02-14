@@ -5,7 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/CocaineCong/gin-mall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 type NoticeDao struct {

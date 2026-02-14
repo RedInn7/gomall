@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	conf "github.com/CocaineCong/gin-mall/config"
+	conf "github.com/RedInn7/gomall/config"
 )
 
 func TestMain(m *testing.M) {

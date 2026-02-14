@@ -1,4 +1,4 @@
-module github.com/CocaineCong/gin-mall
+module github.com/RedInn7/gomall
 
 go 1.24.0
 

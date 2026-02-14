@@ -4,8 +4,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/opentracing/opentracing-go"
 
-	"github.com/CocaineCong/gin-mall/consts"
-	"github.com/CocaineCong/gin-mall/pkg/utils/track"
+	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/utils/track"
 )
 
 func Jaeger() gin.HandlerFunc {

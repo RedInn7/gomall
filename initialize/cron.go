@@ -2,8 +2,8 @@ package initialize
 
 import (
 	"fmt"
-	util "github.com/CocaineCong/gin-mall/pkg/utils/log"
-	"github.com/CocaineCong/gin-mall/service"
+	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/service"
 	"github.com/robfig/cron/v3"
 )
 
