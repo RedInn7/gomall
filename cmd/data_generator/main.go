@@ -51,8 +51,8 @@ func main() {
 	for i := 0; i < TotalRecords; i++ {
 		order := Order{
 			OrderNum:  uint64(snowflake.GenSnowflakeID()),
-			UserID:    uint(rand.Intn(50000)),
-			ProductID: uint(rand.Intn(200)),
+			UserID:    5,
+			ProductID: uint(rand.Intn(2)),
 			BossID:    uint(rand.Intn(4000)),
 			AddressID: uint(rand.Intn(2000)),
 			Num:       rand.Intn(2000),
