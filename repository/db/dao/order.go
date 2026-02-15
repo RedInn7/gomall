@@ -3,6 +3,7 @@ package dao
 import (
 	"context"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 	"gorm.io/gorm"
 	"time"
 
@@ -28,40 +29,33 @@ func (dao *OrderDao) CreateOrder(order *model.Order) error {
 }
 
 // ListOrderByCondition 获取订单List
-func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r []*types.OrderListResp, count int64, err error) {
+func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r *types.OrderListResp, count int64, err error) {
 	// TODO 商城算是一个TOC的应用，TOC的应该是不允许join操作的，看看后续怎么改走缓存，比如走缓存，找找免费的CDN之类的
-	d := dao.DB.Model(&model.Order{}).
-		Where("user_id = ?", uId)
-	if req.Type != 0 {
-		d.Where("type = ?", req.Type)
-	}
-	d.Count(&count) // 总数
+	r = &types.OrderListResp{List: make([]*types.OrderListRespItem, 0)}
+	baseQuery := dao.DB.Table("`order` as o").Where("o.user_id = ? and o.type=?", uId, req.Type)
 
-	db := dao.DB.Model(&model.Order{}).
-		Joins("AS o LEFT JOIN product AS p ON p.id = o.product_id").
-		Joins("LEFT JOIN address AS a ON a.id = o.address_id").
-		Where("o.user_id = ?", uId)
-	if req.Type != 0 {
-		db.Where("o.type = ?", req.Type)
+	err = baseQuery.Count(&count).Error
+	if err != nil {
+		log.LogrusObj.Errorf("计算总数失败，err:%v\n", err)
 	}
-	db.Offset((req.PageNum - 1) * req.PageSize).
-		Limit(req.PageSize).Order("created_at DESC").
-		Select("o.id AS id," +
-			"o.order_num AS order_num," +
-			"UNIX_TIMESTAMP(o.created_at) AS created_at," +
-			"UNIX_TIMESTAMP(o.updated_at) AS updated_at," +
-			"o.user_id AS user_id," +
-			"o.product_id AS product_id," +
-			"o.boss_id AS boss_id," +
-			"o.num AS num," +
-			"o.type AS type," +
-			"p.name AS name," +
-			"p.discount_price AS discount_price," +
-			"p.img_path AS img_path," +
-			"a.name AS address_name," +
-			"a.phone AS address_phone," +
-			"a.address AS address").
-		Find(&r)
+
+	if req.LastId > 0 {
+		baseQuery = baseQuery.Where("o.id<?", req.LastId)
+	}
+	baseQuery = baseQuery.Order("o.id desc").Limit(req.PageSize)
+
+	err = baseQuery.Joins("left join product as p on p.id=o.product_id").
+		Joins("left join address as a on a.id=o.address_id").
+		Select("o.*,a.phone address_phone,a.address address,p.discount_price discount_price,p.img_path img_path").
+		Find(&r.List).Error
+
+	if err != nil {
+		log.LogrusObj.Errorf("获取订单错误，err:%v", err)
+		return nil, 0, err
+	}
+	if len(r.List) > 0 {
+		r.LastId = int(r.List[len(r.List)-1].ID)
+	}
 
 	return
 }
@@ -75,7 +69,7 @@ func (dao *OrderDao) GetOrderById(id, uId uint) (r *model.Order, err error) {
 }
 
 // ShowOrderById 获取订单详情
-func (dao *OrderDao) ShowOrderById(id, uId uint) (r *types.OrderListResp, err error) {
+func (dao *OrderDao) ShowOrderById(id, uId uint) (r *types.OrderListRespItem, err error) {
 	err = dao.DB.Model(&model.Order{}).
 		Joins("AS o LEFT JOIN product AS p ON p.id = o.product_id").
 		Joins("LEFT JOIN address AS a ON a.id = o.address_id").

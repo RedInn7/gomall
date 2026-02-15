@@ -78,9 +78,9 @@ func (s *OrderSrv) OrderList(ctx context.Context, req *types.OrderListReq) (resp
 		util.LogrusObj.Error(err)
 		return
 	}
-	for i := range orders {
+	for i := range orders.List {
 		if conf.Config.System.UploadModel == consts.UploadModelLocal {
-			orders[i].ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + orders[i].ImgPath
+			orders.List[i].ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + orders.List[i].ImgPath
 		}
 	}
 
@@ -123,7 +123,7 @@ func (s *OrderSrv) OrderDelete(ctx context.Context, req *types.OrderDeleteReq) (
 		return
 	}
 	db := dao.NewOrderDao(ctx)
-	var ret *types.OrderListResp
+	var ret *types.OrderListRespItem
 	ret, err = db.ShowOrderById(req.OrderId, u.Id)
 	if err != nil {
 		util.LogrusObj.Error("ShowOrderById失败，err:", err)
