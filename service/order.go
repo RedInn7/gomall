@@ -85,7 +85,7 @@ func (s *OrderSrv) OrderList(ctx context.Context, req *types.OrderListReq) (resp
 	}
 
 	resp = types.DataListResp{
-		Item:  orders.List,
+		Item:  orders,
 		Total: total,
 	}
 
