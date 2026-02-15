@@ -10,7 +10,7 @@ import (
 func InitCron() {
 	c := cron.New(cron.WithSeconds())
 	orderService := new(service.OrderTaskService)
-	_, err := c.AddFunc("*/10 * * * * *", func() {
+	_, err := c.AddFunc("* */5 * * * *", func() {
 		defer func() {
 			if r := recover(); r != nil {
 				util.LogrusObj.Error("Cron 任务发生 Panic: %v\n", r)
