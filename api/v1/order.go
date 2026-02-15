@@ -59,6 +59,31 @@ func ListOrdersHandler() gin.HandlerFunc {
 	}
 }
 
+func ListOrdersHandlerOld() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		var req types.OrderListReq
+		if err := ctx.ShouldBind(&req); err != nil {
+			// 参数校验
+			log.LogrusObj.Infoln(err)
+			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			return
+		}
+		if req.PageSize == 0 {
+			req.PageSize = consts.BasePageSize
+		}
+
+		l := service.GetOrderSrv()
+		resp, err := l.OrderListOld(ctx.Request.Context(), &req)
+		if err != nil {
+			log.LogrusObj.Infoln(err)
+			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			return
+		}
+		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		return
+	}
+}
+
 // ShowOrderHandler 订单详情
 func ShowOrderHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {

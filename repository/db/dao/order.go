@@ -74,6 +74,42 @@ func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r 
 	return
 }
 
+func (dao *OrderDao) ListOrderByConditionOld(uId uint, req *types.OrderListReq) (r *types.OrderListResp, count int64, err error) {
+	// 1. 直接初始化返回对象，完全不考虑 Redis
+	r = &types.OrderListResp{List: make([]*types.OrderListRespItem, 0)}
+
+	// 2. 没有任何预防措施，直接操作 `order` 表 (连反引号都不加)
+	// 没有任何动态判断，直接 Where 写死，req.Type 为 0 时也会强行查询 type=0
+	query := dao.DB.Table("order").Where("`order`.user_id = ? and `order`.type = ?", uId, req.Type)
+
+	// 3. 每一页都查全表总数，200w 数据下这行代码是性能黑洞
+	// 它会强迫 MySQL 进行全表扫描
+	query.Count(&count)
+
+	// 4. 使用最原始的 OFFSET 分页逻辑
+	// 随着 PageNum 增大，这就是典型的深分页 (Deep Pagination)
+	offset := (req.PageNum - 1) * req.PageSize
+
+	// 5. 所有的 Join、Select 和排序全堆在一起执行
+	// Order("created_at desc") 会触发文件排序 (Filesort)，因为不是主键索引
+	// Offset 会让数据库数完前 N 条数据再扔掉，造成严重的磁盘 I/O 浪费
+	err = query.
+		Joins("left join product as p on p.id=order.product_id").
+		Joins("left join address as a on a.id=order.address_id").
+		Select("`order`.*, a.phone address_phone, a.address address, p.discount_price discount_price, p.img_path img_path").
+		Order("order.created_at desc").
+		Offset(offset).
+		Limit(req.PageSize).
+		Find(&r.List).Error
+
+	if err != nil {
+		log.LogrusObj.Errorf("获取订单错误，err:%v", err)
+		return nil, 0, err
+	}
+
+	return r, count, nil
+}
+
 func (dao *OrderDao) GetOrderById(id, uId uint) (r *model.Order, err error) {
 	err = dao.DB.Model(&model.Order{}).
 		Where("id = ? AND user_id = ?", id, uId).

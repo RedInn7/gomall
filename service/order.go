@@ -87,6 +87,26 @@ func (s *OrderSrv) OrderList(ctx context.Context, req *types.OrderListReq) (resp
 	return orders, nil
 }
 
+func (s *OrderSrv) OrderListOld(ctx context.Context, req *types.OrderListReq) (resp interface{}, err error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	orders, _, err := dao.NewOrderDao(ctx).ListOrderByConditionOld(u.Id, req)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return
+	}
+	for i := range orders.List {
+		if conf.Config.System.UploadModel == consts.UploadModelLocal {
+			orders.List[i].ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + orders.List[i].ImgPath
+		}
+	}
+
+	return orders, nil
+}
+
 func (s *OrderSrv) OrderShow(ctx context.Context, req *types.OrderShowReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {

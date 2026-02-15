@@ -40,7 +40,7 @@ func (s *OrderTaskService) RunOrderTimeoutCheck() {
 			return nil
 		})
 		if err != nil {
-			util.LogrusObj.Errorf("关单失败，orderNum:%v\n", order.OrderNum)
+			util.LogrusObj.Errorf("关单失败，orderNum:%v,err:%v\n", order.OrderNum, err)
 			continue
 		}
 		util.LogrusObj.Infof("orderNum:%v关单成功", order.OrderNum)
