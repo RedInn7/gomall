@@ -73,7 +73,7 @@ func (s *OrderSrv) OrderList(ctx context.Context, req *types.OrderListReq) (resp
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	orders, total, err := dao.NewOrderDao(ctx).ListOrderByCondition(u.Id, req)
+	orders, err := dao.NewOrderDao(ctx).ListOrderByCondition(u.Id, req)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
@@ -84,12 +84,7 @@ func (s *OrderSrv) OrderList(ctx context.Context, req *types.OrderListReq) (resp
 		}
 	}
 
-	resp = types.DataListResp{
-		Item:  orders,
-		Total: total,
-	}
-
-	return
+	return orders, nil
 }
 
 func (s *OrderSrv) OrderShow(ctx context.Context, req *types.OrderShowReq) (resp interface{}, err error) {
