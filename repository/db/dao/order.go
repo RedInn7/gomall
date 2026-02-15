@@ -2,8 +2,11 @@ package dao
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/cache"
 	"gorm.io/gorm"
 	"time"
 
@@ -29,15 +32,21 @@ func (dao *OrderDao) CreateOrder(order *model.Order) error {
 }
 
 // ListOrderByCondition 获取订单List
-func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r *types.OrderListResp, count int64, err error) {
+func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r *types.OrderListResp, err error) {
 	// TODO 商城算是一个TOC的应用，TOC的应该是不允许join操作的，看看后续怎么改走缓存，比如走缓存，找找免费的CDN之类的
+	cacheKey := fmt.Sprintf("mall:orders:uid:%v:type:%v", uId, req.Type)
+	if req.LastId == 0 {
+		val, err := cache.RedisClient.Get(context.Background(), cacheKey).Result()
+		if err == nil && val != "" {
+			r = &types.OrderListResp{List: make([]*types.OrderListRespItem, 0)}
+			if jsonErr := json.Unmarshal([]byte(val), r); jsonErr == nil {
+				return r, nil
+			}
+		}
+	}
+
 	r = &types.OrderListResp{List: make([]*types.OrderListRespItem, 0)}
 	baseQuery := dao.DB.Table("`order` as o").Where("o.user_id = ? and o.type=?", uId, req.Type)
-
-	err = baseQuery.Count(&count).Error
-	if err != nil {
-		log.LogrusObj.Errorf("计算总数失败，err:%v\n", err)
-	}
 
 	if req.LastId > 0 {
 		baseQuery = baseQuery.Where("o.id<?", req.LastId)
@@ -51,10 +60,15 @@ func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r 
 
 	if err != nil {
 		log.LogrusObj.Errorf("获取订单错误，err:%v", err)
-		return nil, 0, err
+		return nil, err
 	}
 	if len(r.List) > 0 {
 		r.LastId = int(r.List[len(r.List)-1].ID)
+	}
+
+	if req.LastId == 0 {
+		bytes, _ := json.Marshal(r)
+		cache.RedisClient.Set(context.Background(), cacheKey, string(bytes), 5*time.Minute)
 	}
 
 	return
