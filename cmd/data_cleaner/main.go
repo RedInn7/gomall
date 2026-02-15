@@ -10,7 +10,6 @@ import (
 )
 
 const (
-	// 请确保这里的 DSN 和你之前的一致
 	DSN           = "mall:123456@tcp(127.0.0.1:3306)/mall_db?charset=utf8mb4&parseTime=True&loc=Local"
 	DeleteRecords = 1000000 // 要删除的数据量
 	BatchSize     = 5000    // 每次删 5000 条 (安全水位，不会锁死 DB)
