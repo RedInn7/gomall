@@ -25,6 +25,10 @@ type Product struct {
 	BossAvatar    string
 }
 
+func (Product) TableName() string {
+	return "product"
+}
+
 // View 获取点击数
 func (product *Product) View() uint64 {
 	countStr, _ := cache.RedisClient.Get(cache.RedisContext, cache.ProductViewKey(product.ID)).Result()
