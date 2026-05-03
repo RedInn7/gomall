@@ -2,9 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sync"
-
-	"github.com/spf13/cast"
 
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
@@ -45,8 +44,17 @@ func (s *MoneySrv) MoneyShow(ctx context.Context, req *types.MoneyShowReq) (resp
 	resp = &types.MoneyShowResp{
 		UserID:    user.ID,
 		UserName:  user.UserName,
-		UserMoney: cast.ToString(money),
+		UserMoney: formatYuan(money),
 	}
 
 	return
+}
+
+func formatYuan(cents int64) string {
+	sign := ""
+	if cents < 0 {
+		sign = "-"
+		cents = -cents
+	}
+	return fmt.Sprintf("%s%d.%02d", sign, cents/100, cents%100)
 }

@@ -64,13 +64,13 @@ func (u *User) EncryptMoney(key string) (money string, err error) {
 	return
 }
 
-// DecryptMoney 解密金额
-func (u *User) DecryptMoney(key string) (money float64, err error) {
+// DecryptMoney 解密金额，返回值单位为分。
+func (u *User) DecryptMoney(key string) (money int64, err error) {
 	aesObj, err := secret.NewAesEncrypt(conf.Config.EncryptSecret.MoneySecret, key, "", secret.AesEncrypt128, secret.AesModeTypeCBC)
 	if err != nil {
 		return
 	}
 
-	money = cast.ToFloat64(aesObj.SecretDecrypt(u.Money))
+	money = cast.ToInt64(aesObj.SecretDecrypt(u.Money))
 	return
 }

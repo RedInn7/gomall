@@ -1,74 +1,123 @@
 package upload
 
 import (
+	"errors"
 	"fmt"
-	"io/ioutil"
-	"log"
+	"io"
 	"mime/multipart"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	conf "github.com/RedInn7/gomall/config"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 )
 
-// ProductUploadToLocalStatic 上传到本地文件中
+const (
+	maxImageSize = 5 * 1024 * 1024
+	dirMode      = 0o755
+	fileMode     = 0o644
+)
+
+var allowedImageTypes = map[string]string{
+	"image/jpeg": ".jpg",
+	"image/png":  ".png",
+	"image/gif":  ".gif",
+	"image/webp": ".webp",
+}
+
 func ProductUploadToLocalStatic(file multipart.File, bossId uint, productName string) (filePath string, err error) {
 	bId := strconv.Itoa(int(bossId))
 	basePath := "." + conf.Config.PhotoPath.ProductPath + "boss" + bId + "/"
-	if !DirExistOrNot(basePath) {
-		CreateDir(basePath)
-	}
-	productPath := fmt.Sprintf("%s%s.jpg", basePath, productName)
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		util.LogrusObj.Error(err)
-		return "", err
-	}
-	err = ioutil.WriteFile(productPath, content, 0666)
-	if err != nil {
-		util.LogrusObj.Error(err)
-		return "", err
-	}
-	return fmt.Sprintf("boss%s/%s.jpg", bId, productName), err
+	return saveImage(file, basePath, productName, fmt.Sprintf("boss%s/", bId))
 }
 
-// AvatarUploadToLocalStatic 上传头像
 func AvatarUploadToLocalStatic(file multipart.File, userId uint, userName string) (filePath string, err error) {
-	bId := strconv.Itoa(int(userId))
-	basePath := "." + conf.Config.PhotoPath.AvatarPath + "user" + bId + "/"
-	if !DirExistOrNot(basePath) {
-		CreateDir(basePath)
-	}
-	avatarPath := fmt.Sprintf("%s%s.jpg", basePath, userName)
-	content, err := ioutil.ReadAll(file)
-	if err != nil {
-		util.LogrusObj.Error(err)
-		return "", err
-	}
-	err = ioutil.WriteFile(avatarPath, content, 0666)
-	if err != nil {
-		util.LogrusObj.Error(err)
-		return "", err
-	}
-	return fmt.Sprintf("user%s/%s.jpg", bId, userName), err
+	uId := strconv.Itoa(int(userId))
+	basePath := "." + conf.Config.PhotoPath.AvatarPath + "user" + uId + "/"
+	return saveImage(file, basePath, userName, fmt.Sprintf("user%s/", uId))
 }
 
-// DirExistOrNot 判断文件是否存在
+func saveImage(file multipart.File, baseDir, name, returnPrefix string) (string, error) {
+	safe := safeName(name)
+	if safe == "" {
+		return "", errors.New("文件名非法")
+	}
+
+	content, ext, err := readAndValidateImage(file)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return "", err
+	}
+
+	if !DirExistOrNot(baseDir) {
+		if !CreateDir(baseDir) {
+			return "", errors.New("创建目录失败")
+		}
+	}
+
+	fullPath := filepath.Join(baseDir, safe+ext)
+	if err := os.WriteFile(fullPath, content, fileMode); err != nil {
+		util.LogrusObj.Error(err)
+		return "", err
+	}
+
+	return returnPrefix + safe + ext, nil
+}
+
+func readAndValidateImage(file multipart.File) ([]byte, string, error) {
+	limited := io.LimitReader(file, maxImageSize+1)
+	content, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(content) == 0 {
+		return nil, "", errors.New("文件内容为空")
+	}
+	if len(content) > maxImageSize {
+		return nil, "", fmt.Errorf("文件大小超出限制 %d 字节", maxImageSize)
+	}
+
+	contentType := http.DetectContentType(content)
+	ext, ok := allowedImageTypes[contentType]
+	if !ok {
+		return nil, "", fmt.Errorf("不支持的图片类型: %s", contentType)
+	}
+	return content, ext, nil
+}
+
+func safeName(name string) string {
+	name = strings.TrimSpace(name)
+	name = filepath.Base(name)
+	if name == "." || name == ".." || name == "/" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_':
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func DirExistOrNot(fileAddr string) bool {
 	s, err := os.Stat(fileAddr)
 	if err != nil {
-		log.Println(err)
 		return false
 	}
 	return s.IsDir()
 }
 
-// CreateDir 创建文件夹
 func CreateDir(dirName string) bool {
-	err := os.MkdirAll(dirName, 0755)
-	if err != nil {
-		log.Println(err)
+	if err := os.MkdirAll(dirName, dirMode); err != nil {
+		util.LogrusObj.Error(err)
 		return false
 	}
 	return true

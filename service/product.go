@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"mime/multipart"
 	"strconv"
 	"sync"
@@ -71,15 +72,29 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		return nil, err
 	}
 	uId := u.Id
-	boss, _ := dao.NewUserDao(ctx).GetUserById(uId)
+	boss, err := dao.NewUserDao(ctx).GetUserById(uId)
+	if err != nil {
+		log.LogrusObj.Error("获取卖家信息失败，err:", err)
+		return nil, err
+	}
+	if len(files) == 0 {
+		err = errors.New("至少上传一张商品图片")
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
 	// 以第一张作为封面图
-	tmp, _ := files[0].Open()
+	tmp, err := files[0].Open()
+	if err != nil {
+		log.LogrusObj.Error("打开封面图失败，err:", err)
+		return nil, err
+	}
 	var path string
 	if conf.Config.System.UploadModel == consts.UploadModelLocal {
 		path, err = util.ProductUploadToLocalStatic(tmp, uId, req.Name)
 	} else {
 		path, err = util.UploadToQiNiu(tmp, files[0].Size)
 	}
+	tmp.Close()
 	if err != nil {
 		log.LogrusObj.Error("上传图片失败，err:", err)
 		return
@@ -105,16 +120,19 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		return
 	}
 
-	wg := new(sync.WaitGroup)
-	wg.Add(len(files))
 	for index, file := range files {
 		num := strconv.Itoa(index)
-		tmp, _ = file.Open()
+		tmp, openErr := file.Open()
+		if openErr != nil {
+			log.LogrusObj.Error("打开商品图片失败，err:", openErr)
+			return nil, openErr
+		}
 		if conf.Config.System.UploadModel == consts.UploadModelLocal {
 			path, err = util.ProductUploadToLocalStatic(tmp, uId, req.Name+num)
 		} else {
 			path, err = util.UploadToQiNiu(tmp, file.Size)
 		}
+		tmp.Close()
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return
@@ -128,10 +146,7 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 			log.LogrusObj.Error(err)
 			return
 		}
-		wg.Done()
 	}
-
-	wg.Wait()
 
 	return
 }
@@ -143,7 +158,11 @@ func (s *ProductSrv) ProductList(ctx context.Context, req *types.ProductListReq)
 		condition["category_id"] = req.CategoryID
 	}
 	productDao := dao.NewProductDao(ctx)
-	products, _ := productDao.ListProductByCondition(condition, req.BasePage)
+	products, err := productDao.ListProductByCondition(condition, req.BasePage)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return
+	}
 	total, err = productDao.CountProductByCondition(condition)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -185,7 +204,11 @@ func (s *ProductSrv) ProductList(ctx context.Context, req *types.ProductListReq)
 
 // ProductDelete 删除商品
 func (s *ProductSrv) ProductDelete(ctx context.Context, req *types.ProductDeleteReq) (resp interface{}, err error) {
-	u, _ := ctl.GetUserInfo(ctx)
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return
+	}
 	err = dao.NewProductDao(ctx).DeleteProduct(req.ID, u.Id)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -259,7 +282,11 @@ func (s *ProductSrv) ProductSearch(ctx context.Context, req *types.ProductSearch
 
 // ProductImgList 获取商品列表图片
 func (s *ProductSrv) ProductImgList(ctx context.Context, req *types.ListProductImgReq) (resp interface{}, err error) {
-	productImgs, _ := dao.NewProductImgDao(ctx).ListProductImgByProductId(req.ID)
+	productImgs, err := dao.NewProductImgDao(ctx).ListProductImgByProductId(req.ID)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return
+	}
 	for i := range productImgs {
 		if conf.Config.System.UploadModel == consts.UploadModelLocal {
 			productImgs[i].ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + productImgs[i].ImgPath

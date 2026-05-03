@@ -3,7 +3,7 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
+	"strconv"
 	"sync"
 
 	"gorm.io/gorm"
@@ -29,15 +29,20 @@ func GetPaymentSrv() *PaymentSrv {
 	return PaymentSrvIns
 }
 
-// TODO 目前买家和卖家的支付密码要一致，这个后续优化一下。。
-
-// PayDown 支付操作
+// PayDown 支付操作。BossID/ProductID/Num/Money 全部从订单取，不读 req。
 func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
+
+	if len(req.Key) != consts.EncryptMoneyKeyLength {
+		err = errors.New("支付密码长度错误")
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
+
 	err = dao.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		uId := u.Id
 
@@ -46,9 +51,17 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			log.LogrusObj.Error(err)
 			return err
 		}
-		money := order.Money
+
+		if order.Type != consts.UnPaid {
+			err = errors.New("订单状态非未支付，无法重复支付")
+			log.LogrusObj.Error(err)
+			return err
+		}
+
+		bossID := order.BossID
+		productID := order.ProductID
 		num := order.Num
-		money = money * float64(num)
+		totalMoney := order.Money * int64(num)
 
 		userDao := dao.NewUserDaoByDB(tx)
 		user, err := userDao.GetUserById(uId)
@@ -57,19 +70,17 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			return err
 		}
 
-		// 对钱进行解密。减去订单。再进行加密。
-		moneyFloat, err := user.DecryptMoney(req.Key)
+		userMoney, err := user.DecryptMoney(req.Key)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
-		if moneyFloat-money < 0.0 {
+		if userMoney-totalMoney < 0 {
 			log.LogrusObj.Error("金额不足")
 			return errors.New("金额不足")
 		}
 
-		finMoney := fmt.Sprintf("%f", moneyFloat-money)
-		user.Money = finMoney
+		user.Money = strconv.FormatInt(userMoney-totalMoney, 10)
 		user.Money, err = user.EncryptMoney(req.Key)
 		if err != nil {
 			log.LogrusObj.Error(err)
@@ -82,29 +93,32 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			return err
 		}
 
-		boss, err := userDao.GetUserById(uint(req.BossID))
+		boss, err := userDao.GetUserById(bossID)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 
-		moneyFloat, _ = boss.DecryptMoney(req.Key)
-		finMoney = fmt.Sprintf("%f", moneyFloat+money)
-		boss.Money = finMoney
+		bossMoney, err := boss.DecryptMoney(req.Key)
+		if err != nil {
+			log.LogrusObj.Error(err)
+			return err
+		}
+		boss.Money = strconv.FormatInt(bossMoney+totalMoney, 10)
 		boss.Money, err = boss.EncryptMoney(req.Key)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 
-		err = userDao.UpdateUserById(uint(req.BossID), boss)
+		err = userDao.UpdateUserById(bossID, boss)
 		if err != nil { // 更新boss金额失败，回滚
 			log.LogrusObj.Error(err)
 			return err
 		}
 
 		productDao := dao.NewProductDaoByDB(tx)
-		product, err := productDao.GetProductById(uint(req.ProductID))
+		product, err := productDao.GetProductById(productID)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
@@ -114,7 +128,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			return errors.New("存在超卖问题")
 		}
 		product.Num -= num
-		err = productDao.UpdateProduct(uint(req.ProductID), product)
+		err = productDao.UpdateProduct(productID, product)
 		if err != nil { // 更新商品数量减少失败，回滚
 			log.LogrusObj.Error(err)
 			return err

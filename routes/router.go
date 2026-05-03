@@ -8,13 +8,14 @@ import (
 	"github.com/gin-gonic/gin"
 
 	api "github.com/RedInn7/gomall/api/v1"
+	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/middleware"
 )
 
 // NewRouter 路由配置
 func NewRouter() *gin.Engine {
 	r := gin.Default()
-	store := cookie.NewStore([]byte("something-very-secret"))
+	store := cookie.NewStore([]byte(conf.Config.EncryptSecret.SessionSecret))
 	r.Use(middleware.Cors(), middleware.Jaeger())
 	r.Use(sessions.Sessions("mysession", store))
 	r.StaticFS("/static", http.Dir("./static"))

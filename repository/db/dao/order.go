@@ -33,6 +33,7 @@ func (dao *OrderDao) CreateOrder(order *model.Order) error {
 
 // ListOrderByCondition 获取订单List
 func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r *types.OrderListResp, err error) {
+	req.BasePage.Normalize()
 	// TODO 商城算是一个TOC的应用，TOC的应该是不允许join操作的，看看后续怎么改走缓存，比如走缓存，找找免费的CDN之类的
 	cacheKey := fmt.Sprintf("mall:orders:uid:%v:type:%v", uId, req.Type)
 	if req.LastId == 0 {
@@ -75,6 +76,7 @@ func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r 
 }
 
 func (dao *OrderDao) ListOrderByConditionOld(uId uint, req *types.OrderListReq) (r *types.OrderListResp, count int64, err error) {
+	req.BasePage.Normalize()
 	// 1. 直接初始化返回对象，完全不考虑 Redis
 	r = &types.OrderListResp{List: make([]*types.OrderListRespItem, 0)}
 

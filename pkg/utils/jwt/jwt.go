@@ -2,15 +2,18 @@ package jwt
 
 import (
 	"errors"
-	"github.com/RedInn7/gomall/pkg/utils/log"
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
 
+	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
-var jwtSecret = []byte("FanOne")
+func secret() []byte {
+	return []byte(conf.Config.EncryptSecret.JwtSecret)
+}
 
 type Claims struct {
 	ID       uint   `json:"id"`
@@ -32,7 +35,7 @@ func GenerateToken(id uint, username string) (accessToken, refreshToken string, 
 		},
 	}
 	// 加密并获得完整的编码后的字符串token
-	accessToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
+	accessToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret())
 	if err != nil {
 		return "", "", err
 	}
@@ -40,7 +43,7 @@ func GenerateToken(id uint, username string) (accessToken, refreshToken string, 
 	refreshToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.StandardClaims{
 		ExpiresAt: rtExpireTime.Unix(),
 		Issuer:    "mall",
-	}).SignedString(jwtSecret)
+	}).SignedString(secret())
 	if err != nil {
 		return "", "", err
 	}
@@ -51,7 +54,7 @@ func GenerateToken(id uint, username string) (accessToken, refreshToken string, 
 // ParseToken 验证用户token
 func ParseToken(token string) (*Claims, error) {
 	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return jwtSecret, nil
+		return secret(), nil
 	})
 	if tokenClaims != nil {
 		if claims, ok := tokenClaims.Claims.(*Claims); ok && tokenClaims.Valid {
@@ -89,38 +92,38 @@ func ParseRefreshToken(accessToken, rToken string) (newAToken, newRToken string,
 	return "", "", errors.New("身份过期，重新登陆")
 }
 
-// EmailClaims
+// EmailClaims 邮件 token 携带的字段。PasswordDigest 必须是 bcrypt 哈希值，绝不能是明文密码。
 type EmailClaims struct {
-	UserID        uint   `json:"user_id"`
-	Email         string `json:"email"`
-	Password      string `json:"password"`
-	OperationType uint   `json:"operation_type"`
+	UserID         uint   `json:"user_id"`
+	Email          string `json:"email"`
+	PasswordDigest string `json:"password_digest,omitempty"`
+	OperationType  uint   `json:"operation_type"`
 	jwt.StandardClaims
 }
 
-// GenerateEmailToken 签发邮箱验证Token
-func GenerateEmailToken(userID, Operation uint, email, password string) (string, error) {
+// GenerateEmailToken 签发邮箱验证 token。passwordDigest 必须是 bcrypt 哈希值。
+func GenerateEmailToken(userID, Operation uint, email, passwordDigest string) (string, error) {
 	nowTime := time.Now()
 	expireTime := nowTime.Add(15 * time.Minute)
 	claims := EmailClaims{
-		UserID:        userID,
-		Email:         email,
-		Password:      password,
-		OperationType: Operation,
+		UserID:         userID,
+		Email:          email,
+		PasswordDigest: passwordDigest,
+		OperationType:  Operation,
 		StandardClaims: jwt.StandardClaims{
 			ExpiresAt: expireTime.Unix(),
 			Issuer:    "cmall",
 		},
 	}
 	tokenClaims := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	token, err := tokenClaims.SignedString(jwtSecret)
+	token, err := tokenClaims.SignedString(secret())
 	return token, err
 }
 
 // ParseEmailToken 验证邮箱验证token
 func ParseEmailToken(token string) (*EmailClaims, error) {
 	tokenClaims, err := jwt.ParseWithClaims(token, &EmailClaims{}, func(token *jwt.Token) (interface{}, error) {
-		return jwtSecret, nil
+		return secret(), nil
 	})
 	if tokenClaims != nil {
 		if claims, ok := tokenClaims.Claims.(*EmailClaims); ok && tokenClaims.Valid {
