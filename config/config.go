@@ -2,6 +2,7 @@ package conf
 
 import (
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -43,12 +44,13 @@ type KafkaConfig struct {
 }
 
 type System struct {
-	AppEnv      string `yaml:"appEnv"`
-	Domain      string `yaml:"domain"`
-	Version     string `yaml:"version"`
-	HttpPort    string `yaml:"httpPort"`
-	Host        string `yaml:"host"`
-	UploadModel string `yaml:"uploadModel"`
+	AppEnv         string   `yaml:"appEnv"`
+	Domain         string   `yaml:"domain"`
+	Version        string   `yaml:"version"`
+	HttpPort       string   `yaml:"httpPort"`
+	Host           string   `yaml:"host"`
+	UploadModel    string   `yaml:"uploadModel"`
+	AllowedOrigins []string `yaml:"allowedOrigins"`
 }
 
 type Oss struct {
@@ -86,12 +88,13 @@ type Redis struct {
 	RedisNetwork  string `yaml:"redisNetwork"`
 }
 
-// EncryptSecret 加密的东西
+// EncryptSecret 加密相关密钥。生产环境请通过环境变量覆盖。
 type EncryptSecret struct {
-	JwtSecret   string `yaml:"jwtSecret"`
-	EmailSecret string `yaml:"emailSecret"`
-	PhoneSecret string `yaml:"phoneSecret"`
-	MoneySecret string `yaml:"moneySecret"`
+	JwtSecret     string `yaml:"jwtSecret"`
+	SessionSecret string `yaml:"sessionSecret"`
+	EmailSecret   string `yaml:"emailSecret"`
+	PhoneSecret   string `yaml:"phoneSecret"`
+	MoneySecret   string `yaml:"moneySecret"`
 }
 
 type LocalPhotoPath struct {
@@ -126,6 +129,53 @@ func InitConfig() {
 	err = viper.Unmarshal(&Config)
 	if err != nil {
 		panic(err)
+	}
+
+	applySecretOverrides(Config)
+	applySystemOverrides(Config)
+	mustHaveSecrets(Config)
+}
+
+func applySystemOverrides(c *Conf) {
+	if c == nil || c.System == nil {
+		return
+	}
+	if v := os.Getenv("ALLOWED_ORIGINS"); v != "" {
+		parts := strings.Split(v, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				out = append(out, s)
+			}
+		}
+		c.System.AllowedOrigins = out
+	}
+}
+
+func applySecretOverrides(c *Conf) {
+	if c == nil || c.EncryptSecret == nil {
+		return
+	}
+	if v := os.Getenv("JWT_SECRET"); v != "" {
+		c.EncryptSecret.JwtSecret = v
+	}
+	if v := os.Getenv("SESSION_SECRET"); v != "" {
+		c.EncryptSecret.SessionSecret = v
+	}
+	if v := os.Getenv("MONEY_SECRET"); v != "" {
+		c.EncryptSecret.MoneySecret = v
+	}
+}
+
+func mustHaveSecrets(c *Conf) {
+	if c == nil || c.EncryptSecret == nil {
+		panic("encryptSecret section is required in config")
+	}
+	if c.EncryptSecret.JwtSecret == "" {
+		panic("encryptSecret.jwtSecret is required (set via config or env JWT_SECRET)")
+	}
+	if c.EncryptSecret.SessionSecret == "" {
+		panic("encryptSecret.sessionSecret is required (set via config or env SESSION_SECRET)")
 	}
 }
 

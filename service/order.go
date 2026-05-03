@@ -45,7 +45,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 		ProductID: req.ProductID,
 		BossID:    req.BossID,
 		Num:       int(req.Num),
-		Money:     float64(req.Money),
+		Money:     int64(req.Money), // req.Money 单位也是"分"
 		Type:      consts.UnPaid,
 		AddressID: req.AddressID,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),

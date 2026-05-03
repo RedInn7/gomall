@@ -31,5 +31,5 @@ func TestUserModelEncryptMoney(t *testing.T) {
 	if err != nil {
 		fmt.Println("err EncryptMoney", err)
 	}
-	t.Logf("u after encrypt money:%f", m)
+	t.Logf("u after decrypt money(分):%d", m)
 }

@@ -34,7 +34,9 @@ const (
 
 const EncryptMoneyKeyLength = 6
 
-const UserInitMoney = "10000" // 初始金额 1个w
+// UserInitMoney 用户注册时的初始金额，单位为"分"。
+// 1000000 分 = 10000.00 元。
+const UserInitMoney = "1000000"
 
 const (
 	UserDefaultAvatarOss   = "http://q1.qlogo.cn/g?b=qq&nk=294350394&s=640" // OSS的默认头像

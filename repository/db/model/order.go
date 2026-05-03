@@ -14,5 +14,5 @@ type Order struct {
 	Num       int    // 数量
 	OrderNum  uint64 // 订单号
 	Type      uint   // 1 未支付  2 已支付
-	Money     float64
+	Money int64 // 单位：分
 }

@@ -40,6 +40,7 @@ func (dao *ProductDao) ShowProductById(id uint) (product *model.Product, err err
 
 // ListProductByCondition 获取商品列表
 func (dao *ProductDao) ListProductByCondition(condition map[string]interface{}, page types.BasePage) (products []*model.Product, err error) {
+	page.Normalize()
 	err = dao.DB.Where(condition).
 		Offset((page.PageNum - 1) * page.PageSize).
 		Limit(page.PageSize).
@@ -78,6 +79,7 @@ func (dao *ProductDao) UpdateProduct(pId uint, product *model.Product) error {
 
 // SearchProduct 搜索商品
 func (dao *ProductDao) SearchProduct(info string, page types.BasePage) (products []*model.Product, count int64, err error) {
+	page.Normalize()
 	err = dao.DB.Model(&model.Product{}).
 		Where("name LIKE ? OR info LIKE ?", "%"+info+"%", "%"+info+"%").
 		Offset((page.PageNum - 1) * page.PageSize).

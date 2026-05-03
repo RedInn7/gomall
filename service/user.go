@@ -7,6 +7,8 @@ import (
 	"mime/multipart"
 	"sync"
 
+	"golang.org/x/crypto/bcrypt"
+
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -185,8 +187,24 @@ func (s *UserSrv) SendEmail(ctx context.Context, req *types.SendEmailServiceReq)
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
+
+	var passwordDigest string
+	if req.OperationType == consts.EmailOperationUpdatePassword {
+		if req.Password == "" {
+			err = errors.New("修改密码场景必须提供新密码")
+			log.LogrusObj.Error(err)
+			return nil, err
+		}
+		digest, hashErr := bcrypt.GenerateFromPassword([]byte(req.Password), model.PassWordCost)
+		if hashErr != nil {
+			log.LogrusObj.Error(hashErr)
+			return nil, hashErr
+		}
+		passwordDigest = string(digest)
+	}
+
 	var address string
-	token, err := jwt.GenerateEmailToken(u.Id, req.OperationType, req.Email, req.Password)
+	token, err := jwt.GenerateEmailToken(u.Id, req.OperationType, req.Email, passwordDigest)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
@@ -206,7 +224,7 @@ func (s *UserSrv) SendEmail(ctx context.Context, req *types.SendEmailServiceReq)
 func (s *UserSrv) Valid(ctx context.Context, req *types.ValidEmailServiceReq) (resp interface{}, err error) {
 	var userId uint
 	var email string
-	var password string
+	var passwordDigest string
 	var operationType uint
 	// 验证token
 	if req.Token == "" {
@@ -221,7 +239,7 @@ func (s *UserSrv) Valid(ctx context.Context, req *types.ValidEmailServiceReq) (r
 	} else {
 		userId = claims.UserID
 		email = claims.Email
-		password = claims.Password
+		passwordDigest = claims.PasswordDigest
 		operationType = claims.OperationType
 	}
 
@@ -239,11 +257,12 @@ func (s *UserSrv) Valid(ctx context.Context, req *types.ValidEmailServiceReq) (r
 	case consts.EmailOperationNoBinding:
 		user.Email = ""
 	case consts.EmailOperationUpdatePassword:
-		err = user.SetPassword(password)
-		if err != nil {
-			err = errors.New("密码加密错误")
+		if passwordDigest == "" {
+			err = errors.New("token 缺少密码摘要")
+			log.LogrusObj.Error(err)
 			return
 		}
+		user.PasswordDigest = passwordDigest
 	default:
 		return nil, errors.New("操作不符合")
 	}

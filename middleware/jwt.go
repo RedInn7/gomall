@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"net/http"
+
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/gin-gonic/gin"
 
@@ -65,6 +67,7 @@ func SetToken(c *gin.Context, accessToken, refreshToken string) {
 	secure := IsHttps(c)
 	c.Header(consts.AccessTokenHeader, accessToken)
 	c.Header(consts.RefreshTokenHeader, refreshToken)
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(consts.AccessTokenHeader, accessToken, consts.MaxAge, "/", "", secure, true)
 	c.SetCookie(consts.RefreshTokenHeader, refreshToken, consts.MaxAge, "/", "", secure, true)
 }
