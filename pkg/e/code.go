@@ -48,4 +48,8 @@ const (
 	//对象存储错误
 	ErrorOss        = 50001
 	ErrorUploadFile = 50002
+
+	// 幂等
+	ErrIdempotencyTokenInvalid = 60001
+	ErrIdempotencyInProgress   = 60002
 )

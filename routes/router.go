@@ -60,8 +60,11 @@ func NewRouter() *gin.Engine {
 			authed.POST("favorites/create", api.CreateFavoriteHandler())
 			authed.POST("favorites/delete", api.DeleteFavoriteHandler())
 
-			// 订单操作
-			authed.POST("orders/create", api.CreateOrderHandler())
+			// 幂等 token 颁发
+			authed.GET("idempotency/token", api.IdempotencyTokenHandler())
+
+			// 订单操作（下单走幂等）
+			authed.POST("orders/create", middleware.Idempotency(), api.CreateOrderHandler())
 			authed.GET("orders/list", api.ListOrdersHandler())
 			authed.GET("orders/old/list", api.ListOrdersHandlerOld())
 			authed.GET("orders/show", api.ShowOrderHandler())
@@ -79,8 +82,8 @@ func NewRouter() *gin.Engine {
 			authed.POST("addresses/update", api.UpdateAddressHandler())
 			authed.POST("addresses/delete", api.DeleteAddressHandler())
 
-			// 支付功能
-			authed.POST("paydown", api.OrderPaymentHandler())
+			// 支付功能（走幂等防重复扣款）
+			authed.POST("paydown", middleware.Idempotency(), api.OrderPaymentHandler())
 
 			// 显示金额
 			authed.POST("money", api.ShowMoneyHandler())

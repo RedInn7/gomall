@@ -44,6 +44,9 @@ var MsgFlags = map[int]string{
 	ErrorDatabase: "数据库操作出错,请重试",
 
 	ErrorOss: "OSS配置错误",
+
+	ErrIdempotencyTokenInvalid: "幂等token不存在或已过期",
+	ErrIdempotencyInProgress:   "请求正在处理中，请勿重复提交",
 }
 
 // GetMsg 获取状态码对应信息
