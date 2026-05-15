@@ -8,6 +8,7 @@ import (
 
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/service"
+	"github.com/RedInn7/gomall/service/search"
 )
 
 func AdminListUsersHandler() gin.HandlerFunc {
@@ -48,5 +49,18 @@ func BootstrapAdminHandler() gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"ok": true}))
+	}
+}
+
+// AdminBackfillProductIndexHandler 把 DB 中所有 product 灌一遍到 ES (一次性运维操作)
+func AdminBackfillProductIndexHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		batch, _ := strconv.Atoi(c.DefaultQuery("batch", "200"))
+		n, err := search.BackfillFromDB(c.Request.Context(), batch)
+		if err != nil {
+			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			return
+		}
+		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"indexed": n}))
 	}
 }

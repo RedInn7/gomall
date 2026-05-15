@@ -12,6 +12,7 @@ import (
 	snowflake "github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
+	"github.com/RedInn7/gomall/repository/es"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 	"github.com/RedInn7/gomall/routes"
 )
@@ -34,7 +35,7 @@ func loading() {
 	initialize.InitInventory(context.Background())
 	tryInitRabbitMQ()
 	initialize.InitOutboxPublisher(context.Background())
-	//es.InitEs()             // 如果需要接入ELK可以打开这个注释
+	tryInitES(context.Background())
 	//kafka.InitKafka()
 	//track.InitJaeger()
 	fmt.Println("加载配置完成...")
@@ -54,4 +55,15 @@ func tryInitRabbitMQ() {
 	}()
 	rabbitmq.InitRabbitMQ()
 	initialize.InitOrderDelayConsumer()
+}
+
+// tryInitES ES 不可用时静默跳过，搜索接口会退回 DB 路径
+func tryInitES(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Warnf("ES 初始化失败，商品搜索退化到 DB 路径: %v", r)
+		}
+	}()
+	es.InitEs()
+	initialize.InitSearch(ctx)
 }

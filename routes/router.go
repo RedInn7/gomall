@@ -127,6 +127,7 @@ func NewRouter() *gin.Engine {
 			{
 				admin.GET("users", api.AdminListUsersHandler())
 				admin.POST("users/promote", api.AdminPromoteUserHandler())
+				admin.POST("search/backfill", api.AdminBackfillProductIndexHandler())
 			}
 		}
 	}
