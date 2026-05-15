@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
@@ -17,6 +18,7 @@ import (
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
+	"github.com/RedInn7/gomall/service/events"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -52,10 +54,34 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 	}
 
-	orderDao := dao.NewOrderDao(ctx)
-	err = orderDao.CreateOrder(order)
+	// 1) Redis 预扣库存: available -> reserved，失败直接拒单
+	if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
+		util.LogrusObj.Errorf("reserve stock failed product=%d num=%d err=%v", req.ProductID, req.Num, err)
+		return nil, err
+	}
+
+	// 2) 同事务写订单 + 写 outbox 事件
+	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+		if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+			return e
+		}
+		return dao.NewOutboxDaoByDB(tx).Insert(
+			"order", "OrderCreated", "order.created", order.ID,
+			events.OrderCreated{
+				OrderID:   order.ID,
+				OrderNum:  order.OrderNum,
+				UserID:    u.Id,
+				ProductID: req.ProductID,
+				Num:       int(req.Num),
+			},
+		)
+	})
 	if err != nil {
 		util.LogrusObj.Error(err)
+		// 3) 事务失败：释放刚扣的预占库存，回到 available
+		if relErr := cache.ReleaseReservation(ctx, req.ProductID, int64(req.Num)); relErr != nil {
+			util.LogrusObj.Errorf("release reservation on tx failure failed: %v", relErr)
+		}
 		return
 	}
 
