@@ -2,9 +2,12 @@ package initialize
 
 import (
 	"fmt"
-	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/service"
+
 	"github.com/robfig/cron/v3"
+
+	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/rabbitmq"
+	"github.com/RedInn7/gomall/service"
 )
 
 func InitCron() {
@@ -22,5 +25,15 @@ func InitCron() {
 		panic(fmt.Sprintf("Cron 初始化失败: %v", err))
 	}
 	c.Start()
+}
 
+// InitOrderDelayConsumer 声明延迟队列拓扑并启动消费者
+func InitOrderDelayConsumer() {
+	if err := rabbitmq.InitOrderDelayTopology(); err != nil {
+		util.LogrusObj.Errorf("InitOrderDelayTopology failed: %v", err)
+		return
+	}
+	if err := rabbitmq.ConsumeOrderCancelDelay(service.CancelUnpaidOrder); err != nil {
+		util.LogrusObj.Errorf("ConsumeOrderCancelDelay failed: %v", err)
+	}
 }

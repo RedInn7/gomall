@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"sync"
 	"time"
 
@@ -13,9 +12,11 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/rabbitmq"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -64,6 +65,13 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 	}
 	cache.RedisClient.ZAdd(cache.RedisContext, OrderTimeKey, data)
 
+	if rabbitmq.GlobalRabbitMQ != nil {
+		if pubErr := rabbitmq.PublishOrderCancelDelay(ctx, order.OrderNum, rabbitmq.OrderCancelDelay); pubErr != nil {
+			util.LogrusObj.Errorf("publish delay cancel failed orderNum=%d err=%v", order.OrderNum, pubErr)
+		}
+	}
+
+	resp = order
 	return
 }
 

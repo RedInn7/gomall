@@ -2,14 +2,17 @@ package main
 
 import (
 	"fmt"
+
+	_ "github.com/apache/skywalking-go"
+
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/initialize"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	snowflake "github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
+	"github.com/RedInn7/gomall/repository/rabbitmq"
 	"github.com/RedInn7/gomall/routes"
-	_ "github.com/apache/skywalking-go"
 )
 
 func main() {
@@ -26,7 +29,7 @@ func loading() {
 	cache.InitCache()
 	snowflake.InitSnowflake(1)
 	initialize.InitCron()
-	//rabbitmq.InitRabbitMQ() // 如果需要接入RabbitMQ可以打开这个注释
+	tryInitRabbitMQ()
 	//es.InitEs()             // 如果需要接入ELK可以打开这个注释
 	//kafka.InitKafka()
 	//track.InitJaeger()
@@ -37,4 +40,15 @@ func loading() {
 
 func scriptStarting() {
 	// 启动一些脚本
+}
+
+// tryInitRabbitMQ RabbitMQ 不可用时不阻塞启动，但放弃延迟队列能力
+func tryInitRabbitMQ() {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Warnf("RabbitMQ 初始化失败，订单延迟关单功能不可用: %v", r)
+		}
+	}()
+	rabbitmq.InitRabbitMQ()
+	initialize.InitOrderDelayConsumer()
 }
