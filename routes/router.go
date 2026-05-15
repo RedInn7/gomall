@@ -2,10 +2,12 @@ package routes
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 
 	api "github.com/RedInn7/gomall/api/v1"
 	conf "github.com/RedInn7/gomall/config"
@@ -16,6 +18,8 @@ import (
 func NewRouter() *gin.Engine {
 	r := gin.Default()
 	store := cookie.NewStore([]byte(conf.Config.EncryptSecret.SessionSecret))
+	// 全局令牌桶：每 IP 100 RPS、突发 200，挡正常流量同时防爬虫脚本
+	r.Use(middleware.TokenBucket(rate.Limit(100), 200))
 	r.Use(middleware.Cors(), middleware.Jaeger())
 	r.Use(sessions.Sessions("mysession", store))
 	r.StaticFS("/static", http.Dir("./static"))
@@ -82,17 +86,31 @@ func NewRouter() *gin.Engine {
 			authed.POST("addresses/update", api.UpdateAddressHandler())
 			authed.POST("addresses/delete", api.DeleteAddressHandler())
 
-			// 支付功能（走幂等防重复扣款）
-			authed.POST("paydown", middleware.Idempotency(), api.OrderPaymentHandler())
+			// 支付功能：熔断保护下游 + 幂等防重复扣款
+			authed.POST("paydown",
+				middleware.CircuitBreaker(middleware.CircuitBreakerOption{
+					FailureThreshold: 5,
+					OpenTimeout:      10 * time.Second,
+					HalfOpenMaxReq:   3,
+				}),
+				middleware.Idempotency(),
+				api.OrderPaymentHandler())
 
 			// 显示金额
 			authed.POST("money", api.ShowMoneyHandler())
 
-			// 秒杀专场
+			// 秒杀专场：分布式滑动窗口限流，单用户 1s 内最多 3 次
 			authed.POST("skill_product/init", api.InitSkillProductHandler())
 			authed.GET("skill_product/list", api.ListSkillProductHandler())
 			authed.GET("skill_product/show", api.GetSkillProductHandler())
-			authed.POST("skill_product/skill", api.SkillProductHandler())
+			authed.POST("skill_product/skill",
+				middleware.SlidingWindow(middleware.SlidingWindowOption{
+					Scope:  "seckill",
+					Window: time.Second,
+					Limit:  3,
+					ByUser: true,
+				}),
+				api.SkillProductHandler())
 		}
 	}
 	return r

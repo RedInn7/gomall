@@ -1,8 +1,6 @@
 module github.com/RedInn7/gomall
 
-go 1.24.0
-
-toolchain go1.24.13
+go 1.25.0
 
 require (
 	github.com/CocaineCong/eslogrus v1.0.1
@@ -27,6 +25,7 @@ require (
 	github.com/uber/jaeger-client-go v2.30.0+incompatible
 	go.uber.org/zap v1.24.0
 	golang.org/x/crypto v0.48.0
+	golang.org/x/time v0.5.0
 	gopkg.in/mail.v2 v2.3.1
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.1
