@@ -169,6 +169,19 @@ func (dao *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*model.O
 	return
 }
 
+// GetOrderByOrderNum 通过 order_num 查询订单
+func (dao *OrderDao) GetOrderByOrderNum(orderNum uint64) (*model.Order, error) {
+	var o model.Order
+	err := dao.DB.Model(&model.Order{}).Where("order_num=?", orderNum).First(&o).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &o, nil
+}
+
 func (dao *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 	res := dao.DB.Model(&model.Order{}).Where(
 		"order_num=? and type=?", orderNum, consts.UnPaid).
