@@ -20,12 +20,15 @@ type User struct {
 	Status         string
 	Avatar         string `gorm:"size:1000"`
 	Money          string
+	Role           string `gorm:"size:16;default:'user';index"`
 	Relations      []User `gorm:"many2many:relation;"`
 }
 
 const (
-	PassWordCost        = 12       // 密码加密难度
-	Active       string = "active" // 激活用户
+	PassWordCost         = 12       // 密码加密难度
+	Active        string = "active" // 激活用户
+	RoleUser      string = "user"
+	RoleAdmin     string = "admin"
 )
 
 // SetPassword 设置密码

@@ -117,6 +117,17 @@ func NewRouter() *gin.Engine {
 					ByUser: true,
 				}),
 				api.SkillProductHandler())
+
+			// 初始 admin 引导（仅在系统无 admin 时可用）
+			authed.POST("admin/bootstrap", api.BootstrapAdminHandler())
+
+			// 管理员后台
+			admin := authed.Group("/admin")
+			admin.Use(middleware.RequireRole("admin"))
+			{
+				admin.GET("users", api.AdminListUsersHandler())
+				admin.POST("users/promote", api.AdminPromoteUserHandler())
+			}
 		}
 	}
 	return r
