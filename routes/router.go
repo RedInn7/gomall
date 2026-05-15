@@ -64,6 +64,12 @@ func NewRouter() *gin.Engine {
 			authed.POST("favorites/create", api.CreateFavoriteHandler())
 			authed.POST("favorites/delete", api.DeleteFavoriteHandler())
 
+			// 优惠券
+			authed.POST("coupon/batch", api.CreateCouponBatchHandler())
+			authed.GET("coupon/batches", api.ListCouponBatchHandler())
+			authed.POST("coupon/claim", api.ClaimCouponHandler())
+			authed.GET("coupon/my", api.ListMyCouponHandler())
+
 			// 幂等 token 颁发
 			authed.GET("idempotency/token", api.IdempotencyTokenHandler())
 
