@@ -6,12 +6,14 @@ import (
 	"mime/multipart"
 	"strconv"
 	"sync"
+	"time"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	util "github.com/RedInn7/gomall/pkg/utils/upload"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/types"
@@ -30,12 +32,43 @@ func GetProductSrv() *ProductSrv {
 	return ProductSrvIns
 }
 
-// ProductShow 商品
+// ProductShow Cache Aside 读取商品详情。
+//   1. 先读缓存，命中直接返回
+//   2. 未命中: SETNX 抢回源锁，单飞回源 DB
+//   3. 未抢到锁的请求短暂重试一次，仍未命中则直接回源（兜底）
 func (s *ProductSrv) ProductShow(ctx context.Context, req *types.ProductShowReq) (resp interface{}, err error) {
-	p, err := dao.NewProductDao(ctx).ShowProductById(req.ID)
+	cached := &types.ProductResp{}
+	if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
+		return cached, nil
+	} else if cacheErr != cache.ErrProductCacheMiss {
+		log.LogrusObj.Warnln("read product cache failed:", cacheErr)
+	}
+
+	locked, _ := cache.TryProductLock(ctx, req.ID)
+	if !locked {
+		time.Sleep(50 * time.Millisecond)
+		if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
+			return cached, nil
+		}
+	} else {
+		defer cache.UnlockProduct(ctx, req.ID)
+	}
+
+	pResp, err := s.loadProductFromDB(ctx, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	if setErr := cache.SetProductDetail(ctx, req.ID, pResp); setErr != nil {
+		log.LogrusObj.Warnln("write product cache failed:", setErr)
+	}
+	return pResp, nil
+}
+
+func (s *ProductSrv) loadProductFromDB(ctx context.Context, id uint) (*types.ProductResp, error) {
+	p, err := dao.NewProductDao(ctx).ShowProductById(id)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	pResp := &types.ProductResp{
 		ID:            p.ID,
@@ -58,10 +91,7 @@ func (s *ProductSrv) ProductShow(ctx context.Context, req *types.ProductShowReq)
 		pResp.BossAvatar = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.AvatarPath + pResp.BossAvatar
 		pResp.ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + pResp.ImgPath
 	}
-
-	resp = pResp
-
-	return
+	return pResp, nil
 }
 
 // 创建商品
@@ -202,7 +232,7 @@ func (s *ProductSrv) ProductList(ctx context.Context, req *types.ProductListReq)
 	return
 }
 
-// ProductDelete 删除商品
+// ProductDelete 删除商品 + 删缓存
 func (s *ProductSrv) ProductDelete(ctx context.Context, req *types.ProductDeleteReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -214,10 +244,15 @@ func (s *ProductSrv) ProductDelete(ctx context.Context, req *types.ProductDelete
 		log.LogrusObj.Error(err)
 		return
 	}
+	_ = cache.DelProductDetail(ctx, req.ID)
+	cache.DoubleDeleteAsync(req.ID, 0)
 	return
 }
 
-// 更新商品
+// ProductUpdate 更新商品，延迟双删保证缓存一致性
+//   1. 先删缓存
+//   2. 写库
+//   3. 异步等 500ms 再删一次（覆盖并发读取旧值后写回的窗口）
 func (s *ProductSrv) ProductUpdate(ctx context.Context, req *types.ProductUpdateReq) (resp interface{}, err error) {
 	product := &model.Product{
 		Name:       req.Name,
@@ -229,11 +264,13 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *types.ProductUpdate
 		DiscountPrice: req.DiscountPrice,
 		OnSale:        req.OnSale,
 	}
+	_ = cache.DelProductDetail(ctx, req.ID)
 	err = dao.NewProductDao(ctx).UpdateProduct(req.ID, product)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return
 	}
+	cache.DoubleDeleteAsync(req.ID, 0)
 
 	return
 }
