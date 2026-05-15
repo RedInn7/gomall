@@ -47,6 +47,9 @@ var MsgFlags = map[int]string{
 
 	ErrIdempotencyTokenInvalid: "幂等token不存在或已过期",
 	ErrIdempotencyInProgress:   "请求正在处理中，请勿重复提交",
+
+	ErrRateLimitExceeded: "请求频率超限，请稍后重试",
+	ErrCircuitOpen:       "下游服务熔断中，暂时不可用",
 }
 
 // GetMsg 获取状态码对应信息

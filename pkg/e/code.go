@@ -52,4 +52,8 @@ const (
 	// 幂等
 	ErrIdempotencyTokenInvalid = 60001
 	ErrIdempotencyInProgress   = 60002
+
+	// 限流与熔断
+	ErrRateLimitExceeded = 70001
+	ErrCircuitOpen       = 70002
 )
