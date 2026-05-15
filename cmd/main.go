@@ -25,6 +25,7 @@ func main() {
 // loading一些配置
 func loading() {
 	conf.InitConfig()
+	util.InitLog() // 必须在使用 LogrusObj 的初始化之前完成
 	dao.InitMySQL()
 	cache.InitCache()
 	snowflake.InitSnowflake(1)
@@ -33,7 +34,6 @@ func loading() {
 	//es.InitEs()             // 如果需要接入ELK可以打开这个注释
 	//kafka.InitKafka()
 	//track.InitJaeger()
-	util.InitLog() // 如果接入ELK请进入这个func打开注释
 	fmt.Println("加载配置完成...")
 	//go scriptStarting()
 }
