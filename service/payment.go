@@ -11,8 +11,10 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/service/events"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -43,6 +45,10 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 		return nil, err
 	}
 
+	var (
+		paidProductID uint
+		paidNum       int
+	)
 	err = dao.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		uId := u.Id
 
@@ -61,6 +67,8 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 		bossID := order.BossID
 		productID := order.ProductID
 		num := order.Num
+		paidProductID = productID
+		paidNum = num
 		totalMoney := order.Money * int64(num)
 
 		userDao := dao.NewUserDaoByDB(tx)
@@ -163,13 +171,29 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			return err
 		}
 
-		return nil
-
+		// outbox 事件：order.paid，事件投递交给 publisher 异步处理
+		return dao.NewOutboxDaoByDB(tx).Insert(
+			"order", "OrderPaid", "order.paid", order.ID,
+			events.OrderPaid{
+				OrderID:   order.ID,
+				OrderNum:  order.OrderNum,
+				UserID:    uId,
+				ProductID: productID,
+				Num:       num,
+			},
+		)
 	})
 
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return
+	}
+
+	// TX 已经把 product.Num 真正扣减了；同步把 Redis reserved 桶减掉
+	if paidProductID > 0 && paidNum > 0 {
+		if cErr := cache.CommitReservation(ctx, paidProductID, int64(paidNum)); cErr != nil {
+			log.LogrusObj.Errorf("commit reservation failed product=%d num=%d err=%v", paidProductID, paidNum, cErr)
+		}
 	}
 
 	return

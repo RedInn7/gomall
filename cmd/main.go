@@ -31,6 +31,7 @@ func loading() {
 	cache.InitCache()
 	snowflake.InitSnowflake(1)
 	initialize.InitCron()
+	initialize.InitInventory(context.Background())
 	tryInitRabbitMQ()
 	initialize.InitOutboxPublisher(context.Background())
 	//es.InitEs()             // 如果需要接入ELK可以打开这个注释
