@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	_ "github.com/apache/skywalking-go"
@@ -31,6 +32,7 @@ func loading() {
 	snowflake.InitSnowflake(1)
 	initialize.InitCron()
 	tryInitRabbitMQ()
+	initialize.InitOutboxPublisher(context.Background())
 	//es.InitEs()             // 如果需要接入ELK可以打开这个注释
 	//kafka.InitKafka()
 	//track.InitJaeger()
