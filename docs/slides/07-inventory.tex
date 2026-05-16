@@ -1,0 +1,461 @@
+\input{preamble}
+
+\title{库存与防超发}
+\subtitle{两桶库存 + Lua 三态 + SeedFromDB + Saga 释放}
+\author{gomall · 技术 deck 07}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{为什么单桶 stock 不够用}
+% ============================================================
+
+\begin{frame}{下单到付款，中间那 15 分钟}
+\begin{itemize}
+  \item 用户点"提交订单"到点"立即支付"，gomall 给 15 分钟。
+  \item 这 15 分钟里：商品\textbf{不能再被别人下单}，但也\textbf{还没真正卖出}。
+  \item 单桶 \texttt{stock=N} 模型无法表达这个"占着但没消耗"的中间态：
+  \begin{itemize}
+    \item 一减就减，用户不付钱也回不来（库存丢）；
+    \item 不减，并发下两个人同时下同一件（超卖）。
+  \end{itemize}
+\end{itemize}
+\srcnote{repository/cache/inventory.go:11--14 注释明确两桶定位}
+\end{frame}
+
+\begin{frame}{业务问题清单（本 deck 七连问）}
+\begin{enumerate}
+  \item 为什么把库存切成 \textbf{available + reserved} 两桶？
+  \item 抢库存为什么必须走 Redis Lua，不走 DB \texttt{SELECT FOR UPDATE}？
+  \item Redis 重启之后，库存数字从哪儿来？
+  \item 下单成功，但 DB 事务回滚，预占的库存怎么办？
+  \item 关单（超时 / 用户主动）触发的库存退回，落在哪一行代码？
+  \item 客服收到"明明显示有货，下单却失败"的工单，怎么回答？
+  \item 业务到底承诺什么 —— 超卖能赔多少钱、误锁赔多少钱？
+\end{enumerate}
+\srcnote{对应代码 repository/cache/inventory.go + service/inventory/syncer.go + service/order.go + service/order\_cancel.go}
+\end{frame}
+
+\begin{frame}{两桶库存：available / reserved}
+\begin{tikzpicture}[scale=1]
+  % available 桶
+  \draw[thick,draw=cMain,fill=cMain!15] (0,0) rectangle (6,1);
+  \node[font=\small,anchor=west] at (0.2,0.5) {\textbf{available} = 80};
+  \node[font=\scriptsize\itshape,anchor=east,color=cGray] at (5.8,0.5) {还能下单};
+
+  % reserved 桶
+  \draw[thick,draw=cAccent,fill=cAccent!18] (0,-1.4) rectangle (1.5,-0.4);
+  \node[font=\small,anchor=west] at (0.2,-0.9) {\textbf{reserved} = 20};
+  \node[font=\scriptsize\itshape,anchor=west,color=cGray] at (2,-0.9) {占着未付};
+
+  % DB 锚
+  \draw[thick,draw=cGray,fill=cMute] (0,-2.8) rectangle (6,-1.8);
+  \node[font=\small,anchor=west] at (0.2,-2.3) {\textbf{product.num} = 100 (DB 水位)};
+
+  % 箭头
+  \draw[arrow] (4,-0.1) -- node[right,font=\scriptsize]{reserve}  (1,-0.3);
+  \draw[arrow,draw=cOK] (1,-1.5) -- node[left,font=\scriptsize]{release}  (4,-1.7);
+\end{tikzpicture}
+\vspace{2mm}
+\small 两桶相加 = DB 初始水位（不计已 commit 的真扣减）。\\
+DB 是\textbf{水位锚}，Redis 是\textbf{运行时账本}。
+\srcnote{repository/cache/inventory.go:16--22 两个 key 命名规范}
+\end{frame}
+
+% ============================================================
+\section{Redis Lua 三段脚本}
+% ============================================================
+
+\begin{frame}{三态生命周期}
+\begin{tikzpicture}[node distance=10mm and 18mm]
+  \node[node-state,node-state-normal] (av)  {available};
+  \node[node-state,node-state-transition,right=of av] (rv) {reserved};
+  \node[node-state,node-state-alert,right=of rv] (out) {sold};
+  \draw[arrow] (av) -- node[above,font=\tiny,align=center]{reserve\\(下单)} (rv);
+  \draw[arrow] (rv) -- node[above,font=\tiny,align=center]{commit\\(支付)} (out);
+  \draw[arrow,bend left=35,draw=cOK] (rv.north) to node[above,font=\tiny\color{cOK},align=center]{release\\(取消/超时)} (av.north);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{reserve}：available -= n, reserved += n（下单时调）
+  \item \textbf{commit}：reserved -= n（支付成功时调，total 也消耗）
+  \item \textbf{release}：reserved -= n, available += n（取消 / 关单时调）
+\end{itemize}
+\srcnote{repository/cache/inventory.go:29--66 三段 Lua 脚本完整定义}
+\end{frame}
+
+\begin{frame}[fragile]{reserveScript：8 行 Lua，零超卖的全部秘密}
+\begin{lstlisting}[language=LuaRedis,firstnumber=32,
+  caption={\srcnote{repository/cache/inventory.go:32--44 reserveScript}}]
+local avail = redis.call('GET', KEYS[1])    -- 1. 读 available
+if avail == false then
+    return -2                                -- 2. key 不存在 = 库存未初始化
+end
+local need = tonumber(ARGV[1])
+if tonumber(avail) < need then
+    return -1                                -- 3. 不足 = ErrStockInsufficient
+end
+redis.call('DECRBY', KEYS[1], need)          -- 4. available -= n
+redis.call('INCRBY', KEYS[2], need)          -- 5. reserved  += n
+return 1                                     -- 6. 成功
+\end{lstlisting}
+\small \textbf{为什么必须打成一个 Lua}：脚本对 Redis 是单命令，redis-server 单线程从头执行到尾，中途\textbf{不会插入}其它客户端的 GET / DECRBY / INCRBY。如果分成 3 次 RTT 做 check-then-act，500 并发立刻超卖。
+\end{frame}
+
+\begin{frame}[fragile]{commitScript / releaseScript：成对出现，对称设计}
+\begin{lstlisting}[language=LuaRedis,firstnumber=48,
+  caption={\srcnote{repository/cache/inventory.go:48--66 commit + release}}]
+-- commitScript：支付成功，reserved 真正消耗
+local r = redis.call('GET', KEYS[1])           -- KEYS[1]=reserved
+if r == false or tonumber(r) < tonumber(ARGV[1]) then
+    return -1
+end
+redis.call('DECRBY', KEYS[1], ARGV[1])         -- reserved -= n
+return 1
+-- releaseScript：取消，reserved 退回 available
+local r = redis.call('GET', KEYS[1])           -- KEYS[1]=reserved
+if r == false or tonumber(r) < tonumber(ARGV[1]) then
+    return -1
+end
+redis.call('DECRBY', KEYS[1], ARGV[1])         -- reserved -= n
+redis.call('INCRBY', KEYS[2], ARGV[1])         -- available += n
+return 1
+\end{lstlisting}
+\small commit 只动 reserved 一桶（钱已付，不退）；release 两桶都动（占的位还回去）。每次调用前必 check $r \geq n$，避免 reserved 跌成负数。
+\end{frame}
+
+\begin{frame}{Redis Lua vs DB \texttt{SELECT FOR UPDATE}：实测尾延迟}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+& Redis Lua & DB 悲观锁 \\
+\midrule
+avg 延迟    & 1.24ms  & 1.29ms \\
+p95 延迟    & 3.52ms  & 3.65ms \\
+\textbf{max 延迟} & \textbf{136ms} & \textbf{453ms} \\
+RPS         & 51{,}362 & 50{,}142 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small avg / p95 看不出差距，但 \textbf{max 拉开 3.3 倍}。原因：
+\begin{itemize}
+  \item DB：BEGIN $\to$ \texttt{SELECT \dots FOR UPDATE} (行锁) $\to$ 业务 check $\to$ UPDATE $\to$ COMMIT，至少 4 次 RTT + 行锁串行；
+  \item Redis Lua：\textbf{1 次 RTT}，单线程跑完 5 条命令。
+\end{itemize}
+\srcnote{stressTest/REPORT.md \S 6 优惠券：Redis Lua vs DB 锁}
+\end{frame}
+
+\begin{frame}{零超卖的并发证据}
+\textbf{测试}：\texttt{TestInventory\_NoOversellUnderConcurrency}\\
+\textbf{设置}：\texttt{InitStock(pid, 100)}，500 goroutine 各抢 1 件。
+
+\vspace{2mm}
+\begin{tabular}{@{}lr@{}}
+\toprule
+指标 & 实测 \\
+\midrule
+成功 reserve 次数 & \textbf{exactly 100} \\
+失败次数 (ErrStockInsufficient) & 400 \\
+\textbf{available 终值} & \textbf{0} \\
+\textbf{reserved 终值}  & \textbf{100} \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small "exactly 100" 是 \texttt{t.Fatalf("oversell: want exactly \%d, got \%d", initial, success)} 写死的断言：少一个少卖、多一个超卖，CI 都红。
+\srcnote{repository/cache/inventory\_test.go:52--82 NoOversellUnderConcurrency}
+\end{frame}
+
+% ============================================================
+\section{启动 SeedFromDB}
+% ============================================================
+
+\begin{frame}{Redis 重启之后，库存从哪里来？}
+\begin{tikzpicture}[node distance=8mm and 16mm]
+  \node[node-box] (boot) {gomall 启动};
+  \node[node-box,right=of boot] (seed) {SeedFromDB};
+  \node[node-box,above right=of seed,node-warn] (db) {MySQL\\product.num};
+  \node[node-box,below right=of seed,node-ok] (rd) {Redis\\stock:available:*};
+  \draw[arrow] (boot) -- (seed);
+  \draw[arrow] (db) -- node[above,font=\tiny]{分页扫表 batch=500} (seed);
+  \draw[arrow] (seed) -- node[below,font=\tiny]{InitStock (跳过已存在)} (rd);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{真理之源}是 MySQL 的 \texttt{product.num}（商家后台维护，AOF / binlog 持久化）。
+  \item Redis 只是\textbf{运行时缓存}，重启会丢，必须能从 DB 恢复。
+  \item 但已经在跑的实例\textbf{不能}被覆盖，否则会把 reserved 状态吃掉。
+\end{itemize}
+\srcnote{initialize/inventory.go:11--17 调用入口 + service/inventory/syncer.go:14}
+\end{frame}
+
+\begin{frame}[fragile]{SeedFromDB 主循环：分页 + EXISTS 双保险}
+\begin{lstlisting}[language=Go,firstnumber=14,
+  caption={\srcnote{service/inventory/syncer.go:14--48 SeedFromDB}}]
+func SeedFromDB(ctx context.Context, batchSize int) error {
+    if batchSize <= 0 { batchSize = 500 }            // 默认页 500
+    d := dao.NewDBClient(ctx); var lastID uint
+    for {
+        var rows []*model.Product
+        q := d.Model(&model.Product{}).Order("id ASC").Limit(batchSize)
+        if lastID > 0 { q = q.Where("id > ?", lastID) }  // 游标分页
+        if err := q.Find(&rows).Error; err != nil { return err }
+        if len(rows) == 0 { break }
+        for _, p := range rows {
+            lastID = p.ID
+            exists, _ := cache.RedisClient.Exists(ctx,
+                cache.StockAvailableKey(p.ID)).Result()
+            if exists == 1 { continue }              // 跳过运行期数据
+            cache.InitStock(ctx, p.ID, int64(p.Num)) // 覆盖写 0
+        }
+    }
+    return nil
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{为什么是"游标分页 + EXISTS 跳过"}
+\begin{itemize}
+  \item \textbf{游标分页}（\texttt{WHERE id > lastID LIMIT 500}）：
+  \begin{itemize}
+    \item 1M 行的 \texttt{product} 表，\texttt{OFFSET 999500 LIMIT 500} 要扫近百万行；
+    \item 游标走 PK 索引，每页\textbf{常数时间}，启动期间 DB CPU 不抖。
+  \end{itemize}
+  \item \textbf{EXISTS 检查 / 跳过}（line 32--40 是关键）：
+  \begin{itemize}
+    \item 冷启动：available key 不存在 $\to$ 写入 DB 水位；
+    \item 滚动重启 / 多副本：available 已被前一实例 / 上一次启动写过 $\to$ 跳过，\textbf{不会把运行期 reserve 抹平}；
+    \item \texttt{InitStock} 是\textbf{覆盖写}（\texttt{SET k v 0}），没这层 EXISTS 就是事故。
+  \end{itemize}
+\end{itemize}
+\srcnote{service/inventory/syncer.go:34--41 EXISTS 跳过}
+\end{frame}
+
+% ============================================================
+\section{OrderCreate reserve}
+% ============================================================
+
+\begin{frame}{下单链路：reserve $\to$ 事务 $\to$ 失败回滚}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box] (cli) {Client};
+  \node[node-box,right=of cli] (svc) {OrderCreate};
+  \node[node-box,right=of svc,node-warn] (rsv) {ReserveStock\\(Redis Lua)};
+  \node[node-box,below=of rsv] (tx) {DB Tx\\order + outbox};
+  \node[node-box,below=of tx,node-ok] (mq) {RabbitMQ\\delay 15min};
+  \node[node-box,left=of tx,node-bad] (rel) {ReleaseReservation\\(回滚补偿)};
+  \draw[arrow] (cli) -- (svc);
+  \draw[arrow] (svc) -- (rsv);
+  \draw[arrow] (rsv) -- node[right,font=\tiny]{OK} (tx);
+  \draw[arrow] (tx) -- node[right,font=\tiny]{OK} (mq);
+  \draw[arrow-bad] (tx) -- node[above,font=\tiny\color{cBad}]{Tx fail} (rel);
+\end{tikzpicture}
+\vspace{2mm}
+\small 注意顺序：\textbf{先 Redis 预扣，后 DB 落库}。这样 DB 跑不动时，Redis 直接拒单（429 / 50001），DB 不会被无效订单淹没。
+\srcnote{service/order.go:40--98 完整调用链}
+\end{frame}
+
+\begin{frame}[fragile]{OrderCreate 关键片段}
+\begin{lstlisting}[language=Go,firstnumber=58,
+  caption={\srcnote{service/order.go:58--86 reserve + tx + 补偿 release}}]
+// 1) Redis 预扣: available -> reserved，失败直接拒单
+if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
+    return nil, err                       // ErrStockInsufficient
+}
+// 2) 同事务写订单 + 写 outbox
+err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+    if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil { return e }
+    return dao.NewOutboxDaoByDB(tx).Insert(/* OrderCreated */)
+})
+if err != nil {
+    // 3) 事务失败：必须释放刚扣的预占（Saga 补偿）
+    if relErr := cache.ReleaseReservation(ctx,
+            req.ProductID, int64(req.Num)); relErr != nil {
+        util.LogrusObj.Errorf("release on tx failure: %v", relErr)
+    }
+    return
+}
+\end{lstlisting}
+\small 注意 step 1 在 step 2 之外：Redis 写入即生效，不能"放进 MySQL 事务里"，失败靠显式 ReleaseReservation 补偿。
+\end{frame}
+
+% ============================================================
+\section{关单 release}
+% ============================================================
+
+\begin{frame}{15 分钟关单 \& 用户主动取消}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box] (mq) {RabbitMQ\\delay queue};
+  \node[node-box,right=of mq] (worker) {CancelWorker};
+  \node[node-box,right=of worker] (svc)  {CancelUnpaidOrder};
+  \node[node-box,below=of svc,node-warn] (tx)  {DB Tx\\CloseOrderWithCheck\\+ outbox cancelled};
+  \node[node-box,below=of tx,node-ok] (rel) {ReleaseReservation};
+  \draw[arrow] (mq) -- (worker);
+  \draw[arrow] (worker) -- (svc);
+  \draw[arrow] (svc) -- (tx);
+  \draw[arrow] (tx) -- node[right,font=\tiny]{closed=true 才走}(rel);
+\end{tikzpicture}
+\vspace{2mm}
+\small 顺序很要紧：\textbf{先关单 DB 状态，后退回 Redis 库存}。如果先退库存再关单，关单失败时库存已经退回但订单还能支付，二次扣减会失败。
+\srcnote{service/order\_cancel.go:14--63 CancelUnpaidOrder}
+\end{frame}
+
+\begin{frame}[fragile]{CancelUnpaidOrder 的幂等保证}
+\begin{lstlisting}[language=Go,firstnumber=31,
+  caption={\srcnote{service/order\_cancel.go:31--62 关单 + release}}]
+err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
+    ok, err := dao.NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
+    if err != nil { return err }
+    if !ok { return nil }                  // 1. 已关 -> 短路 no-op
+    closed = true
+    return dao.NewOutboxDaoByDB(tx).Insert(/* OrderCancelled */)
+})
+if err != nil { return err }
+if !closed { return nil }                  // 2. 没真关 -> 不退库存
+
+if relErr := cache.ReleaseReservation(ctx,
+    order.ProductID, int64(order.Num)); relErr != nil {
+    util.LogrusObj.Errorf("release on cancel failed: %v", relErr)
+}
+\end{lstlisting}
+\small \textbf{closed 标志位}是关键：\texttt{CloseOrderWithCheck} 只对 UnPaid 状态生效，二次调用 ok=false，整个函数 no-op，库存\textbf{不会被退第二次}。
+\end{frame}
+
+\begin{frame}{Saga 失败回滚：DB 落库失败必须 release}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box,node-warn] (s1) {step1: Reserve\\available--, reserved++};
+  \node[node-box,right=of s1] (s2) {step2: DB Tx\\order + outbox};
+  \node[node-box,right=of s2] (s3) {step3: MQ delay};
+  \node[node-box,below=of s2,node-bad] (c1) {compensate: Release\\reserved--, available++};
+  \draw[arrow] (s1) -- (s2);
+  \draw[arrow] (s2) -- (s3);
+  \draw[arrow-bad] (s2) -- node[right,font=\tiny\color{cBad}]{tx fail} (c1);
+  \draw[arrow-bad,bend right=20] (c1.west) to node[below,font=\tiny\color{cBad}]{undo step1}(s1.south);
+\end{tikzpicture}
+\vspace{2mm}
+\small 如果 step2 失败且\textbf{不补偿}：available 数字永远比真实可售数字小，长期下来库存全锁死。这就是\textbf{库存 leak} —— 客户端看"无货"，DB 里其实有货。
+\srcnote{service/order.go:79--85 显式调用 ReleaseReservation 补偿}
+\end{frame}
+
+% ============================================================
+\section{业务承诺与客诉答疑}
+% ============================================================
+
+\begin{frame}{业务承诺：超卖 vs 误锁，两条不同的红线}
+\begin{tabular}{@{}lll@{}}
+\toprule
+事故 & 用户体感 & 业务代价 \\
+\midrule
+超卖     & 下单成功，无法发货      & \textbf{真金白银赔} + 商誉 \\
+误锁     & 显示"已售罄"           & 转化率轻微下降 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\begin{itemize}
+  \item 超卖 = 法律 / 合同事件，必须\textbf{零容忍}（NoOversell 单测就是这一条的工程化）。
+  \item 误锁 = 体验事件，可以\textbf{容忍一阵}（高峰过后 / 关单超时后会自愈）。
+  \item 这个不对称是\textbf{所有设计选择}的源头：选 Redis 单线程、选先 reserve 后 commit、选 EXISTS 跳过 \dots
+\end{itemize}
+\srcnote{repository/cache/inventory.go:11--14 注释揭示这条业务红线}
+\end{frame}
+
+\begin{frame}{客服话术：50001 vs 70001 vs 70002}
+\begin{tabular}{@{}lll@{}}
+\toprule
+状态码 & 触发位置 & 客服话术 \\
+\midrule
+\textbf{50001} & ReserveStock 返回 ErrStockInsufficient & "本商品已售罄" \\
+70001 & 全局 / 秒杀限流命中 & "活动太火爆，请稍后" \\
+70002 & 支付熔断器 Open & "支付服务暂忙，1 分钟后" \\
+60002 & 同 key 重复下单 & "您已下单成功" \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 50001 和 70001 都是"拒单"，但根因不同：
+\begin{itemize}
+  \item 50001 是\textbf{真的}没货（available = 0），重试也没用；
+  \item 70001 是\textbf{速率}被限，等几秒重试就行。
+\end{itemize}
+\srcnote{pkg/e/code.go 业务码定义；50001 在 deck 10 业务码总表中作为库存不足语义}
+\end{frame}
+
+\begin{frame}{典型客诉：明明显示有货，下单却失败}
+\textbf{Q：商详页显示库存 50，我下单却提示"已售罄"？}
+
+\vspace{2mm}
+两种根因：
+\begin{itemize}
+  \item \textbf{商详页缓存 vs Redis available 不一致}：
+  \begin{itemize}
+    \item 商详页用 5min 商品缓存（deck 03），num 字段是 5 分钟前的快照；
+    \item 高峰期，available 已经从 50 跌到 0，但商详页还显示 50；
+    \item 应对：商详页改成显示"是否有货" boolean，或缓存 TTL 调到 30s。
+  \end{itemize}
+  \item \textbf{库存被预占未释放}：
+  \begin{itemize}
+    \item 大量未支付订单堆在 reserved 桶，available = 0；
+    \item 15 min 后被关单 worker 释放回去；
+    \item 应对：关单 worker 心跳监控，延迟超过 2min 报警。
+  \end{itemize}
+\end{itemize}
+\srcnote{service/order\_cancel.go:59 release 调用是这条客诉自愈的关键}
+\end{frame}
+
+\begin{frame}{巡检对账 + 各角色看哪个指标}
+\textbf{巡检恒等式}：\texttt{available + reserved + committed = product.num}\\
+\small \texttt{GetStockSnapshot(pid)} 给前两项，committed 取 DB 已支付订单 \texttt{SUM(num)}；偏差 $>$ 1\% 钉钉报警，SRE 用 \texttt{InitStock} 人工覆盖，\textbf{不阻断业务}。
+\vspace{1mm}
+\begin{tabular}{@{}lll@{}}
+\toprule
+角色 & 关心 & 看哪个 \\
+\midrule
+财务  & 不超卖     & NoOversell 单测 + 已发货 vs DB 水位差 \\
+SRE   & 一致性     & 巡检 leak 偏差 / SeedFromDB 跳过日志 \\
+客服  & 投诉个例   & status=50001 比例 + 关单超时告警 \\
+运营  & 大促进度   & available 分布 / reserved 堆积量 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\keypoint{库存不是缓存问题，是\textbf{业务对"我答应卖你"这句承诺的工程兜底}。}
+\srcnote{repository/cache/inventory.go:127--138 GetStockSnapshot}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{面试 Q\&A}
+\textbf{Q1}：为什么不能用单条 \texttt{UPDATE product SET num=num-1 WHERE num>0}？\\
+\hspace{4mm}\small A：单 SQL 防得了超卖，但表达不了"占着未付"。下单后到支付前的 15min，单桶模型只能选"立刻扣"（不付就丢货）或"不扣"（并发超卖），都不可接受。
+
+\vspace{2mm}
+\textbf{Q2}：Redis 挂了 30 秒，恢复后库存怎么办？\\
+\hspace{4mm}\small A：AOF / RDB 持久化保住大头；丢失的部分由 SeedFromDB 在重启时从 \texttt{product.num} 回灌。运行期数据（reserved 状态）通过 EXISTS 跳过保护。少量已支付未对账的差额走巡检脚本对齐。
+
+\vspace{2mm}
+\textbf{Q3}：DB 事务成功但 Redis commit 失败，怎么处理？\\
+\hspace{4mm}\small A：当前实现是 outbox 事件落库后由消费者重试 CommitReservation；reserved 桶里数字偏高，巡检 leak 报警接管。属"业务可接受 + 监控可发现"的设计取舍。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\textbf{实现}
+\begin{description}\setlength\itemsep{-1mm}
+  \item[reserve / commit / release Lua]\srcnote{repository/cache/inventory.go:32--66}
+  \item[sentinel 映射 + InitStock + Snapshot]\srcnote{repository/cache/inventory.go:69--138}
+  \item[SeedFromDB 主循环 + 启动注入]\srcnote{service/inventory/syncer.go:14--48；initialize/inventory.go:11--17}
+  \item[OrderCreate reserve + 补偿]\srcnote{service/order.go:57--86}
+  \item[CancelUnpaidOrder release]\srcnote{service/order\_cancel.go:14--63}
+\end{description}
+\textbf{测试 \& 压测}
+\begin{description}\setlength\itemsep{-1mm}
+  \item[Reserve / Release / NoOversell]\srcnote{repository/cache/inventory\_test.go:10--82}
+  \item[Lua vs DB 尾延迟 / 幂等 755K]\srcnote{stressTest/REPORT.md \S 4, \S 6}
+\end{description}
+\keypoint{配套业务 deck：11-inventory-business.tex}
+\end{frame}
+
+\end{document}
