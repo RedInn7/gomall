@@ -115,3 +115,14 @@ func (dao *ProductDao) RollbackStock(productId uint, num int) (bool, error) {
 func NewProductDaoWithDB(db *gorm.DB) *ProductDao {
 	return &ProductDao{DB: db}
 }
+
+// ListByIDs 按 id 批量取商品，结果顺序不保证，调用方按需重排
+func (dao *ProductDao) ListByIDs(ids []uint) (products []*model.Product, err error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	err = dao.DB.Model(&model.Product{}).
+		Where("id IN ?", ids).
+		Find(&products).Error
+	return
+}

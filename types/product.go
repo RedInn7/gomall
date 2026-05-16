@@ -56,6 +56,21 @@ type ListProductImgReq struct {
 	ID uint `json:"id" form:"id"`
 }
 
+// ProductSemanticSearchReq 语义检索请求体，CategoryID 可选过滤
+type ProductSemanticSearchReq struct {
+	Query      string `json:"query" form:"query" binding:"required"`
+	TopK       int    `json:"top_k" form:"top_k"`
+	CategoryID *uint  `json:"category_id,omitempty" form:"category_id"`
+}
+
+// ProductSemanticHit 单条命中，Score 为融合后的归一化分数
+type ProductSemanticHit struct {
+	Product       *ProductResp `json:"product"`
+	Score         float32      `json:"score"`
+	SemanticScore float32      `json:"semantic_score"`
+	KeywordScore  float32      `json:"keyword_score"`
+}
+
 type ProductResp struct {
 	ID            uint   `json:"id"`
 	Name          string `json:"name"`

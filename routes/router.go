@@ -39,6 +39,7 @@ func NewRouter() *gin.Engine {
 		v1.GET("product/list", middleware.HTTPCache(30*time.Second), api.ListProductsHandler())
 		v1.GET("product/show", middleware.HTTPCache(60*time.Second), api.ShowProductHandler())
 		v1.POST("product/search", api.SearchProductsHandler())
+		v1.POST("product/semantic-search", api.SemanticSearchProductsHandler())                   // 语义检索: ES + Milvus 融合
 		v1.GET("product/imgs/list", api.ListProductImgHandler())                                  // 商品图片
 		v1.GET("category/list", middleware.HTTPCache(300*time.Second), api.ListCategoryHandler()) // 商品分类
 		v1.GET("carousels", middleware.HTTPCache(300*time.Second), api.ListCarouselsHandler())    // 轮播图

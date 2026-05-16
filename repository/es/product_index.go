@@ -153,6 +153,79 @@ func DeleteProduct(ctx context.Context, productID uint) error {
 	return nil
 }
 
+// ScoredProductDoc 携带 ES _score 的命中
+type ScoredProductDoc struct {
+	Doc   *ProductDoc
+	Score float32
+}
+
+// SearchProductsWithScore 多字段模糊查询，返回带 _score 的命中，供向量/关键词融合排序使用
+func SearchProductsWithScore(ctx context.Context, keyword string, from, size int, categoryID *uint) ([]ScoredProductDoc, int64, error) {
+	if EsClient == nil {
+		return nil, 0, errors.New("es client not initialized")
+	}
+	if size <= 0 {
+		size = 20
+	}
+	must := []map[string]any{
+		{
+			"multi_match": map[string]any{
+				"query":  keyword,
+				"fields": []string{"name^3", "title^2", "info"},
+			},
+		},
+	}
+	filter := []map[string]any{}
+	if categoryID != nil {
+		filter = append(filter, map[string]any{"term": map[string]any{"category_id": *categoryID}})
+	}
+	q := map[string]any{
+		"from": from,
+		"size": size,
+		"query": map[string]any{
+			"bool": map[string]any{
+				"must":   must,
+				"filter": filter,
+			},
+		},
+	}
+	body, _ := json.Marshal(q)
+	req := esapi.SearchRequest{
+		Index: []string{ProductIndex},
+		Body:  bytes.NewReader(body),
+	}
+	res, err := req.Do(ctx, EsClient)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer res.Body.Close()
+	if res.IsError() {
+		bz, _ := io.ReadAll(res.Body)
+		return nil, 0, fmt.Errorf("search failed: %s", string(bz))
+	}
+	var parsed struct {
+		Hits struct {
+			Total struct {
+				Value int64 `json:"value"`
+			} `json:"total"`
+			Hits []struct {
+				Score  float32     `json:"_score"`
+				Source *ProductDoc `json:"_source"`
+			} `json:"hits"`
+		} `json:"hits"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&parsed); err != nil {
+		return nil, 0, err
+	}
+	out := make([]ScoredProductDoc, 0, len(parsed.Hits.Hits))
+	for _, h := range parsed.Hits.Hits {
+		if h.Source != nil {
+			out = append(out, ScoredProductDoc{Doc: h.Source, Score: h.Score})
+		}
+	}
+	return out, parsed.Hits.Total.Value, nil
+}
+
 // SearchProducts 多字段模糊查询，返回命中文档 + 总数
 func SearchProducts(ctx context.Context, keyword string, from, size int) ([]*ProductDoc, int64, error) {
 	if EsClient == nil {
