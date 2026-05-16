@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package user;
+
+option go_package = "github.com/RedInn7/gomall/proto/user;userpb";
+
+service UserService {
+  rpc GetUser (GetUserRequest) returns (UserInfo);
+  rpc ListUsers (ListUsersRequest) returns (ListUsersResponse);
+}
+
+message GetUserRequest {
+  uint32 id = 1;
+}
+
+message ListUsersRequest {
+  uint32 page = 1;
+  uint32 page_size = 2;
+}
+
+message UserInfo {
+  uint32 id = 1;
+  string user_name = 2;
+  string nick_name = 3;
+  string email = 4;
+  string status = 5;
+  int64 created_at = 6;
+}
+
+message ListUsersResponse {
+  repeated UserInfo items = 1;
+  int64 total = 2;
+}

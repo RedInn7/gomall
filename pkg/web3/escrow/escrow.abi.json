@@ -1,0 +1,157 @@
+[
+  {
+    "type": "constructor",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      { "name": "_buyer", "type": "address" },
+      { "name": "_seller", "type": "address" },
+      { "name": "_arbiter", "type": "address" },
+      { "name": "_amount", "type": "uint256" }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "buyer",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address" }]
+  },
+  {
+    "type": "function",
+    "name": "seller",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address" }]
+  },
+  {
+    "type": "function",
+    "name": "arbiter",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "address" }]
+  },
+  {
+    "type": "function",
+    "name": "amount",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint256" }]
+  },
+  {
+    "type": "function",
+    "name": "state",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "uint8" }]
+  },
+  {
+    "type": "function",
+    "name": "orderID",
+    "stateMutability": "view",
+    "inputs": [],
+    "outputs": [{ "name": "", "type": "bytes32" }]
+  },
+  {
+    "type": "function",
+    "name": "fund",
+    "stateMutability": "payable",
+    "inputs": [],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "fundWithOrderID",
+    "stateMutability": "payable",
+    "inputs": [{ "name": "_orderID", "type": "bytes32" }],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "release",
+    "stateMutability": "nonpayable",
+    "inputs": [],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "refund",
+    "stateMutability": "nonpayable",
+    "inputs": [],
+    "outputs": []
+  },
+  {
+    "type": "function",
+    "name": "dispute",
+    "stateMutability": "nonpayable",
+    "inputs": [],
+    "outputs": []
+  },
+  {
+    "type": "event",
+    "name": "Funded",
+    "anonymous": false,
+    "inputs": [
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Released",
+    "anonymous": false,
+    "inputs": [
+      { "name": "to", "type": "address", "indexed": true }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Refunded",
+    "anonymous": false,
+    "inputs": [
+      { "name": "to", "type": "address", "indexed": true }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Disputed",
+    "anonymous": false,
+    "inputs": [
+      { "name": "by", "type": "address", "indexed": true }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "PaymentConfirmed",
+    "anonymous": false,
+    "inputs": [
+      { "name": "orderID", "type": "bytes32", "indexed": true },
+      { "name": "buyer", "type": "address", "indexed": true },
+      { "name": "amount", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "InvalidState",
+    "inputs": [
+      { "name": "expected", "type": "uint8" },
+      { "name": "actual", "type": "uint8" }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotAuthorized",
+    "inputs": [{ "name": "caller", "type": "address" }]
+  },
+  {
+    "type": "error",
+    "name": "WrongAmount",
+    "inputs": [
+      { "name": "expected", "type": "uint256" },
+      { "name": "actual", "type": "uint256" }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "ZeroAddress",
+    "inputs": []
+  }
+]

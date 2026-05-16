@@ -1,0 +1,81 @@
+system:
+  domain: mall
+  version: 1.0
+  env: "dev"
+  HttpPort: ":5002"
+  Host: "localhost"
+  UploadModel: "local"
+  allowedOrigins:
+    - http://localhost:8080
+    - http://localhost:5173
+
+mysql:
+  default:
+    dialect: "mysql"
+    dbHost: "127.0.0.1"
+    dbPort: "3306"
+    dbName: "mall_db"
+    userName: "mall"
+    password: "CHANGE_ME"
+    charset: "utf8mb4"
+
+kafka:
+  default:
+    debug: true
+    address: localhost:9092
+    requiredAck: -1
+    readTimeout: 30
+    writeTimeout: 30
+    maxOpenRequests: 5
+    partition: 2
+
+redis:
+  redisDbName: 4
+  redisHost: 127.0.0.1
+  redisPort: 6379
+  redisPassword: ""
+  redisNetwork: "tcp"
+
+cache:
+  cacheType: redis
+  cacheEmpires: 600
+  cacheWarmUp: false
+  cacheServer:
+
+email:
+  address: http://localhost:8080/#/vaild/email/
+  smtpHost:
+  smtpEmail:
+  smtpPass:
+
+# 生产环境必须通过环境变量覆盖：
+#   JWT_SECRET / SESSION_SECRET / MONEY_SECRET
+encryptSecret:
+  jwtSecret: "CHANGE_ME"
+  sessionSecret: "CHANGE_ME"
+  emailSecret: "CHANGE_ME"
+  phoneSecret: "CHANGE_ME"
+  moneySecret: "CHANGE_ME"
+
+oss:
+  AccessKeyId:
+  AccessKeySecret:
+  BucketName:
+  QiNiuServer:
+
+photoPath:
+  photoHost: http://127.0.0.1
+  ProductPath: /static/imgs/product/
+  AvatarPath: /static/imgs/avatar/
+
+es:
+  EsHost: 127.0.0.1
+  EsPort: 9200
+  EsIndex: mylog
+
+rabbitMq:
+  rabbitMQ: amqp
+  rabbitMQUser: guest
+  rabbitMQPassWord: CHANGE_ME
+  rabbitMQHost: localhost
+  rabbitMQPort: 5672

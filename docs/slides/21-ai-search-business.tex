@@ -1,0 +1,449 @@
+\input{preamble}
+
+\title{AI 检索的业务视角}
+\subtitle{ES 关键词 + Milvus 语义向量的 hybrid 路线}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{deck 12 的遗留问题}
+% ============================================================
+
+\begin{frame}{deck 12 给搜索做了什么}
+\begin{itemize}
+  \item LIKE $\to$ ES：解决了"分词 / 字段加权 / 相关性"三件事。
+  \item Outbox + indexer：解决了"上架 5 分钟内可搜"的承诺。
+  \item ES 挂 $\to$ DB 兜底：解决了"搜索是流量入口不能 5xx"的承诺。
+\end{itemize}
+\vspace{2mm}
+\keypoint{deck 12 把"搜得到"做到位了。这份 deck 要回答的是：\textbf{搜不到的那部分} query 怎么办。}
+\srcnote{repository/es/product\_index.go:156--209 当前 multi\_match 查询}
+\end{frame}
+
+\begin{frame}{ES 关键词解决不了的三类 query}
+\begin{tabular}{@{}lll@{}}
+\toprule
+query 类型 & 例子 & ES 行为 \\
+\midrule
+自然语言   & \textit{送女朋友的礼物}    & 拆成"送 / 女朋友 / 礼物" $\to$ 命中乱 \\
+跨表达同义 & \textit{苹果手机最新款}    & "苹果"+"手机"+"最新款" $\to$ 漏 iPhone 15 \\
+口语描述   & \textit{适合健身的运动鞋} & 长尾词命中率极低 $\to$ 趋近 0 命中 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item ES 衡量的是\textbf{词的重合度}，不是\textbf{意思的接近度}。
+  \item 用户已经习惯用自然语言搜（短视频 / 大模型养出来的）。
+  \item 关键词召回率掉到 60\% 以下，长尾 GMV 直接漏走。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{为什么长尾搜索是大类目电商的命门}
+\begin{itemize}
+  \item 头部 SKU 的搜索词高度集中：\textit{iPhone}、\textit{口红}、\textit{洗衣液}。
+  \item 但全站 GMV 里，头部 SKU 通常只贡献 30\%。
+  \item 剩下 70\% 来自\textbf{长尾 SKU}：小众品类、个性化需求、口语化搜索。
+  \item 业界口径：亚马逊有约 70\% GMV 来自非头部商品。
+\end{itemize}
+\vspace{2mm}
+\keypoint{长尾搜索 miss 一次 = 一个细分类目的下单机会被默默放掉，
+没有 5xx，没有告警，但 GMV 一直在漏。}
+\end{frame}
+
+% ============================================================
+\section{三层检索体系}
+% ============================================================
+
+\begin{frame}{从单层 ES 到三层检索的整体形态}
+\begin{tikzpicture}[node distance=4mm and 7mm,every node/.append style={font=\tiny}]
+  \node[node-box]                       (q)   {用户\\query};
+  \node[node-box,right=of q,node-warn]  (kw)  {关键词层\\ES};
+  \node[node-box,right=of kw,node-warn] (sem) {语义层\\Milvus};
+  \node[node-box,right=of sem]          (bz)  {业务调权\\运营 boost};
+  \node[node-box,right=of bz,node-ok]   (mix) {融合排序\\RRF / 加权};
+  \node[node-box,right=of mix]          (top) {top\_k};
+  \draw[arrow] (q)   -- (kw);
+  \draw[arrow] (kw)  -- (sem);
+  \draw[arrow] (sem) -- (bz);
+  \draw[arrow] (bz)  -- (mix);
+  \draw[arrow] (mix) -- (top);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 三层不是叠加，是\textbf{并行召回} + \textbf{统一融合}。
+  \item 关键词召回保证"精确匹配不掉"，语义召回保证"长尾不漏"。
+  \item 业务调权层让运营在不动算法的前提下调结果。
+\end{itemize}
+\srcnote{service/search/service.go:11--16 当前只走 ES 一路；融合在 feat/semantic-search PR}
+\end{frame}
+
+\begin{frame}{三层的业务责任划分}
+\begin{tabular}{@{}lp{4.0cm}p{5.0cm}@{}}
+\toprule
+层 & 解决什么 & gomall 现状 \\
+\midrule
+关键词层 & \textit{iPhone 13} $\to$ name 命中 & 已在 main \\
+语义层   & \textit{送礼物} $\to$ 礼物 / 饰品   & feat/milvus-vector + feat/semantic-search PR \\
+业务调权 & 大促主推强制置顶 & 路线图，运营需求成熟后做 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 关键词层："搜得到品牌型号"的下限。
+  \item 语义层："搜得到长尾意图"的上限。
+  \item 业务调权层："运营能干预"的政策接口。
+\end{itemize}
+\srcnote{repository/es/product\_index.go:17 product 索引；语义层 collection 在 feat/milvus-vector}
+\end{frame}
+
+% ============================================================
+\section{hybrid 加权的业务含义}
+% ============================================================
+
+\begin{frame}{两路分数为什么不能直接加}
+\begin{itemize}
+  \item ES \texttt{\_score}：BM25 + 字段加权，绝对值几十到几百，跟 query 长度强相关。
+  \item Milvus 向量距离：cosine 在 $[-1, 1]$，L2 在 $[0, +\infty)$，跟 query 长度无关。
+  \item 直接加 $\to$ ES 分数把向量分数压死 $\to$ 等于没引入语义层。
+\end{itemize}
+\vspace{2mm}
+\keypoint{不同量纲必须先 normalize。这是一个工程必修，但业务侧也要懂：
+否则"上线了向量搜索召回率没变化"就解释不清楚。}
+\srcnote{融合公式与 minMaxNormalize 实现在 feat/semantic-search PR 的 service/search/semantic.go}
+\end{frame}
+
+\begin{frame}{50/50 默认权重的业务判断}
+\begin{tabular}{@{}lll@{}}
+\toprule
+权重 (kw : sem) & 适用场景 & 业务侧理由 \\
+\midrule
+70 : 30 & 商品库已全名上架  & 关键词命中率本来就高 \\
+50 : 50 & 出厂默认           & 两路同等信任，先保召回 \\
+30 : 70 & 自然语言 query 多 & 用户更多用描述 / 长尾词 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 50/50 不是"算法最优"，是\textbf{产品对未知用户的初始信任}。
+  \item 真正调权要靠埋点：人工标注或点击日志做 NDCG / MRR 离线评估。
+  \item 也可以做 AB：按 UV 分桶切流量，观察 7 日 GMV / 0 结果率。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{融合方法：加权 vs RRF}
+\begin{tikzpicture}[node distance=5mm and 10mm,every node/.append style={font=\tiny}]
+  \node[node-box]                  (esh) {ES 100 条\\BM25 分数};
+  \node[node-box,below=of esh]     (vch) {Milvus 100 条\\cosine 分数};
+  \node[node-box,right=of esh,node-warn] (norm1) {min-max\\归一};
+  \node[node-box,right=of vch,node-warn] (norm2) {min-max\\归一};
+  \node[node-box,right=2cm of norm1,yshift=-7mm,node-ok] (mix) {加权融合\\$\alpha \cdot kw + (1-\alpha) \cdot sem$};
+  \node[node-box,right=of mix]     (top) {top 20};
+  \draw[arrow] (esh) -- (norm1);
+  \draw[arrow] (vch) -- (norm2);
+  \draw[arrow] (norm1) -- (mix);
+  \draw[arrow] (norm2) -- (mix);
+  \draw[arrow] (mix) -- (top);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item gomall 当前路线：加权 + min-max。
+  \item RRF（reciprocal rank fusion）是另一条路：只看排名 \texttt{1/(rank+60)}，不看分数。
+  \item 加权更可调，RRF 更稳健。前期选加权，留着 AB 调 $\alpha$。
+\end{itemize}
+\srcnote{feat/semantic-search PR 中 service/search/semantic.go 的 50/50 融合公式}
+\end{frame}
+
+% ============================================================
+\section{语义层落地：embedding + 向量库}
+% ============================================================
+
+\begin{frame}{embedding 不只是"调一个 API"}
+\begin{tabular}{@{}llll@{}}
+\toprule
+模型 & 维度 & 中文 & 成本 \\
+\midrule
+OpenAI text-embedding-3-small & 1536 & 一般  & \$0.02 / 1M tokens \\
+OpenAI text-embedding-3-large & 3072 & 中等  & \$0.13 / 1M tokens \\
+BGE-base-zh-v1.5               & 768  & 强   & 自部署 \\
+BGE-large-zh-v1.5              & 1024 & 最强 & 自部署，GPU \\
+GTE / E5-large-zh              & 1024 & 强   & 自部署 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 中文电商：BGE-zh 系列在中文 benchmark 上长期领先 OpenAI。
+  \item 自部署成本 = GPU 显存 + 推理服务 SRE。
+  \item 调外部 API = 数据出境 + 单调用 50--500ms 延迟。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{gomall 的 embedding 抽象层}
+\begin{itemize}
+  \item 不绑死任何具体模型。env 切：
+  \begin{itemize}
+    \item \texttt{EMBEDDING\_API\_URL} 未设 $\to$ SHA-256 衍生 768 维占位向量，本地可跑。
+    \item 设了 $\to$ POST \texttt{\{model, input\}}，OpenAI / BGE / Ollama 三种响应结构都兼容。
+    \item \texttt{EMBEDDING\_MODEL} 切模型，\texttt{EMBEDDING\_API\_KEY} 走 Bearer。
+  \end{itemize}
+  \item 切模型只改 env，不动代码 —— 12-factor。
+  \item 超时 5s，避免拖死检索 p99。
+\end{itemize}
+\vspace{2mm}
+\srcnote{feat/semantic-search PR 的 service/search/embedding.go EmbedText 抽象}
+\end{frame}
+
+\begin{frame}{为什么不是"在 ES 里加个 dense\_vector 就行"}
+\begin{itemize}
+  \item ES 7.x 后支持 \texttt{dense\_vector}，但没有专门的 ANN 索引（早期版本）。
+  \item 商品库 100 万行 + 768 维向量 = $\sim$3 GB 原始数据。
+  \item ES 直接搜向量是\textbf{暴力近邻}，p99 退化到秒级。
+  \item Milvus 用 HNSW 索引，同样 100 万向量 p99 在 5--20ms。
+\end{itemize}
+\vspace{2mm}
+\keypoint{专用向量库不是"高大上"，是\textbf{ms 级响应的工程下限}。
+搜索接口 p99 不能超过 200ms 是产品红线。}
+\srcnote{repository/es/product\_index.go:17--40 ES product 索引故意不放向量字段}
+\end{frame}
+
+\begin{frame}{HNSW 还是 IVF：业务给出的答案}
+\begin{tabular}{@{}llll@{}}
+\toprule
+索引 & 准确率 & 内存 & 适用规模 \\
+\midrule
+HNSW (M=16) & 高 ($\geq$95\%) & 高 ($\sim$2$\times$ 原始) & $<$ 1000 万 \\
+IVF\_FLAT   & 中             & 低                       & 千万级 \\
+IVF\_PQ     & 中低           & 极低                     & 亿级 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\begin{itemize}
+  \item gomall 商品数 $\sim$ 100 万，HNSW 直接选定。
+  \item M=16 / efConstruction=200 / efSearch=64 是 Milvus 官方推荐的中等配置。
+  \item 召回不达标 $\to$ 调 efSearch（运行时参数，不重建索引）。
+\end{itemize}
+\srcnote{feat/milvus-vector PR 的 repository/milvus/product\_vector.go HNSW 参数}
+\end{frame}
+
+\begin{frame}{静默降级：Milvus 挂了用户感受是什么}
+\begin{tikzpicture}[node distance=8mm and 12mm]
+  \node[node-state,node-state-normal] (n) {正常\\三层全开};
+  \node[node-state,node-state-transition,right=of n] (d) {语义降级\\走 ES 单路};
+  \node[node-state,node-state-alert,right=of d] (a) {全降级\\DB LIKE 兜底};
+  \draw[arrow]       (n) -- node[above,font=\tiny]{Milvus 超时} (d);
+  \draw[arrow-alert] (d) -- node[above,font=\tiny]{ES 也挂} (a);
+  \draw[arrow,bend left=30] (d.south) to node[below,font=\tiny]{Milvus 恢复} (n.south);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item Milvus 客户端启动失败 $\to$ \texttt{tryInitMilvus} recover $\to$ 进程照常起。
+  \item \texttt{MILVUS\_ADDR} 未设 $\to$ 直接跳过初始化（本地开发场景）。
+  \item 语义召回挂 $\to$ ES 关键词单路仍可用 $\to$ 长尾词 miss 但精确词不掉。
+\end{itemize}
+\srcnote{cmd/main.go:60--69 tryInitES 的同套路；tryInitMilvus 在 feat/milvus-vector PR}
+\end{frame}
+
+\begin{frame}{增量更新：复用 outbox 不再造一遍轮子}
+\begin{tikzpicture}[node distance=3mm and 3mm,every node/.append style={minimum width=12mm,font=\tiny}]
+  \node[node-box]                       (api)  {商家\\改名};
+  \node[node-box,right=of api]          (db)   {MySQL\\product};
+  \node[node-box,right=of db,node-warn] (ob)   {outbox};
+  \node[node-box,right=of ob]           (mq)   {RMQ\\product.\\changed};
+  \node[node-box,right=of mq,node-ok]   (esi)  {ES\\indexer};
+  \node[node-box,below=of esi,node-ok]  (mvi)  {Milvus\\indexer};
+  \node[node-box,right=of esi]          (es)   {ES doc};
+  \node[node-box,right=of mvi]          (mv)   {Milvus\\vector};
+  \draw[arrow] (api) -- (db);
+  \draw[arrow] (db)  -- (ob);
+  \draw[arrow-async] (ob) -- (mq);
+  \draw[arrow] (mq)  -- (esi);
+  \draw[arrow] (mq)  |- (mvi);
+  \draw[arrow] (esi) -- (es);
+  \draw[arrow] (mvi) -- (mv);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item ES indexer 和 Milvus indexer 订阅\textbf{同一个事件}：\texttt{product.changed}。
+  \item Milvus indexer 多一步：调 embedding 服务 $\to$ 写 vector。
+  \item 整体 SLA 跟 ES 一致：上架 5 分钟内可搜（含语义召回）。
+\end{itemize}
+\srcnote{service/search/indexer.go:17--49 ES indexer 模板；Milvus indexer 在 feat/milvus-vector PR}
+\end{frame}
+
+% ============================================================
+\section{业务收益与运营接口}
+% ============================================================
+
+\begin{frame}{四类 query 的命中对比（模拟）}
+\begin{tabular}{@{}lllr@{}}
+\toprule
+query 类型 & 例子                          & kw only & hybrid 50/50 \\
+\midrule
+精确 SKU    & \textit{iPhone 13 Pro 256GB} & top1 准 & top1 准 \\
+同义跨表达 & \textit{苹果手机最新款}        & miss    & top3 命中 \\
+自然语言   & \textit{适合健身的运动鞋}     & 全 miss & top5 命中 \\
+模糊场景   & \textit{送男朋友的礼物}       & 凌乱    & 相关性高 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\begin{itemize}
+  \item 精确 SKU：语义层无收益，但也不会拖低。
+  \item 同义 / 长尾：从 0 命中提到 top3 $\to$ 这就是\textbf{增量 GMV} 的来源。
+  \item 数字仅作业务侧示意，实际值要按上线后埋点测算。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{压测视角下的检索接口预算}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+链路 & RPS & p95 \\
+\midrule
+\texttt{/ping} 基线           & 64{,}254 & 3.51ms \\
+\texttt{/product/show} (DB)   & 62{,}226 & 3.01ms \\
+\texttt{/product/search} (ES) & --       & 业务承诺 $<$ 200ms \\
+\texttt{/product/semantic} (ES + Milvus) & -- & 业务承诺 $<$ 300ms \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 详情页 62K RPS / p95 3ms 是基线，搜索接口本来就慢一个数量级。
+  \item 引入语义层后 p99 预算放宽到 300ms：embedding 50--100ms + Milvus 20ms + ES 30ms + 融合 + DB 取详情。
+  \item 业务承诺写在 FAQ：\textbf{搜索接口慢于 1s 视为故障}。
+\end{itemize}
+\srcnote{stressTest/REPORT.md 链路压测表 基线 64{,}254 RPS / product\_show 62{,}226 RPS}
+\end{frame}
+
+\begin{frame}{运营 boost：算法做不到的事 + 路线图}
+\begin{itemize}
+  \item \textbf{大促主推}：双 11 期间，"主推商品"必须出现在搜索前三。
+  \item \textbf{新品冷启}：上架 7 天内的新品自然加权，让新品有曝光机会。
+  \item \textbf{库存导向}：剩余 $\geq$ 100 件微加权，避免推无货 SKU。
+  \item \textbf{客诉修正}：客服反馈"这个 query 总出错商品" $\to$ manual override。
+\end{itemize}
+\vspace{2mm}
+路线图：\texttt{POST /admin/search/boost \{keyword, productID, weight\}}，
+权重落 Redis，融合公式扩展为 \texttt{$\alpha \cdot kw + \beta \cdot sem + \gamma \cdot boost$}。
+\srcnote{routes/router.go:130 admin/search/backfill 是同类型 admin 入口模板}
+\end{frame}
+
+\begin{frame}{客服话术：搜不到时怎么说}
+\begin{tabular}{@{}lll@{}}
+\toprule
+业务码 & 含义 & 客服话术 \\
+\midrule
+\texttt{SE-EMBED-FAIL} & embedding 调用失败 & 智能搜索暂不可用，已切回关键词 \\
+\texttt{SE-MILVUS-DOWN} & 向量库不可用     & （内部告警，对外无感）        \\
+\texttt{SE-ES-DOWN}     & ES 不可用         & 搜索能力恢复中，请稍候           \\
+\texttt{SE-EMPTY}       & 无结果           & 未找到，试试其他关键词           \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\begin{itemize}
+  \item 业务码不暴露给前端，只在客服后台用。
+  \item 用户侧统一文案"未找到"，避免技术名词刺激退出。
+  \item gomall 的原则：\textbf{搜不到比搜错更可恢复}，宁可结果偏宽。
+\end{itemize}
+\srcnote{service/product.go:294--323 ES 失败 fall back DB 的降级模板}
+\end{frame}
+
+\begin{frame}{各角色关心的指标}
+\begin{tabular}{@{}lll@{}}
+\toprule
+角色 & 关心 & 看哪个数字 \\
+\midrule
+产品 & GMV 转化     & 各 query 类型的搜索 $\to$ 详情 $\to$ 下单 \\
+运营 & 主推命中率   & boost 商品在 top3 的出现率 \\
+客服 & "搜不到" 客诉 & SE-* 业务码统计 \\
+SRE  & 接口稳定性   & embedding / Milvus p95 + 错误率 \\
+算法 & 召回 / 准确  & top-k recall / precision 离线评估 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 算法的 recall / precision 是离线指标。\\
+产品 / 运营关心的"实际收益"要看\textbf{在线 GMV 增量}，靠 AB 切桶量出来。
+\end{frame}
+
+\begin{frame}{回到业务承诺}
+\begin{itemize}
+  \item ES 单路：把"搜得到关键词"做到位。
+  \item 加 Milvus：把"搜得到长尾意图"补上。
+  \item 业务调权层：把"搜得到运营要卖的"留给非工程。
+  \item 静默降级：把"搜索从不 5xx"的承诺延伸到三层。
+\end{itemize}
+\vspace{2mm}
+\keypoint{从 LIKE 到 ES 是\textbf{召回率的一次跃迁}；
+从 ES 到 ES + Milvus 是\textbf{召回率的第二次跃迁}。
+两次跃迁解决的都不是"算法精度"，是\textbf{搜得到 vs 搜不到}的二元差距。}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{业务侧 Q\&A（上）}
+\textbf{Q1}：embedding 模型升级时，已有商品向量怎么迁？\\
+\hspace{4mm}\small A：向量空间不可比，必须重算全量。做法是版本化 collection
+（\texttt{product\_vector\_v1} / \texttt{v2}），后台跑全量 backfill 灌 v2，
+搜索流量灰度切到 v2，验证后下掉 v1。整个过程对前端透明。
+
+\vspace{2mm}
+\textbf{Q2}：50/50 加权是不是可以做成可学习的？\\
+\hspace{4mm}\small A：可以。两条路：离线 NDCG / MRR 网格搜，或在线 contextual bandit
+按 query 类型动态调权。当前路线先把手动 50/50 上线，埋点 7 天再决定走哪条。
+
+\vspace{2mm}
+\textbf{Q3}：Milvus 挂了用户怎么感知？\\
+\hspace{4mm}\small A：无感。客户端检测 \texttt{nopMilvusSearcher} 或网络挂 $\to$ 融合时
+向量分数取 0 $\to$ 等价于纯 ES 单路。长尾词召回率掉，但主流量词不变。
+告警 5 分钟内拉群，运营无须前台 banner。
+\end{frame}
+
+\begin{frame}{业务侧 Q\&A（下）}
+\textbf{Q4}：以图搜图（跨模态）值不值得做？\\
+\hspace{4mm}\small A：值得，但优先级低于文本语义。CLIP 类模型把图和文本 embed 到同一个空间，
+用户拍照搜同款的转化率显著高于关键词。代价：图片 embed 慢，需要 GPU 推理服务。
+路线图上排在文本语义之后。
+
+\vspace{2mm}
+\textbf{Q5}：要不要给每个用户建一个 user embedding 做个性化？\\
+\hspace{4mm}\small A：典型推荐系统的路线。搜索侧用 user embedding 收益有限，因为搜索 query 已经表达了
+即时意图。更划算的做法是把 user embedding 留给\textbf{推荐 / feed 流}，搜索专心做意图理解。
+
+\vspace{2mm}
+\textbf{Q6}：海外站点多语言搜索怎么扩？\\
+\hspace{4mm}\small A：换 embedding 模型即可。multilingual-e5-large、bge-m3 这类多语种模型把
+中 / 英 / 日 embed 到同一空间，无需为每种语言部署独立索引。ES 侧分词器要按语言切，
+但向量侧一份 collection 就够。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\textbf{main 已有（关键词层）}
+\begin{description}
+  \item[搜索路由入口]\srcnote{routes/router.go:40}
+  \item[全量回填 admin 入口]\srcnote{routes/router.go:130}
+  \item[搜索服务编排]\srcnote{service/search/service.go:11--16}
+  \item[indexer 消费者]\srcnote{service/search/indexer.go:17--60}
+  \item[全量回填实现]\srcnote{service/search/backfill.go:13--43}
+  \item[ES 多字段查询 + 加权]\srcnote{repository/es/product\_index.go:156--209}
+  \item[ProductSearch 降级]\srcnote{service/product.go:294--323}
+  \item[ES 启动静默降级]\srcnote{cmd/main.go:60--69}
+\end{description}
+
+\vspace{2mm}
+\textbf{PR 待合（语义层 + 融合）}
+\begin{description}
+  \item[Milvus 客户端]\srcnote{feat/milvus-vector：repository/milvus/milvus.go + product\_vector.go}
+  \item[embedding 抽象]\srcnote{feat/semantic-search：service/search/embedding.go}
+  \item[语义编排 + 融合]\srcnote{feat/semantic-search：service/search/semantic.go}
+  \item[Milvus 接口桩]\srcnote{feat/semantic-search：service/search/milvus\_stub.go}
+\end{description}
+\end{frame}
+
+\end{document}

@@ -1,0 +1,192 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
+
+	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/utils/snowflake"
+	"github.com/RedInn7/gomall/repository/cache"
+	"github.com/RedInn7/gomall/repository/db/dao"
+	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/rabbitmq"
+	"github.com/RedInn7/gomall/service/events"
+	"github.com/RedInn7/gomall/types"
+)
+
+const OrderTimeKey = "OrderTime"
+
+var OrderSrvIns *OrderSrv
+var OrderSrvOnce sync.Once
+
+type OrderSrv struct {
+}
+
+func GetOrderSrv() *OrderSrv {
+	OrderSrvOnce.Do(func() {
+		OrderSrvIns = &OrderSrv{}
+	})
+	return OrderSrvIns
+}
+
+func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (resp interface{}, err error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	order := &model.Order{
+		UserID:    u.Id,
+		ProductID: req.ProductID,
+		BossID:    req.BossID,
+		Num:       int(req.Num),
+		Money:     int64(req.Money), // req.Money 单位也是"分"
+		Type:      consts.UnPaid,
+		AddressID: req.AddressID,
+		OrderNum:  uint64(snowflake.GenSnowflakeID()),
+	}
+
+	// 1) Redis 预扣库存: available -> reserved，失败直接拒单
+	if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
+		util.LogrusObj.Errorf("reserve stock failed product=%d num=%d err=%v", req.ProductID, req.Num, err)
+		return nil, err
+	}
+
+	// 2) 同事务写订单 + 写 outbox 事件
+	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+		if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+			return e
+		}
+		return dao.NewOutboxDaoByDB(tx).Insert(
+			"order", "OrderCreated", "order.created", order.ID,
+			events.OrderCreated{
+				OrderID:   order.ID,
+				OrderNum:  order.OrderNum,
+				UserID:    u.Id,
+				ProductID: req.ProductID,
+				Num:       int(req.Num),
+			},
+		)
+	})
+	if err != nil {
+		util.LogrusObj.Error(err)
+		// 3) 事务失败：释放刚扣的预占库存，回到 available
+		if relErr := cache.ReleaseReservation(ctx, req.ProductID, int64(req.Num)); relErr != nil {
+			util.LogrusObj.Errorf("release reservation on tx failure failed: %v", relErr)
+		}
+		return
+	}
+
+	data := redis.Z{
+		Score:  float64(time.Now().Unix()) + 15*time.Minute.Seconds(),
+		Member: order.OrderNum,
+	}
+	cache.RedisClient.ZAdd(cache.RedisContext, OrderTimeKey, data)
+
+	if rabbitmq.GlobalRabbitMQ != nil {
+		if pubErr := rabbitmq.PublishOrderCancelDelay(ctx, order.OrderNum, rabbitmq.OrderCancelDelay); pubErr != nil {
+			util.LogrusObj.Errorf("publish delay cancel failed orderNum=%d err=%v", order.OrderNum, pubErr)
+		}
+	}
+
+	resp = order
+	return
+}
+
+func (s *OrderSrv) OrderList(ctx context.Context, req *types.OrderListReq) (resp interface{}, err error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	orders, err := dao.NewOrderDao(ctx).ListOrderByCondition(u.Id, req)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return
+	}
+	for i := range orders.List {
+		if conf.Config.System.UploadModel == consts.UploadModelLocal {
+			orders.List[i].ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + orders.List[i].ImgPath
+		}
+	}
+
+	return orders, nil
+}
+
+func (s *OrderSrv) OrderListOld(ctx context.Context, req *types.OrderListReq) (resp interface{}, err error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	orders, _, err := dao.NewOrderDao(ctx).ListOrderByConditionOld(u.Id, req)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return
+	}
+	for i := range orders.List {
+		if conf.Config.System.UploadModel == consts.UploadModelLocal {
+			orders.List[i].ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + orders.List[i].ImgPath
+		}
+	}
+
+	return orders, nil
+}
+
+func (s *OrderSrv) OrderShow(ctx context.Context, req *types.OrderShowReq) (resp interface{}, err error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	order, err := dao.NewOrderDao(ctx).ShowOrderById(req.OrderId, u.Id)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return
+	}
+	if order == nil || order.ID == 0 {
+		return nil, errors.New("没找到数据")
+	}
+
+	if conf.Config.System.UploadModel == consts.UploadModelLocal {
+		order.ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + order.ImgPath
+	}
+
+	resp = order
+
+	return
+}
+
+func (s *OrderSrv) OrderDelete(ctx context.Context, req *types.OrderDeleteReq) (resp interface{}, err error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return
+	}
+	db := dao.NewOrderDao(ctx)
+	var ret *types.OrderListRespItem
+	ret, err = db.ShowOrderById(req.OrderId, u.Id)
+	if err != nil {
+		util.LogrusObj.Error("ShowOrderById失败，err:", err)
+		return nil, err
+	}
+	if ret == nil || ret.ID == 0 {
+		return nil, errors.New("没有查找到数据")
+	}
+
+	err = db.DeleteOrderById(req.OrderId, u.Id)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return
+	}
+
+	return
+}

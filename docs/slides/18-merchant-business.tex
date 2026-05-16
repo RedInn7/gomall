@@ -1,0 +1,408 @@
+\input{preamble}
+
+\title{商家在 gomall 里是怎么活的}
+\subtitle{BossID 字段在、商家自助 API 缺：从"商家用 admin 后台"到"商家用商家后台"}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{业务困局：商家在 gomall 里没有"自己的后台"}
+% ============================================================
+
+\begin{frame}{一句话：BossID 字段早就在了，商家接口一个都没有}
+\begin{itemize}
+  \item gomall 五张核心表里，\textbf{BossID 字段都已经埋好}：order、product、cart、favorite、skill\_product。
+  \item 但全站没有任何一个 \texttt{/api/v1/merchant/*} 路由 —— 商家想看自己店铺数据\textbf{进不去}。
+  \item 现状导致三件事：
+  \begin{itemize}
+    \item 商家想看"我今天卖了多少" $\to$ 没接口，要么找客服查、要么直接看 admin 后台（越权）。
+    \item 商家想知道"我哪个 SKU 快没库存" $\to$ 没告警，等用户下不了单才发现。
+    \item 商家上架商品调 \texttt{product/create} —— 这接口在 authed group 下，\textbf{任何登录用户都能上架}。
+  \end{itemize}
+\end{itemize}
+\srcnote{routes/router.go:60--62 product/create 三件套都在 authed 下，没 RequireRole；:135--141 admin sub-group 只有 3 个 handler}
+\end{frame}
+
+\begin{frame}{现状对业务的真实伤害}
+\begin{itemize}
+  \item \textbf{招商困难}：BD 谈一个新商家，洽谈阶段只能开 admin 账号给他 —— 商家立刻看到\textbf{所有店铺}数据，谈判桌上当场翻车。
+  \item \textbf{客服压力}：商家把客服当后台用 —— "帮我查下我店铺今日订单"、"帮我看下 SKU 12345 的库存"。客服 1 个人对 N 个商家，挤兑出的工单全是低价值查询。
+  \item \textbf{权限边界没法解释}：\texttt{product/delete} 已经有 \texttt{WHERE id=? AND boss\_id=?}，但\textbf{没任何中间件保证"调用者一定是 boss\_id 这个人"} —— 数据查询正确，权限模型却没成形。
+\end{itemize}
+\srcnote{repository/db/dao/product.go:67--72 DeleteProduct 已带 boss\_id 隔离；但 router.go:62 没有 RequireMerchant}
+\end{frame}
+
+% ============================================================
+\section{商家用户旅程：哪一站有路、哪一站没路}
+% ============================================================
+
+\begin{frame}{商家七步旅程 + gomall 现状}
+\begin{tikzpicture}[node distance=1mm and 1mm,every node/.append style={align=center,font=\tiny,text width=13mm}]
+  \node[node-box,node-state-normal] (s1) {1.注册};
+  \node[node-box,node-state-alert,right=of s1] (s2) {2.资质\\审核};
+  \node[node-box,node-state-alert,right=of s2] (s3) {3.第一次\\上架};
+  \node[node-box,node-state-normal,right=of s3] (s4) {4.第一单\\成交};
+  \node[node-box,node-state-alert,right=of s4] (s5) {5.售后\\退款};
+  \node[node-box,node-state-alert,right=of s5] (s6) {6.结算\\提现};
+  \node[node-box,node-state-alert,right=of s6] (s7) {7.数据\\复盘};
+  \draw[arrow] (s1) -- (s2); \draw[arrow] (s2) -- (s3); \draw[arrow] (s3) -- (s4);
+  \draw[arrow] (s4) -- (s5); \draw[arrow] (s5) -- (s6); \draw[arrow] (s6) -- (s7);
+\end{tikzpicture}
+\vspace{1mm}
+\scriptsize
+\begin{tabular}{@{}clll@{}}
+\toprule
+站 & 业务诉求 & gomall 现状 & 命中表/接口 \\
+\midrule
+1 & 注册        & \checkmark 复用 user/register & user 表 Role='user' \\
+2 & 资质审核    & 缺            & 无 merchant\_profile 表 \\
+3 & 上架商品    & 部分          & product/create 任谁都能调 \\
+4 & 第一单成交  & \checkmark 但商家看不到 & order 表已有 boss\_id \\
+5 & 售后退款    & 缺            & 无商家侧退款审批 \\
+6 & 结算提现    & 缺            & 无 settlement / withdraw \\
+7 & 数据复盘    & 缺            & 无销量 / 转化看板 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small \textbf{"部分"的代价}：\texttt{product/create} 无角色校验，任何注册用户调一次自己就成了"店主"。gomall 业务定位是 B2C 自营+第三方品牌\textbf{不是闲鱼}；上架前必须资质审核。
+\srcnote{repository/db/model/order.go:12 BossID；user.go:23 Role 只有 user/admin 两态；router.go:60 product/create}
+\end{frame}
+
+% ============================================================
+\section{三层鉴权边界：把 router 翻译成商家视角}
+% ============================================================
+
+\begin{frame}{三层墙：商家应该站在中间那层}
+\begin{tikzpicture}[node distance=3mm and 3mm,every node/.append style={align=center,font=\scriptsize,text width=26mm}]
+  \node[node-box,node-state-normal] (user)  {C 端用户\\\texttt{/api/v1/*}\\下单/领券/支付};
+  \node[node-box,node-state-transition,right=of user] (merchant) {\textbf{商家（缺）}\\\texttt{/api/v1/merchant/*}\\自店订单/商品/库存};
+  \node[node-box,node-state-alert,right=of merchant] (admin) {admin\\\texttt{/api/v1/admin/*}\\promote/backfill};
+  \draw[arrow]      (user)     -- node[above,font=\tiny]{merchant 角色} (merchant);
+  \draw[arrow-alert](merchant) -- node[above,font=\tiny]{提权审核} (admin);
+\end{tikzpicture}
+\vspace{1mm}
+\scriptsize
+\begin{tabular}{@{}lllll@{}}
+\toprule
+角色 & 能看 & 能改 & 路径 & 现状 \\
+\midrule
+C 端用户  & 自己的订单         & 自己资料   & \texttt{/api/v1/*}          & \checkmark \\
+商家     & 自店订单/商品/库存 & 自店范围   & \texttt{/api/v1/merchant/*} & \textbf{缺} \\
+admin   & 全部              & 全部      & \texttt{/api/v1/admin/*}    & 部分 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small \textbf{三层各自的最坏情况}：C 端越权 $\to$ 看到别人订单（泄露电话/地址）；商家越权 $\to$ 看到其他商家销售（竞业/抄品）；admin 越权 $\to$ 一切（必须审计，见 deck 14）。
+\srcnote{routes/router.go:46 authed；:135--141 admin；middleware/rbac.go:48--86 RequireRole；model/user.go:30--31 Role 常量}
+\end{frame}
+
+% ============================================================
+\section{数据基础：BossID 字段在哪}
+% ============================================================
+
+\begin{frame}{BossID 散落在 5 张表 + 现有 dao 用法}
+\scriptsize
+\begin{tabular}{@{}lll@{}}
+\toprule
+位置 & 字段或语句 & 业务含义 \\
+\midrule
+model/order.go:12       & BossID uint                    & 这单卖家是谁 \\
+model/product.go:23     & BossID uint                    & 这商品归谁 \\
+model/cart.go:10        & BossID uint                    & 加购的店铺归属 \\
+model/favorite.go:11    & BossID uint                    & 收藏背后的店主 \\
+model/skill\_product.go:6& BossId uint                   & 秒杀活动发起商家 \\
+dao/product.go:69       & DELETE WHERE id AND boss\_id   & 商家删自己商品 \\
+dao/cart.go:61          & SELECT WHERE user/product/boss & 加购"店内唯一性" \\
+dao/order.go:135        & o.boss\_id AS boss\_id (JOIN)  & 订单详情带卖家 \\
+dao/favories.go:33      & JOIN user ON u.id=f.boss\_id   & 关注的店铺 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small \textbf{所有 boss\_id 用法都是"C 端用户视角"} —— 拿来展示"这商品/订单/购物车的卖家是谁"，\textbf{从来没有"以 boss\_id 为主语"的查询}。
+\keypoint{有字段 $\ne$ 有能力。商家自助接口的本质是把 boss\_id \textbf{从外键升级为查询主体}。}
+\end{frame}
+
+% ============================================================
+\section{商家后台 MVP：第一版接口设计}
+% ============================================================
+
+\begin{frame}[fragile]{接口设计草案：沿用 admin group 写法}
+\begin{lstlisting}[language=Go,firstnumber=135,
+  caption={\srcnote{对照 routes/router.go:135--141 admin 子组，新增 merchant 子组}}]
+// 商家子组：先 authed，再 RequireRole("merchant")
+merchant := authed.Group("/merchant")
+merchant.Use(middleware.RequireRole("merchant"))
+{
+    merchant.GET ("orders",       MerchantListOrders)      // WHERE boss_id = ctx.userID
+    merchant.GET ("orders/stats", MerchantOrderStats)      // 日/周/月销量
+    merchant.GET ("products",     MerchantListProducts)
+    merchant.POST("products",     MerchantCreateProduct)   // 替换裸 product/create
+    merchant.GET ("inventory",    MerchantInventoryStatus) // 低库存告警
+    merchant.POST("coupon/batch", MerchantCreateCoupon)
+    merchant.GET ("settlement",   MerchantSettlement)      // 结算/提现
+}
+\end{lstlisting}
+\small \textbf{照搬 admin 写法}：\texttt{authed.Group} + \texttt{Use(RequireRole)}，复用 30s 角色缓存；\texttt{RequireRole} 已支持变参，无需改实现。
+\srcnote{middleware/rbac.go:48--86 RequireRole(allowed...string)}
+\end{frame}
+
+\begin{frame}{MVP 七接口的业务优先级}
+\begin{tabular}{@{}lll@{}}
+\toprule
+接口 & 业务紧迫度 & 实现工作量 \\
+\midrule
+GET orders            & 高（替代客服查单） & 小（已有 order dao） \\
+GET orders/stats      & 高（招商对外）     & 中（新增聚合 SQL） \\
+GET inventory         & 高（防超卖恶化）   & 小（复用库存表） \\
+POST coupon/batch     & 中（已有，需限店） & 小（加 WHERE boss\_id） \\
+GET products          & 中                & 小 \\
+POST products         & 中（替换裸接口）   & 小（迁移 + 加 RBAC） \\
+GET settlement        & 低（结算还没做）   & 大（涉及对账 / 第三方） \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \textbf{业务侧建议顺序}：先做\textbf{读接口}（让商家\textbf{看得到}），再做\textbf{告警接口}（让商家\textbf{被通知到}），最后做\textbf{结算接口}（让商家\textbf{拿得到钱}）。三步对应"信任三段论"：能看 $\to$ 能管 $\to$ 能赚。
+\end{frame}
+
+% ============================================================
+\section{商家看板：信息架构四象限}
+% ============================================================
+
+\begin{frame}{商家看板四象限 + SQL 草图}
+\begin{columns}[T,onlytextwidth]
+\column{0.42\textwidth}
+\begin{tikzpicture}[node distance=2mm and 2mm,every node/.append style={align=center,font=\tiny,text width=22mm}]
+  \node[node-box,node-state-normal] (ne)  {\textbf{今日营收}\\GMV / 客单价};
+  \node[node-box,node-state-alert,right=of ne] (nw) {\textbf{待发货}\\type=2 未发};
+  \node[node-box,node-state-transition,below=of ne] (se) {\textbf{库存告警}\\num<safety};
+  \node[node-box,node-state-alert,below=of nw] (sw) {\textbf{客诉}\\退款率/待回};
+\end{tikzpicture}
+\column{0.55\textwidth}
+\scriptsize
+\begin{tabular}{@{}p{18mm}p{42mm}@{}}
+\toprule
+象限 & 查询 \\
+\midrule
+今日营收 & \texttt{SELECT COUNT,SUM(money) FROM order WHERE boss\_id=? AND DATE=CURDATE AND type=2} \\
+待发货   & \texttt{WHERE boss\_id=? AND type=2 ORDER BY created\_at} \\
+库存告警 & \texttt{WHERE boss\_id=? AND num < safety\_stock} \\
+客诉     & \texttt{aftersale\_ticket WHERE boss\_id=?}（待建）\\
+\bottomrule
+\end{tabular}
+\end{columns}
+\vspace{2mm}
+\small \textbf{已有索引}：\texttt{order.user\_id} 走索引（C 端用），\texttt{boss\_id 没建索引}。商家维度查询前\textbf{先 ALTER TABLE order ADD INDEX idx\_boss\_date(boss\_id, created\_at)}，否则像 deck 13 那样翻全表。
+\srcnote{repository/db/model/order.go:16 Type 1未支付/2已支付；product.go:22 Num 即可用库存；dao/order.go:50 现有 user\_id 索引参考}
+\end{frame}
+
+% ============================================================
+\section{商家告警的业务规则}
+% ============================================================
+
+\begin{frame}{三条核心告警规则 + 阈值设计}
+\scriptsize
+\begin{tabular}{@{}llll@{}}
+\toprule
+规则 & 触发 & 通道 & 接收方 \\
+\midrule
+库存阈值 & num < safety\_stock        & outbox \texttt{inventory.low}  & 商家钉钉 \\
+退款异常 & 单日退款率 > 10\%          & outbox \texttt{aftersale.spike}& 平台+商家 \\
+异常订单 & 单订单金额 > 均值 5$\times$ & outbox \texttt{order.suspect}  & 风控审查 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small
+\begin{itemize}
+  \item 三条规则共用机制：\textbf{业务事务里写 outbox} $\to$ \texttt{publisher.loop} 异步投递。同步发短信 = 网关挂一次下单全卡死。
+  \item \textbf{阈值不是 0}：库存等于 0 告警 = 已卖断货 = 用户买不到。要用 \texttt{safety\_stock}（按品类 = 7 天销量）。
+  \item \textbf{safety\_stock 谁定}：商家自填大部分填 0；平台算准但要 7 天历史。\textbf{折中}：上架前 7 天按品类均值兜底，7 天后切实际销量。
+  \item \textbf{频率收敛}：同 SKU 24h 只发一次，防商家被噪音淹没。
+\end{itemize}
+\srcnote{service/outbox/publisher.go:65--86 drainBatch；model/product.go:22 Num；docs/slides/04-outbox-saga.tex 配套}
+\end{frame}
+
+% ============================================================
+\section{商家结算与提现：资金路径}
+% ============================================================
+
+\begin{frame}{T+1 结算 + 隔离账户}
+\begin{tikzpicture}[node distance=3mm and 8mm]
+  \node[node-state,node-state-normal] (s1) {D 日\\签收};
+  \node[node-state,node-state-transition,right=of s1] (s2) {D+1 0:00\\结算};
+  \node[node-state,node-state-transition,right=of s2] (s3) {D+1\\提现};
+  \node[node-state,node-state-alert,right=of s3] (s4) {D+2\\出账};
+  \draw[arrow]       (s1) -- node[above,font=\tiny]{冻结期} (s2);
+  \draw[arrow]       (s2) -- node[above,font=\tiny]{settlement} (s3);
+  \draw[arrow-alert] (s3) -- node[above,font=\tiny]{银行} (s4);
+\end{tikzpicture}
+\vspace{1mm}
+\scriptsize
+\begin{tabular}{@{}lll@{}}
+\toprule
+账户       & 含义              & 状态 \\
+\midrule
+冻结户 A   & 已支付未发货      & 不可结算 \\
+冻结户 B   & 已发货未签收      & 不可结算 \\
+可结算户   & 已签收 + 过退货期 & 可发起提现 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small \textbf{为什么必须拆账户}：用户已支付未发货时退款 $\to$ 钱直接退回用户卡，\textbf{不能从商家已提现的钱里追}。"钱不出账户体系"之前商家无法 cash-out；一旦走到第三方银行追回成本极高（走法务）。
+\keypoint{结算 = 把"什么时候可以给商家钱"，从拍脑袋变成\textbf{状态机}。}
+\srcnote{docs/slides/04-outbox-saga.tex 事务+事件原子写；15-order-close-business.tex 关单时机}
+\end{frame}
+
+% ============================================================
+\section{admin vs merchant：边界由谁守}
+% ============================================================
+
+\begin{frame}{admin 多一个动作：promote 到 merchant + 30s 缓存}
+\begin{tikzpicture}[node distance=3mm and 8mm]
+  \node[node-box,font=\scriptsize] (req)   {商家请求};
+  \node[node-box,right=of req,node-warn,font=\scriptsize] (cache) {sync.Map\\TTL 30s};
+  \node[node-box,below=of cache,font=\scriptsize] (db) {MySQL\\role='merchant'};
+  \node[node-box,right=of cache,node-ok,font=\scriptsize] (ok) {放行 /merchant};
+  \draw[arrow] (req) -- (cache);
+  \draw[arrow,dashed] (cache) -- node[right,font=\tiny]{miss} (db);
+  \draw[arrow,dashed] (db.east) to [bend right=20] node[right,font=\tiny]{回填} (cache.east);
+  \draw[arrow] (cache) -- (ok);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item \textbf{现状}：\texttt{PromoteToAdmin} 硬编码 RoleAdmin。\textbf{路线}：抽象成 \texttt{PromoteToRole(target, role)}。
+  \item \textbf{流程}：BD 谈妥 $\to$ 商家传资质 $\to$ admin 审核 $\to$ \texttt{promote(role="merchant")} $\to$ 解锁 \texttt{/merchant}。
+  \item \textbf{对称性陷阱}（deck 14）：提权慢可接受、降权慢是真风险。封号必须显式 \texttt{InvalidateRoleCache}，否则违规商家还能操作 30s。
+\end{itemize}
+\srcnote{service/admin.go:47--62 PromoteToAdmin 当前写死；middleware/rbac.go:22--45,88--91 cache + Invalidate}
+\end{frame}
+
+\begin{frame}{merchant 不能跨店 = 后端必须强约束}
+\begin{itemize}
+  \item \textbf{前端做不到}：哪怕 UI 完全不展示别店数据，商家可以\textbf{改 URL 参数 / 改 boss\_id 字段}发请求。
+  \item \textbf{鉴权做不到}：\texttt{RequireRole("merchant")} 只能保证"是某个商家"，不能保证"是这单的商家"。
+  \item \textbf{必须在 dao / service 层强约束}：所有 merchant 接口的 SQL\textbf{必须}带 \texttt{WHERE boss\_id = ctx.userID}。
+  \item 类比 deck 14 的安全等级：
+  \begin{itemize}
+    \item L1 路由前缀（区分 user/merchant/admin） —— RBAC 中间件。
+    \item L2 业务约束（boss\_id 必须匹配 ctx）—— 写在 service / dao。
+    \item L3 数据审计（异常聚合查询）—— 待补。
+  \end{itemize}
+\end{itemize}
+\srcnote{repository/db/dao/product.go:67--72 已有 WHERE id AND boss\_id 模板可参考}
+\end{frame}
+
+% ============================================================
+\section{压测数据告诉我们什么}
+% ============================================================
+
+\begin{frame}{商家维度查询的性能基线}
+\begin{itemize}
+  \item \texttt{order} 表当前 \textasciitilde 6M 行，\texttt{product} 表 \textasciitilde 956K 行（stressTest/REPORT.md L8）。
+  \item C 端 \texttt{/orders/list}（WHERE user\_id 走索引）：\textbf{58{,}406 RPS / p95 5ms}。
+  \item 旧版深分页（无游标）：\textbf{8.3 RPS / p95 15.95s} —— 大表上不走索引就是这个结局。
+  \item \textbf{商家查"我今天的订单"}如果不建 \texttt{idx\_boss\_date(boss\_id, created\_at)} $\to$ 直接对标深分页那一行。
+\end{itemize}
+\keypoint{先建索引，再开接口。否则上线第一天就被自家商家 DoS。}
+\srcnote{stressTest/REPORT.md 各链路压测表（行 3 vs 行 9）}
+\end{frame}
+
+% ============================================================
+\section{遗留风险与路线图}
+% ============================================================
+
+\begin{frame}{当前的洞 + 修补顺序 + 边界由谁定}
+\begin{columns}[T,onlytextwidth]
+\column{0.55\textwidth}
+\textbf{洞}：
+\begin{itemize}\setlength{\itemsep}{0.5mm}
+  \item \textbf{隐式商家}：任何用户调一次 product/create $\to$ 自己变商家。
+  \item \textbf{无商家接口}：自助看数据走客服或 admin。
+  \item \textbf{无 boss\_id 索引}：查询一上来全表扫。
+  \item \textbf{无资质 / 结算表}：法务 / 财务都不闭环。
+\end{itemize}
+\textbf{修补顺序}（按 ROI）：
+\begin{enumerate}\setlength{\itemsep}{0.5mm}
+  \item RoleMerchant + RequireRole $\to$ 锁 product/create。
+  \item idx\_boss\_date 索引 + 三个读接口。
+  \item 库存告警 outbox + 钉钉机器人。
+  \item 资质审核表 + admin 审核流程。
+  \item settlement 表 + 提现接口（财务对接）。
+\end{enumerate}
+\column{0.42\textwidth}
+\scriptsize
+\textbf{边界由谁定}：
+\begin{tabular}{@{}ll@{}}
+\toprule
+决定 & 由谁负责 \\
+\midrule
+谁能成为商家     & BD + 法务 \\
+商家可见字段     & 产品 + 风控 \\
+库存告警阈值     & 商品 + 数据 \\
+结算冻结期       & 财务 + 风控 \\
+提现单日限额     & 财务 + 风控 \\
+封禁商家触发     & 运营 + 法务 \\
+\bottomrule
+\end{tabular}
+\end{columns}
+\vspace{1mm}
+\small \textbf{最终目标}：商家自助看数据 / 上架走审核 / 库存有告警 / 结算有路径 / 出问题平台先冻结再追责。
+\keypoint{商家不是"特殊的 user"，是\textbf{独立的角色}。BossID 字段在了 4 年，是时候把这件事补上。}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{Q\&A（上）：产品 / BD 角度}
+\textbf{Q1}：为什么不直接给商家开 admin 权限？\\
+\hspace{4mm}\small A：admin 能看全平台数据，商家拿到 admin = 当场翻车（看到别家销售）。RBAC 三层墙的意义就是\textbf{最小权限}。
+
+\vspace{2mm}
+\textbf{Q2}：merchant 看自店订单万一查询慢怎么办？\\
+\hspace{4mm}\small A：同 deck 13 思路 —— 先建 \texttt{idx\_boss\_date} 索引、再上游标分页（last\_id）；首页加 5min Redis 缓存兜底。C 端 orders/list 跑到 58K RPS，商家版数据量更小，吞吐预期类似。
+
+\vspace{2mm}
+\textbf{Q3}：商家"品牌主页"和"店铺主页"是不是一回事？\\
+\hspace{4mm}\small A：业务上不是。品牌主页是 C 端引流入口（公开 GET，匿名可见），店铺主页是商家自助后台（authed + RequireRole）。数据源可同源，但路由 / 鉴权 / 缓存策略完全不同。
+\end{frame}
+
+\begin{frame}{Q\&A（下）：法务 / 风控角度}
+\textbf{Q4}：第三方店铺和自营商品怎么区分？\\
+\hspace{4mm}\small A：自营 = BossID 指向"平台账号"（一个特殊 user\_id）；第三方 = BossID 指向真实商家。聚合查询时一条 WHERE 就能区分。这也是为什么必须保留 BossID 而不是把自营 boss\_id 写成 0。
+
+\vspace{2mm}
+\textbf{Q5}：资质审核怎么落地？OCR 还是人工？\\
+\hspace{4mm}\small A：OCR 做\textbf{字段抽取}（营业执照号 / 法人 / 经营范围），但\textbf{最终拍板必须人工} —— 营业执照能 PS、品牌授权能伪造。OCR 是节省人工录入，不是替代审核。落地：商家上传 $\to$ OCR 预填 $\to$ admin 审核员复核 $\to$ promote 到 merchant。
+
+\vspace{2mm}
+\textbf{Q6}：一个店铺多个员工账号怎么权限拆？\\
+\hspace{4mm}\small A：MVP 阶段不拆，单店铺 = 单账号。等业务量足够大再加 \texttt{merchant\_employee} 表 + 子角色（运营 / 客服 / 财务）。当前不要预先抽象 —— 角色越多越容易出"谁能批准谁"的扯皮（deck 14 同样论点）。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}
+  \item[BossID @ order]\srcnote{repository/db/model/order.go:12}
+  \item[BossID @ product]\srcnote{repository/db/model/product.go:23}
+  \item[BossID @ cart]\srcnote{repository/db/model/cart.go:10}
+  \item[BossID @ favorite]\srcnote{repository/db/model/favorite.go:11--12}
+  \item[BossId @ skill\_product]\srcnote{repository/db/model/skill\_product.go:6}
+  \item[现有 admin group（merchant 模板）]\srcnote{routes/router.go:135--141}
+  \item[product/create 当前位置]\srcnote{routes/router.go:60}
+  \item[RequireRole 中间件]\srcnote{middleware/rbac.go:48--86}
+  \item[InvalidateRoleCache]\srcnote{middleware/rbac.go:88--91}
+  \item[PromoteToAdmin（待泛化）]\srcnote{service/admin.go:47--62}
+  \item[outbox publisher（告警通道）]\srcnote{service/outbox/publisher.go:65--86}
+  \item[\textbf{merchant group 待新增}]\srcnote{routes/router.go:135 后插入新 group}
+\end{description}
+\small 配套压测数据：stressTest/REPORT.md 链路压测表（C 端 orders/list 行 vs 深分页行）。
+\end{frame}
+
+\end{document}
