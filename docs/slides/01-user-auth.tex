@@ -217,28 +217,25 @@ c.Request = c.Request.WithContext(
 \end{frame}
 
 \begin{frame}[fragile]{代码片段 2：lookupRole + 30s sync.Map 缓存}
-\begin{lstlisting}[language=Go,firstnumber=22,
-  caption={\srcnote{middleware/rbac.go:22--45}}]
+\begin{lstlisting}[language=Go,firstnumber=22]
 var (
     roleCache    sync.Map
     roleCacheTTL = 30 * time.Second
 )
 func lookupRole(ctx context.Context, userId uint) (string, error) {
     if v, ok := roleCache.Load(userId); ok {
-        entry := v.(roleCacheEntry)
-        if time.Now().Before(entry.expires) {
-            return entry.role, nil
-        }
+        e := v.(roleCacheEntry)
+        if time.Now().Before(e.expires) { return e.role, nil }
     }
     u, err := dao.NewUserDao(ctx).GetUserById(userId)
     if err != nil { return "", err }
     role := u.Role
     if role == "" { role = "user" }
-    roleCache.Store(userId,
-        roleCacheEntry{role, time.Now().Add(roleCacheTTL)})
+    roleCache.Store(userId, roleCacheEntry{role, time.Now().Add(roleCacheTTL)})
     return role, nil
 }
 \end{lstlisting}
+\srcnote{middleware/rbac.go:22--45}
 \end{frame}
 
 \begin{frame}{逐行讲解 2：lookupRole}
@@ -429,52 +426,366 @@ B. 客服走 admin & admin 后台接口     & 低           & 有 \\
 \srcnote{middleware/jwt.go：待加黑名单；service/admin.go：待加 advisory lock；routes/router.go：待加 merchant group}
 \end{frame}
 
+\begin{frame}{攻击面：登录接口要扛三种黑产打法}
+\begin{tabular}{@{}lll@{}}
+\toprule
+攻击类型 & 特征 & 单点拦截手段 \\
+\midrule
+撞库 (credential stuffing) & 泄露库扫所有用户 & 失败限频 + 二次验证 \\
+密码喷洒 (spraying)       & 弱密码扫万人      & 全局账号失败计数 \\
+账号枚举                  & 错误码差异爆破     & 错误码归一 / 时序对齐 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item gomall 当前登录仅 bcrypt + 业务码 \texttt{10005}，\textbf{无失败限频}。
+  \item 错误码上 \texttt{10003}（用户不存在）vs \texttt{10005}（密码错）可被批量枚举。
+  \item 黑产场景：3000 IP 代理池 × 5 RPS = \textbf{15k RPS}，bcrypt 直接拖死。
+\end{itemize}
+\srcnote{service/user.go:85--121 login 当前无失败限频；pkg/e/code.go:10003 vs 10005 错误码差异是枚举漏洞}
+\end{frame}
+
+\begin{frame}{撞库防御三段式：限频 + 验证码 + 设备指纹}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box,node-ok]   (ip)   {IP 限频\\10/min};
+  \node[node-box,right=of ip,node-warn]   (user) {账号限频\\5 失败/15min};
+  \node[node-box,right=of user,node-bad]  (cap)  {强制验证码\\hCaptcha};
+  \node[node-box,right=of cap,node-bad]   (lock) {账号冻结\\30min};
+  \draw[arrow] (ip) -- node[above,font=\tiny]{触发} (user);
+  \draw[arrow-alert] (user) -- (cap);
+  \draw[arrow-bad] (cap) -- (lock);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{第一层}：IP 维度滑动窗口限频，复用 deck 10 \texttt{SlidingWindow}。
+  \item \textbf{第二层}：账号维度连续失败计数，5 次失败强制带验证码。
+  \item \textbf{第三层}：15min 内累计 10 次失败 $\to$ 冻结 30min，直接返回 \texttt{10005} 不消耗 bcrypt。
+  \item bcrypt cost=12 每次 250ms，账号冻结后\textbf{省的是 CPU 不是用户体验}。
+\end{itemize}
+\srcnote{repository/cache/ratelimit/sliding\_window.go 可直接复用；service/user.go:85 是接入点}
+\end{frame}
+
+\begin{frame}[fragile]{代码片段 4：登录失败计数 + 强制验证码门槛}
+\begin{lstlisting}[language=Go,firstnumber=1]
+const (
+    loginFailKeyPrefix = "auth:login:fail:"
+    loginFailThreshold = 5     // 15min 内
+)
+
+func (s *UserSrv) preflight(ctx context.Context, name, cap string) error {
+    fails, _ := cache.RedisClient.Get(ctx, loginFailKeyPrefix+name).Int()
+    if fails >= loginFailThreshold && cap == "" {
+        return ErrCaptchaRequired           // 业务码 10011
+    }
+    if fails >= loginFailThreshold {
+        if ok, _ := captchaVerify(ctx, cap); !ok { return ErrCaptchaInvalid }
+    }
+    return nil
+}
+\end{lstlisting}
+\srcnote{路线图：service/user.go login 入口前置校验}
+\end{frame}
+
+\begin{frame}{逐行讲解 4：preflight + 失败计数器}
+\begin{itemize}
+  \item \texttt{loginFailKeyPrefix}：key 设计成 \texttt{auth:login:fail:<username>}，TTL = 15min 滑动窗口。
+  \item \texttt{Get(...).Int()}：Redis miss 直接返回 0，无需额外判空。
+  \item \texttt{fails $\geq$ 5 \&\& captcha == ""}：前端拿到 \textbf{10011} 直接弹 hCaptcha。
+  \item 登录成功后必须 \texttt{Del(loginFailKeyPrefix+name)}，否则用户输错一次就锁 15min。
+  \item 设备指纹路线图：UA + canvas hash + 时区组成 \texttt{deviceId}，跨账号失败 $\geq 3$ 直接拉黑。
+\end{itemize}
+\srcnote{config/redis.go cache.RedisClient 已就绪；deck 10 SlidingWindow 提供窗口算法}
+\end{frame}
+
+% ============================================================
+\section{双 token 失效 / 强制下线 / 多端隔离}
+% ============================================================
+
+\begin{frame}{token 黑名单方案：版本号 vs SET}
+\begin{tabular}{@{}lll@{}}
+\toprule
+方案 & 实现 & 代价 \\
+\midrule
+A. Redis SET 黑名单     & SISMEMBER \texttt{jti}            & 每请求 1 RTT，TTL 难管 \\
+B. 用户 token 版本号    & users.token\_ver，签进 claims    & 每请求查 DB / 本地缓存 \\
+C. 用户最早签发时间戳   & users.token\_min\_iat，对比 iat  & 改密码只写一次 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item A 按 token 粒度（被偷场景），\texttt{jti} 数随活跃用户线性增长。
+  \item B/C 按用户粒度（改密码 / 强制下线），改一次字段全部作废。
+  \item gomall 推荐 \textbf{B+C 合并}：版本号 \texttt{++} 即生效，本地 sync.Map 命中 0ms。
+\end{itemize}
+\srcnote{repository/db/model/user.go:14 待加 TokenVer；pkg/utils/jwt/jwt.go:18--22 Claims 加字段}
+\end{frame}
+
+\begin{frame}{客服强制下线时序}
+\begin{tikzpicture}[node distance=7mm and 14mm]
+  \node[node-box] (cs)    {客服后台};
+  \node[node-box,right=of cs] (api)   {/admin/users/\\force\_logout};
+  \node[node-box,right=of api,node-warn] (db)   {users.token\_ver\\++};
+  \node[node-box,below=of db] (inval) {InvalidateRoleCache\\+ TokenVerCache};
+  \node[node-box,below=of cs,node-bad] (cli)   {被踢用户\\下一次请求};
+  \node[node-box,right=of cli,node-bad] (resp) {30002\\回登录页};
+  \draw[arrow]       (cs)  -- (api);
+  \draw[arrow]       (api) -- (db);
+  \draw[arrow]       (db)  -- (inval);
+  \draw[arrow-bad]   (inval) -- (cli);
+  \draw[arrow-bad]   (cli) -- (resp);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 写 \texttt{token\_ver}：单条 UPDATE 行锁，毫秒级返回。
+  \item 失效本地缓存：与 RBAC 共用 \texttt{InvalidateRoleCache} 模式，按 userId 删本地 sync.Map 槽。
+  \item 多实例场景：写 Redis pub/sub 让所有实例 Del 本地缓存槽，最终一致延迟 \textbf{$<$ 100ms}。
+\end{itemize}
+\srcnote{service/admin.go:47--62 PromoteToAdmin 已是模板；路线图：admin.go 加 ForceLogout(userId)}
+\end{frame}
+
+\begin{frame}{refresh 被偷的恢复路径}
+\begin{itemize}
+  \item \textbf{识别}：同 userId 的 refresh 出现在 2 个不同 IP / device $\to$ 钓鱼信号。
+  \item \textbf{触发}：每次登录 / 刷新写 \texttt{userId $\to$ deviceId} HSET，device 数 $>$ 5 触发风控。
+  \item \textbf{处置}：\texttt{token\_ver++} 全端下线，C 端跳登录页 + 短信 / 邮件二次验证。
+  \item \textbf{兜底}：每次发 access 时推 \texttt{security\_event} 到 IM / 邮件，让用户主动报警。
+\end{itemize}
+\srcnote{路线图：repository/cache/security 新增 device 集合；jwt.go SetToken 后写一次}
+\end{frame}
+
+\begin{frame}{第三方登录接入对照}
+\begin{tabular}{@{}llll@{}}
+\toprule
+渠道 & 协议 & 关键字段 & 业务难点 \\
+\midrule
+微信 (开放平台 / 小程序) & OAuth2 变体 & unionid / openid & 账号合并 \\
+Google Sign-In            & OIDC         & sub / email      & 邮箱冲突 \\
+Apple Login               & OIDC         & sub / relay 邮箱 & relay 去重 \\
+GitHub / 企业 SSO         & OAuth2/SAML  & login / orgs     & 角色映射 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item gomall 当前只有用户名密码，第三方登录从 0 接入。
+  \item 数据模型加 \texttt{user\_oauth} 表：\texttt{(provider, external\_id) $\to$ user\_id}。
+  \item \textbf{邮箱已注册}场景：合规要求二次验证，不直接合并。
+\end{itemize}
+\srcnote{路线图：repository/db/model/user\_oauth.go；service/oauth.go；router.go 加 /oauth/callback}
+\end{frame}
+
+\begin{frame}{第三方登录链路：把 OAuth 收敛回 gomall 双 token}
+\begin{tikzpicture}[node distance=6mm and 10mm]
+  \node[node-box,node-ok]                  (c)   {C 端\\跳转};
+  \node[node-box,right=of c]               (idp) {IdP};
+  \node[node-box,right=of idp]             (cb)  {/oauth/\\callback};
+  \node[node-box,below=of cb,node-warn]    (look) {user\_oauth\\查/建};
+  \node[node-box,right=of look,node-ok]    (gen)  {Generate\\Token};
+  \node[node-box,right=of gen,node-ok]     (ret)  {302 回前端};
+  \draw[arrow] (c) -- (idp); \draw[arrow] (idp) -- (cb);
+  \draw[arrow] (cb) -- (look); \draw[arrow] (look) -- (gen); \draw[arrow] (gen) -- (ret);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item OAuth 拿 \texttt{external\_id} 后\textbf{不直接颁 token}，先查 / 建 \texttt{user\_oauth}。
+  \item 后续接口仍走双 token + AuthMiddleware，IdP 不参与每次鉴权。
+  \item \texttt{external\_id} 已绑别人 $\to$ 拒绝，返回 \texttt{ErrorExistUser}。
+\end{itemize}
+\srcnote{pkg/utils/jwt/jwt.go:25--52 GenerateToken 复用；路线图：service/oauth.go BindOrCreate}
+\end{frame}
+
+\begin{frame}{bcrypt cost 调优：为什么是 12 不是 10 也不是 14}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+cost & 单次耗时 (M1) & 1 核 / 秒 & 1k 登录耗 CPU \\
+\midrule
+10 & \textasciitilde60ms  & 16 次  & 60s \\
+12 & \textasciitilde250ms & 4 次   & 250s \\
+14 & \textasciitilde1.0s  & 1 次   & 1000s \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item cost=10 太弱：消费级 GPU 一秒穷举几千候选，2026 标准 $\geq 12$。
+  \item cost=14 太重：登录多 1s，1k QPS 吃满整机 CPU。
+  \item cost=12：250ms 在 300ms 感知阈值内；穷举 10 位数字 $\approx$ 80 年。
+  \item bcrypt 内置 16 字节 salt，拖库后 rainbow table 失效。每 2--3 年 cost++ 一次。
+\end{itemize}
+\srcnote{repository/db/model/user.go:28 PassWordCost=12；:34--48 SetPassword/CheckPassword}
+\end{frame}
+
+\begin{frame}[fragile]{代码片段 5：cost=12 与未来无痛升级路径}
+\begin{lstlisting}[language=Go,firstnumber=28]
+const PassWordCost = 12
+
+func (u *User) SetPassword(pwd string) error {
+    b, err := bcrypt.GenerateFromPassword([]byte(pwd), PassWordCost)
+    if err != nil { return err }
+    u.PasswordDigest = string(b); return nil
+}
+
+func (u *User) CheckPassword(pwd string) bool {
+    if bcrypt.CompareHashAndPassword(
+        []byte(u.PasswordDigest), []byte(pwd)) != nil { return false }
+    if cost, _ := bcrypt.Cost([]byte(u.PasswordDigest)); cost < PassWordCost {
+        _ = u.SetPassword(pwd); _ = saveDigest(u)  // 顺便升 cost
+    }
+    return true
+}
+\end{lstlisting}
+\srcnote{repository/db/model/user.go:28--48 + 升级钩子}
+\end{frame}
+
+
+\begin{frame}{为什么 gomall 选纯 JWT，不走 session cookie}
+\begin{tabular}{@{}lll@{}}
+\toprule
+维度 & Server Session & JWT (双 token) \\
+\midrule
+鉴权 RT     & 读 Redis 1 RTT      & 解 HS256 零 RTT \\
+失效粒度    & 删 session $O(1)$   & 黑名单 / token\_ver \\
+水平扩缩    & 共享存储瓶颈        & 无状态，加机器即可 \\
+跨域 / 多端 & cookie SameSite     & header 跨域无障碍 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item gomall 优先：\textbf{鉴权延迟 + 水平扩展 + 多端} $\to$ JWT。
+  \item 代价：失效慢，用 \texttt{token\_ver} + 黑名单兜底关键路径。
+  \item 反例：银行类业务选 session 更合理，失效粒度比延迟重要。
+\end{itemize}
+\srcnote{middleware/jwt.go 全文 64 行无 Redis 依赖；session 方案需要每请求 Get(sid)}
+\end{frame}
+
+\begin{frame}{多端同账号：app / web / 小程序 token 隔离}
+\begin{itemize}
+  \item 当前 gomall 所有端共享同一对 token：app 登录 web 自动登录。
+  \item 业务影响：web 改密码 $\to$ app 上 token 仍能用 24h。
+  \item 路线图：\texttt{Claims} 加 \texttt{client\_type}（app / web / mp / pad），按 \texttt{(userId, client\_type)} 颁发独立 token。
+  \item 副作用：refresh 必须保留 client\_type；强制下线粒度更精细；device 数风控按 client\_type 分桶。
+\end{itemize}
+\srcnote{pkg/utils/jwt/jwt.go:18--22 Claims 待加 ClientType；service/user.go:85--121 login 待区分入口}
+\end{frame}
+
+
+\begin{frame}{审计日志：admin 操作必须留痕}
+\begin{itemize}
+  \item 当前 admin 3 个接口（promote / backfill / users），\textbf{无审计写入}。
+  \item 合规字段：operator\_id / target\_id / action / reason / before / after / ts / ip / UA。
+  \item 路线图：\texttt{admin\_audit} 表 + \texttt{AuditMiddleware} 挂 admin 子组自动入表。
+  \item 索引：\texttt{(operator\_id, ts)} 客服自查；\texttt{(target\_id, ts)} 投诉反查。
+  \item 不允许 DELETE，按月分区，异地冷备 7 年。审计是补券 / 强制下线的前置依赖。
+\end{itemize}
+\srcnote{routes/router.go:148--155 admin 子组待加 AuditMiddleware；service/admin.go 所有写操作待加审计}
+\end{frame}
+
+\begin{frame}{鉴权链路涉及的全部业务码 + 客服对照}
+\begin{tabular}{@{}lll@{}}
+\toprule
+码 & 含义 & 客服话术 \\
+\midrule
+400   InvalidParams                    & token 缺失 / 格式错  & 升级 app 重试 \\
+10003 ErrorNotExistUser                & 用户名不存在        & 用户名或密码不正确 \\
+10005 ErrorNotComparePassword          & 密码错              & 用户名或密码不正确 \\
+10011 ErrCaptchaRequired (路线图)      & 失败过阈值          & 请完成人机验证 \\
+30001 ErrorAuthCheckTokenFail          & token 解析失败      & 请重新登录 \\
+30002 ErrorAuthCheckTokenTimeout       & 双 token 都过期     & 已超 10 天未登录 \\
+30003 ErrorAuthToken                   & token 字段不匹配    & 内部错误，请重试 \\
+30005 ErrorAuthInsufficientAuthority   & 角色不够            & 需要管理员权限 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small \textbf{SOP}：10003 / 10005 对外话术一致（防枚举），对内保留具体码用于审计。
+\srcnote{pkg/e/code.go:10001--10011, 30001--30010；路线图：10011 新增}
+\end{frame}
+
+\begin{frame}{鉴权链路容量规划：1k / 10k / 100k QPS 怎么撑}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+目标 QPS & access 解析 CPU & RBAC DB QPS (miss) & Redis RTT \\
+\midrule
+1k        & 单核 12\%   & $\approx$ 33   & 0.3ms p99 \\
+10k       & 4 核 30\%   & $\approx$ 330  & 0.5ms p99 \\
+100k      & 32 核 60\%  & $\approx$ 3.3k & 1.5ms p99 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 压测基线：authed 链路 \textbf{58{,}406 RPS / p95 5.0ms}，单机已扛 50k+。
+  \item 10k QPS 内单实例即可；100k 横向扩 4 实例 + 本地缓存命中 $>$ 99\%。
+  \item \textbf{瓶颈不在鉴权}：下单 / 支付 / 库存先到瓶颈，鉴权剩 60\%+ 余量。
+\end{itemize}
+\srcnote{stressTest/REPORT.md:34--46 RPS 表行 1 (Ping 64254) / 行 3 (authed 58406)}
+\end{frame}
+
 % ============================================================
 \appendix
 % ============================================================
 
 \begin{frame}{面试 Q\&A（上）}
+\scriptsize
 \textbf{Q1}：access 24h / refresh 10d 这两个数字怎么定？\\
-\hspace{4mm}\small A：access 短到能限制 token 泄露损失，refresh 长到覆盖周末回流用户。10d 是留存指标和安全的折中。
+\hspace{3mm}A：access 短限泄露损失，refresh 长覆盖周末回流，10d 是留存与安全的折中。
 
-\vspace{2mm}
+\vspace{1mm}
 \textbf{Q2}：RBAC 30s 内存缓存，admin 误授权 30s 不是漏洞吗？\\
-\hspace{4mm}\small A：30s 是常规延迟。关键路径调 \texttt{InvalidateRoleCache(userId)} 显式失效，提权 / 降权立即生效。
+\hspace{3mm}A：常规延迟可接受。关键路径 \texttt{InvalidateRoleCache(userId)} 显式失效，提权 / 降权立即生效。
 
-\vspace{2mm}
-\textbf{Q3}：双 token 不查黑名单，登出后老 token 还能用 24h 怎么办？\\
-\hspace{4mm}\small A：当前 token 仅控访问不直接控钱，大额操作有二次验证。路线图里加 Redis 黑名单。
+\vspace{1mm}
+\textbf{Q3}：登出后老 token 还能用 24h 怎么办？\\
+\hspace{3mm}A：token 仅控访问不直接控钱，大额二次验证。路线图加 Redis 黑名单 + \texttt{token\_ver}。
+
+\vspace{1mm}
+\textbf{Q4}：bcrypt cost=12 怎么选？怎么无痛升 14？\\
+\hspace{3mm}A：250ms 在 300ms 感知阈值内，穷举不现实。登录成功路径探测旧 hash 顺便 re-hash，90 天自然升完。
+
+\vspace{1mm}
+\textbf{Q5}：登录接口怎么扛 15k RPS 撞库？\\
+\hspace{3mm}A：IP + 账号双维度滑动窗口 + 5 次失败强制验证码 + 30min 冻结，bcrypt 不消耗在冻结账号上。
+
+\vspace{1mm}
+\textbf{Q6}：admin bootstrap 一次性接口怎么防重？\\
+\hspace{3mm}A：\texttt{count(*) WHERE role='admin'}，$>0$ 直接返回错。并发加 advisory lock 兜底。
 \end{frame}
 
 \begin{frame}{面试 Q\&A（下）}
-\textbf{Q4}：admin bootstrap 一次性接口怎么防止重复使用？\\
-\hspace{4mm}\small A：\texttt{SELECT count(*) WHERE role='admin'}，count $>0$ 直接返回错误。接口本身存在，但永远进不到提权那一步。
+\scriptsize
+\textbf{Q7}：merchant 没独立 group 为什么不阻塞上线？\\
+\hspace{3mm}A：单店家场景 user 即 merchant。多店家才需 group + DAO 层 shop\_id 双层。
 
-\vspace{2mm}
-\textbf{Q5}：merchant 当前没独立 group，为什么不阻塞上线？\\
-\hspace{4mm}\small A：单店家 / 自营场景下 user 即 merchant，业务上不区分。多店家路线图阶段才需要 group + shop\_id 双层隔离。
+\vspace{1mm}
+\textbf{Q8}：业务码 30001 vs 30002 用户视角一样，区分有何意义？\\
+\hspace{3mm}A：用户都重登，客服区分"安全事件 vs 长闲置"，比例异常触发审计。
 
-\vspace{2mm}
-\textbf{Q6}：业务码 30001 vs 30002 用户视角一样，区分有什么意义？\\
-\hspace{4mm}\small A：用户视角一样（都要重登），但客服后台可以区分"账户安全事件 vs 正常长闲置"。比例异常时触发安全审计。
+\vspace{1mm}
+\textbf{Q9}：客服强制下线如何实现？多端怎么隔离？\\
+\hspace{3mm}A：users 加 \texttt{token\_ver} 签进 claims，改密码 / 下线时 \texttt{++}。多端按 \texttt{client\_type} 分桶存 \texttt{token\_ver\_map}。
+
+\vspace{1mm}
+\textbf{Q10}：为什么 gomall 选 JWT 不选 session？\\
+\hspace{3mm}A：零 RTT + 无状态扩展 + 多端 header 无跨域。代价是失效慢，\texttt{token\_ver} 兜底。银行业务选 session 更合理。
+
+\vspace{1mm}
+\textbf{Q11}：第三方登录怎么接入？\\
+\hspace{3mm}A：OAuth 拿 \texttt{external\_id} $\to$ 查/建 \texttt{user\_oauth} $\to$ 复用 GenerateToken。后续仍走 AuthMiddleware。
+
+\vspace{1mm}
+\textbf{Q12}：100k QPS 鉴权怎么扩？瓶颈在哪？\\
+\hspace{3mm}A：HS256 + sync.Map 单机 58k RPS，100k 扩 4 实例够用，瓶颈始终在下单 / 支付 / 库存。
 \end{frame}
 
 \begin{frame}{代码位置一览}
+\scriptsize
 \begin{description}
-  \item[authed group 入口]\srcnote{routes/router.go:47--48}
-  \item[admin sub-group]\srcnote{routes/router.go:148--155}
-  \item[admin/bootstrap 路由]\srcnote{routes/router.go:146}
-  \item[AuthMiddleware]\srcnote{middleware/jwt.go:16--64}
-  \item[SetToken 写回]\srcnote{middleware/jwt.go:66--73}
-  \item[双 token 续期]\srcnote{pkg/utils/jwt/jwt.go:67--93}
-  \item[邮箱 token 15min]\srcnote{pkg/utils/jwt/jwt.go:95--134}
-  \item[RequireRole + 30s 缓存]\srcnote{middleware/rbac.go:22--45, 48--86}
-  \item[InvalidateRoleCache]\srcnote{middleware/rbac.go:88--91}
-  \item[BootstrapPromoteSelf]\srcnote{service/admin.go:66--80}
-  \item[PromoteToAdmin]\srcnote{service/admin.go:47--62}
-  \item[Role 字段 / bcrypt cost=12]\srcnote{repository/db/model/user.go:23, 28, 30--31, 34--48}
-  \item[业务码定义]\srcnote{pkg/e/code.go:35--58}
-  \item[access/refresh 常量]\srcnote{consts/user.go:31--32}
+  \item[路由 / authed / admin]\srcnote{routes/router.go:34--45, 47--48, 146, 148--155}
+  \item[AuthMiddleware / SetToken]\srcnote{middleware/jwt.go:16--64, 66--73}
+  \item[双 token 续期 / EmailClaims]\srcnote{pkg/utils/jwt/jwt.go:25--52, 67--93, 95--134}
+  \item[RequireRole + 30s 缓存 / Invalidate]\srcnote{middleware/rbac.go:22--45, 48--86, 88--91}
+  \item[admin bootstrap / promote]\srcnote{service/admin.go:47--62, 66--80}
+  \item[bcrypt cost=12 / Role]\srcnote{repository/db/model/user.go:23, 28, 34--48}
+  \item[业务码 / 时长常量]\srcnote{pkg/e/code.go:35--58；consts/user.go:31--32}
+  \item[滑动窗口 / Redis 客户端]\srcnote{repository/cache/ratelimit/sliding\_window.go；config/redis.go}
+  \item[压测数据来源]\srcnote{stressTest/REPORT.md:34--46}
+  \item[路线图]\srcnote{user.go 加 TokenVer / TokenVerMap；admin.go 加 ForceLogout + AuditMiddleware；oauth.go 新建}
 \end{description}
 \end{frame}
 
