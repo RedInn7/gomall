@@ -1,0 +1,134 @@
+% docs/slides/preamble.tex -- 五份 deck 共享
+\documentclass[aspectratio=169,11pt]{beamer}
+
+% ==== 中文与字体 ====
+\usepackage[UTF8,fontset=none]{ctex}
+\usepackage{fontspec}
+
+\IfFontExistsTF{PingFang SC}{%
+  \setCJKmainfont{PingFang SC}[BoldFont=PingFang SC,ItalicFont=PingFang SC,AutoFakeSlant=0.15]
+  \setCJKsansfont{PingFang SC}[ItalicFont=PingFang SC,AutoFakeSlant=0.15]
+  \setCJKmonofont{PingFang SC}
+}{%
+  \IfFontExistsTF{Source Han Sans SC}{%
+    \setCJKmainfont{Source Han Sans SC}
+    \setCJKsansfont{Source Han Sans SC}
+  }{%
+    \IfFontExistsTF{Noto Sans CJK SC}{%
+      \setCJKmainfont{Noto Sans CJK SC}
+      \setCJKsansfont{Noto Sans CJK SC}
+    }{%
+      \setCJKmainfont{Heiti SC}
+      \setCJKsansfont{Heiti SC}
+    }
+  }
+}
+
+\IfFontExistsTF{Helvetica Neue}{\setmainfont{Helvetica Neue}}{%
+  \IfFontExistsTF{Inter}{\setmainfont{Inter}}{}}
+\IfFontExistsTF{JetBrains Mono}{\setmonofont{JetBrains Mono}[Scale=0.85]}%
+  {\setmonofont{Menlo}[Scale=0.85]}
+
+% ==== 颜色 ====
+\usepackage{xcolor}
+\definecolor{cMain}{HTML}{1F4E79}
+\definecolor{cAccent}{HTML}{E07A1F}
+\definecolor{cGray}{HTML}{595959}
+\definecolor{cMute}{HTML}{F4F4F4}
+\definecolor{cOK}{HTML}{2E7D32}
+\definecolor{cBad}{HTML}{B23A3A}
+\definecolor{cWarn}{HTML}{C8A300}
+
+% ==== 主题 ====
+\usepackage{tcolorbox}
+\usetheme{metropolis}
+\metroset{progressbar=frametitle,numbering=fraction,block=fill}
+\setbeamercolor{frametitle}{bg=cMain,fg=white}
+\setbeamercolor{progress bar}{fg=cAccent,bg=cMute}
+\setbeamercolor{alerted text}{fg=cAccent}
+\setbeamercolor{title}{fg=cMain}
+
+% metropolis 默认尝试 Fira Sans，未安装时 fallback 到 Latin Modern Sans。
+% 这里在主题加载后显式覆盖，强制使用 macOS 上一定存在的 Helvetica Neue，
+% 跟中文 PingFang 风格一致；找不到则按顺序尝试 Inter / Arial。
+\IfFontExistsTF{Helvetica Neue}{%
+  \setsansfont{Helvetica Neue}%
+}{%
+  \IfFontExistsTF{Inter}{\setsansfont{Inter}}{%
+    \IfFontExistsTF{Arial}{\setsansfont{Arial}}{}}%
+}
+
+% ==== TikZ ====
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,shapes.geometric,calc,%
+  decorations.pathmorphing,backgrounds}
+
+\tikzset{
+  node-box/.style={draw=cMain,thick,rounded corners=2pt,
+    minimum height=8mm,minimum width=18mm,align=center,font=\small},
+  node-state/.style={draw=cMain,thick,circle,minimum size=14mm,
+    align=center,font=\small},
+  node-ok/.style={draw=cOK,thick,fill=cOK!10},
+  node-warn/.style={draw=cWarn,thick,fill=cWarn!15},
+  node-bad/.style={draw=cBad,thick,fill=cBad!10},
+  % 色盲友好的状态机三态：蓝 (正常/Closed) / 橙 (告警/Open) / 灰 (中间/HalfOpen)
+  % 避免 red-green 二元区分，改用 hue + lightness 双通道。
+  node-state-normal/.style={draw=cMain,thick,fill=cMain!12},
+  node-state-alert/.style={draw=cAccent,thick,fill=cAccent!18},
+  node-state-transition/.style={draw=cGray,thick,fill=cGray!18},
+  arrow/.style={-{Stealth[length=2mm]},thick,draw=cMain},
+  arrow-async/.style={-{Stealth[length=2mm]},thick,dashed,draw=cGray},
+  arrow-bad/.style={-{Stealth[length=2mm]},thick,draw=cBad},
+  arrow-alert/.style={-{Stealth[length=2mm]},thick,draw=cAccent},
+  lifeline/.style={dashed,thick,draw=cGray},
+}
+
+% ==== 代码 ====
+\usepackage{listings}
+\lstdefinelanguage{Go}{
+  morekeywords={break,case,chan,const,continue,default,defer,else,
+    fallthrough,for,func,go,goto,if,import,interface,map,package,range,
+    return,select,struct,switch,type,var,nil,true,false,iota},
+  morekeywords=[2]{string,int,int64,uint,uint64,bool,byte,error,context},
+  sensitive=true,
+  morecomment=[l]//,morecomment=[s]{/*}{*/},
+  morestring=[b]",morestring=[b]`,
+}
+\lstdefinelanguage{LuaRedis}{
+  morekeywords={and,break,do,else,elseif,end,false,for,function,if,in,
+    local,nil,not,or,repeat,return,then,true,until,while},
+  morekeywords=[2]{redis,call,KEYS,ARGV,tonumber,HGET,HSET,GET,SET,
+    DECR,DECRBY,INCR,INCRBY,EXPIRE,PEXPIRE,ZADD,ZCARD,ZREMRANGEBYSCORE,
+    EVAL,EVALSHA},
+  sensitive=true,
+  morecomment=[l]{--},
+  morestring=[b]",morestring=[b]',
+}
+
+\lstdefinestyle{base}{
+  basicstyle=\ttfamily\scriptsize,
+  numbers=left,numberstyle=\tiny\color{cGray},
+  keywordstyle=\color{cMain}\bfseries,
+  keywordstyle=[2]\color{cAccent},
+  stringstyle=\color{cOK},
+  commentstyle=\color{cGray}\itshape,
+  backgroundcolor=\color{cMute},
+  frame=single,framerule=0pt,
+  showstringspaces=false,
+  breaklines=true,
+  tabsize=2,
+  columns=fullflexible,
+}
+\lstset{style=base}
+
+% ==== 三线表与附录页码 ====
+\usepackage{booktabs}
+\usepackage{appendixnumberbeamer}
+
+% ==== 页脚来源标注 ====
+\newcommand{\srcnote}[1]{{\color{cGray}\scriptsize\itshape #1}}
+
+% 关键论点框
+\newcommand{\keypoint}[1]{%
+  \begin{tcolorbox}[colback=cMute,colframe=cMain,boxrule=0.5pt,arc=2pt]%
+  #1\end{tcolorbox}}
