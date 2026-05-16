@@ -152,7 +152,7 @@ LIKE \texttt{'\%X\%'} 索引可用？ & 否（前缀通配） \\
   \item 加权是\textbf{运营调出来的}，不是开发拍的。促销期 \texttt{title} 权重可以临时上调。
   \item 不加权的结果是"卖标签的店铺把 info 塞满热词"反而排第一。
 \end{itemize}
-\srcnote{repository/es/product\_index.go:170 fields=\{name^3, title^2, info\}}
+\srcnote{repository/es/product\_index.go:170 fields=\{name\^{}3, title\^{}2, info\}}
 \end{frame}
 
 \begin{frame}{精度 vs 召回：业务侧怎么挑}
@@ -315,7 +315,7 @@ ES 写入用 \texttt{refresh=false}，refresh\_interval 决定可搜延迟下界
 \vspace{2mm}
 \small 整个过程\textbf{不需要}DB 兜底数据搬到 ES，因为 outbox 已经记了。
 \srcnote{对应技术 deck 04 Outbox：publisher 失败重试 + at-least-once 投递}
-\end{frame>
+\end{frame}
 
 % ============================================================
 \section{遗留风险与多角色视角}
