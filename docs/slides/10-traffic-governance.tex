@@ -501,12 +501,247 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
 \srcnote{Google SRE error budget 原则；stressTest/REPORT.md 链路稳定性数据}
 \end{frame}
 
+\begin{frame}{服务调服务调服务：三层熔断的级联防护}
+\begin{tikzpicture}[node distance=4mm and 10mm]
+  \node[node-box] (cli) {Client};
+  \node[node-box,node-warn,right=of cli] (api) {gomall API\\CB-A};
+  \node[node-box,node-warn,right=of api] (svc) {订单服务\\CB-B};
+  \node[node-box,node-warn,right=of svc] (pay) {支付聚合\\CB-C};
+  \node[node-box,node-bad,below=of pay] (stripe) {Stripe};
+  \node[node-box,node-bad,below=of svc] (alipay) {支付宝};
+  \node[node-box,node-bad,below=of api] (wx) {微信支付};
+  \draw[arrow] (cli) -- (api);
+  \draw[arrow] (api) -- (svc);
+  \draw[arrow] (svc) -- (pay);
+  \draw[arrow] (pay) -- (stripe);
+  \draw[arrow] (pay) -- (alipay);
+  \draw[arrow] (pay) -- (wx);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item CB-C 守第三方：单家挂掉只断单家，其余通道照走。
+  \item CB-B 守"支付聚合服务"整体：三家全挂时止血，避免订单服务自身被拖。
+  \item CB-A 守"订单服务"整体：极端场景下退化到只读，让用户至少能看到订单列表。
+\end{itemize}
+\srcnote{middleware/circuitbreaker.go:44--136 单实例 CB; routes/router.go:114--119 仅 CB-A 接入}
+\end{frame}
+
+\begin{frame}{级联防护的两个隐藏陷阱}
+\begin{itemize}
+  \item \textbf{陷阱 1：阈值同步雪崩}。如果 CB-A 与 CB-B 都设 5/10s，下游恢复瞬间所有上游同时 HalfOpen $\to$ 探测流量乘 N 倍打回去 $\to$ 下游再次挂。\\
+  对策：外层 CB 的 OpenTimeout \textbf{要长于}内层（如 30s vs 10s），错开探测窗口。
+  \item \textbf{陷阱 2：兜底链路也会挂}。CB-C Open 时若兜底返回的 cache stale 也过期，CB-B 会把 cache 读失败计作业务失败 $\to$ 跟着 Open。\\
+  对策：兜底路径\textbf{不能}计入 CB-B 的失败计数；report 时按 status code 维度分桶。
+  \item gomall 当前只挂了 CB-A（paydown），CB-B / CB-C 是把单实例 CB 复制到下游服务上的扩展模式。
+\end{itemize}
+\srcnote{middleware/circuitbreaker.go:69 失败判定 = 5xx 或 c.Errors; 兜底路径需要在 handler 内吞掉 5xx 改成 200+stale}
+\end{frame}
+
+\begin{frame}{压测的两难：不压不知道、压坏怕影响真用户}
+\begin{itemize}
+  \item 线下压测的天花板：本地依赖、数据规模、缓存命中率都跟线上不一样，结果偏乐观。
+  \item 真在线上压：每条链路写进 \texttt{order} / \texttt{stock} 表会污染真实业务数据。
+  \item 全链路压测平台的本质：在\textbf{同一套线上代码}里区分"压测流量 vs 真流量"，让前者落进\textbf{影子库 / 影子表 / 影子 MQ}。
+  \item 关键技术：\textbf{流量染色}（traffic coloring）—— 染色标识跟着 trace 一路透传到 DAO 层，DAO 看到色就切表。
+\end{itemize}
+\srcnote{阿里 / 字节公开过的全链路压测方案；gomall 当前未实现，本节为扩展设计}
+\end{frame}
+
+\begin{frame}{全链路压测：影子库 / 影子 MQ / 流量染色}
+\begin{tikzpicture}[node distance=4mm and 10mm]
+  \node[node-box] (k6) {k6 压测端};
+  \node[node-box,node-warn,right=of k6] (gw) {网关\\注入 X-Test=1};
+  \node[node-box,right=of gw] (svc) {gomall\\透传染色};
+  \node[node-box,node-ok,below=4mm of svc] (db) {真 DB\\order};
+  \node[node-box,node-warn,below=12mm of svc] (sdb) {影子 DB\\order\_shadow};
+  \node[node-box,right=of svc] (mq) {RabbitMQ};
+  \node[node-box,node-warn,below=12mm of mq] (smq) {影子队列\\order.async\_shadow};
+  \draw[arrow] (k6) -- (gw);
+  \draw[arrow] (gw) -- (svc);
+  \draw[arrow] (svc) -- (db);
+  \draw[arrow-async,bend right=15] (svc) to (sdb);
+  \draw[arrow] (svc) -- (mq);
+  \draw[arrow-async,bend right=15] (mq) to (smq);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item DAO 看 ctx 里的 \texttt{X-Test} 决定 \texttt{order} vs \texttt{order\_shadow}；
+  \item MQ 按 routing-key 分流，consumer 只消费\textbf{对应色}的队列；
+  \item Redis 用 key 前缀 \texttt{shadow:} 隔离；缓存命中率与真链路解耦。
+\end{itemize}
+\srcnote{扩展设计：gomall DAO 层（dao/*.go）+ middleware/coloring.go（待新增）}
+\end{frame}
+
+\begin{frame}[fragile]{流量染色中间件：ctx 透传一行入侵}
+\begin{lstlisting}[language=Go,firstnumber=1,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{设计稿：middleware/coloring.go}}]
+const ColorKey = "x-traffic-color"
+
+func TrafficColoring() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        color := c.GetHeader("X-Test")     // 1) 取染色标识
+        if color == "" { color = "prod" }
+        ctx := context.WithValue(c.Request.Context(), ColorKey, color)
+        c.Request = c.Request.WithContext(ctx) // 2) 写回 ctx
+        c.Next()                           // 3) 后续 DAO 从 ctx 读
+    }
+}
+
+// DAO 切表（示例）
+func tableOrder(ctx context.Context) string {
+    if v, _ := ctx.Value(middleware.ColorKey).(string); v == "test" {
+        return "order_shadow"              // 4) 影子表
+    }
+    return "order"
+}
+\end{lstlisting}
+\scriptsize ① 染色只在入口注入一次；② ctx 是 trace 天然载体，trace 框架已经在带；③ DAO 看 ctx 决定表名，零侵入业务代码；④ 缺点：所有 DAO 都要改一行；好处：可以做到\textbf{产线压测无副作用}。
+\end{frame}
+
+\begin{frame}{红蓝灰发布：按 IP / 按 userID / 按比例的流量切}
+\begin{tikzpicture}[node distance=8mm and 16mm,every node/.style={font=\small}]
+  \node[node-state,node-state-normal] (start) {新版本上线};
+  \node[node-state,node-state-transition,below right=of start] (blue) {蓝：内部 IP\\10 人};
+  \node[node-state,node-state-transition,below=of blue] (gray1) {灰 1\%\\userID hash};
+  \node[node-state,node-state-transition,below=of gray1] (gray10) {灰 10\%};
+  \node[node-state,node-state-alert,below=of gray10] (red) {红：50\%\\对照组};
+  \node[node-state,node-state-normal,right=18mm of red] (full) {全量 100\%};
+  \draw[arrow] (start) -- (blue);
+  \draw[arrow] (blue) -- node[right,font=\tiny]{告警 0} (gray1);
+  \draw[arrow] (gray1) -- node[right,font=\tiny]{核心指标 OK} (gray10);
+  \draw[arrow] (gray10) -- node[right,font=\tiny]{24h 观察} (red);
+  \draw[arrow] (red) -- node[above,font=\tiny]{A/B 显著} (full);
+  \draw[arrow-bad,bend right=20] (gray1.west) to node[left,font=\tiny]{回滚} (start.west);
+\end{tikzpicture}
+\srcnote{切流策略由网关层执行；gomall 当前单实例没接，本节为扩展设计}
+\end{frame}
+
+\begin{frame}{三种切流维度的业务取舍}
+\begin{tabular}{@{}lll@{}}
+\toprule
+切流维度 & 业务含义 & 适用场景 \\
+\midrule
+按 IP / 内部 段 & "公司同事先用"        & 蓝绿、冒烟、QA 验收 \\
+按 userID hash  & "同一用户一定看同一版" & 灰度、A/B、新人引导 \\
+按比例随机      & "整体 X\% 流量"      & 性能压力、稳定性验证 \\
+按地域 / 设备   & "先在某区域 / 设备试"  & 区域化运营、客户端兼容 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 同一用户切到不同版本 $\to$ 购物车 / 订单 / 优惠券容易出现"看到一半的数据"，要么按 userID hash，要么版本兼容。
+  \item 按比例随机适合"无状态读路径"（首页、商品详情）；写路径要按 userID 锁定。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{网关层选型：Kong / APISIX / Nginx Ingress / 自研}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+方案 & 数据面 & 控制面 & 限流颗粒 & 适合 \\
+\midrule
+Nginx Ingress & nginx + Lua & K8s CRD & IP / Header & K8s 集群入口 \\
+Kong          & nginx + Lua & PostgreSQL & 服务 / 消费者 & 中大型微服务 \\
+APISIX        & nginx + Lua & etcd & 服务 / 路由 / Consumer & 高动态变更 \\
+自研 gateway   & Go / Rust & 自管 & 业务字段任意 & 业务定制极重 \\
+gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small gomall 没接独立网关，限流 / 熔断都跑在 gin 中间件里。\textbf{进生产前一般会接 Nginx Ingress + APISIX}：进程内中间件守业务码与状态机正确性，网关守 IP / DDoS / TLS。
+\srcnote{对照：APISIX 公开文档 limit-req/limit-count 插件配置}
+\end{frame}
+
+\begin{frame}{五种主流限流算法：各自的业务边界}
+\begin{tabular}{@{}lll@{}}
+\toprule
+算法 & 适合场景 & 局限 \\
+\midrule
+计数器 fixed-window     & 简单兜底 / 日级配额 & 窗口边界"双倍突刺" \\
+滑动窗口 sliding-log    & 精确反黑产         & 内存 / Redis 开销大 \\
+滑动窗口 sliding-counter & 折中               & 仍有边界误差   \\
+令牌桶 token-bucket     & 允许突发           & 不抗持续高水位 \\
+漏桶 leaky-bucket       & 强制平滑           & 突发延迟    \\
+自适应 Sentinel BBR     & 容量自动反推       & 调参复杂 / 黑盒 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small gomall 选\textbf{滑动窗口 ZSet}（sliding-log 变种）跑秒杀，因为业务上要\textbf{精确反黑产}；选\textbf{令牌桶}跑全局，因为允许首屏突发。
+\srcnote{middleware/ratelimit.go:22--49 token-bucket; repository/cache/ratelimit.go:18--34 sliding-log}
+\end{frame}
+
+\begin{frame}{熔断打开后：兜底数据让"不可用"变"降级可用"}
+\begin{tikzpicture}[node distance=6mm and 12mm]
+  \node[node-box] (req) {请求};
+  \node[node-box,node-warn,right=of req] (cb) {CB Open?};
+  \node[node-box,node-ok,right=of cb] (live) {下游实时};
+  \node[node-box,node-warn,below=of live] (stale) {cache stale\\$<$ 5min};
+  \node[node-box,node-warn,below=of stale] (def) {默认值\\(零、空数组)};
+  \node[node-box,node-bad,below=of def] (rej) {拒绝\\70002};
+  \draw[arrow] (req) -- (cb);
+  \draw[arrow] (cb) -- node[above,font=\tiny]{no} (live);
+  \draw[arrow-bad] (cb) -- node[right,font=\tiny]{yes} (stale);
+  \draw[arrow-bad] (stale) -- node[right,font=\tiny]{无 cache} (def);
+  \draw[arrow-bad] (def) -- node[right,font=\tiny]{资金链路} (rej);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item 读路径（商品 / 推荐 / 评价）：cache stale > 默认值 > 拒绝。用户能看到旧数据胜过白屏。
+  \item 写路径（支付 / 下单 / 扣库存）：\textbf{宁可拒，不要默认值}，否则资金 / 库存对不上账。
+  \item 兜底数据来自 HTTPCache 中间件留下的 ETag 体，TTL 内可用。
+\end{itemize}
+\srcnote{middleware/httpcache.go:47--100 留 ETag / max-age 数据天然可作 stale 兜底}
+\end{frame}
+
+\begin{frame}{业务码全表：错误码 $\to$ 客户端行为 $\to$ 客服话术}
+\footnotesize
+\begin{tabular}{@{}lllll@{}}
+\toprule
+码 & 含义 & 客户端 & 监控位 & 客服话术 \\
+\midrule
+20000 & 成功         & 正常        & 业务 KPI    & --                        \\
+40001 & 参数非法     & 不重试      & 调用方告警  & "请检查输入"              \\
+40101 & 未登录       & 跳登录      & 不告警      & "请先登录"                \\
+40301 & 无权限       & 不重试      & 不告警      & "无权限"                  \\
+50001 & 库存不足     & 不重试      & 业务面板    & "已售罄"                  \\
+50002 & 网络超时     & 重试+幂等   & SRE 告警    & "网络繁忙、请稍后"        \\
+60001 & 幂等冲突     & 拉结果      & 业务面板    & "请稍后查询"              \\
+60002 & 幂等命中     & 读结果      & 不告警      & "您已成功，无需重复"      \\
+70001 & 限流命中     & 1s 重试     & 治理面板    & "活动太火、请稍后"        \\
+70002 & 熔断开启     & 指数退避    & SRE 告警    & "支付暂忙、1 分钟后再试"  \\
+70003 & 黑产识别命中 & 不重试      & 风控面板    & "为了账户安全、请联系客服" \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\srcnote{pkg/e/code.go:57--58 / msg.go:51--52；70003 为扩展位}
+\end{frame}
+
+\begin{frame}{大促容量评估：怎么算出"需要多少机器"}
+\begin{itemize}
+  \item 输入：① 业务侧预估的峰值 QPS；② 单机基线（gomall 64k RPS）；③ 安全系数（一般 1.5--2$\times$）。
+  \item 计算：副本数 = $\lceil$ 预估峰值 $\times$ 安全系数 / 单机基线 $\rceil$。
+  \item 双 11 例：100k QPS / 64k RPS $\times$ 1.5 = 2.34 $\to$ \textbf{至少 3 台}。
+  \item 但秒杀 / 红包链路 \textbf{不是} 64k RPS 的水平：实测 52k 是 \texttt{/skill\_product/skill}，下单写链路 50k；要按\textbf{最弱链路}（这里是异步落库的 consumer 消费速度）算容量。
+  \item 容量评估的常见错误：① 只看 RPS 不看 p99；② 没考虑下游放大（一个 paydown 触发 3 个下游调用）；③ 忽略冷启动（K8s 拉镜像 30s 起步）。
+\end{itemize}
+\srcnote{stressTest/REPORT.md \S 1 各链路基线 RPS}
+\end{frame}
+
+\begin{frame}{HPA 自动扩缩容：怎么定 metric 与冷却时间}
+\begin{itemize}
+  \item CPU-based HPA 是最朴素的：CPU > 70\% 扩、< 30\% 缩。问题：扩容前 30s 已经把请求拒了。
+  \item 自定义 metric HPA：用 QPS / 队列堆积量 / 连接数作为触发条件，比 CPU 提前 1--2min 感知。
+  \item gomall 异步下单的天然信号：MQ 队列堆积 > 10k $\to$ 扩 consumer。
+  \item 关键：\textbf{冷却时间}（cooldown）—— 缩容窗口必须长于扩容（10min vs 1min），避免抖动来回拉。
+  \item \textbf{预热与缓冲池}：新副本起来后先放 5\% 流量预热（JIT、连接池、缓存预填），10s 后切到 100\%，避免冷启动 p99 暴涨。
+\end{itemize}
+\srcnote{扩展设计；K8s HPA + Custom Metrics API；RabbitMQ queue depth 作为 metric}
+\end{frame}
 
 % ============================================================
 \appendix
 % ============================================================
 
-\begin{frame}{面试 Q\&A (1/2)}
+\begin{frame}{面试 Q\&A (1/4)}
 \textbf{Q1}：100 RPS / 200 burst 这两个数字怎么定？\\
 \hspace{4mm}\small A：基线 64k RPS / 单 IP 用不到 1/600，100 留给爬虫脚本做兜底；burst 200 容纳一次首屏并发 100+，不会误伤真用户。
 
@@ -519,17 +754,39 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
 \hspace{4mm}\small A：5 = 容忍偶发抖动不一抖就跳；10s = 给下游一次完整告警+自愈周期；3 = HalfOpen 探测够小，避免再次打死下游。
 \end{frame}
 
-\begin{frame}{面试 Q\&A (2/2)}
+\begin{frame}{面试 Q\&A (2/4)}
 \textbf{Q4}：异步下单是不是会丢单？\\
-\hspace{4mm}\small A：不会。库存先 Reserve（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。
+\hspace{4mm}\small A：不会。库存先 Reserve（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。代码位置 \texttt{service/order\_async.go:119--172}。
 
 \vspace{2mm}
 \textbf{Q5}：为什么熔断返回 200 不返回 503？\\
-\hspace{4mm}\small A：app 端老网关不能优雅处理 5xx；统一走业务码（70002）= 客户端只用维护一套 status switch；监控不要按 4xx/5xx 算错误率，必须看 status。
+\hspace{4mm}\small A：app 端老网关不能优雅处理 5xx；统一走业务码（70002）= 客户端只用维护一套 status switch；监控不要按 4xx/5xx 算错误率，必须看 status。代码位置 \texttt{middleware/circuitbreaker.go:57--65}。
 
 \vspace{2mm}
 \textbf{Q6}：HTTP cache 的 max-age 怎么定？\\
-\hspace{4mm}\small A：取决于"改价 / 下架"的最大可接受延迟。商品详情 60s，分类 / 轮播 300s，列表 30s（库存敏感）。
+\hspace{4mm}\small A：取决于"改价 / 下架"的最大可接受延迟。商品详情 60s，分类 / 轮播 300s，列表 30s（库存敏感）。代码位置 \texttt{routes/router.go:39--45}。
+\end{frame}
+
+\begin{frame}{面试 Q\&A (3/4)}
+\textbf{Q7}：多层熔断会不会"探测雪崩"？怎么办？\\
+\hspace{4mm}\small A：会。外层 CB 的 OpenTimeout 要长于内层（30s vs 10s）错开 HalfOpen 探测窗口；同时兜底路径不应计入失败计数，否则 cache 过期会让外层跟着 Open。代码位置 \texttt{middleware/circuitbreaker.go:69 失败判定}。
+
+\vspace{2mm}
+\textbf{Q8}：全链路压测怎么避免污染真实数据？\\
+\hspace{4mm}\small A：流量染色：网关层注入 \texttt{X-Test} header $\to$ 透传到 ctx $\to$ DAO 看 ctx 切 \texttt{order\_shadow} 表；MQ 用独立 routing-key 走影子队列；Redis 用 \texttt{shadow:} 前缀隔离。代码位置 \texttt{middleware/coloring.go（扩展）}。
+
+\vspace{2mm}
+\textbf{Q9}：灰度发布按什么维度切流最合理？\\
+\hspace{4mm}\small A：① 内部 IP 段——蓝绿冒烟；② userID hash——保证"同一用户看同一版"，避免购物车看到一半的数据；③ 按比例随机——只适合无状态读路径。写路径必须按 userID 锁定。
+\end{frame}
+
+\begin{frame}{面试 Q\&A (4/4)}
+\textbf{Q10}：限流算法为什么不选自适应（Sentinel BBR）？\\
+\hspace{4mm}\small A：自适应是黑盒、冷启动 5--10min 才稳；秒杀 3/秒/用户 这种阈值用业务语言能算清楚，没必要让运维去看 BBR 曲线判断。代码位置 \texttt{repository/cache/ratelimit.go:18--34}。
+
+\vspace{2mm}
+\textbf{Q11}：HPA 用什么 metric 比 CPU 更合适？\\
+\hspace{4mm}\small A：异步下单链路用 \textbf{MQ 队列堆积}：堆积 > 10k 扩 consumer，比等 CPU 飙高快 1--2min；同步链路看 inflight 请求数 / p99 延迟；cooldown 缩容窗口要长于扩容（10min vs 1min）避免抖动。
 \end{frame}
 
 \begin{frame}{代码位置一览}
