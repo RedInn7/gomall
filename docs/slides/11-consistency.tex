@@ -1,0 +1,604 @@
+\input{preamble}
+
+\metroset{sectionpage=none}
+
+\title{Outbox 与一致性}
+\subtitle{双写、Transactional Outbox、Saga 与缓存一致性的业务底层}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{业务出发点：一致性意味着什么}
+% ============================================================
+
+\begin{frame}{一致性是\textbf{业务事实}，不是技术口号}
+\begin{itemize}
+  \item 业务上的"一致"：库存数、订单状态、搜索结果、用户能看到的页面，四者要对得上。
+  \item gomall 里至少有四个独立存储：MySQL、Redis、RabbitMQ、Elasticsearch。
+  \item 任何一对存储之间都可能"一边成功一边失败"。
+  \item 业务能容忍的不是"零延迟一致"，而是"最终一致 + 看得见的窗口"。
+\end{itemize}
+\srcnote{cmd/main.go:29--47 初始化序列里 4 个存储依次进场}
+\end{frame}
+
+\begin{frame}{gomall 里业务侧最在意的三组一致性}
+\begin{tabular}{@{}lll@{}}
+\toprule
+一致性对 & 业务后果 & gomall 的兜底 \\
+\midrule
+DB $\leftrightarrow$ MQ      & 下游收不到事件 / 搜索索引腐烂 & \textbf{Outbox} (deck 主线) \\
+DB $\leftrightarrow$ Cache   & 用户看到旧价 / 旧库存 & 延迟双删 + SETNX 回源锁 \\
+跨服务步骤                    & 半成品订单、超卖、漏退款 & 协同式 Saga + 补偿事件 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 三组一致性问题各有典型出错形态。本 deck 只挑这三组，因为 gomall 实际改过、修过、复盘过。
+\srcnote{service/order.go、service/order\_cancel.go、service/product.go 三处对应改动}
+\end{frame}
+
+% ============================================================
+\section{双写问题：业务上意味着什么}
+% ============================================================
+
+\begin{frame}{双写问题的两个不对称失败}
+\begin{tikzpicture}[node distance=10mm and 8mm,font=\scriptsize]
+  \foreach \name/\x in {App/0, DB/26, MQ/52, Cons/78} {
+    \node[node-box,minimum width=14mm] at (\x mm,0) (\name) {\name};
+    \draw[lifeline] (\x mm,-2mm) -- (\x mm,-30mm);
+  }
+  \draw[arrow]      (0,-6mm)   -- node[above,font=\tiny]{INSERT order}      (26mm,-6mm);
+  \draw[arrow]      (26mm,-10mm) -- node[above,font=\tiny]{ok}              (0,-10mm);
+  \draw[arrow-bad]  (0,-16mm)  -- node[above,font=\tiny\color{cBad}]{publish 抖} (52mm,-16mm);
+  \draw[arrow-bad]  (52mm,-20mm)-- node[above,font=\tiny\color{cBad}]{timeout}  (0,-20mm);
+  \node[font=\tiny,text=cBad] at (39mm,-26mm) {DB 有单 / MQ 没事件 $\Rightarrow$ 搜索索引、库存对账、风控全断流};
+\end{tikzpicture}
+\vspace{2mm}
+\textbf{反过来}：先 publish 再 commit，commit 失败时下游会收到"幽灵订单"，更糟。
+\srcnote{docs/blog/04-outbox-saga.md \S 这就是双写问题}
+\end{frame}
+
+\begin{frame}{为什么 gomall 不能"两个 try / catch 套一下"}
+\begin{itemize}
+  \item DB 事务回滚不会回滚已经发出去的 MQ 消息。
+  \item MQ 投递失败可以重试，但应用进程崩了之后重试上下文也没了。
+  \item 2PC / XA 在 MQ 那一侧支持很差，RabbitMQ 官方没有 XA 资源管理器。
+  \item 业务无法接受"先停止下单、等运维手动对账"。
+\end{itemize}
+\vspace{1mm}
+\keypoint{业务层结论：必须把"事件"也当成 DB 行写进去，让事务统一管。}
+\srcnote{deck 04 \S 双写问题 / 业界标准答案：Transactional Outbox}
+\end{frame}
+
+% ============================================================
+\section{Transactional Outbox：业务变更 + 事件落表}
+% ============================================================
+
+\begin{frame}{Outbox 的核心一句话}
+\begin{tikzpicture}[node distance=6mm and 10mm]
+  \node[node-box] (biz) {业务行\\order/product};
+  \node[node-box,right=of biz,minimum width=34mm,node-warn]
+       (tx)  {同一个 TX\\\texttt{INSERT order}\\\texttt{INSERT outbox\_event}};
+  \node[node-box,below=of tx,node-ok] (pub) {Publisher\\轮询 pending};
+  \node[node-box,right=of pub] (mq) {RabbitMQ};
+  \node[node-box,right=of mq] (cons) {Consumer\\(ES / 库存 / 风控)};
+  \draw[arrow] (biz) -- (tx);
+  \draw[arrow] (tx)  -- node[right,font=\tiny]{FetchBatch} (pub);
+  \draw[arrow] (pub) -- node[above,font=\tiny]{publish + MarkSent} (mq);
+  \draw[arrow-async] (mq) -- (cons);
+\end{tikzpicture}
+\vspace{2mm}
+\small \textbf{业务变更 + 事件}写在同一个 DB 事务里 —— 要么都成功，要么都失败。 \\
+"投递给 MQ" 这件事被下沉到一个独立的轮询循环，业务请求不再等 MQ ack。
+\srcnote{service/order.go::CreateOrder / service/order\_cancel.go::CancelUnpaidOrder}
+\end{frame}
+
+\begin{frame}[fragile]{outbox\_event 表结构：业务字段就是状态机字段}
+\begin{lstlisting}[language=Go,firstnumber=17,
+  caption={\srcnote{repository/db/model/outbox.go:17--37}}]
+type OutboxEvent struct {
+    gorm.Model
+    AggregateType string    // "order" / "product"  业务实体类型
+    AggregateID   uint      // 业务实体 id —— 下游幂等 key 之一
+    EventType     string    // "OrderCreated" / "OrderCancelled"
+    RoutingKey    string    // "order.created"      投递到哪条 routing
+    Payload       string    // JSON body —— 包含一切下游需要的字段
+    Status        int       // 1 pending / 2 sent / 3 dead
+    Attempts      int       // 已尝试投递次数
+    NextRetryAt   time.Time // 指数退避后的下一次允许时间
+    LastError     string    // 最后一次失败原因，截断 500 字
+}
+\end{lstlisting}
+\vspace{1mm}
+\small 几个关键设计：\textbf{Status} 是业务码（pending/sent/dead），不是布尔；\textbf{NextRetryAt} 让退避不依赖外部调度；\textbf{LastError} 留给值班同学复盘。
+\end{frame}
+
+\begin{frame}[fragile]{CancelUnpaidOrder：业务变更 + 事件 同事务}
+\begin{lstlisting}[language=Go,firstnumber=30,
+  caption={\srcnote{service/order\_cancel.go:30--51}}]
+err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
+    ok, err := dao.NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
+    if err != nil {
+        return err
+    }
+    if !ok {
+        return nil    // 已经被关过，幂等 no-op
+    }
+    closed = true
+    return dao.NewOutboxDaoByDB(tx).Insert(
+        "order", "OrderCancelled", "order.cancelled", order.ID,
+        events.OrderCancelled{
+            OrderID: order.ID, OrderNum: orderNum,
+            UserID:  order.UserID, ProductID: order.ProductID,
+            Num:     order.Num, Reason: "timeout",
+        },
+    )
+})
+\end{lstlisting}
+\vspace{1mm}
+\small 逐行讲解（取关键 4 行）：
+\begin{itemize}
+  \item \texttt{Transaction(...)}：GORM 帮你 begin/commit/rollback，闭包返 err 就回滚。
+  \item \texttt{CloseOrderWithCheck}：只对 \texttt{UnPaid} 生效，二次调用直接 no-op —— 这是 Saga 步骤的\textbf{业务幂等键}。
+  \item \texttt{NewOutboxDaoByDB(tx)}：把 tx 传进去，事件 INSERT 跟订单 UPDATE 共享同一行锁版本。
+  \item 闭包出去之后，关单和事件\textbf{一起}对外可见，或者\textbf{一起}没发生。
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\section{Publisher：轮询 + 状态机推进}
+% ============================================================
+
+\begin{frame}{Publisher 默认参数：业务为什么这么取}
+\begin{tabular}{@{}llp{4.8cm}@{}}
+\toprule
+参数 & 默认值 & 业务依据 \\
+\midrule
+\texttt{PollInterval} & \textbf{1s}    & 用户感知"延迟"上限 1s 是搜索/对账接受的窗口 \\
+\texttt{BatchSize}    & \textbf{100}   & 单实例 + 1 张表 + 长事务规避，100 行单次能在 50ms 内 commit 完 \\
+\texttt{MaxAttempts}  & \textbf{10}    & 指数退避 1s/2s/4s/.../上限 5min，10 次累计可覆盖约 17 分钟波动 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 这三个值不是拍脑袋：\texttt{BatchSize=100} 对应"一次 \texttt{FetchBatch} 不会让 publisher 自己变成慢查询"；\texttt{MaxAttempts=10} 之后进 dead，由值班看 alarm。
+\srcnote{service/outbox/publisher.go:14--32 \texttt{withDefaults}；repository/db/model/outbox.go:14 \texttt{OutboxDefaultMaxAttempts}}
+\end{frame}
+
+\begin{frame}[fragile]{publisher.loop / drainBatch：主循环 + 状态推进}
+\begin{lstlisting}[language=Go,firstnumber=51,
+  caption={\srcnote{service/outbox/publisher.go:51--86}}]
+func (p *Publisher) loop(ctx context.Context) {
+    ticker := time.NewTicker(p.cfg.PollInterval)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ctx.Done():
+            return
+        case <-ticker.C:
+            p.drainBatch(ctx)
+        }
+    }
+}
+
+func (p *Publisher) drainBatch(ctx context.Context) {
+    if rabbitmq.GlobalRabbitMQ == nil { return }
+    rows, err := dao.NewOutboxDao(ctx).FetchBatch(p.cfg.BatchSize)
+    if err != nil { util.LogrusObj.Errorln(err); return }
+    for _, ev := range rows {
+        if err := rabbitmq.PublishDomainEvent(ctx, ev.RoutingKey,
+                                              []byte(ev.Payload)); err != nil {
+            dao.NewOutboxDao(ctx).MarkFailed(ev.ID, ev.Attempts,
+                                             p.cfg.MaxAttempts, err.Error())
+            continue
+        }
+        dao.NewOutboxDao(ctx).MarkSent(ev.ID)
+    }
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{publisher.loop 逐行讲：业务侧 6 条要点}
+\begin{enumerate}
+  \item \textbf{\texttt{ticker}} 而不是 sleep —— GC / 长 batch 都不会让节奏漂移。
+  \item \textbf{\texttt{ctx.Done()}}：进程退出时立刻收尾，正在处理的 batch 让它跑完即可（下次还能 \texttt{FetchBatch} 出来）。
+  \item \textbf{\texttt{GlobalRabbitMQ == nil} 直接 return}：RMQ 没起，不消耗 DB 也不打 alarm，等运维修。
+  \item \textbf{\texttt{FetchBatch}} 拿的是 \texttt{pending + next\_retry\_at <= now()}，自带退避隔离。
+  \item \textbf{失败走 \texttt{MarkFailed}} 而不是 \texttt{continue} 后丢弃 —— 业务码沿 \texttt{pending} 流转，不会"卡死"。
+  \item \textbf{投递成功才 \texttt{MarkSent}}：至少一次语义 = 宁可重投不可漏投。
+\end{enumerate}
+\srcnote{service/outbox/publisher.go:51--86 同上}
+\end{frame}
+
+\begin{frame}{业务码状态机：pending / sent / dead}
+\begin{tikzpicture}[node distance=18mm,font=\scriptsize]
+  \node[node-state,node-state-normal] (p) {pending};
+  \node[node-state,node-state-normal,fill=cMain!4,right=of p] (s) {sent};
+  \node[node-state,node-state-alert,below=of s] (d) {dead};
+  \draw[arrow]       (p) -- node[above,font=\tiny]{publish ok} (s);
+  \draw[arrow-alert] (p) -- node[right,font=\tiny]{attempts $\geq$ 10} (d);
+  \draw[arrow,bend left=55,looseness=2.6] (p) to
+       node[above,font=\tiny]{publish fail + 退避 1s$\to$2s$\to$4s$\to$ ... 5min 封顶} (p);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{pending}：默认初值，等下一轮 publisher 取。
+  \item \textbf{sent}：业务事件已经送达 broker（注意：不是消费者）。
+  \item \textbf{dead}：人工介入分支 —— 值班看 \texttt{LastError}，定位下游问题；不会自愈。
+\end{itemize}
+\srcnote{repository/db/dao/outbox.go:62--78 \texttt{MarkFailed} / repository/db/model/outbox.go:10--14}
+\end{frame}
+
+\begin{frame}[fragile]{MarkFailed: 指数退避 + 死信落地}
+\begin{lstlisting}[language=Go,firstnumber=62,
+  caption={\srcnote{repository/db/dao/outbox.go:62--78}}]
+func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string) error {
+    now := time.Now()
+    updates := map[string]any{
+        "attempts":   attempts + 1,
+        "last_error": truncate(errMsg, 500),
+        "updated_at": now,
+    }
+    if attempts+1 >= maxAttempts {
+        updates["status"] = model.OutboxStatusDead
+    } else {
+        backoff := time.Duration(1<<attempts) * time.Second
+        if backoff > 5*time.Minute { backoff = 5 * time.Minute }
+        updates["next_retry_at"] = now.Add(backoff)
+    }
+    return d.DB.Model(&model.OutboxEvent{}).Where("id = ?", id).Updates(updates).Error
+}
+\end{lstlisting}
+\vspace{1mm}
+\small 逐行讲（核心 4 点）：
+\begin{itemize}
+  \item \texttt{1 << attempts}：第 1 次失败退避 1s，第 5 次 32s，第 9 次 256s$\to$ 被 5min 封顶。
+  \item 退避更新写在 \texttt{next\_retry\_at}，下次 \texttt{FetchBatch} 的 WHERE 自动过滤掉。
+  \item \texttt{attempts + 1 >= max}：第 10 次也失败才进 dead，前 9 次都还有机会。
+  \item \texttt{last\_error} 截断 500 字符 —— 防 panic 栈把 LOB 撑爆，节省值班同学翻日志的时间。
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\section{至少一次语义：下游必须幂等}
+% ============================================================
+
+\begin{frame}{Outbox 解决"丢失"，幂等解决"重复"}
+\begin{tikzpicture}[node distance=8mm and 12mm,font=\scriptsize]
+  \node[node-box] (a) {应用};
+  \node[node-box,right=of a] (db)  {DB + outbox};
+  \node[node-box,right=of db,node-warn] (mq) {RMQ};
+  \node[node-box,right=of mq,node-ok] (idem) {幂等表 / Key};
+  \node[node-box,right=of idem] (down) {下游 handler};
+  \draw[arrow] (a) -- (db);
+  \draw[arrow] (db) -- (mq);
+  \draw[arrow-async] (mq) -- (idem);
+  \draw[arrow] (idem) -- (down);
+  \draw[arrow,bend right=25] (mq.south) to
+       node[below,font=\tiny\color{cWarn}]{重复投递 (网络 / publisher 重启)} (idem.south);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 投递语义：\textbf{at-least-once} —— 至少一次。
+  \item 把 \textbf{at-least-once + 幂等} 做出"业务侧 exactly-once"的效果。
+  \item 与 deck 01 / 04 / 05 三个 deck 直接衔接：
+  \begin{itemize}
+    \item deck 01 幂等中间件：以 \texttt{Idempotency-Key} 兜单次请求。
+    \item deck 04 outbox：本 deck 的技术细节版本。
+    \item deck 05 限流熔断：客户端重试时再叠加 RateLimit / CircuitBreaker。
+  \end{itemize}
+\end{itemize}
+\end{frame}
+
+\begin{frame}{压测里量出来的两组真实数字}
+\begin{tabular}{@{}lr@{}}
+\toprule
+压测场景 & 实测 \\
+\midrule
+单元测试 \texttt{TestCoupon\_AtomicClaimNoOversell}：500 并发抢 100 张券 & \textbf{零超发} \\
+压测 \texttt{idempotency\_replay.js}：同 Key 累计 15s 请求    & \textbf{755{,}033} \\
+\hspace{4mm}对应入库订单数（\texttt{SELECT COUNT(*)}）          & \textbf{1} \\
+\hspace{4mm}回放 p95 / 吞吐                                    & 2.33ms / \textbf{50{,}319 RPS} \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small "零超发" + "75 万次只入 1 单" 是同一套设计的两个表现 ——
+\textbf{at-least-once 投递}遇上\textbf{业务码幂等键}（券号 / Idempotency-Key），
+最终对账数永远只算一次。
+\srcnote{stressTest/REPORT.md \S 单元测试一览 \& \S 4. 幂等中间件压测}
+\end{frame}
+
+% ============================================================
+\section{协同 vs 编排：Saga 的业务取舍}
+% ============================================================
+
+\begin{frame}{协同 vs 编排：哪种 Saga 配 gomall}
+\begin{tabular}{@{}lll@{}}
+\toprule
+模式 & 实现 & 业务取舍 \\
+\midrule
+编排 (Orchestration) & 中心 Coordinator 推 & 步骤 $\geq 5$、需要看板、跨团队 \\
+协同 (Choreography)  & 事件驱动、无中心  & \textbf{gomall 选用} —— 步骤少 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{tikzpicture}[node distance=2mm and 5mm,font=\scriptsize,
+    every node/.append style={minimum width=14mm,minimum height=7mm}]
+  \node[node-box] (o) {Order};
+  \node[node-box,right=of o,node-warn] (rsv) {Reserve};
+  \node[node-box,right=of rsv] (ob) {outbox};
+  \node[node-box,right=of ob] (mq) {RMQ};
+  \node[node-box,right=of mq] (pay) {Pay};
+  \node[node-box,right=of pay] (es)  {ES};
+  \draw[arrow] (o)   -- (rsv);
+  \draw[arrow] (rsv) -- (ob);
+  \draw[arrow] (ob)  -- (mq);
+  \draw[arrow-async] (mq) -- (pay);
+  \draw[arrow-async] (mq) -- (es);
+\end{tikzpicture}
+\vspace{1mm}
+\small 协同式：每一步消费上一步事件、产出下一步事件，没有"总指挥"。\\
+对 gomall 的 5 步链路 (Order $\to$ Reserve $\to$ outbox $\to$ Pay / ES) 是最省心的选择。
+\srcnote{docs/blog/04-outbox-saga.md \S 完整链路}
+\end{frame}
+
+\begin{frame}{Saga 失败一步：CancelUnpaidOrder 就是一次回滚}
+\begin{tikzpicture}[node distance=10mm and 14mm,font=\scriptsize]
+  \node[node-box] (cre)  {1.CreateOrder\\(reserved += n)};
+  \node[node-box,right=of cre,node-warn] (wait) {2.等待支付\\(15min 内)};
+  \node[node-box,right=of wait,node-bad] (timeout) {3.超时未支付};
+  \node[node-box,below=of timeout] (cancel) {4.CancelUnpaidOrder};
+  \node[node-box,left=of cancel,node-ok] (rel)  {5.Release\\(reserved $\to$ avail)};
+  \node[node-box,left=of rel]           (ob)   {6.outbox\\order.cancelled};
+  \draw[arrow] (cre) -- (wait);
+  \draw[arrow] (wait) -- (timeout);
+  \draw[arrow-alert] (timeout) -- (cancel);
+  \draw[arrow] (cancel) -- (rel);
+  \draw[arrow] (rel) -- (ob);
+\end{tikzpicture}
+\vspace{2mm}
+\small 三个业务保证：
+\begin{itemize}
+  \item \textbf{幂等}：第二次调用 \texttt{CloseOrderWithCheck} 返回 \texttt{ok=false}，跳过释放与事件。
+  \item \textbf{先 DB tx 后 cache}：DB 关单 + outbox 一致后再释放 Redis 占用 —— 失败可重放。
+  \item \textbf{最终一致}：库存 = available + reserved + sold 这条不变量始终成立。
+\end{itemize}
+\srcnote{service/order\_cancel.go:14--63 完整闭包}
+\end{frame}
+
+\begin{frame}{业务接受怎样的"补偿失败"}
+\begin{itemize}
+  \item Saga 补偿不是银弹：补偿本身也会失败（比如 cache 拒连）。
+  \item gomall 的容错思路：
+  \begin{enumerate}
+    \item 先保证 DB 这一边 commit —— 业务真相先落地。
+    \item Cache 释放失败只打 error 日志，不回滚 DB —— 状态机靠下次扫描自愈。
+    \item 真出现\textbf{长期不一致}时，由 cron + outbox 死信表兜底，值班对账。
+  \end{enumerate}
+  \item 业务话术（写在 SOP 里）：\textbf{"先关单 + 后释放"，释放失败 = 库存短暂少一点，绝不会卖超。}
+\end{itemize}
+\srcnote{service/order\_cancel.go:58--62 释放 reservation 仅 log；initialize/cron.go 巡检任务}
+\end{frame}
+
+% ============================================================
+\section{缓存一致性：双删 + 击穿保护}
+% ============================================================
+
+\begin{frame}{Cache Aside 的两个出错位置}
+\begin{tikzpicture}[node distance=8mm and 12mm,font=\scriptsize]
+  \node[node-box] (c1) {读 1: cache miss};
+  \node[node-box,below=of c1] (w1) {写: 删 cache};
+  \node[node-box,right=of w1] (w2) {写: UPDATE DB};
+  \node[node-box,right=of c1] (c2) {读 1: 回填旧值 (race)};
+  \node[node-box,below=of w2,node-bad] (bad) {cache = 旧值};
+  \draw[arrow] (c1) -- (c2);
+  \draw[arrow] (w1) -- (w2);
+  \draw[arrow] (c2) -- (bad);
+  \draw[arrow-bad] (w2) -- (bad);
+\end{tikzpicture}
+\vspace{2mm}
+\textbf{业务出错形态}：商品改价后，部分用户在 1$\sim$2 秒内还能看到旧价。\\
+对 gomall：\textbf{允许}短时间旧库存（最坏拒单），\textbf{不允许}长时间旧价格（结算口径不一致）。
+\srcnote{service/product.go:282--288 ProductUpdate 写库前后两次 \texttt{DelProductDetail}}
+\end{frame}
+
+\begin{frame}{延迟双删时序图}
+\begin{tikzpicture}[node distance=4mm,font=\scriptsize]
+  \foreach \name/\x in {Writer/0, Cache/30, DB/60, Reader/90} {
+    \node[node-box,minimum width=14mm] at (\x mm,0) (\name) {\name};
+    \draw[lifeline] (\x mm,-2mm) -- (\x mm,-50mm);
+  }
+  \draw[arrow]      (0,-6mm)   -- node[above,font=\tiny]{1.DEL key}      (30mm,-6mm);
+  \draw[arrow]      (0,-12mm)  -- node[above,font=\tiny]{2.UPDATE}       (60mm,-12mm);
+  \draw[arrow-async](90mm,-18mm)-- node[above,font=\tiny]{并发读到旧值}  (60mm,-18mm);
+  \draw[arrow-async](90mm,-24mm)-- node[above,font=\tiny\color{cBad}]{回填旧值}  (30mm,-24mm);
+  \draw[arrow,bend right=20](0,-30mm) to node[above,font=\tiny\color{cAccent}]{3.500ms 后再 DEL} (30mm,-30mm);
+  \node[font=\tiny] at (45mm,-40mm) {第二次 DEL 抹掉了 race 写回的旧值，窗口收敛到亚秒级};
+\end{tikzpicture}
+\srcnote{repository/cache/product.go:66--74 \texttt{DoubleDeleteAsync}}
+\end{frame}
+
+\begin{frame}[fragile]{双删 + 击穿保护：源码与逐行讲}
+\begin{lstlisting}[language=Go,firstnumber=55,
+  caption={\srcnote{repository/cache/product.go:55--74}}]
+// TryProductLock SETNX 抢回源锁，避免缓存击穿时多个请求同时回源
+func TryProductLock(ctx context.Context, id uint) (bool, error) {
+    return RedisClient.SetNX(ctx, ProductLockKey(id), "1", ProductLockTTL).Result()
+}
+
+func UnlockProduct(ctx context.Context, id uint) {
+    RedisClient.Del(ctx, ProductLockKey(id))
+}
+
+// DoubleDeleteAsync 延迟双删：写库后已经做了第一次删除，这里在 interval 后再删一次，
+// 用于覆盖"读旧值的并发请求把旧值塞回缓存"的窗口。
+func DoubleDeleteAsync(id uint, interval time.Duration) {
+    if interval <= 0 { interval = ProductDelayInterval }  // 默认 500ms
+    go func() {
+        time.Sleep(interval)
+        _ = RedisClient.Del(context.Background(), ProductDetailKey(id)).Err()
+    }()
+}
+\end{lstlisting}
+\vspace{1mm}
+\small 逐行讲解（业务侧）：
+\begin{itemize}
+  \item \texttt{SetNX}：键不存在才设置 —— 单进程拿锁，其他请求阻塞或 fallback 读旧值。
+  \item \texttt{ProductLockTTL = 3s}：回源最坏 3s，自动释放避免死锁。
+  \item \texttt{DoubleDeleteAsync}：丢到 goroutine 异步执行，不阻塞写接口响应。
+  \item \texttt{ProductDelayInterval = 500ms}：业务侧调研出来的"读 race 窗口"上限。
+  \item 用 \texttt{context.Background()}：调用方 ctx 可能已经返回客户端，goroutine 用独立 ctx 兜后续。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{击穿保护：SETNX 单飞回源}
+\begin{tikzpicture}[node distance=8mm and 10mm,font=\scriptsize]
+  \node[node-box] (r1) {读 A};
+  \node[node-box,right=of r1] (r2) {读 B};
+  \node[node-box,right=of r2] (r3) {读 C};
+  \node[node-box,below=of r2,node-warn] (lock) {SETNX lock\\TTL 3s};
+  \node[node-box,below=of lock] (db) {DB SELECT};
+  \node[node-box,right=of db,node-ok] (set) {SET cache};
+  \draw[arrow] (r1) -- (lock);
+  \draw[arrow-bad,bend left=15] (r2) to node[above,font=\tiny]{抢锁失败 / 退避} (r1.east);
+  \draw[arrow-bad,bend right=15] (r3) to node[above,font=\tiny]{抢锁失败 / 退避} (r1.east);
+  \draw[arrow] (lock) -- (db);
+  \draw[arrow] (db) -- (set);
+\end{tikzpicture}
+\vspace{2mm}
+\small \textbf{业务收益}：热点商品（首页 banner 商品）失效瞬间不会让 1000 个请求一起打到 DB。\\
+落库次数从 $N$ 个请求降到 1 次回源 + 其余请求复用 cache。
+\srcnote{repository/cache/product.go:55--62 \texttt{TryProductLock} / \texttt{UnlockProduct}}
+\end{frame}
+
+% ============================================================
+\section{启动顺序事故：InitLog 必须在 RMQ 之前}
+% ============================================================
+
+\begin{frame}{真实事故：\texttt{tryInitRabbitMQ} 让进程整个退出}
+\textbf{现象}：RMQ 没起，\texttt{tryInitRabbitMQ()} \texttt{recover} 时 \textbf{NPE}，进程 crash。
+
+\vspace{2mm}
+\textbf{定位过程}：
+\begin{enumerate}
+  \item PR \#51（订单延迟关单）引入 \texttt{tryInitRabbitMQ()}。
+  \item 该函数 \texttt{recover()} 内调用 \texttt{util.LogrusObj.Warnf(...)}。
+  \item 当时 \texttt{util.InitLog()} 写在 \texttt{tryInitRabbitMQ()} \textbf{之后}。
+  \item \texttt{LogrusObj == nil} $\to$ recover 内再 panic $\to$ 进程退出。
+\end{enumerate}
+\vspace{1mm}
+\textbf{修复（commit 8d0157a / 3cbe3c4）}：把 \texttt{util.InitLog()} 提前到所有可能 \texttt{recover} 的代码之前。
+\srcnote{cmd/main.go:30--31 修复后的顺序；stressTest/REPORT.md \S 已修：util.LogrusObj}
+\end{frame}
+
+\begin{frame}{修复后的启动顺序（业务因果）}
+\begin{tikzpicture}[node distance=5mm and 6mm,font=\scriptsize,
+    every node/.append style={minimum width=22mm,minimum height=7mm}]
+  \node[node-box] (cfg)  {1.InitConfig};
+  \node[node-box,right=of cfg,node-warn] (log) {2.InitLog\\(必须在 recover 之前)};
+  \node[node-box,right=of log] (db)   {3.InitMySQL};
+  \node[node-box,below=of cfg] (cache){4.InitCache};
+  \node[node-box,right=of cache] (sf) {5.Snowflake};
+  \node[node-box,right=of sf] (cron)  {6.InitCron};
+  \node[node-box,below=of cache] (inv){7.InitInventory};
+  \node[node-box,right=of inv] (rmq)  {8.tryInitRabbitMQ};
+  \node[node-box,right=of rmq] (pub)  {9.InitOutboxPublisher};
+  \draw[arrow] (cfg) -- (log);
+  \draw[arrow] (log) -- (db);
+  \draw[arrow] (db) -- (cache);
+  \draw[arrow] (cache) -- (sf);
+  \draw[arrow] (sf) -- (cron);
+  \draw[arrow] (cron) -- (inv);
+  \draw[arrow] (inv) -- (rmq);
+  \draw[arrow] (rmq) -- (pub);
+\end{tikzpicture}
+\vspace{2mm}
+\small 关键约束：\textbf{InitLog 必须在 InitMySQL / RMQ 之前}，因为 MySQL / RMQ 初始化的 \texttt{recover} 都依赖 \texttt{LogrusObj}。
+\srcnote{cmd/main.go:29--47 完整初始化序列}
+\end{frame}
+
+\begin{frame}{两条可复用的业务侧教训}
+\begin{enumerate}
+  \item \textbf{初始化顺序}：所有依赖全局对象的代码，必须在它初始化之后才能调用。
+  \begin{itemize}
+    \item \texttt{InitLog} / \texttt{InitTracer} / \texttt{InitMetrics} 放最前。
+    \item 用 \texttt{init()} 隐式引导时盯紧 import 顺序。
+  \end{itemize}
+  \item \textbf{recover 内禁止再 panic}：
+  \begin{itemize}
+    \item recover 是最后兜底，里面再崩进程彻底失控。
+    \item 写法：recover 内只 \texttt{fmt.Fprintln(os.Stderr, ...)} 或写本地文件，不依赖任何复杂组件。
+  \end{itemize}
+\end{enumerate}
+\keypoint{outbox publisher 起不来不算事故 —— 启动顺序错了让进程 crash，才是事故。}
+\srcnote{cmd/main.go:54--62 tryInitRabbitMQ 的 recover 块；commit 8d0157a 修复点}
+\end{frame}
+
+\begin{frame}{业务侧总结：一致性约束一张表}
+\begin{tabular}{@{}llll@{}}
+\toprule
+一致性对 & 模式 & 业务码 / 表 & gomall 现状 \\
+\midrule
+DB $\leftrightarrow$ MQ      & Transactional Outbox & \texttt{outbox\_event.status} & pending/sent/dead \\
+DB $\leftrightarrow$ Cache   & Cache Aside + 延迟双删 & \texttt{product:detail:\{id\}} & 500ms 延迟双删 \\
+缓存击穿                     & SETNX 单飞回源        & \texttt{product:lock:\{id\}}   & TTL 3s \\
+跨服务 Saga                  & 协同式 (事件驱动)     & 见 outbox 路由 key            & 5 步链路 \\
+启动依赖                     & 顺序约束             & N/A                            & InitLog 第 2 位 \\
+\bottomrule
+\end{tabular}
+\srcnote{cmd/main.go / repository/cache/product.go / repository/db/dao/outbox.go}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{面试 Q\&A}
+\textbf{Q1}：为什么 Outbox 比"DB commit 后再 publish"安全？\\
+\hspace{4mm}\small A：commit 与 publish 不在一个事务，commit 成功 publish 失败就丢事件。Outbox 把事件写进 DB，由轮询消化，事件丢失等价于 DB 数据丢失。
+
+\vspace{2mm}
+\textbf{Q2}：outbox 表会不会堆积？\\
+\hspace{4mm}\small A：会。监控 \texttt{status=pending AND next\_retry\_at <= now()} 的行数即可。横向扩展可用 \texttt{SELECT FOR UPDATE SKIP LOCKED}；当前 gomall 单实例 BatchSize=100/1s 还远没到瓶颈。
+
+\vspace{2mm}
+\textbf{Q3}：延迟双删的"延迟"该取多大？\\
+\hspace{4mm}\small A：取\textbf{大于}最长读 race 窗口。gomall 取 500ms：DB 写常态 5--20ms，留 20$\times$ 余量盖 GC / 网络抖动；TTL 10min 兜底。
+\end{frame}
+
+\begin{frame}{面试 Q\&A（续）}
+\textbf{Q4}：协同式 vs 编排式 Saga，怎么选？\\
+\hspace{4mm}\small A：步骤 $\leq 5$、跨团队少 $\to$ 协同（gomall 选）。步骤多、需可视化、跨团队多 $\to$ 编排，但要承担"中心节点"运维成本。
+
+\vspace{2mm}
+\textbf{Q5}：为什么 cache 释放失败不回滚 DB？\\
+\hspace{4mm}\small A：DB 是业务真相，cache 是性能侧。Cache 失败让库存"短暂少一点"，最坏拒单不超卖；回滚 DB 反而让"已关单"被复活，业务码乱套。
+
+\vspace{2mm}
+\textbf{反追问}：为什么不用 CDC (Debezium / binlog) 替代 Outbox？\\
+\hspace{4mm}\small A：CDC 更通用但要拉 binlog 链路、跑 Debezium 集群，运维重；Outbox 是"应用层 CDC"，简单可控，gomall 量级足够。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}
+  \item[outbox\_event 表]\srcnote{repository/db/model/outbox.go:10--37}
+  \item[Outbox DAO (Insert / FetchBatch / MarkSent / MarkFailed)]\srcnote{repository/db/dao/outbox.go:13--86}
+  \item[Publisher (Start / loop / drainBatch)]\srcnote{service/outbox/publisher.go:34--86}
+  \item[初始化 publisher]\srcnote{initialize/outbox.go:12--30}
+  \item[OrderCreate (业务 + outbox 同事务)]\srcnote{service/order.go:40--102}
+  \item[CancelUnpaidOrder (Saga 回滚)]\srcnote{service/order\_cancel.go:14--63}
+  \item[缓存双删 / SETNX 回源锁]\srcnote{repository/cache/product.go:13--74}
+  \item[ProductUpdate 调用双删]\srcnote{service/product.go:271--289}
+  \item[启动顺序修复点]\srcnote{cmd/main.go:29--47；commit 8d0157a}
+\end{description}
+\vspace{1mm}
+\keypoint{配套阅读：deck 04-outbox-saga.tex / deck 03-cache-consistency.tex / docs/blog/04-outbox-saga.md}
+\end{frame}
+
+\end{document}
