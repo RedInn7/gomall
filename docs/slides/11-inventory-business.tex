@@ -141,13 +141,12 @@
 
 \begin{frame}{怎么把"宁可误锁"翻译成代码}
 \begin{itemize}
-  \item Lua 脚本第一行就是 \texttt{if avail $<$ need then return -1}：
-  库存够才扣，不够直接拒绝，没有"先扣了再说"的中间态。
-  \item Redis 单线程 + Lua 原子执行：500 并发抢 100 件券，单元测试\textbf{零超发}。
+  \item Lua 脚本先判 \texttt{avail $<$ need} 再 \texttt{DECRBY}：库存不够直接拒绝，没有"先扣了再说"的中间态。
+  \item Redis 单线程 + Lua 原子执行：500 个 goroutine 同时 \texttt{ReserveStock(pid, 1)}，初始库存 100 件，最终成功数\textbf{恰好 100}。
   \item DB 那一桶（\texttt{product.num}）只在\textbf{支付落地}和\textbf{Cron 回滚}两条路径上动。
   \item 业务承诺：\textbf{任何瞬间，已售 + 已锁 $\le$ 总水位}，这条不变量永不破。
 \end{itemize}
-\srcnote{stressTest/REPORT.md \S 单元测试 TestCoupon\_AtomicClaimNoOversell 500 并发 / 100 张 / 零超发}
+\srcnote{repository/cache/inventory\_test.go:52--82 TestInventory\_NoOversellUnderConcurrency}
 \end{frame}
 
 \begin{frame}{两个错误码，两套客服话术}
@@ -325,7 +324,7 @@ SRE   & Redis 和 DB 一致吗      & 对账脚本偏差秒数 \\
 \vspace{2mm}
 \small 六条承诺缺一不可。压测脚本与数据在 \texttt{stressTest/} 下，PR 可复核。\\
 /orders/create 单机 50{,}319 RPS、p95 2.33ms ——\textbf{业务承诺的实测证据}。
-\srcnote{stressTest/REPORT.md 链路压测表第 5 行}
+\srcnote{stressTest/REPORT.md 链路压测表 idempotency\_replay 行}
 \end{frame}
 
 \begin{frame}{回到那条 30 分钟的线}
