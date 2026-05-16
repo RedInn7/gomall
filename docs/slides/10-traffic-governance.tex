@@ -1,0 +1,550 @@
+\input{preamble}
+
+\title{流量治理：多层闸门的业务视角}
+\subtitle{TokenBucket / SlidingWindow / CircuitBreaker / 异步削峰 / HTTP cache}
+\author{gomall · 业务侧 deck (v2)}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+% 为什么不能"一刀切"
+% ============================================================
+
+\begin{frame}{流量治理是一个"分层叠加"的工程}
+\begin{itemize}
+  \item 单一阈值挡不住所有场景：
+  \begin{itemize}
+    \item DDoS 几十万 QPS，网关层就要拦；
+    \item 黑产用户 5 QPS 持续刷一天，要在用户维度拦；
+    \item 第三方支付 30s 超时，要在依赖维度拦。
+  \end{itemize}
+  \item gomall 把治理拆成 5 层叠加：\textbf{TokenBucket / SlidingWindow / CircuitBreaker / 异步削峰 / HTTP cache}。
+  \item 每一层解决一个具体的业务问题，组合起来才能扛住大促。
+\end{itemize}
+\srcnote{routes/router.go:22 全局 / :40 HTTP cache / :94 异步入队 / :114 熔断 / :136 滑动窗口}
+\end{frame}
+
+\begin{frame}{gomall 五层闸门的业务定位}
+\begin{tikzpicture}[node distance=4mm and 8mm]
+  \node[node-box] (cli) {Client / CDN};
+  \node[node-box,node-warn,right=of cli] (cdn) {HTTP cache\\卸读流量};
+  \node[node-box,node-warn,right=of cdn] (tb) {TokenBucket\\IP 100 RPS};
+  \node[node-box,below=of tb] (route) {router};
+  \node[node-box,node-warn,below=of route] (sw) {SlidingWindow\\3/s/user};
+  \node[node-box,node-warn,left=of sw] (cb) {CircuitBreaker\\5/10s/3};
+  \node[node-box,node-warn,left=of cb] (mq) {OrderEnqueue\\ticket+MQ};
+  \draw[arrow] (cli) -- (cdn);
+  \draw[arrow] (cdn) -- (tb);
+  \draw[arrow] (tb) -- (route);
+  \draw[arrow] (route) -- (sw);
+  \draw[arrow] (route) -- (cb);
+  \draw[arrow] (route) -- (mq);
+\end{tikzpicture}
+\vspace{2mm}
+\small 五层并不是"流水线串联"，而是按接口按业务分级\textbf{挑选挂载}。
+\srcnote{routes/router.go 全文 mount 点}
+\end{frame}
+
+\begin{frame}{核心 P0 vs 营销 P2：阈值取舍完全不同}
+\begin{tabular}{@{}llll@{}}
+\toprule
+等级 & 接口举例 & 限流姿态 & 熔断 \\
+\midrule
+P0 交易 & /orders/create, /paydown & 不挂用户限流 & 必须有 \\
+P1 读   & /product/show, /carousels & HTTP cache & 不需要 \\
+P2 秒杀 & /skill\_product/skill    & 用户 3/s 激进 & 不需要 \\
+P2 红包 & /redpacket/claim         & 用户 3/s     & 不需要 \\
+P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \textbf{P0 宁可下游慢、不能上游 429}；\textbf{P2 宁可误杀、不能让黑产薅光}。\\
+两类接口同一套阈值是行不通的。
+\srcnote{routes/router.go:22, 39--45, 76--84, 92, 114--119, 136--142}
+\end{frame}
+
+% ============================================================
+\section{第一层：TokenBucket 全局兜底}
+% ============================================================
+
+\begin{frame}{为什么全局还要 100 RPS / 200 burst}
+\begin{itemize}
+  \item gomall 单机基线 \textbf{64{,}254 RPS}（\texttt{/ping}），单 IP 真正用户用不到 1/600。
+  \item 100 RPS / 200 burst 实际拦的是\textbf{爬虫脚本和异常客户端}，不是用户。
+  \item burst 给到 2$\times$ rps 的依据：
+  \begin{itemize}
+    \item 浏览器一个页面 30+ 静态 GET 是常态，瞬时 burst $\approx$ 100；
+    \item burst 留 200 = 让一次正常加载\textbf{绝不触发}。
+  \end{itemize}
+  \item 这层是\textbf{兜底}：业务层的精细限流挂掉时，至少不会被压死。
+\end{itemize}
+\srcnote{routes/router.go:22 TokenBucket(rate.Limit(100), 200)}
+\end{frame}
+
+\begin{frame}{TokenBucket 算法：桶 + 令牌生成 + 漏出}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box,node-warn] (gen) {令牌生成\\100/s 稳定};
+  \node[node-box,right=of gen] (bucket) {桶\\容量 200};
+  \node[node-box,right=of bucket,node-ok] (out) {请求漏出};
+  \node[node-box,below=of bucket,node-bad] (drop) {满了丢弃\\status=70001};
+  \draw[arrow] (gen) -- (bucket);
+  \draw[arrow] (bucket) -- (out);
+  \draw[arrow-bad] (bucket) -- (drop);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 令牌按 \textbf{rps} 匀速生成；桶满则溢出。
+  \item 请求拿到令牌才放行，拿不到立刻返回 70001。
+  \item burst 容量决定能否吸收\textbf{瞬时尖刺}（比如页面首屏并发）。
+\end{itemize}
+\srcnote{middleware/ratelimit.go:22--49 golang.org/x/time/rate 实现}
+\end{frame}
+
+\begin{frame}[fragile]{TokenBucket 中间件实现 (逐行)}
+\begin{lstlisting}[language=Go,firstnumber=22,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{middleware/ratelimit.go:22--49}}]
+func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
+    var mu sync.Mutex
+    limiters := make(map[string]*rate.Limiter)
+    get := func(ip string) *rate.Limiter {
+        mu.Lock(); defer mu.Unlock()
+        if l, ok := limiters[ip]; ok { return l }
+        l := rate.NewLimiter(rps, burst); limiters[ip] = l; return l
+    }
+    return func(c *gin.Context) {
+        if !get(c.ClientIP()).Allow() {
+            c.JSON(200, gin.H{"status": e.ErrRateLimitExceeded})
+            c.Abort(); return
+        }
+        c.Next()
+    }
+}
+\end{lstlisting}
+\scriptsize ① map 按 IP 隔离；② 每 IP 一个 \texttt{rate.Limiter}；③ \texttt{Allow()} 非阻塞；④ 拒了直接 70001；⑤ 进程内 map 是单机代价，多实例要 Redis token bucket。
+\end{frame}
+
+% ============================================================
+\section{第二层：SlidingWindow 用户精确限流}
+% ============================================================
+
+\begin{frame}{秒杀为什么必须用 SlidingWindow}
+\begin{itemize}
+  \item 秒杀的\textbf{业务对手}是脚本，不是用户：
+  \begin{itemize}
+    \item 真人最快点击 \textbf{300--500ms 一次} $\to$ 1s 最多 2--3 次；
+    \item 脚本可以 1s 打 1000 次。
+  \end{itemize}
+  \item 阈值定 \textbf{3/s/用户}：
+  \begin{itemize}
+    \item 真用户：留 50\% 余量给"双击 + 网络重试"；
+    \item 黑产：第 4 次开始 70001 截断。
+  \end{itemize}
+  \item TokenBucket 不够：
+  \begin{itemize}
+    \item 必须按\textbf{用户 ID}（不是 IP）限，否则一个 NAT 出口下所有用户共享一个桶；
+    \item 必须\textbf{分布式精确}，多实例下用 Redis 共享状态。
+  \end{itemize}
+\end{itemize}
+\srcnote{routes/router.go:136--142 SlidingWindow Scope:seckill Limit:3 Window:1s ByUser:true}
+\end{frame}
+
+\begin{frame}{SlidingWindow 在 Redis ZSet 上的实现}
+\begin{tikzpicture}[node distance=6mm and 14mm]
+  \node[node-box] (in) {请求};
+  \node[node-box,node-warn,right=of in] (z1) {ZREMRANGE\\BYSCORE\\0..now-W};
+  \node[node-box,right=of z1] (z2) {ZCARD\\$<$ Limit?};
+  \node[node-box,node-ok,right=of z2] (z3) {ZADD\\now$\to$rand};
+  \node[node-box,node-bad,below=of z2] (no) {0, count\\status=70001};
+  \draw[arrow] (in) -- (z1);
+  \draw[arrow] (z1) -- (z2);
+  \draw[arrow] (z2) -- node[above,font=\tiny]{yes} (z3);
+  \draw[arrow-bad] (z2) -- node[right,font=\tiny]{no} (no);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 每个用户一个 ZSet：\texttt{rl:seckill:user:42}；
+  \item score = 请求时间戳（ms）；member = "时间戳 + 6 字节随机"避免同毫秒冲突；
+  \item 滑动窗口 = 每次请求先\textbf{踢掉 window 之外的旧记录}，再 ZCARD 数当前窗口内的请求数。
+\end{itemize}
+\srcnote{repository/cache/ratelimit.go:18--34 Lua 脚本; middleware/ratelimit.go:69--104 调用方}
+\end{frame}
+
+\begin{frame}[fragile]{SlidingWindow Lua 脚本 (逐行)}
+\begin{lstlisting}[language=LuaRedis,firstnumber=18,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{repository/cache/ratelimit.go:18--34}}]
+local key, window_ms = KEYS[1], tonumber(ARGV[1])
+local limit, now_ms, member = tonumber(ARGV[2]), tonumber(ARGV[3]), ARGV[4]
+redis.call('ZREMRANGEBYSCORE', key, 0, now_ms - window_ms)
+local count = redis.call('ZCARD', key)
+if count >= limit then return {0, count} end
+redis.call('ZADD', key, now_ms, member)
+redis.call('PEXPIRE', key, window_ms)
+return {1, count + 1}
+\end{lstlisting}
+\small 逐行：① 入参 key/窗口/阈值/now/请求 id；② \textbf{ZREMRANGEBYSCORE} 滑掉过期（关键）；③ ZCARD 数当前窗口；④ 超阈值返回 0；⑤ 通过则 ZADD 入；⑥ PEXPIRE 自动回收；⑦ \textbf{整脚本单原子}，无竞态。
+\end{frame}
+
+\begin{frame}{压测实测：3/s/user 阈值校验}
+\textbf{场景}：30 VU × 15s 打 \texttt{/skill\_product/skill}，共用同一 token。
+
+\vspace{2mm}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+指标       & 实测      & 业务期望 \\
+\midrule
+通过请求数 & \textbf{46}     & 15s × 3 = 45 \\
+被限流数   & 781{,}624  & 黑产全拦 \\
+单接口 RPS & 52{,}082   & 与 ping 同量级 \\
+误差       & 2.2\%      & < 5\% \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+
+\small 通过 46$\approx$"真用户 15s 最多秒杀 45 次"；被限 78 万次说明脚本成本被推到客户端，服务端只做一次 Lua RTT。
+\srcnote{stressTest/REPORT.md \S5；stressTest/seckill\_rate\_limit.js}
+\end{frame}
+
+\begin{frame}{红包接口：同一套机制再用一次}
+\begin{itemize}
+  \item \texttt{/redpacket/claim} 也是 \textbf{Limit:3 Window:1s ByUser:true}（router.go:79--84）。
+  \item 与秒杀不同的是：红包额外挂\textbf{幂等}（避免一次抢包重复扣余额）。
+  \item 这印证了一个体例：\textbf{SlidingWindow 是 P2 营销接口的"标配"}，按用户维度反黑产；幂等是 P0/P2 资金链路的"标配"。
+  \item gomall 把这两个中间件设计成可以\textbf{任意组合}，business team 只用写一行声明。
+\end{itemize}
+\srcnote{routes/router.go:79--84 红包抢包；:136--142 秒杀；:92, 94, 114, 120 幂等链}
+\end{frame}
+
+% ============================================================
+\section{第三层：CircuitBreaker 保护慢依赖}
+% ============================================================
+
+\begin{frame}{熔断保护的不是自己，是下游}
+\begin{itemize}
+  \item gomall \texttt{/paydown} 的下游 = 第三方支付（Stripe / 微信 / 支付宝）。
+  \item 这种依赖的\textbf{失败模式}是慢，不是 500：
+  \begin{itemize}
+    \item 正常 RT 200ms；
+    \item 异常时 RT 30s 才超时；
+    \item 不熔断 $\to$ goroutine 堆积 $\to$ 内存爆 $\to$ 自己跟着挂。
+  \end{itemize}
+  \item CircuitBreaker 的业务含义：\textbf{"我代下游回答你不行，免得你等 30 秒"}。
+  \item 三态阈值 \textbf{5 失败 / 10s 等待 / 3 探测}（router.go:114--119）：
+  \begin{itemize}
+    \item 5 = 容忍偶发抖动，不会一抖就跳；
+    \item 10s = 给下游一个完整告警 + 自愈周期；
+    \item 3 = 探测窗口够小，避免 HalfOpen 也被打爆。
+  \end{itemize}
+\end{itemize}
+\srcnote{routes/router.go:114--119 三态阈值}
+\end{frame}
+
+\begin{frame}{CircuitBreaker 三态机}
+\begin{tikzpicture}[node distance=8mm and 16mm]
+  \node[node-state,node-state-normal] (closed) {Closed};
+  \node[node-state,node-state-alert,right=of closed] (open) {Open};
+  \node[node-state,node-state-transition,below=of open] (half) {HalfOpen};
+  \draw[arrow-alert] (closed) -- node[above,font=\tiny]{连续 5 次失败} (open);
+  \draw[arrow] (open) -- node[right,font=\tiny]{10s 后} (half);
+  \draw[arrow] (half) to[bend right=30] node[below,font=\tiny]{3 个都成功} (closed);
+  \draw[arrow-alert] (half) to[bend left=20] node[right,font=\tiny]{任一失败} (open);
+\end{tikzpicture}
+\vspace{1mm}
+\small \textbf{Closed}：放行所有，连续 5 次失败 $\to$ Open。
+\textbf{Open}：直接返回 70002，10s 后试探。
+\textbf{HalfOpen}：放 3 个探测，全成功 $\to$ Closed；任一失败 $\to$ Open。
+\srcnote{middleware/circuitbreaker.go:76--128 allow + report}
+\end{frame}
+
+\begin{frame}[fragile]{CircuitBreaker.allow 状态转移 (逐行)}
+\begin{lstlisting}[language=Go,firstnumber=76,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{middleware/circuitbreaker.go:76--106 allow}}]
+func (cb *circuitBreaker) allow() error {
+    switch circuitState(cb.state.Load()) {
+    case stateClosed: return nil                          // 1) 关闭态零开销
+    case stateOpen:
+        if time.Now().UnixNano()-cb.openedAt.Load() < int64(cb.opt.OpenTimeout) {
+            return errCircuitOpen                         // 2) Open 期间一律拒
+        }
+        cb.mu.Lock(); defer cb.mu.Unlock()
+        if circuitState(cb.state.Load()) == stateOpen {   // 3) 锁内 double-check
+            cb.state.Store(int32(stateHalfOpen))
+            cb.halfOpenReq.Store(0)
+        }
+        fallthrough                                       // 4) 进入 HalfOpen
+    case stateHalfOpen:
+        if cb.halfOpenReq.Add(1) > cb.opt.HalfOpenMaxReq {
+            return errCircuitOpen                         // 5) 探测超限退回
+        }
+        return nil
+    }
+    return nil
+}
+\end{lstlisting}
+\scriptsize ① Closed 仅 atomic load；② Open 内不查时间就拒；③ Open$\to$HalfOpen 锁内 double-check；④ HalfOpen 用原子 Add 限并发；⑤ 热路径无 mutex。
+\end{frame}
+
+\begin{frame}[fragile]{report：决定下一刻是 Closed 还是 Open}
+\begin{lstlisting}[language=Go,firstnumber=108,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{middleware/circuitbreaker.go:108--128 report}}]
+func (cb *circuitBreaker) report(failed bool) {
+    switch circuitState(cb.state.Load()) {
+    case stateClosed:
+        if failed {
+            if cb.failures.Add(1) >= cb.opt.FailureThreshold {
+                cb.tripOpen()             // 连续失败到阈值
+            }
+        } else { cb.failures.Store(0) }   // 成功重置
+    case stateHalfOpen:
+        if failed { cb.tripOpen()         // 任一失败 -> Open
+        } else if cb.halfOpenReq.Load() >= cb.opt.HalfOpenMaxReq {
+            cb.state.Store(int32(stateClosed)) // 全成功 -> Closed
+            cb.failures.Store(0)
+        }
+    }
+}
+\end{lstlisting}
+\scriptsize ① Closed 失败计数；② 成功重置避免偶发抖动跳闸；③ HalfOpen \textbf{非对称}——任一失败立即回 Open，必须全成功才回 Closed；④ "信任成本"对资金链路合适：宁保守不再打死下游。
+\end{frame}
+
+\begin{frame}{熔断 + 幂等的三角配对：Open 返回 200 + 70002}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box] (cli) {客户端};
+  \node[node-box,node-warn,right=of cli] (cb) {CircuitBreaker};
+  \node[node-box,node-ok,right=of cb] (id) {Idempotency};
+  \node[node-box,below=of id] (pay) {Stripe / 微信};
+  \draw[arrow] (cli) -- (cb);
+  \draw[arrow] (cb) -- (id);
+  \draw[arrow] (id) -- (pay);
+  \draw[arrow-bad,bend left=30] (cb.south) to node[below,font=\tiny]{Open: 200+70002} (cli.south);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item Open 返回 \textbf{200 + status=70002}（不是 5xx）：app 端老网关吞不了 5xx，统一业务码客户端只用一套 switch。
+  \item 客户端拿 70002 指数退避（1s/2s/4s）；重试必须带原 Idempotency-Key。
+  \item paydown 同时挂 CB + Idempotency 不是巧合：缺一边都不行。
+\end{itemize}
+\srcnote{routes/router.go:114--121；middleware/circuitbreaker.go:57--65；pkg/e/code.go:58}
+\end{frame}
+
+% ============================================================
+\section{第四层：异步下单削峰}
+% ============================================================
+
+\begin{frame}{双 11 0 点：100k QPS 怎么扛}
+\begin{itemize}
+  \item 同步下单链路：HTTP $\to$ ReserveStock $\to$ INSERT order $\to$ COMMIT $\to$ 回客户端，p99 大约 50--100ms。
+  \item 100k QPS $\times$ 100ms = \textbf{1 万并发}进 MySQL，连接池打爆。
+  \item gomall 的方案：把"DB 落库"从同步链路里拆出来。
+  \begin{enumerate}
+    \item 同步部分：reserve 库存 + 写 ticket + 投 MQ $\to$ 返回 ticket；
+    \item 异步部分：consumer 慢慢消费 MQ $\to$ INSERT order $\to$ 回写 ticket 状态；
+    \item 客户端：拿 ticket 轮询 \texttt{/orders/status}。
+  \end{enumerate}
+  \item 收益：DB 压力从"瞬时尖刺"变成"恒定 1k QPS 平流"。
+\end{itemize}
+\srcnote{service/order\_async.go:119--172 OrderEnqueue}
+\end{frame}
+
+\begin{frame}{同步下单 vs 异步 ticket 链路}
+\begin{tikzpicture}[node distance=4mm and 10mm]
+  \node[node-box] (c1) {Client};
+  \node[node-box,node-warn,right=of c1] (h1) {HTTP};
+  \node[node-box,right=of h1] (db1) {Reserve+INSERT};
+  \node[font=\tiny,below=2mm of db1] (s1) {同步：p99 100ms};
+
+  \node[node-box,below=12mm of c1] (c2) {Client};
+  \node[node-box,node-ok,right=of c2] (h2) {HTTP};
+  \node[node-box,right=of h2] (mq) {Reserve+Ticket+MQ};
+  \node[node-box,node-warn,below=4mm of mq] (cons) {Consumer\\慢慢落库};
+  \node[node-box,below=4mm of h2] (poll) {GET status\\轮询 ticket};
+  \draw[arrow] (c1) -- (h1); \draw[arrow] (h1) -- (db1);
+  \draw[arrow] (c2) -- (h2); \draw[arrow] (h2) -- (mq);
+  \draw[arrow-async] (mq) -- (cons);
+  \draw[arrow] (c2) to[bend right=30] (poll);
+\end{tikzpicture}
+\vspace{2mm}
+\small 上：所有客户端被 DB 阻塞；下：客户端 5ms 拿到 ticket，DB 压力被 MQ 缓冲。
+\srcnote{api 层：EnqueueOrderHandler + OrderStatusHandler; service/order\_async.go}
+\end{frame}
+
+\begin{frame}[fragile]{OrderEnqueue：核心 12 行}
+\begin{lstlisting}[language=Go,firstnumber=119,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{service/order\_async.go:119--172}}]
+func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
+    u, _ := ctl.GetUserInfo(ctx)
+    if err := cache.ReserveStock(ctx, req.ProductID, req.Num); err != nil {
+        return nil, err                                  // 1) 库存预扣
+    }
+    ticket := fmt.Sprintf("%d", snowflake.GenSnowflakeID()) // 2) ticket
+    if err := defaultTicketStore.Put(ctx, ticket,
+        OrderTicketStatus{Status: "pending"}, time.Hour); err != nil {
+        _ = cache.ReleaseReservation(...); return nil, err   // 3) 写 Redis
+    }
+    body, _ := json.Marshal(AsyncOrderTask{Ticket: ticket, ...})
+    if err := defaultAsyncProducer.Publish(ctx, body); err != nil {
+        _ = cache.ReleaseReservation(...); return nil, err   // 4) 投 MQ
+    }
+    return OrderEnqueueResp{Ticket: ticket, Status: "pending"}, nil
+}
+\end{lstlisting}
+\scriptsize ① 库存预扣前置，不足直接拒；② snowflake 生成 ticket 无 DB；③ Redis pending 给前端轮询；④ 任一步失败 \textbf{ReleaseReservation} 回滚库存；⑤ 投递成功才算入队。
+\end{frame}
+
+% ============================================================
+\section{第五层：HTTP cache 把读路径 CDN 化}
+% ============================================================
+
+\begin{frame}{读流量的最优解：根本不到 gomall}
+\begin{itemize}
+  \item P1 P3 读接口（\texttt{/product/show}, \texttt{/carousels}, \texttt{/category/list}）的数据更新频率\textbf{远低于查询频率}。
+  \item 让浏览器 / CDN 缓存代答：
+  \begin{itemize}
+    \item 浏览器：直接返回 304 Not Modified（不传 body）；
+    \item CDN：命中缓存（不到 gomall）。
+  \end{itemize}
+  \item gomall 实现：\texttt{HTTPCache(maxAge)} 中间件统一发 ETag + Cache-Control。
+\end{itemize}
+\srcnote{middleware/httpcache.go:47--100 HTTPCache; routes/router.go:39--45 挂载点}
+\end{frame}
+
+\begin{frame}{HTTP cache 的三种命中}
+\begin{tikzpicture}[node distance=6mm and 12mm]
+  \node[node-box] (c) {Client};
+  \node[node-box,node-ok,right=of c] (cdn) {CDN};
+  \node[node-box,node-warn,right=of cdn] (gw) {gomall};
+  \node[node-box,below=4mm of gw] (db) {DB};
+  \draw[arrow,bend left=40] (c.north) to node[above,font=\tiny]{1.强缓存命中 (max-age)} (c.north);
+  \draw[arrow] (c) -- node[above,font=\tiny]{2.协商缓存} (cdn);
+  \draw[arrow-async] (cdn) -- node[above,font=\tiny]{3.回源 ETag} (gw);
+  \draw[arrow] (gw) -- (db);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{强缓存}（Cache-Control: max-age=60）：浏览器本地命中，0 RTT；
+  \item \textbf{协商缓存}（ETag + If-None-Match）：到 CDN，命中返回 304，无 body；
+  \item \textbf{回源}：CDN 不命中，回 gomall；ETag 用 SHA-256 前 16 字节算。
+\end{itemize}
+\srcnote{middleware/httpcache.go:78--98 ETag 协商；routes/router.go:39 product/list max-age=30}
+\end{frame}
+
+\begin{frame}{各接口的 max-age 定多少}
+\begin{tabular}{@{}lll@{}}
+\toprule
+接口 & max-age & 业务依据 \\
+\midrule
+/product/list   & 30s  & 价格 / 库存可能变化，不能太长 \\
+/product/show   & 60s  & 商品详情更稳定 \\
+/category/list  & 300s & 分类几乎不变 \\
+/carousels      & 300s & 运营手动调，时效性弱 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small max-age 的\textbf{业务取舍}：太长会让"改价 / 下架"延迟生效，太短卸不了流量。\\
+300s = 运营改完最多 5min 生效，可接受；30s = 库存接近灵敏阈值的折中。
+\srcnote{routes/router.go:39--45 各路由的 maxAge 参数}
+\end{frame}
+
+% ============================================================
+% 业务连续性：阈值之外的事
+% ============================================================
+
+\begin{frame}{多层流控漏斗：DDoS $\to$ IP $\to$ 用户 $\to$ 业务}
+\begin{tikzpicture}[node distance=3mm]
+  \node[node-box,node-warn] (l1) {L1 网络：CDN / Anti-DDoS（云厂商）};
+  \node[node-box,node-warn,below=of l1] (l2) {L2 网关：IP TokenBucket（gomall）};
+  \node[node-box,node-warn,below=of l2] (l3) {L3 业务：用户 SlidingWindow（gomall）};
+  \node[node-box,node-warn,below=of l3] (l4) {L4 风控：设备指纹 / 行为模型（外部）};
+  \draw[arrow] (l1) -- (l2);
+  \draw[arrow] (l2) -- (l3);
+  \draw[arrow] (l3) -- (l4);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item gomall 自己负责 L2 + L3，挡住\textbf{绝大部分业务异常流量}。
+  \item L1 / L4 通常由云厂商和独立风控团队提供，不自己造。
+\end{itemize}
+\srcnote{routes/router.go:22 (L2); :136--142 (L3)}
+\end{frame}
+
+\begin{frame}{业务码 70001 / 70002：客服话术对照}
+\begin{tabular}{@{}lll@{}}
+\toprule
+业务码 & 业务含义 & 客服话术 \\
+\midrule
+70001 & 限流命中    & "活动太火爆，请稍后重试" \\
+70002 & 熔断开启    & "支付暂忙，1 分钟后再试" \\
+60002 & 幂等命中    & "您已下单成功，无需重复" \\
+50001 & 库存不足    & "已售罄" \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small 同样是"请稍后"，70001 客户端重试就能过、70002 必须等下游自愈、60002 是用户自己重复了。\\
+区分话术比统一一句"系统繁忙"对用户更友好，对客服也更省事。
+\srcnote{pkg/e/code.go:57--58 业务码; pkg/e/msg.go:51--52 消息}
+\end{frame}
+
+\begin{frame}{error budget：用数字管"什么时候停发版"}
+\begin{itemize}
+  \item P0 SLO=99.95\% $\to$ 月度\textbf{宕机预算 $\approx$ 21min}。
+  \item 烧 1/3（7min）减发版；烧 2/3（14min）冻结非紧急；全烧光 $\to$ 下月转"稳定性 only"。
+  \item 预算用 SLI 推：限流命中率 / 熔断打开时间 / 5xx 比例累加成"不可用时间"。
+\end{itemize}
+\keypoint{流量治理不是\textbf{一个机制}，是\textbf{五个机制按业务等级组合}。\\
+每个阈值都要能用业务语言解释清楚。}
+\srcnote{Google SRE error budget 原则；stressTest/REPORT.md 链路稳定性数据}
+\end{frame}
+
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{面试 Q\&A (1/2)}
+\textbf{Q1}：100 RPS / 200 burst 这两个数字怎么定？\\
+\hspace{4mm}\small A：基线 64k RPS / 单 IP 用不到 1/600，100 留给爬虫脚本做兜底；burst 200 容纳一次首屏并发 100+，不会误伤真用户。
+
+\vspace{2mm}
+\textbf{Q2}：为什么秒杀用 SlidingWindow 不用 TokenBucket？\\
+\hspace{4mm}\small A：① 必须按用户而不是 IP，否则 NAT 出口全员共享；② 必须分布式精确，多实例下用 Redis 共享状态；③ ZSet 比 fixed-window 没有窗口边界可以利用。
+
+\vspace{2mm}
+\textbf{Q3}：CircuitBreaker 5/10s/3 三个数字有什么讲究？\\
+\hspace{4mm}\small A：5 = 容忍偶发抖动不一抖就跳；10s = 给下游一次完整告警+自愈周期；3 = HalfOpen 探测够小，避免再次打死下游。
+\end{frame}
+
+\begin{frame}{面试 Q\&A (2/2)}
+\textbf{Q4}：异步下单是不是会丢单？\\
+\hspace{4mm}\small A：不会。库存先 Reserve（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。
+
+\vspace{2mm}
+\textbf{Q5}：为什么熔断返回 200 不返回 503？\\
+\hspace{4mm}\small A：app 端老网关不能优雅处理 5xx；统一走业务码（70002）= 客户端只用维护一套 status switch；监控不要按 4xx/5xx 算错误率，必须看 status。
+
+\vspace{2mm}
+\textbf{Q6}：HTTP cache 的 max-age 怎么定？\\
+\hspace{4mm}\small A：取决于"改价 / 下架"的最大可接受延迟。商品详情 60s，分类 / 轮播 300s，列表 30s（库存敏感）。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\footnotesize
+\begin{description}
+  \item[router 挂载点] \srcnote{routes/router.go:22, 39--45, 79--84, 94, 114--121, 136--142}
+  \item[TokenBucket] \srcnote{middleware/ratelimit.go:22--49}
+  \item[SlidingWindow] \srcnote{middleware/ratelimit.go:59--106 + repository/cache/ratelimit.go:18--34}
+  \item[CircuitBreaker] \srcnote{middleware/circuitbreaker.go:44--136}
+  \item[HTTPCache] \srcnote{middleware/httpcache.go:47--100}
+  \item[OrderEnqueue] \srcnote{service/order\_async.go:119--172}
+  \item[业务码] \srcnote{pkg/e/code.go:57--58 / msg.go:51--52}
+  \item[压测报告] \srcnote{stressTest/REPORT.md \S 1, \S 5}
+\end{description}
+\keypoint{配套技术 deck：05-ratelimit-circuit-breaker.tex（机制视角）}
+\end{frame}
+
+\end{document}
