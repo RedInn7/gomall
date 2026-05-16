@@ -1,0 +1,490 @@
+\input{preamble}
+
+\title{订单生命周期与履约}
+\subtitle{3 态状态机 + RMQ/Cron 双保险 + 履约缺口路线图}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{订单状态机的现状与差距}
+% ============================================================
+
+\begin{frame}{完整电商：7 态状态机}
+\begin{tikzpicture}[node distance=4mm and 6mm,every node/.style={font=\scriptsize}]
+  \node[node-state,node-state-normal]                 (c)   {Created};
+  \node[node-state,node-state-transition,right=of c]  (p)   {Paid};
+  \node[node-state,node-state-transition,right=of p]  (pk)  {Picking};
+  \node[node-state,node-state-transition,right=of pk] (sh)  {Shipped};
+  \node[node-state,node-state-normal,right=of sh]     (dv)  {Delivered};
+  \node[node-state,node-state-alert,below=of pk]      (cl)  {Closed};
+  \node[node-state,node-state-alert,below=of sh]      (rf)  {Refunded};
+  \draw[arrow] (c) -- (p);
+  \draw[arrow] (p) -- (pk);
+  \draw[arrow] (pk) -- (sh);
+  \draw[arrow] (sh) -- (dv);
+  \draw[arrow-alert] (c) -- (cl);
+  \draw[arrow-alert] (p) -- (rf);
+  \draw[arrow-alert] (dv) -- (rf);
+\end{tikzpicture}
+\vspace{3mm}
+\small 京东 / 拼多多 / 天猫上线最少 7 个稳定状态，加上"部分发货 / 部分退款"扩展到 12--16 态。\\
+真正复杂的不是状态本身，而是\textbf{状态之间的转移谁来推、靠什么消息触发、对账怎么做}。
+\srcnote{对照《电商系统设计》(王新栋) 第 4 章订单状态机；京东开放平台订单 API 状态枚举}
+\end{frame}
+
+\begin{frame}{gomall 现状：只有 3 态闭环}
+\begin{tikzpicture}[node distance=8mm and 14mm,every node/.style={font=\scriptsize}]
+  \node[node-state,node-state-normal]                (u)  {UnPaid\\=1};
+  \node[node-state,node-state-transition,right=of u] (p)  {Paid\\=2};
+  \node[node-state,node-state-alert,below=of p]      (cl) {Cancelled\\=3};
+  \node[node-state,node-state-alert,right=of cl]     (rf) {Refunded\\=4};
+  \draw[arrow] (u) -- node[above,font=\tiny]{paydown} (p);
+  \draw[arrow-alert] (u) -- node[left,font=\tiny]{30min / cron / 手动}  (cl);
+  \draw[arrow-async] (p) -- node[above,font=\tiny]{尚无 handler} (rf);
+\end{tikzpicture}
+
+\small \texttt{consts/order.go:11--16} 定义了 UnPaid / Paid / Cancelled / Refunded 四个枚举。\textbf{有代码推动}的转移只有两条：UnPaid$\to$Paid (paydown) 和 UnPaid$\to$Cancelled (关单)。\texttt{Refunded} 是占位，目前没有任何接口能把订单写到这个状态。
+\srcnote{consts/order.go:11--16 状态枚举；routes/router.go:114--121 paydown 入口}
+\end{frame}
+
+\begin{frame}{两套常量并存的历史包袱}
+\begin{tikzpicture}[node distance=2mm and 8mm,every node/.style={font=\tiny}]
+  \node[node-box,minimum width=30mm,fill=cMute]            (a) {OrderTypeXxx (=1..4)\\下单 / 列表展示用};
+  \node[node-box,minimum width=30mm,fill=cMute,right=of a] (b) {UnPaid/Paid/Cancelled (=1..4)\\关单 / 支付状态机用};
+  \draw[arrow-async] (a) -- node[above]{语义偏移} (b);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \texttt{OrderTypeUnPaid=1, PendingShipping=2, Shipping=3, Receipt=4} —— 老的"订单类型"。
+  \item \texttt{UnPaid=1, Paid=2, Cancelled=3, Refunded=4} —— 新的状态机。
+  \item 两者数字\textbf{1 重合 (=UnPaid)、2--4 各异}，DB 字段都叫 \texttt{type}。读老订单的代码会把 \texttt{Paid=2} 当成 \texttt{PendingShipping=2}，业务语义没冲突纯属巧合。
+  \item 历史包袱必须靠一次性 \textbf{数据治理 PR} 来收口，靠新建状态机表 + 单向迁移。
+\end{itemize}
+\srcnote{consts/order.go:3--16 两组并列枚举}
+\end{frame}
+
+\begin{frame}{从"消息能不能送达"理解状态机难点}
+\begin{itemize}
+  \item Created$\to$Paid：依赖\textbf{支付回调}。网络抖一下回调就丢，需要查询接口轮询。
+  \item Paid$\to$Picking：依赖\textbf{WMS 拣货事件}。WMS 是另一套系统，得对账。
+  \item Picking$\to$Shipped：\textbf{物流接单接口}。顺丰 / 京东物流各一套 webhook。
+  \item Shipped$\to$Delivered：\textbf{快递公司签收回执}，延迟 0--72h，需 fallback 轮询。
+\end{itemize}
+\keypoint{核心难点\textbf{不是状态多}，而是每一次转移都跨系统、跨网络、跨组织边界。}
+\srcnote{对照美团技术博客 2021《订单状态机的演进》}
+\end{frame}
+
+% ============================================================
+\section{30 分钟关单 + RMQ/Cron 双保险}
+% ============================================================
+
+\begin{frame}{30 分钟从哪定}
+\begin{tabular}{@{}lll@{}}
+\toprule
+方案 & 用户感受 & 业务后果 \\
+\midrule
+5 分钟    & 切卡 / 等短信都不够   & 商家投诉"刚下单就被取消"，付款转化掉 10\%+ \\
+15 分钟   & 多数人够用            & 高峰仍有 5\%+ 误关，弱网用户最先被牺牲 \\
+\textbf{30 分钟} & 含切卡 + 短信冗余  & 大促锁单可控，商家 / 运营都能接受 \\
+60 分钟   & 用户不抱怨            & 双 11 锁 1 小时，爆款一直显示"已售罄" \\
+24 小时   & 客服零投诉            & 库存周转崩盘，恶意囤货成本为零 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 商家投诉曲线和库存周转曲线是\textbf{反向的}，30 分钟是二者交点附近的工业经验值。\\
+京东 30min / 天猫 30min--1h / 拼多多 15min —— 越是高频低价类目越短。
+\srcnote{repository/rabbitmq/order\_delay.go:21--22 OrderCancelDelay = 30 * time.Minute}
+\end{frame}
+
+\begin{frame}{三处时长不一致 (一个待清理的债)}
+\begin{tabular}{@{}lll@{}}
+\toprule
+出现位置 & 数值 & 用途 \\
+\midrule
+\texttt{rabbitmq/order\_delay.go:22} & \textbf{30 min} & TTL 延迟队列 (主) \\
+\texttt{service/order\_task.go:16}   & \textbf{15 min} & Cron 兜底 (副) \\
+\texttt{service/order.go:89}         & \textbf{15 min} & 旧 Redis ZSet (历史残留) \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item Cron 用 15min 是\textbf{故意提前于 RMQ}：让兜底比主路径早动手，避免两路同时执行的并发去重压力。
+  \item Redis ZSet 是早期实现，被 RMQ 替换后忘删，目前\textbf{只写不读}，等下一次清理 PR。
+  \item 业务侧只关心 \textbf{用户实际看到 30 分钟}；技术侧三处数字的语义必须文档化。
+\end{itemize}
+\srcnote{repository/rabbitmq/order\_delay.go:22 \quad service/order\_task.go:16 \quad service/order.go:89}
+\end{frame}
+
+\begin{frame}{单一机制都不可靠}
+\begin{tabular}{@{}lll@{}}
+\toprule
+方案 & 致命弱点 & 何时露馅 \\
+\midrule
+只用 RMQ 延迟队列  & MQ 宕机消息全丢      & 机房断网 / RabbitMQ 重启 \\
+只用 Cron 5min    & 高峰锁单累积 5--15min & 双 11 库存周转跟不上 \\
+只用 Redis ZSet   & Redis 内存满 evict   & 6M 历史订单一次性扫描 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item RMQ 是\textbf{时效快}（30min 准点到秒级）、\textbf{失败盲}（消息丢就是丢）。
+  \item Cron 是\textbf{时效粗}（5min 步进）、\textbf{保证强}（DB 全表扫一定能扫到）。
+  \item 两个机制\textbf{失败模式互不相关}，组合后整体可靠性 $\approx 1 - p_{rmq} \cdot p_{cron}$。
+\end{itemize}
+\srcnote{cmd/main.go:54--62 tryInitRabbitMQ 设计意图}
+\end{frame}
+
+\begin{frame}{时间线：双保险怎么协同}
+\begin{tikzpicture}[every node/.style={font=\scriptsize}]
+  \draw[arrow] (0,0) -- (13,0);
+  \foreach \x/\lbl in {0/T0,2/+5min,4/+10min,5.5/+15min,8/+20min,11/+30min,12.5/+35min}{
+    \draw[cGray] (\x,-0.08) -- (\x,0.08);
+    \node[below=1mm] at (\x,-0.08) {\lbl};
+  }
+  \node[node-box,minimum width=14mm,fill=cMain!10,above=4mm of {(0,0)}]    (a)  {下单};
+  \node[node-box,minimum width=18mm,fill=cWarn!15,above=18mm of {(5.5,0)}] (b)  {Cron 第 3 次扫到\\($\geq$15min)};
+  \node[node-box,minimum width=14mm,fill=cAccent!18,above=4mm of {(11,0)}] (c)  {RMQ TTL\\到期};
+  \draw[arrow-async] (a.south) -- ++(0,-0.4) -| (5.5,0);
+  \draw[arrow-async] (b.south) -- (5.5,0);
+  \draw[arrow-async] (c.south) -- (11,0);
+\end{tikzpicture}
+\begin{itemize}
+  \item 正常路径：T+30min RMQ 投递死信 $\to$ \texttt{CancelUnpaidOrder} 关单。
+  \item RMQ 失联：T+15min Cron 已关单 (\texttt{type=Cancelled}, RowsAffected=1)。
+  \item RMQ 恢复后晚到的死信：\texttt{CloseOrderWithCheck} 因 \texttt{type$\neq$UnPaid} no-op。
+\end{itemize}
+\srcnote{service/order\_task.go:14--48 Cron；rabbitmq/order\_delay.go:24--56 RMQ}
+\end{frame}
+
+\begin{frame}[fragile]{RMQ 拓扑声明 (TTL + 死信)}
+\begin{lstlisting}[language=Go,firstnumber=34,
+  caption={\srcnote{repository/rabbitmq/order\_delay.go:34--55}}]
+ch.ExchangeDeclare(orderDelayExchange, "direct", true, ...)
+ch.ExchangeDeclare(orderDeadExchange,  "direct", true, ...)
+
+_, err = ch.QueueDeclare(orderDelayQueue, true, false, false, false,
+    amqp.Table{
+        "x-dead-letter-exchange":    orderDeadExchange,
+        "x-dead-letter-routing-key": orderDeadRouting,
+    })
+ch.QueueBind(orderDelayQueue, "", orderDelayExchange, false, nil)
+ch.QueueDeclare(orderDeadQueue, true, false, false, false, nil)
+ch.QueueBind(orderDeadQueue, orderDeadRouting, orderDeadExchange, ...)
+\end{lstlisting}
+{\scriptsize
+L34--35: 两个 direct 交换机，一个收延迟消息、一个收死信。\quad
+L37--41: \texttt{x-dead-letter-exchange} 让 \texttt{delayQueue} 里 TTL 到期的消息自动转投死信交换机 —— TTL 延迟队列的标准做法。\quad
+L43--45: 消费者只盯 \texttt{deadQueue}，业务代码不直接接触 TTL 过程。}
+\end{frame}
+
+\begin{frame}[fragile]{Cron 兜底主循环}
+\begin{lstlisting}[language=Go,firstnumber=14,
+  caption={\srcnote{service/order\_task.go:14--47}}]
+func (s *OrderTaskService) RunOrderTimeoutCheck() {
+    orders, _ := baseDao.GetTimeoutOrders(15, 100)
+    for _, order := range orders {
+        baseDao.DB.Transaction(func(tx *gorm.DB) error {
+            ok, _ := txOrderDao.CloseOrderWithCheck(order.OrderNum)
+            if !ok { return errors.New("关单失败") }
+            ok, _ = txProductDao.RollbackStock(
+                order.ProductID, order.Num)
+            return nil
+        })
+    }
+}
+\end{lstlisting}
+{\scriptsize
+L16: \texttt{GetTimeoutOrders(15, 100)} 一次取 100 条，防 cron 单次跑过头。\quad
+L18: 每条订单独立事务，一条失败不连坐其他。\quad
+L20: \texttt{CloseOrderWithCheck} \texttt{WHERE type=UnPaid} 乐观锁，已被 RMQ 关掉者 \texttt{RowsAffected=0}。}
+\end{frame}
+
+\begin{frame}[fragile]{真实 bug：cron 表达式打错 60 倍}
+\begin{lstlisting}[language=Go,firstnumber=16,
+  caption={\srcnote{initialize/cron.go:16}}]
+_, err := c.AddFunc("* */5 * * * *", func() { ... })
+\end{lstlisting}
+\begin{itemize}
+  \item \texttt{robfig/cron} 6 段格式：\texttt{秒 分 时 日 月 周}。第一段 \texttt{*} 表示\textbf{每秒都跑}。
+  \item 实际行为：\textbf{每 5 分钟里有 60 秒在跑}，触发 60 次。正确写法 \texttt{"0 */5 * * * *"}。
+  \item 同文件 \texttt{cron.go:29} 红包任务写对了，可见复制改写时漏了一个 0。
+\end{itemize}
+\keypoint{cron 任务必须有\textbf{执行次数监控}：今天比昨天多跑 60 倍，告警立即响。}
+\srcnote{initialize/cron.go:16 vs cron.go:29 同文件对照}
+\end{frame}
+
+% ============================================================
+\section{幂等关单与优雅降级}
+% ============================================================
+
+\begin{frame}{四个调用方都可能并发杀同一单}
+\begin{tikzpicture}[node distance=6mm and 14mm,every node/.style={font=\scriptsize}]
+  \node[node-box,fill=cMute]                  (rmq)  {RMQ 死信消费者\\\tiny T+30min};
+  \node[node-box,fill=cMute,below=of rmq]     (cron) {Cron 5min 兜底\\\tiny T+15..30min};
+  \node[node-box,fill=cMute,right=2.4cm of rmq]  (cs)   {客服后台\\\tiny T+任意};
+  \node[node-box,fill=cMute,right=2.4cm of cron] (usr)  {用户主动取消\\\tiny T+任意};
+  \node[node-state,node-state-transition,right=2cm of $(cs)!0.5!(usr)$] (idem) {幂等点\\CloseOrder\\WithCheck};
+  \draw[arrow-async] (rmq) -- (idem);
+  \draw[arrow-async] (cron) -- (idem);
+  \draw[arrow-async] (cs) -- (idem);
+  \draw[arrow-async] (usr) -- (idem);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item RMQ + Cron 双保险已经天然导致\textbf{至少 2 个并发关单调用}。
+  \item 客服处理工单时也可能手动取消；产品形态上未来还会加用户主动"取消订单"按钮。
+  \item 任意一对调用并发命中，幂等点必须收敛 —— \textbf{有且只有一次}做"真关单 + 释放预占 + 发 outbox"的副作用。
+\end{itemize}
+\srcnote{service/order\_cancel.go:14--63 幂等实现；rabbitmq/order\_delay.go:96 RMQ requeue 一次}
+\end{frame}
+
+\begin{frame}[fragile]{CancelUnpaidOrder 主体 (幂等 + Saga + outbox)}
+\begin{lstlisting}[language=Go,firstnumber=19,
+  caption={\srcnote{service/order\_cancel.go:19--63}}]
+func CancelUnpaidOrder(orderNum uint64) error {
+    order, _ := baseDao.GetOrderByOrderNum(orderNum)
+    if order == nil { return nil }                  // (1)
+    var closed bool
+    baseDao.DB.Transaction(func(tx *gorm.DB) error {
+        ok, _ := dao.NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum) // (2)
+        if !ok { return nil }                       // (3)
+        closed = true
+        return dao.NewOutboxDaoByDB(tx).Insert(...)
+    })
+    if closed { cache.ReleaseReservation(...) }     // (4)
+    return nil
+}
+\end{lstlisting}
+{\scriptsize
+(1) 不存在 no-op。\quad (2) \texttt{UPDATE WHERE type=UnPaid} 乐观锁。\quad (3) \texttt{RowsAffected=0} 时不发 outbox。\quad (4) Saga：库存退回 available。}
+\end{frame}
+
+\begin{frame}{为什么 outbox 必须在事务里}
+\begin{tikzpicture}[node distance=6mm and 12mm,every node/.style={font=\scriptsize}]
+  \node[node-box,fill=cMain!10]                       (db) {DB tx 提交\\order.type=Cancelled};
+  \node[node-box,fill=cMain!10,right=of db]           (ob) {outbox 行\\order.cancelled};
+  \node[node-box,fill=cWarn!15,right=of ob]           (pub) {Publisher\\异步抓取};
+  \node[node-box,fill=cOK!10,right=of pub]            (down) {下游消费\\(订阅 / 推送 / BI)};
+  \draw[arrow] (db) -- node[above,font=\tiny]{同事务} (ob);
+  \draw[arrow-async] (ob) -- (pub);
+  \draw[arrow] (pub) -- (down);
+\end{tikzpicture}
+\begin{itemize}
+  \item 如果用 \texttt{tx.Commit() $\to$ MQ.Publish()} 两步，第二步失败会丢事件。
+  \item Outbox 让事件\textbf{和业务数据同生死}：DB 提交即事件持久化，Publisher 异步搬运。
+  \item 这就是 \texttt{order\_cancel.go:40--50} 把 \texttt{OutboxDao.Insert} 放在 \texttt{Transaction} 回调里的原因。
+\end{itemize}
+\srcnote{service/order\_cancel.go:40--50；配套 deck 04-outbox-saga.tex}
+\end{frame}
+
+\begin{frame}[fragile]{已知缺陷：orders/delete 旁路}
+\begin{lstlisting}[language=Go,firstnumber=99,
+  caption={\srcnote{routes/router.go:99 + service/order.go:185}}]
+authed.POST("orders/delete", api.DeleteOrderHandler())
+// service/order.go:185
+err = db.DeleteOrderById(req.OrderId, u.Id)   // 物理删除，无任何检查
+\end{lstlisting}
+\begin{itemize}
+  \item 当前实现：\textbf{物理删除}订单行，不走 \texttt{CancelUnpaidOrder}。
+  \item 后果一：\textbf{库存泄漏} —— Redis \texttt{reserved} 没释放。
+  \item 后果二：\textbf{outbox 漏写} —— 下游 BI / 退款看不到这单。
+  \item 后果三：\textbf{资金已扣}的 Paid 单也能被删，账实分离。
+\end{itemize}
+\keypoint{修复：\texttt{DeleteOrder} 内部转调 \texttt{CancelUnpaidOrder}；对 Paid 单返 4xx 引导走退款。}
+\srcnote{routes/router.go:99 + service/order.go:185 缺补偿}
+\end{frame}
+
+\begin{frame}[fragile]{tryInitRabbitMQ 静默降级}
+\begin{lstlisting}[language=Go,firstnumber=54,
+  caption={\srcnote{cmd/main.go:54--62}}]
+func tryInitRabbitMQ() {
+    defer func() {
+        if r := recover(); r != nil {
+            util.LogrusObj.Warnf("RMQ init 失败: %v", r)
+        }
+    }()
+    rabbitmq.InitRabbitMQ()
+    initialize.InitOrderDelayConsumer()
+}
+\end{lstlisting}
+\small 启动顺序 \texttt{InitCron() $\to$ tryInitRabbitMQ()}：\textbf{Cron 先就位}。RMQ 连不上 $\to$ recover 吞 panic $\to$ HTTP 服务正常起，30min 主路径暂停但 15min Cron 照常每 5min 扫一次。用户感受：关单时间从 30min 漂到 15--20min，提前关不算 bug。
+\srcnote{cmd/main.go:35--37 启动顺序确保 Cron 在 RMQ 之前}
+\end{frame}
+
+\begin{frame}{两套基础设施挂掉后的影响矩阵}
+\begin{tabular}{@{}llll@{}}
+\toprule
+RMQ & Cron & 用户感受 & 数据风险 \\
+\midrule
+在    & 在    & 30min 准点关单     & 无 \\
+\textbf{挂} & 在    & 15--20min 提前关    & 无 (提前优于漏关) \\
+在    & \textbf{挂} & 30min 准点关单     & RMQ 单点风险 \\
+\textbf{挂} & \textbf{挂} & \textbf{永不关单}    & 库存泄漏，需手动 reconcile \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 两套同时挂，需要值班同学跑 reconcile 脚本 (按 \texttt{created\_at} 扫 \texttt{type=UnPaid})。
+  \item 这是为什么 \texttt{ReserveStock} 必须\textbf{独立于关单链路}有 TTL 兜底 (deck 11 业务侧库存)。
+\end{itemize}
+\srcnote{repository/cache/inventory.go reserved 字段；deck 11-inventory-business.tex 配套}
+\end{frame}
+
+% ============================================================
+\section{压测数字与履约缺口}
+% ============================================================
+
+\begin{frame}{REPORT.md 里关于订单的关键锚点}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+场景 & RPS & p95 & 备注 \\
+\midrule
+/orders/list (游标+缓存) & \textbf{58,406} & 5.0ms & PR \#38 优化 \\
+/orders/list (旧版深分页) & 8.3   & 15,950ms & 反面教材 \\
+/orders/create (幂等重放) & 50,000+ & 2.3ms  & 同 Key 重放命中 done 态 \\
+\bottomrule
+\end{tabular}
+\begin{itemize}
+  \item 同 \texttt{Idempotency-Key} 15s 打 \textbf{755,033 次} \texttt{/orders/create}，DB 只生成 \textbf{1 笔订单}。
+  \item 同一把幂等锁也是关单链路的并发模型：RMQ + Cron + 客服三路同时打 \texttt{CloseOrderWithCheck} 不会重复释放库存。
+  \item 真正瓶颈在\textbf{下游支付 / 物流 / 退款的系统边界}。
+\end{itemize}
+\srcnote{stressTest/REPORT.md \S 链路压测 + 幂等重放}
+\end{frame}
+
+\begin{frame}{从 Paid 之后 gomall 没有任何 handler}
+\begin{tikzpicture}[node distance=6mm and 10mm,every node/.style={font=\scriptsize}]
+  \node[node-state,node-state-normal] (paid) {Paid};
+  \node[node-box,right=of paid,fill=cMute,dashed] (wms) {WMS\\(未接)};
+  \node[node-box,right=of wms,fill=cMute,dashed] (lg)  {物流\\(未接)};
+  \node[node-box,right=of lg,fill=cMute,dashed]  (dv)  {签收\\(未接)};
+  \node[node-box,below=of lg,fill=cMute,dashed]  (rf)  {退款\\(未接)};
+  \draw[arrow-async] (paid) -- (wms);
+  \draw[arrow-async] (wms)  -- (lg);
+  \draw[arrow-async] (lg)   -- (dv);
+  \draw[arrow-async] (paid) |- (rf);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \texttt{paydown} handler 写 \texttt{type=Paid} 后，订单数据\textbf{再也没人动}。
+  \item 真实电商需要：拣货 / 出库 / 物流单 / 签收 / 售后五条独立链路。
+  \item 每条链路都是\textbf{跨系统集成} —— 不是写代码的工作量，是\textbf{对接 API 和签合同}的工作量。
+\end{itemize}
+\srcnote{routes/router.go:114--121 paydown 是当前业务链路终点}
+\end{frame}
+
+\begin{frame}{退款 Saga 路线图：理论形态}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.style={font=\scriptsize}]
+  \node[node-box,fill=cMain!10]                     (a)  {用户申请};
+  \node[node-box,fill=cWarn!15,right=of a]          (b)  {风控审核};
+  \node[node-box,fill=cWarn!15,right=of b]          (c)  {资金接口退款};
+  \node[node-box,fill=cWarn!15,right=of c]          (d)  {库存回写};
+  \node[node-box,fill=cMain!10,right=of d]          (e)  {Refunded};
+  \node[node-box,fill=cBad!10,below=of c]           (cb) {补偿\\(任一步失败)};
+  \draw[arrow] (a) -- (b);
+  \draw[arrow] (b) -- (c);
+  \draw[arrow] (c) -- (d);
+  \draw[arrow] (d) -- (e);
+  \draw[arrow-bad] (b.south) -- (cb);
+  \draw[arrow-bad] (c.south) -- (cb);
+  \draw[arrow-bad] (d.south) -- (cb);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 5 步链路里只要任意一步失败，前面已成功的步骤都要走\textbf{补偿动作}。
+  \item 资金接口退款 (第三方支付 API) 是\textbf{慢且不可控}的依赖 —— 需要熔断 (deck 05) + outbox (deck 04) 兜底。
+  \item gomall 现状：枚举值 \texttt{Refunded=4} 已经留位，handler / DAO / 第三方支付 SDK 都没接。
+\end{itemize}
+\srcnote{consts/order.go:15 Refunded 枚举占位；deck 04-outbox-saga.tex Saga 模式}
+\end{frame}
+
+\begin{frame}{物流 + 签收链路：webhook + 轮询双保险}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.style={font=\scriptsize}]
+  \node[node-box,fill=cMain!10]                     (p)   {Paid};
+  \node[node-box,fill=cWarn!15,right=of p]          (lg)  {物流接单};
+  \node[node-box,fill=cWarn!15,right=of lg]         (sh)  {Shipped};
+  \node[node-box,fill=cWarn!15,right=of sh]         (tr)  {运输中};
+  \node[node-box,fill=cOK!10,right=of tr]           (dv)  {Delivered};
+  \node[node-box,fill=cBad!10,below=of tr]          (po)  {7 天未签收\\$\to$ 客服};
+  \draw[arrow] (p) -- (lg);
+  \draw[arrow] (lg) -- (sh);
+  \draw[arrow] (sh) -- (tr);
+  \draw[arrow] (tr) -- (dv);
+  \draw[arrow-bad] (tr.south) -- (po);
+\end{tikzpicture}
+\begin{itemize}
+  \item 物流接单：调顺丰 / 京东物流下单 API，拿到运单号写回订单。
+  \item Shipped 推送：物流公司 webhook 推 \textbf{揽件成功} $\to$ 业务侧改状态。
+  \item Delivered 兜底：webhook 不可信，每天\textbf{轮询查件}对账。
+  \item gomall 现状：DB 里有 \texttt{Shipping=3 / Receipt=4} 的老枚举但没人写。
+\end{itemize}
+\srcnote{consts/order.go:6--7 老枚举占位}
+\end{frame}
+
+\begin{frame}{售后链路：远比退款复杂}
+\begin{tabular}{@{}ll@{}}
+\toprule
+售后类型 & 业务复杂度 \\
+\midrule
+仅退款 (Refund Only)        & 钱回去就行，库存不动 \\
+退货退款 (Return + Refund)  & 用户寄回 + 入库质检 + 退钱 + 库存加回 \\
+换货 (Exchange)             & 退货 + 新发货，资金不动 \\
+价保 (Price Match)          & 不退货只退差额，营销系统介入 \\
+仅维修 (Repair Only)        & 寄回 + 维修 + 寄回，跨 30--90 天 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 五种售后\textbf{业务流程完全不同}，但都要在订单上记录"已发起售后单"状态。
+  \item 大型电商通常用\textbf{售后单}另一张表，订单只标"有 N 个售后单关联"。
+  \item gomall 当前没有任何售后表 —— 第一版能接通"仅退款"就是巨大进步。
+\end{itemize}
+\srcnote{对照淘宝开放平台《退款 / 退货接口》文档结构}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{面试 Q\&A}
+\small
+\textbf{Q1}：为什么不只用 RMQ，要再加 Cron？\\
+\hspace{4mm} A：RMQ 宕机或消息丢就关不了单。Cron 在 DB 扫，失败模式互不相关，整体可用率 $\approx 1 - p_{rmq} \cdot p_{cron}$。
+
+\vspace{1mm}
+\textbf{Q2}：\texttt{CancelUnpaidOrder} 怎么保证幂等？\\
+\hspace{4mm} A：\texttt{UPDATE WHERE type=UnPaid} 乐观锁，\texttt{RowsAffected=0} 时 no-op，不释放库存不发 outbox。四调用方共用这把锁。
+
+\vspace{1mm}
+\textbf{Q3}：\texttt{"* */5 * * * *"} 为什么是 bug？\\
+\hspace{4mm} A：6 段格式第一段是秒，\texttt{*} 每秒都跑。在分钟 \% 5==0 时 5min 跑 60 次。正确 \texttt{"0 */5 * * * *"}。
+
+\vspace{1mm}
+\textbf{Q4}：状态机为什么只有 3 态，缺了什么？\\
+\hspace{4mm} A：缺 Picking / Shipped / Delivered / Refunded —— 每态都要跨系统对接 WMS / 物流 / 快递 / 资金接口。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\small
+\begin{description}
+  \item[Cron 兜底]\srcnote{service/order\_task.go:14--48}
+  \item[幂等关单+Saga+outbox]\srcnote{service/order\_cancel.go:14--63}
+  \item[乐观锁 UPDATE]\srcnote{repository/db/dao/order.go:185--195}
+  \item[RMQ 拓扑+发送+消费]\srcnote{repository/rabbitmq/order\_delay.go:24--105}
+  \item[双保险注册]\srcnote{initialize/cron.go:13--53}
+  \item[静默降级 + 启动顺序]\srcnote{cmd/main.go:35--37, 54--62}
+  \item[状态枚举两组]\srcnote{consts/order.go:3--16}
+  \item[orders/delete 缺陷]\srcnote{routes/router.go:99 + service/order.go:185}
+\end{description}
+\keypoint{配套 deck：15-order-close-business / 04-outbox-saga / 11-inventory-business。}
+\end{frame}
+
+\end{document}
