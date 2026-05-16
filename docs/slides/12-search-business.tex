@@ -191,9 +191,9 @@ LIKE \texttt{'\%X\%'} 索引可用？ & 否（前缀通配） \\
 \end{frame}
 
 \begin{frame}{从上架到可搜的完整链路}
-\begin{tikzpicture}[node distance=5mm and 10mm]
+\begin{tikzpicture}[node distance=3mm and 3mm,every node/.append style={minimum width=13mm,font=\tiny}]
   \node[node-box]                      (api) {商家上架\\API};
-  \node[node-box,right=of api]         (db)  {MySQL\\product 表};
+  \node[node-box,right=of api]         (db)  {MySQL\\product};
   \node[node-box,right=of db,node-warn](ob)  {outbox\\表};
   \node[node-box,right=of ob]          (mq)  {RabbitMQ\\product.changed};
   \node[node-box,right=of mq]          (cs)  {indexer\\消费者};
