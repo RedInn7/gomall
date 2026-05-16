@@ -195,6 +195,87 @@ func (dao *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 
 }
 
+// ShipOrder 商家发货：WaitShip -> WaitReceive。
+// 条件 UPDATE 保证幂等：仅当订单仍处于 WaitShip 时才会写入；
+// 已发货 / 已退款的订单 RowsAffected=0，上层据此判定非法转换。
+// 物流单号本期不持久化（model 未引入字段），仅在事件层带出。
+func (dao *OrderDao) ShipOrder(orderNum uint64) (bool, error) {
+	res := dao.DB.Model(&model.Order{}).
+		Where("order_num=? AND type=?", orderNum, consts.OrderWaitShip).
+		Update("type", consts.OrderWaitReceive)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// ConfirmReceive 确认收货：WaitReceive -> Completed。
+// 用户主动确认与 7d 兜底 cron 共用同一条 SQL，依靠 WHERE 兜底幂等。
+func (dao *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
+	res := dao.DB.Model(&model.Order{}).
+		Where("order_num=? AND type=?", orderNum, consts.OrderWaitReceive).
+		Update("type", consts.OrderCompleted)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// RequestRefund 申请退款：from 必须落在 allowedFrom 集合内（WaitShip / WaitReceive / Completed）。
+// 通过 WHERE type IN (...) 一次拦截非法 from，避免读后写竞态。
+func (dao *OrderDao) RequestRefund(orderNum uint64, allowedFrom []uint) (bool, error) {
+	if len(allowedFrom) == 0 {
+		return false, nil
+	}
+	res := dao.DB.Model(&model.Order{}).
+		Where("order_num=? AND type IN ?", orderNum, allowedFrom).
+		Update("type", consts.OrderRefunding)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// ApproveRefund 同意退款：Refunding -> Refunded。
+func (dao *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
+	res := dao.DB.Model(&model.Order{}).
+		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
+		Update("type", consts.OrderRefunded)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// RejectRefund 驳回退款：Refunding -> Completed。
+// 仅在 from=Refunding 时生效，避免误把还在 WaitShip / WaitReceive 的订单推到 Completed。
+func (dao *OrderDao) RejectRefund(orderNum uint64) (bool, error) {
+	res := dao.DB.Model(&model.Order{}).
+		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
+		Update("type", consts.OrderCompleted)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
+// GetTimeoutWaitReceive 拉取已发货超过 days 天仍未确认收货的订单，由 cron 兜底确认收货。
+// 仅扫 WaitReceive 状态，避免误碰退款流程。
+func (dao *OrderDao) GetTimeoutWaitReceive(days int, limit int) (orders []*model.Order, err error) {
+	if days <= 0 {
+		days = 7
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	expireTime := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	err = dao.DB.Model(&model.Order{}).
+		Where("type=? AND updated_at <=?", consts.OrderWaitReceive, expireTime).
+		Limit(limit).
+		Find(&orders).Error
+	return
+}
+
 func NewOrderDaoWithDB(db *gorm.DB) *OrderDao {
 	return &OrderDao{DB: db}
 }
