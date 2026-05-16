@@ -50,3 +50,29 @@ type Web3PaymentPending struct {
 	ChainID    uint64 `json:"chain_id"`
 	Nonce      string `json:"nonce"`
 }
+
+// 红包相关事件：
+//   red_packet.created  -> RedPacketCreated  (发包，便于风控/数据同步)
+//   red_packet.claimed  -> RedPacketClaimed  (领包，下游钱包消费此事件入账)
+//   red_packet.expired  -> RedPacketExpired  (过期回收，退给发包人)
+
+type RedPacketCreated struct {
+	RedPacketID uint   `json:"red_packet_id"`
+	UserID      uint   `json:"user_id"`
+	Total       int64  `json:"total"`
+	Count       int    `json:"count"`
+	Greeting    string `json:"greeting,omitempty"`
+	ExpireAt    int64  `json:"expire_at"` // unix
+}
+
+type RedPacketClaimed struct {
+	RedPacketID uint  `json:"red_packet_id"`
+	UserID      uint  `json:"user_id"`
+	Amount      int64 `json:"amount"`
+}
+
+type RedPacketExpired struct {
+	RedPacketID uint  `json:"red_packet_id"`
+	UserID      uint  `json:"user_id"` // 退款回到发包人
+	RefundTotal int64 `json:"refund_total"`
+}

@@ -23,3 +23,13 @@ func IdempotencyTokenKey(userId uint, token string) string {
 func ProductViewKey(id uint) string {
 	return fmt.Sprintf("view:product:%s", strconv.Itoa(int(id)))
 }
+
+// RedPacketAmountsKey 红包预拆好的金额 LIST (LPOP 即抢)
+func RedPacketAmountsKey(id uint) string {
+	return fmt.Sprintf("redpacket:%d:amounts", id)
+}
+
+// RedPacketClaimedKey 红包已领用户 HASH (userID -> amount)
+func RedPacketClaimedKey(id uint) string {
+	return fmt.Sprintf("redpacket:%d:claimed", id)
+}

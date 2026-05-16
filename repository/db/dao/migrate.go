@@ -13,6 +13,7 @@ func migrate() (err error) {
 			&model.ProductImg{}, &model.SkillProduct{},
 			&model.SkillProduct2MQ{},
 			&model.CouponBatch{}, &model.UserCoupon{},
+			&model.RedPacket{}, &model.RedPacketClaim{},
 		)
 
 	return

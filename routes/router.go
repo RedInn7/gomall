@@ -71,6 +71,19 @@ func NewRouter() *gin.Engine {
 			authed.POST("coupon/claim", api.ClaimCouponHandler())
 			authed.GET("coupon/my", api.ListMyCouponHandler())
 
+			// 红包：发包幂等；抢包按用户做滑动窗口 + 幂等
+			authed.POST("redpacket/create",
+				middleware.Idempotency(),
+				api.CreateRedPacketHandler())
+			authed.POST("redpacket/claim",
+				middleware.SlidingWindow(middleware.SlidingWindowOption{
+					Scope: "redpacket", Window: time.Second, Limit: 3, ByUser: true,
+				}),
+				middleware.Idempotency(),
+				api.ClaimRedPacketHandler())
+			authed.GET("redpacket/show", api.ShowRedPacketHandler())
+			authed.GET("redpacket/list", api.ListMyRedPacketsHandler())
+
 			// 幂等 token 颁发
 			authed.GET("idempotency/token", api.IdempotencyTokenHandler())
 
