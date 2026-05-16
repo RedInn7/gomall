@@ -1,0 +1,539 @@
+\input{preamble}
+
+\title{谁能做什么}
+\subtitle{角色边界、双 token 续命、客服补券与黑产温床}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{第一性原理：鉴权解决的不是技术问题，是责任划分}
+% ============================================================
+
+\begin{frame}{一句话：鉴权 = 把"谁"和"能做什么"两件事分开}
+\begin{itemize}
+  \item "谁"（Authentication，认证）：你是不是张三？$\to$ 看 token。
+  \item "能做什么"（Authorization，授权）：张三能不能改价？$\to$ 看角色。
+  \item 这两件事必须分开，否则一旦合并：
+  \begin{itemize}
+    \item 客服认错人 = 真用户被代下单。
+    \item 角色判错 = 普通用户能进 admin 后台。
+  \end{itemize}
+  \item gomall 的边界分两层：先 \texttt{AuthMiddleware}（是不是登录用户），再 \texttt{RequireRole}（是不是 admin）。
+\end{itemize}
+\srcnote{routes/router.go:45--46 authed group；:125--126 admin sub-group}
+\end{frame}
+
+\begin{frame}{这份 deck 要回答的 5 个业务问题}
+\begin{enumerate}
+  \item 谁能下单 / 谁能补券 / 谁能改价？业务边界在 router 哪一行？
+  \item 双 token 续命对 app 留存意味着什么？
+  \item \texttt{admin/bootstrap} 这种"一次性后门"凭什么进生产代码？
+  \item RBAC 30s 内存缓存怎么跟业务方解释"不是强一致"？
+  \item 为什么"用户自助补券"是黑产温床，而"客服走 admin 补券"不是？
+\end{enumerate}
+\vspace{2mm}
+\small 全程不讲 JWT 算法 / claim 字段，只讲"哪条线是业务红线"。
+\end{frame}
+
+% ============================================================
+\section{角色边界：把 router 翻译成业务能力}
+% ============================================================
+
+\begin{frame}{gomall 现在只有两种角色}
+\begin{tabular}{@{}lll@{}}
+\toprule
+角色 & 业务身份 & 路由前缀 \\
+\midrule
+匿名     & 没登录的访客         & \texttt{/api/v1/*}（白名单） \\
+user     & 注册用户             & \texttt{/api/v1/*} + \texttt{authed.*} \\
+admin    & 运营 / 客服 / 风控    & 以上 + \texttt{authed.admin.*} \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small 没有"商家"，没有"运营组长"，没有"超级 admin"。\\
+角色越少，越不容易出"谁可以批准谁"的扯皮。等业务真有分级再加，不要预先抽象。
+\srcnote{repository/db/model/user.go:23 Role 字段；:30--31 RoleUser / RoleAdmin}
+\end{frame}
+
+\begin{frame}{三层墙：匿名 / user / admin}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box,node-state-normal] (open)  {匿名可见\\product/show, ping, register, login};
+  \node[node-box,node-state-transition,right=of open] (user) {登录后可用\\orders/create, coupon/claim, paydown};
+  \node[node-box,node-state-alert,right=of user] (admin) {仅 admin\\users, promote, search/backfill};
+  \draw[arrow]      (open) -- node[above,font=\tiny]{AuthMiddleware} (user);
+  \draw[arrow-alert](user) -- node[above,font=\tiny]{RequireRole("admin")}(admin);
+\end{tikzpicture}
+\vspace{3mm}
+\begin{itemize}
+  \item \textbf{匿名层}：要能引流，所以商品详情 / 列表 / 类目都开放。
+  \item \textbf{user 层}：涉及资金 / 个人数据，必须先确认"是不是你本人"。
+  \item \textbf{admin 层}：动别人账户的能力 —— 必须二次校验角色。
+\end{itemize}
+\srcnote{routes/router.go:34--43 匿名；:45--46 authed；:125--131 admin}
+\end{frame}
+
+\begin{frame}{为什么这些接口在 authed 而那些不在}
+\begin{tabular}{@{}lll@{}}
+\toprule
+接口 & 业务理由 & 路由位置 \\
+\midrule
+\texttt{product/show}    & 引流必须匿名可看  & router.go:39 \\
+\texttt{user/login}      & 登录前怎么可能登录 & router.go:35 \\
+\texttt{orders/create}   & 没人的订单是谁的？ & router.go:77（authed） \\
+\texttt{coupon/claim}    & 没人怎么把券记到账户上？& router.go:70（authed） \\
+\texttt{paydown}         & 资金类，最严      & router.go:96（authed） \\
+\texttt{admin/users}     & 看全员数据，必须 admin & router.go:128 \\
+\texttt{search/backfill} & 一次几千万条写 ES & router.go:130 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small "能不能匿名访问"不是开发拍的，是"业务上有没有公网引流诉求"决定的。
+\end{frame}
+
+\begin{frame}{反例：把边界画错会发生什么}
+\begin{itemize}
+  \item \textbf{把 \texttt{orders/create} 放匿名}：黑产薅羊毛批量下单 + 不付款 = 库存被预占空。
+  \item \textbf{把 \texttt{coupon/claim} 放匿名}：一个 IP 领光所有券。
+  \item \textbf{把 \texttt{admin/users} 放 user}：任何用户能看到全员手机号 / 邮箱 $\to$ 等价于撞库数据库泄露。
+  \item \textbf{把 \texttt{search/backfill} 放 user}：1M 行写 ES，谁都能触发 = 拒绝服务。
+\end{itemize}
+\vspace{2mm}
+\keypoint{边界画错的代价：从"客诉一两条"到"全公司上头条"。}
+\srcnote{对应 router.go 各行；search/backfill 单次重建索引耗时见 docs/slides/03-cache-consistency.tex}
+\end{frame}
+
+% ============================================================
+\section{双 token 续命：用户感受不到登录这件事}
+% ============================================================
+
+\begin{frame}{为什么不能只用一个 token}
+\begin{itemize}
+  \item \textbf{token 短期过期}：被偷不亏太久 $\to$ 安全。但用户每天要重新登录 $\to$ 痛。
+  \item \textbf{token 长期不过期}：用户不烦 $\to$ 体验好。但被偷一辈子能用 $\to$ 不安全。
+  \item 双 token 是把"安全"和"体验"两个 KPI 解耦：
+  \begin{itemize}
+    \item \texttt{access\_token}：1 天过期 $\to$ 安全
+    \item \texttt{refresh\_token}：10 天过期 $\to$ 留存
+  \end{itemize}
+  \item app 后台静默续期 $\to$ 用户感受不到登录这个动作。
+\end{itemize}
+\srcnote{consts/user.go:31--32 AccessTokenExpireDuration=24h / RefreshTokenExpireDuration=240h}
+\end{frame}
+
+\begin{frame}{续期时序：用户什么都不用做}
+\begin{tikzpicture}[node distance=10mm and 12mm]
+  \node[node-box] (app) {App 客户端};
+  \node[node-box,right=of app,node-warn] (mw) {AuthMiddleware};
+  \node[node-box,right=of mw] (svc) {业务 handler};
+  \draw[arrow] (app) -- node[above,font=\tiny]{access + refresh} (mw);
+  \draw[arrow] (mw) -- node[above,font=\tiny]{合法 $\to$ 透传} (svc);
+  \draw[arrow-alert,bend left=35] (mw.north) to node[above,font=\tiny]{Set-Cookie 新 token 对} (app.north);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 每次请求都会刷新一次 token 对（access 没过期也刷）。
+  \item App 拿到响应头 / Cookie 里的新 token，覆盖本地存储。
+  \item 用户在线 1 天内来一次 $\to$ token 永远不过期。10 天内不来一次 = 重新登录。
+  \item 10 天这个阈值就是"我们能接受多久召回不到"的业务参数。
+\end{itemize}
+\srcnote{middleware/jwt.go:32 ParseRefreshToken；:59 SetToken；pkg/utils/jwt/jwt.go:81--89 续期逻辑}
+\end{frame}
+
+\begin{frame}{10 天这个数字怎么定}
+\begin{itemize}
+  \item \textbf{业务侧问题}：用户多久不开 app 算"流失"？
+  \begin{itemize}
+    \item 内容类 app：3 天不开就流失。
+    \item 工具类 app：30 天不开才算流失。
+    \item 电商：7--14 天的"周期性消费"是核心。
+  \end{itemize}
+  \item gomall 选 10 天，覆盖一整个"双周购物习惯"：用户上周买过，这周再来不用重新登录。
+  \item 超过 10 天没回来：八成是真流失，重新登录顺便走"召回弹窗"也合理。
+\end{itemize}
+\vspace{2mm}
+\small \textbf{这是产品决定，不是开发决定。}如果改成 30 天 = 留存好但被盗号窗口变长；改成 3 天 = 安全但每周登录一次。
+\srcnote{consts/user.go:32 RefreshTokenExpireDuration = 10 * 24 * time.Hour}
+\end{frame}
+
+\begin{frame}{被盗号最坏多久 = 双 token 的安全上限}
+\begin{tabular}{@{}lll@{}}
+\toprule
+场景 & 攻击者能用多久 & 业务损失 \\
+\midrule
+access 被嗅探（HTTP 明文）& 最长 1 天 & 限制在窗口内 \\
+access + refresh 都泄露   & 最长 10 天 & 整个续期周期 \\
+设备被物理偷走             & 直到改密 / 主动下线 & 看用户多久发现 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small \textbf{暴露的真问题}：gomall 现在没有 token 黑名单 / 服务端主动失效。\\
+即使用户改了密码，旧 access\_token 在 1 天内仍然有效。改进方向见末尾"遗留风险"页。
+\srcnote{middleware/jwt.go:32--63 当前未查黑名单}
+\end{frame}
+
+% ============================================================
+\section{admin/bootstrap：开机钥匙}
+% ============================================================
+
+\begin{frame}{冷启动悖论：第一个 admin 从哪里来？}
+\begin{itemize}
+  \item \texttt{users/promote} 把人升级为 admin。但这个接口本身要求调用者是 admin。
+  \item 第一天的生产数据库一个 admin 都没有。
+  \item 这是一个鸡生蛋问题：
+  \begin{itemize}
+    \item 不能让普通用户能 promote 自己 $\to$ 全网随便提权。
+    \item 不能直接改数据库 $\to$ DBA 权限滥用 / 没有审计。
+    \item 不能写死 super-admin 账号 $\to$ 密码外泄一次完蛋。
+  \end{itemize}
+  \item 答案：留一个"一次性后门"，并且后门自己知道"用过一次就锁"。
+\end{itemize}
+\srcnote{service/admin.go:66--80 BootstrapPromoteSelf}
+\end{frame>
+
+\begin{frame}{bootstrap 状态机：用一次就锁}
+\begin{tikzpicture}[node distance=10mm and 16mm]
+  \node[node-state,node-state-normal] (s0) {初始\\无 admin};
+  \node[node-state,node-state-transition,right=of s0] (s1) {首次调用\\count(admin)=0};
+  \node[node-state,node-state-alert,right=of s1] (s2) {已锁\\count(admin) $\ge$ 1};
+  \draw[arrow]       (s0) -- node[above,font=\tiny]{POST /admin/bootstrap} (s1);
+  \draw[arrow]       (s1) -- node[above,font=\tiny]{Role = admin} (s2);
+  \draw[arrow-bad,bend right=30] (s2.south) to node[below,font=\tiny]{再次调用 $\to$ 直接拒绝} (s0.south);
+\end{tikzpicture}
+\vspace{3mm}
+\begin{itemize}
+  \item 仍然要求"已登录"，所以不是完全裸奔。
+  \item 校验 \texttt{count(role='admin') == 0}，否则报错"系统已存在 admin，禁止使用 bootstrap"。
+  \item 第一个登录用户调一次 $\to$ 自己变成 admin $\to$ 之后所有人调都被拒。
+\end{itemize}
+\srcnote{service/admin.go:72--78 count(admin) 校验；routes/router.go:122 仅 authed，未挂 RequireRole}
+\end{frame}
+
+\begin{frame}{这个接口的业务约束（写给运维 / 安全）}
+\begin{itemize}
+  \item \textbf{生产部署 SOP}：
+  \begin{enumerate}
+    \item 首发上线 $\to$ 注册第一个运营账号 $\to$ 立刻调 \texttt{admin/bootstrap}。
+    \item 把这个 user\_id 记进运维交接文档。
+    \item 之后所有提权走 \texttt{users/promote}，有 admin 操作日志。
+  \end{enumerate}
+  \item \textbf{如果数据库被清掉重建}：bootstrap 又解锁了。所以备份恢复 SOP 里必须包括"恢复后立刻确认有 admin"。
+  \item \textbf{不建议加 IP 白名单 / 时间窗口}：那是"安全感"不是"安全"，反而让人忘记基本约束。
+  \item 真要再硬一点，可以加"环境变量必须包含一次性 token"，但当前业务量没必要。
+\end{itemize}
+\srcnote{routes/router.go:122 仅在 authed 下，无 RequireRole}
+\end{frame}
+
+% ============================================================
+\section{RBAC 30 秒缓存：换 QPS 换出来的体验}
+% ============================================================
+
+\begin{frame}{为什么不每次请求都查 DB}
+\begin{itemize}
+  \item 鉴权是\textbf{每个 admin 请求都要走}的链路。
+  \item 如果每个请求都打一次 \texttt{SELECT role FROM user WHERE id=?}：
+  \begin{itemize}
+    \item QPS 翻倍：原本 1 个业务查询变成 2 个。
+    \item DB 连接池竞争：高峰期容易耗尽。
+  \end{itemize}
+  \item \textbf{真实场景}：用户的角色变更频率 < 一年 10 次。
+  \item \textbf{不一致代价}：客服刚把 A 提权，A 30s 内还看不到管理后台 $\to$ 让他 F5 就行。
+  \item 用"30s 内的最终一致"换"高 QPS 下不打挂 DB"，业务可接受。
+\end{itemize}
+\srcnote{middleware/rbac.go:24 roleCacheTTL = 30 * time.Second；:28--45 lookupRole}
+\end{frame}
+
+\begin{frame}{缓存流程：命中 / 未命中 / 显式失效}
+\begin{tikzpicture}[node distance=8mm and 12mm]
+  \node[node-box] (req)  {admin 请求};
+  \node[node-box,right=of req,node-warn] (cache) {sync.Map\\TTL 30s};
+  \node[node-box,below=of cache] (db) {MySQL\\user.role};
+  \node[node-box,right=of cache,node-ok] (ok) {放行 / 拒绝};
+  \draw[arrow] (req) -- (cache);
+  \draw[arrow,dashed] (cache) -- node[right,font=\tiny]{miss} (db);
+  \draw[arrow,dashed] (db.east) to [bend right=20] node[right,font=\tiny]{回填} (cache.east);
+  \draw[arrow] (cache) -- (ok);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{命中}：直接返回缓存里的 role $\to$ 微秒级。
+  \item \textbf{未命中}：打一次 DB $\to$ 回填 $\to$ 30s 内复用。
+  \item \textbf{显式失效}：\texttt{InvalidateRoleCache(userId)} 立刻删条目，下一次 miss。
+  \item 提权 / 降权动作都会主动调一次失效 $\to$ 客服关心的"立刻生效"路径仍然是秒级。
+\end{itemize}
+\srcnote{middleware/rbac.go:88--91 InvalidateRoleCache；service/admin.go:59 PromoteToAdmin 后调用}
+\end{frame}
+
+\begin{frame}{30s 不一致的业务说法}
+\begin{tabular}{@{}lll@{}}
+\toprule
+事件 & 30s 内观感 & 是否可接受 \\
+\midrule
+A 被提权为 admin & A 看不到后台菜单    & 让他刷新；可接受 \\
+B 被降权为普通   & B 仍能访问 admin 30s & \textbf{这是真风险} \\
+C 被封号         & C 仍能下单 30s       & 严重，需 token 黑名单 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small \textbf{对称性陷阱}：提权延迟体验问题，降权 / 封号延迟是\textbf{安全问题}。\\
+gomall 用"显式失效"补这条线：降权和封号都要主动调 \texttt{InvalidateRoleCache}。\\
+但 access\_token 1 天有效期仍然存在 —— 这是当前的遗留风险。
+\srcnote{middleware/rbac.go:88--91 显式失效；middleware/jwt.go 无 token 黑名单查询}
+\end{frame}
+
+\begin{frame}{鉴权链路压测开销：实测可控}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+接口 & RPS & p95 \\
+\midrule
+\texttt{/ping}（无 Auth）           & 64{,}254 & 3.51ms \\
+\texttt{/product/show}（无 Auth）   & 62{,}226 & 3.01ms \\
+\texttt{/orders/list}（带 Auth）    & 58{,}406 & 5.00ms \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small 带 \texttt{AuthMiddleware} 的 \texttt{orders/list} 仍能跑到 58K RPS，相对裸 ping 损耗 < 10\%。\\
+说明双 token 验签 + ParseToken 两次 + Set-Cookie 这套组合开销可控，\textbf{不是性能瓶颈}。
+真要继续优化，先优化分页 / SQL，再回头看鉴权链。
+\srcnote{stressTest/REPORT.md \S 链路压测表 行 1, 2, 4}
+\end{frame}
+
+% ============================================================
+\section{客服补券 vs 黑产温床：边界在哪}
+% ============================================================
+
+\begin{frame}{补券这件事必须有两条路径}
+\begin{itemize}
+  \item \textbf{用户主路径}：\texttt{coupon/claim} $\to$ 排队 + Lua 单原子防超发 + 滑动窗口防脚本。
+  \item \textbf{客服主路径}：客服核对用户身份 $\to$ 走 admin 接口直接发券到指定账户。
+  \item 两条路径的本质区别：
+  \begin{itemize}
+    \item 用户路径是\textbf{机器对机器}的接口，没有"人核对身份"这一步 $\to$ 必须靠风控。
+    \item 客服路径有\textbf{真人}核对身份 $\to$ 风控可以松，但操作要有审计。
+  \end{itemize}
+  \item \textbf{绝对不能做的事}：把"用户自助申请补券"做成一个普通用户能直接调的接口。
+\end{itemize}
+\srcnote{routes/router.go:70 coupon/claim 在 authed；admin 侧补券需新增 admin handler}
+\end{frame}
+
+\begin{frame}{为什么"用户自助补券" = 黑产温床}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box,node-state-normal] (l1)  {L1 网络层\\IP TokenBucket};
+  \node[node-box,node-state-normal,right=of l1] (l2) {L2 业务层\\用户 SlidingWindow};
+  \node[node-box,node-state-alert,right=of l2] (l3) {L3 客服\\真人核对};
+  \draw[arrow] (l1) -- (l2);
+  \draw[arrow-alert] (l2) -- (l3);
+\end{tikzpicture}
+\vspace{3mm}
+\begin{itemize}
+  \item L1 + L2 能挡 80\% 黑产，但是\textbf{挡不住有耐心的羊毛党}：注册 1 万个号，每号每天领 5 张。
+  \item "用户自助补券"如果做成接口 $\to$ \textbf{第三层风控直接消失}。L1 + L2 那点防御不够。
+  \item 借鉴 deck 10 的分层结论：电商场景的最后一道闸 \textbf{必须是人}，不能是代码。
+\end{itemize}
+\srcnote{deck 10 L1--L4 拦截层级；routes/router.go:22 全局 IP 桶 + :112--119 用户滑动窗口}
+\end{frame}
+
+\begin{frame}{客服补券走 admin 接口的约束}
+\begin{itemize}
+  \item \textbf{身份核对在前}：客服在客服系统里看用户工单 / 录音 / 凭证。
+  \item \textbf{操作走 admin}：admin 接口直接给指定 user\_id 发券，绕过 \texttt{coupon/claim} 的限流 / 防刷链路。
+  \item \textbf{操作必须留痕}：谁 / 什么时候 / 给谁 / 发了多少 / 凭什么工单。
+  \item \textbf{额度封顶}：单客服每天发券额度有上限，超过要主管复核（业务侧 SOP，不放在代码里）。
+  \item \textbf{异常告警}：单客服突然发券激增 = 内鬼或者账号被盗。
+\end{itemize}
+\vspace{2mm}
+\small 这套链路在 gomall 当前还没完整落地，admin 补券接口是\textbf{下一步要做的事}。\\
+现在 admin 这一层只有 \texttt{users/promote} 和 \texttt{search/backfill}，是基础位。
+\srcnote{routes/router.go:125--131 当前 admin 子组的全部内容}
+\end{frame}
+
+% ============================================================
+\section{业务码与客服话术}
+% ============================================================
+
+\begin{frame}{鉴权失败的业务码决策树}
+\begin{tikzpicture}[node distance=8mm and 10mm]
+  \node[node-box] (req) {请求到达};
+  \node[node-box,right=of req,node-warn] (tok) {有 token?};
+  \node[node-box,right=of tok,node-warn] (parse) {签名合法?};
+  \node[node-box,right=of parse,node-warn] (role) {角色匹配?};
+  \node[node-box,below=of parse,node-bad] (e1) {30001\\Token 鉴权失败};
+  \node[node-box,below=of role,node-bad]  (e2) {30005\\权限不足};
+  \node[node-box,below=of tok,node-bad]   (e0) {400\\token 不能为空};
+  \node[node-box,right=of role,node-ok]   (ok) {200\\放行};
+  \draw[arrow] (req) -- (tok);
+  \draw[arrow] (tok) -- (parse);
+  \draw[arrow] (parse) -- (role);
+  \draw[arrow] (role) -- (ok);
+  \draw[arrow-bad] (tok) -- (e0);
+  \draw[arrow-bad] (parse) -- (e1);
+  \draw[arrow-bad] (role) -- (e2);
+\end{tikzpicture}
+\vspace{2mm}
+\srcnote{middleware/jwt.go:22--57 三类失败分支；middleware/rbac.go:75--82 角色不匹配}
+\end{frame}
+
+\begin{frame}{客服话术：业务码 $\to$ 提示文案}
+\begin{tabular}{@{}lll@{}}
+\toprule
+状态码 & 含义       & 客服话术 \\
+\midrule
+30001  & Token 鉴权失败  & "请退出重新登录"          \\
+30002  & Token 已超时    & "登录已过期，请重新登录"   \\
+30005  & 权限不足        & "该功能仅限管理员"        \\
+60001  & 幂等 token 无效 & "请重新进入下单页"         \\
+60002  & 幂等命中重复    & "您已下单成功，无需重复"   \\
+70001  & 限流命中        & "活动太火爆，请稍后重试"   \\
+70002  & 熔断打开        & "支付服务暂忙，1 分钟后"   \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small 30001 vs 30002 表面像："鉴权失败"通常是 token 被改了 / 没带；"超时"是过期。\\
+30005 客服遇到要警惕：要么用户走错入口，要么有人在试着调 admin 接口。
+\srcnote{pkg/e/code.go:35--58；pkg/e/msg.go:31--52}
+\end{frame}
+
+\begin{frame}{鉴权统一返回 HTTP 200 + 业务码}
+\begin{itemize}
+  \item gomall 所有鉴权失败都返回 \texttt{HTTP 200} + JSON \texttt{\{status: 30001, msg: ...\}}。
+  \item \textbf{优点}：app 老版本网关不能优雅吞 401/403，统一 200 不会 crash。
+  \item \textbf{缺点}：监控不能简单按 HTTP 状态码做错误率，必须看业务 status。
+  \item \textbf{对外约定}：客户端拿到 30001/30002 $\to$ 跳登录页，其它业务码按表查。
+\end{itemize}
+\vspace{2mm}
+\keypoint{监控告警必须基于业务 status，不是 HTTP code。}
+\srcnote{middleware/jwt.go:24, 38, 51 三处 c.JSON(200, ...)；middleware/rbac.go:56, 67, 76 同}
+\end{frame}
+
+% ============================================================
+\section{各角色看鉴权这件事}
+% ============================================================
+
+\begin{frame}{产品 / 安全 / 客服 / SRE 各自的关心}
+\begin{tabular}{@{}ll@{}}
+\toprule
+角色 & 关心 \\
+\midrule
+产品   & 30 天登录留存率 / 第二天回访率（refresh 10 天兜底）\\
+安全   & 被盗号后能否快速止血（目前不能：无 token 黑名单）\\
+客服   & 30001/30005 比例 / 单用户高频投诉是不是被攻击 \\
+SRE   & 鉴权链路延迟占比 / RBAC 缓存命中率 / DB 查询是否激增 \\
+风控   & 客服补券额度异常 / 单 admin 账号操作量异常 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \textbf{客服的特殊地位}：是用户和系统之间唯一"有人介入"的环节，所有规则的最后一道是客服。
+\end{frame>
+
+\begin{frame}{遗留风险与改进方向}
+\textbf{目前的洞}：
+\begin{itemize}
+  \item \textbf{无 token 黑名单}：用户改密 / 主动下线后，旧 access\_token 仍在 1 天内有效。
+  \item \textbf{无 admin 操作审计表}：promote / backfill 这种动作只写 log，未入审计 DB。
+  \item \textbf{admin 没有二次确认}：promote 一个用户不需要主管复核。
+  \item \textbf{admin 补券接口未实现}：当前客服只能通过改 DB 这种"野路子"补券。
+\end{itemize}
+\vspace{2mm}
+\textbf{改进顺序}（按 ROI 排）：
+\begin{enumerate}
+  \item admin 补券接口（业务最痛）。
+  \item admin 操作审计表（合规线）。
+  \item token 黑名单（被盗号止血）。
+  \item admin 二次确认 / 双人复核（额度更大才有必要）。
+\end{enumerate}
+\srcnote{middleware/jwt.go 当前无黑名单查询；routes/router.go:125--131 admin 子组无审计中间件}
+\end{frame}
+
+\begin{frame}{回到业务：边界这事到底由谁定}
+\begin{tabular}{@{}ll@{}}
+\toprule
+决定 & 由谁负责 \\
+\midrule
+哪个接口能匿名访问           & 产品 + 安全 \\
+access / refresh 过期时长   & 产品（留存）+ 安全（盗号窗口）\\
+admin 能做哪些事             & 运营 + 安全（最小权限）\\
+RBAC 缓存 TTL                & SRE + 安全（一致性 vs QPS）\\
+客服补券额度上限             & 风控 + 财务 \\
+bootstrap 用过谁来确认       & 运维 SOP \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small 鉴权不是"开发自己写"的事，是"几个角色谈出来"的事。\\
+开发要做的是把谈好的边界翻译成 router.go 里那几行 \texttt{authed} / \texttt{admin}。
+\end{frame}
+
+\begin{frame}{业务侧的最终目标}
+\begin{itemize}
+  \item 用户不感受到"登录"这个动作（双 token 续命）。
+  \item 客服能在 1 分钟内完成补券（admin 接口走通）。
+  \item 黑产领不到券（L1 + L2 + L3 三层）。
+  \item 内鬼搞不出大额损失（审计 + 额度上限，待补）。
+  \item 出事能立刻止血（token 黑名单，待补）。
+\end{itemize}
+\vspace{2mm}
+\keypoint{鉴权不是把门关上，是\textbf{给不同角色留刚刚好够用的钥匙}。}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{Q\&A（上）：产品 / 客服角度}
+\textbf{Q1}：refresh\_token 为什么是 10 天，不是 30 天？\\
+\hspace{4mm}\small A：电商双周购物周期 + 盗号窗口控制。30 天体验更好但盗号能用一个月。
+
+\vspace{2mm}
+\textbf{Q2}：客服怎么强制下线一个被盗号？\\
+\hspace{4mm}\small A：现在做不到。需要补 token 黑名单。临时方案：改密 + 让用户主动等 1 天。这是当前最大的遗留风险。
+
+\vspace{2mm}
+\textbf{Q3}：用户改了密码，旧 access\_token 怎么办？\\
+\hspace{4mm}\small A：当前仍然 1 天内有效。改进方向：改密 $\to$ 写黑名单 $\to$ AuthMiddleware 查黑名单。
+
+\vspace{2mm}
+\textbf{Q4}：为什么不允许"用户自助申请补券"？\\
+\hspace{4mm}\small A：补券路径如果没有"人核对身份"这一步，等价于把券免费送给黑产。
+\end{frame}
+
+\begin{frame}{Q\&A（下）：安全 / SRE 角度}
+\textbf{Q5}：为什么 RBAC 用 30s 缓存，不是强一致每次查 DB？\\
+\hspace{4mm}\small A：高 QPS 下 DB 扛不住，30s 缓存 + 显式失效是性价比最高的方案。降权 / 封号显式调 \texttt{InvalidateRoleCache} 保证关键路径快速生效。
+
+\vspace{2mm}
+\textbf{Q6}：admin/bootstrap 会不会被攻击？\\
+\hspace{4mm}\small A：要求"已登录"+"系统无 admin"两个条件同时满足才能调用。生产首发后立刻有 admin，接口自然锁死。如果数据库被清空，应当先恢复 admin 再开 API。
+
+\vspace{2mm}
+\textbf{Q7}：鉴权链路压测下会不会成为瓶颈？\\
+\hspace{4mm}\small A：\texttt{orders/list} 带 Auth 仍跑到 58K RPS，相对裸 ping 损耗 < 10\%。当前不是瓶颈。
+
+\vspace{2mm}
+\textbf{Q8}：30001 大量出现意味着什么？\\
+\hspace{4mm}\small A：要么 JWT secret 刚换过，要么有人在批量试 token（撞库）。后者要立刻看 IP 分布。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}
+  \item[authed group 入口]\srcnote{routes/router.go:45--46}
+  \item[admin sub-group]\srcnote{routes/router.go:125--131}
+  \item[admin/bootstrap 路由]\srcnote{routes/router.go:122}
+  \item[AuthMiddleware]\srcnote{middleware/jwt.go:16--64}
+  \item[双 token 续期]\srcnote{pkg/utils/jwt/jwt.go:67--93}
+  \item[RequireRole + 30s 缓存]\srcnote{middleware/rbac.go:24, 28--45, 48--86}
+  \item[InvalidateRoleCache]\srcnote{middleware/rbac.go:88--91}
+  \item[BootstrapPromoteSelf]\srcnote{service/admin.go:64--80}
+  \item[Role 字段定义]\srcnote{repository/db/model/user.go:23, 30--31}
+  \item[业务码定义]\srcnote{pkg/e/code.go:35--58；pkg/e/msg.go:31--52}
+\end{description}
+\vspace{2mm}
+\keypoint{配套压测数据：stressTest/REPORT.md 链路压测表前 7 行。}
+\end{frame}
+
+\end{document}
