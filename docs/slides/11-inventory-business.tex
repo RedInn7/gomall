@@ -35,7 +35,7 @@
   \draw[arrow] (av.north east) to[bend left=20] node[above,font=\tiny]{下单 reserve} (rv.north west);
   \draw[arrow] (rv.south west) to[bend left=20] node[below,font=\tiny]{取消 release} (av.south east);
   \draw[arrow-async] (db) -- node[right,font=\tiny]{启动 seed} (av);
-  \draw[arrow-bad] (rv.east) -- ++(1.2,0) node[right,font=\tiny]{支付 commit\\\tiny 真扣减};
+  \draw[arrow-bad] (rv.east) -- ++(1.2,0) node[right,font=\tiny,align=center]{支付 commit\\真扣减};
 \end{tikzpicture}
 \vspace{2mm}
 \begin{itemize}
@@ -106,7 +106,7 @@
   \item gomall 选择两条都留：
   \begin{itemize}
     \item MQ 是\textbf{主路径}，正常情况 30min 准点触发。
-    \item Cron 每 5 分钟扫一次 \texttt{type=UnPaid AND created\_at \le now-15min} 的订单兜底。
+    \item Cron 每 5 分钟扫一次 \texttt{type=UnPaid AND created\_at $\le$ now-15min} 的订单兜底。
     \item \textbf{业务保证}：哪怕 MQ 彻底挂掉，库存最多多锁 35 分钟，不会泄漏到第二天。
   \end{itemize}
 \end{itemize}
@@ -249,7 +249,7 @@ Cron 自身没跑到 (调度挂)          & 运维 & 监控告警 \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
-\small Cron 是\textbf{最后一道线}，所以扫表条件是 \texttt{created\_at \le now-15min} 而不是 30min ——\\
+\small Cron 是\textbf{最后一道线}，所以扫表条件是 \texttt{created\_at $\le$ now-15min} 而不是 30min ——\\
 \textbf{15min 早于 MQ 的 30min}，保证 MQ 正常时 Cron 不会抢先误关。
 \srcnote{service/order\_task.go:16 GetTimeoutOrders(15, 100)}
 \end{frame}
@@ -309,52 +309,38 @@ SRE   & Redis 和 DB 一致吗      & 对账脚本偏差秒数 \\
 \section{业务承诺一张总表}
 % ============================================================
 
-\begin{frame}{压测数据替业务说话}
-\begin{tabular}{@{}lrl@{}}
-\toprule
-场景 & 实测 & 业务含义 \\
-\midrule
-500 并发抢 100 张      & 零超发     & 不变量守住 \\
-50 VU 同 Key 重放 15s & 755{,}033 次 / 1 单 & 幂等中间件接住恶意锁单 \\
-/orders/create RPS  & 50{,}319   & 单机够撑双 11 中等品类 \\
-p95 / max           & 2.33ms / 73ms & 远低于 P0 SLO 500ms \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-\small 这些不是"性能数字"，是\textbf{业务承诺的实测证据}。\\
-压测脚本和数据都在 \texttt{stressTest/} 下，PR 评审可复核。
-\srcnote{stressTest/REPORT.md 链路压测表 第 5 行 + \S 单元测试}
-\end{frame}
-
-\begin{frame}{业务承诺总表}
+\begin{frame}{业务承诺总表 + 压测复核}
 \begin{tabular}{@{}lll@{}}
 \toprule
-承诺 & 实现 & 触发条件 \\
+承诺 & 实现 & 复核 \\
 \midrule
-\textbf{不超卖}      & Redis Lua 原子扣 & 100\% 时刻 \\
-\textbf{30min 释放} & MQ TTL 30min     & 用户未付款 \\
-\textbf{兜底释放}    & Cron 5min / 15min 窗口 & MQ 挂或消费失败 \\
-\textbf{支付即扣}    & CommitReservation & 支付回调成功 \\
-\textbf{幂等关单}    & WHERE type=UnPaid & 多次取消同一单 \\
-\textbf{显式回滚}    & service/order.go release & DB tx 失败 \\
+\textbf{不超卖}      & Redis Lua 原子扣        & 500 并发抢 100 张零超发 \\
+\textbf{30min 释放} & MQ TTL 30min            & RMQ 单元测试 + 端到端 \\
+\textbf{兜底释放}    & Cron 5min / 15min 窗口  & RMQ 关停后 Cron 接管 \\
+\textbf{支付即扣}    & CommitReservation       & service/order.go 单测 \\
+\textbf{幂等关单}    & WHERE type=UnPaid       & 50 VU 同 Key 15s = 1 单 \\
+\textbf{显式回滚}    & order.go release 分支    & tx 失败注入测试 \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
-\small 六条承诺缺一不可。任意一条破，业务侧就要回退到"人工对账"。
+\small 六条承诺缺一不可。压测脚本与数据在 \texttt{stressTest/} 下，PR 可复核。\\
+/orders/create 单机 50{,}319 RPS、p95 2.33ms ——\textbf{业务承诺的实测证据}。
+\srcnote{stressTest/REPORT.md 链路压测表第 5 行}
 \end{frame}
 
 \begin{frame}{回到那条 30 分钟的线}
 \begin{itemize}
-  \item 30 分钟是\textbf{用户友好}与\textbf{库存周转}的平衡。
-  \item 它不是 SLA、不是延迟、不是性能指标 —— 它是\textbf{业务的合同条款}。
-  \item 改 30 分钟，要走的不是一个 PR，是一次跨部门的产品决策：
+  \item 30 分钟是\textbf{用户友好}与\textbf{库存周转}的平衡，不是 SLA、不是延迟指标——它是\textbf{业务的合同条款}。
+  \item 改 30 分钟，要走的不是一个 PR，是一次跨部门决策（商家锁单 / 运营促销 / 风控黑产）。
+  \item 业务侧落到代码的总结：
   \begin{itemize}
-    \item 商家：会不会涨锁单时长？
-    \item 运营：节日要不要临时缩短？
-    \item 风控：黑产能不能利用？
+    \item 两桶库存 = \textbf{可售 / 已锁定}，对应运营两套报表。
+    \item 超卖必赔、误锁仅流失，默认偏好\textbf{宁可误锁}。
+    \item 一致性靠 Saga + 对账，而非分布式事务。
+    \item 六条承诺都\textbf{要压测或单测复核}，否则只是口号。
   \end{itemize}
 \end{itemize}
-\keypoint{库存治理的核心，不是 Redis Lua 怎么写，是\textbf{这六条承诺怎么落到代码里且能被压测复核}。}
+\keypoint{库存治理的核心，不是 Redis Lua 怎么写，是\textbf{这六条承诺怎么落到代码里且能被复核}。}
 \end{frame}
 
 % ============================================================
@@ -376,17 +362,6 @@ p95 / max           & 2.33ms / 73ms & 远低于 P0 SLO 500ms \\
 \vspace{2mm}
 \textbf{Q4}：为什么不上分布式事务？\\
 \hspace{4mm}\small A：Redis 不参与 2PC；Saga + 兜底成本更低，已经满足"最终一致"业务承诺。
-\end{frame}
-
-\begin{frame}{业务侧总结}
-\begin{itemize}
-  \item 两桶库存翻译成业务语言 = \textbf{可售} / \textbf{已锁定}。
-  \item 30 分钟是合同条款，不是定时器参数。
-  \item 超卖必赔，误锁仅流失 —— 默认偏好\textbf{宁可误锁}。
-  \item 一致性靠 Saga 与对账，而不是分布式事务。
-  \item 每条业务承诺，都\textbf{要有压测或单测能复核}，否则只是口号。
-\end{itemize}
-\keypoint{对应技术 deck：02 防超发、04 Outbox + Saga。这份业务侧 deck 解释的是"为什么这么做"，不替代它们。}
 \end{frame}
 
 \begin{frame}{代码位置一览}
