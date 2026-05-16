@@ -98,6 +98,15 @@ func NewRouter() *gin.Engine {
 			authed.GET("orders/show", api.ShowOrderHandler())
 			authed.POST("orders/delete", api.DeleteOrderHandler())
 
+			// 订单状态机扩展：履约 + 退款
+			// 用户主动：确认收货 / 申请退款（幂等）
+			authed.POST("orders/confirm-receive", api.ConfirmReceiveHandler())
+			authed.POST("orders/refund/request", middleware.Idempotency(), api.RequestRefundHandler())
+			// 商家 / 运营：发货 / 同意 / 驳回退款。merchant 角色未落地前先挂 admin RBAC
+			authed.POST("orders/ship", middleware.RequireRole("admin"), api.ShipOrderHandler())
+			authed.POST("orders/refund/approve", middleware.RequireRole("admin"), api.ApproveRefundHandler())
+			authed.POST("orders/refund/reject", middleware.RequireRole("admin"), api.RejectRefundHandler())
+
 			// 购物车
 			authed.POST("carts/create", api.CreateCartHandler())
 			authed.GET("carts/list", api.ListCartHandler())
