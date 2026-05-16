@@ -1,0 +1,52 @@
+\input{preamble}
+
+\title{gomall 后端实战 · 五讲合订}
+\subtitle{幂等 / 防超发 / 缓存一致性 / Outbox+Saga / 限流熔断}
+\author{gomall · 后端实战}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{合订本目录}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\# & 主题 & 学时 & 合订本起始页 \\
+\midrule
+01 & 幂等中间件设计                       & 60 min & p.~4   \\
+02 & 防超发与抢购库存                     & 90 min & p.~33  \\
+03 & 缓存一致性                           & 60 min & p.~63  \\
+04 & Outbox 模式与 Saga 补偿              & 90 min & p.~93  \\
+05 & 限流与熔断                           & 60 min & p.~123 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4mm}
+\small
+\begin{itemize}
+  \item 全册 5 deck $\times$ 29--30 页 $=$ 约 147 页。
+  \item 每份 deck 末 3 页固定为「面试 Q\&A（上）/（下）/ 代码位置一览」。
+  \item 推荐顺序：01 $\to$ 02 $\to$ 03 $\to$ 05 $\to$ 04（难度递增 + 故事性）。
+\end{itemize}
+
+\keypoint{建议每讲独立放映；连讲请用 \texttt{master.pdf} 翻到对应起始页。}
+\end{frame}
+
+\begin{frame}{这套 deck 怎么用}
+\begin{description}
+  \item[一节课讲一个主题] 直接放对应 \texttt{0?-*.pdf}（29--30 页 / 60--90 min）
+  \item[一整门课串讲]     按 01$\to$05 顺序连讲，建议拆 2 天
+  \item[单页打印讲义]     \texttt{pdfjam --nup 2x2 --landscape 0?-*.pdf}
+  \item[面试前自查]       打印每份末 3 页（Q\&A + 代码位置）当 cheat sheet
+\end{description}
+
+\vspace{3mm}
+\small 编译：\texttt{./build.sh}\\
+源码：\texttt{docs/slides/}\\
+博客长文：\texttt{docs/blog/0?-*.md}\\
+压测数据：\texttt{stressTest/REPORT.md}\\
+设计文档：\texttt{docs/slides-pipeline/}
+\end{frame}
+
+\end{document}
