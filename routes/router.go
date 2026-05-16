@@ -76,6 +76,9 @@ func NewRouter() *gin.Engine {
 
 			// 订单操作（下单走幂等）
 			authed.POST("orders/create", middleware.Idempotency(), api.CreateOrderHandler())
+			// 异步下单：MQ 削峰，前端拿 ticket 轮询 status
+			authed.POST("orders/enqueue", middleware.Idempotency(), api.EnqueueOrderHandler())
+			authed.GET("orders/status", api.OrderStatusHandler())
 			authed.GET("orders/list", api.ListOrdersHandler())
 			authed.GET("orders/old/list", api.ListOrdersHandlerOld())
 			authed.GET("orders/show", api.ShowOrderHandler())
