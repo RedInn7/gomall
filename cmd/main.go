@@ -37,6 +37,7 @@ func loading() {
 	initialize.InitOutboxPublisher(context.Background())
 	initialize.InitOrderAsyncConsumer(context.Background())
 	tryInitES(context.Background())
+	tryInitWeb3Listener(context.Background())
 	//kafka.InitKafka()
 	//track.InitJaeger()
 	fmt.Println("加载配置完成...")
@@ -67,4 +68,14 @@ func tryInitES(ctx context.Context) {
 	}()
 	es.InitEs()
 	initialize.InitSearch(ctx)
+}
+
+// tryInitWeb3Listener Web3 RPC 不可用时静默跳过，链下监听不影响主链路
+func tryInitWeb3Listener(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Warnf("Web3 listener 初始化 panic: %v", r)
+		}
+	}()
+	initialize.InitWeb3Listener(ctx)
 }
