@@ -1,7 +1,7 @@
 \input{preamble}
 
-\title{商家后台与可观测性}
-\subtitle{BossID 数据基础 / merchant 角色路线图 / Jaeger / Skywalking / 静默降级}
+\title{商家后台与可观测性（v2 扩展版）}
+\subtitle{BossID 数据基础 / merchant API 与入驻 / 商家看板 / Prometheus + Grafana / ELK / 告警分级 / SLO 与 trace 驱动决策}
 \author{gomall · 业务侧 deck}
 \date{}
 
@@ -13,9 +13,7 @@
 \tableofcontents
 \end{frame}
 
-% ============================================================
-\section{商家数据现状：BossID 在、接口缺}
-% ============================================================
+\section{商家数据现状与 merchant 角色路线图}
 
 \begin{frame}{一个商家在 gomall 里能干什么、不能干什么}
 \begin{itemize}
@@ -25,16 +23,6 @@
   \item 但是 \texttt{/api/v1/merchant/*} \textbf{一个路由都没有} —— 数据有、查询入口缺。
 \end{itemize}
 \srcnote{repository/db/model/order.go:12、product.go:23、cart.go:10、favorite.go:12 五处 BossID}
-\end{frame}
-
-\begin{frame}{现状对业务的真实伤害}
-\begin{itemize}
-  \item \textbf{招商场景}：BD 谈一个新品牌，对方第一句话"我能看到自己卖了多少吗" $\to$ 答不上来。
-  \item \textbf{客服场景}：商家把客服当后台用 —— "帮我查下我店铺今日订单"、"帮我看 SKU 12345 库存"。1 个客服对 N 个商家，工单全是低价值查询。
-  \item \textbf{越权风险}：临时给商家开 admin 账号 $\to$ 商家立刻看到\textbf{所有店铺}数据，谈判桌上当场翻车。
-  \item \textbf{数据正确但权限模型没成形}：\texttt{product/delete} 已经按 \texttt{WHERE id=? AND boss\_id=?} 隔离，但没有任何中间件保证调用者就是 \texttt{boss\_id} 这个人。
-\end{itemize}
-\srcnote{repository/db/dao/product.go:67--72 已带 boss\_id 隔离；routes/router.go:148--155 admin 子组只有 3 个 handler}
 \end{frame}
 
 \begin{frame}{BossID 散落在五张表里}
@@ -56,25 +44,186 @@
 \srcnote{repository/db/model/order.go:12、product.go:23、cart.go:10、favorite.go:12}
 \end{frame}
 
-\begin{frame}{数据基础够不够给商家看板}
-\begin{tabular}{@{}llll@{}}
+\section{merchant API 草案与入驻流程}
+
+\begin{frame}{merchant Group 总览}
+\begin{tikzpicture}[node distance=3mm and 6mm,every node/.append style={align=center,font=\scriptsize,text width=24mm}]
+  \node[node-box,node-state-normal] (root) {merchant := \\authed.Group("/merchant")};
+  \node[node-box,node-state-transition,right=18mm of root] (dash) {GET /dashboard\\今日营收};
+  \node[node-box,node-state-transition,above=of dash]      (ord)  {GET /orders\\待发货列表};
+  \node[node-box,node-state-transition,below=of dash]      (prod) {GET /products\\本店 SKU};
+  \node[node-box,node-state-transition,right=of dash]      (inv)  {GET /inventory/alert\\库存告警};
+  \node[node-box,node-state-transition,right=of ord]       (ship) {POST /ship\\发货};
+  \node[node-box,node-state-transition,right=of prod]      (settle){GET /settlement\\结算单};
+  \node[node-box,node-state-alert,right=of inv]            (with) {POST /withdraw\\提现};
+  \draw[arrow] (root) -- (dash);
+  \draw[arrow] (root.east) to[bend left=15] (ord.west);
+  \draw[arrow] (root.east) to[bend right=15] (prod.west);
+  \draw[arrow] (dash) -- (inv);
+  \draw[arrow] (ord) -- (ship);
+  \draw[arrow] (prod) -- (settle);
+  \draw[arrow-alert] (inv) -- (with);
+\end{tikzpicture}
+\vspace{1mm}
+\small 7 个接口分三层：\textbf{查（dashboard / orders / products / inventory / settlement）}、\textbf{操作（ship）}、\textbf{资金（withdraw）}。资金类需要二次鉴权（短信/邮箱 OTP）。
+\srcnote{routes/router.go:157--164 admin 子组模板，merchant 完全复用该姿势}
+\end{frame}
+
+\begin{frame}{7 个接口的签名与权限矩阵}
+\scriptsize
+\begin{tabular}{@{}lllll@{}}
 \toprule
-看板模块 & 需要的字段 & 现有 & 缺什么 \\
+路径 & 方法 & 入参 & 返回 & 备注 \\
 \midrule
-今日营收  & order(BossID, Money, Type=2)  & \checkmark & 时间维度索引 \\
-待发货    & order(BossID, Type=2, Ship?) & 部分 & 无 ship\_status 字段 \\
-库存告警  & product(BossID, Num)         & \checkmark & 阈值规则表 \\
-客诉工单  & 无 ticket 表                  & 缺   & 整张表 \\
+/merchant/dashboard       & GET  & date=YYYY-MM-DD             & DashboardVO & 命 Redis 60s 缓存 \\
+/merchant/orders          & GET  & status=wait\_ship,page,size & []OrderVO   & 默认 status=wait\_ship \\
+/merchant/orders/ship     & POST & order\_id, ship\_no, carrier & status      & 幂等 + 写 outbox \\
+/merchant/products        & GET  & on\_sale=true, page, size   & []ProductVO & WHERE boss\_id=? \\
+/merchant/inventory/alert & GET  & threshold=10                & []SkuAlert  & ZRANGEBYSCORE \\
+/merchant/settlement      & GET  & month=YYYY-MM               & SettleVO    & 上月汇总，T+30 \\
+/merchant/withdraw        & POST & amount, bank\_acct          & OrderNum    & OTP + 风控 + 异步 \\
 \bottomrule
 \end{tabular}
-\vspace{3mm}
-\small 4 个模块里 2 个开箱可做（今日营收、库存告警），1 个差一个字段（待发货），1 个要新加表（客诉）。\textbf{先做能做的}，是常见的最小可用商家后台路线。
-\srcnote{repository/db/model/order.go:8--18 Type 字段只有"已支付/未支付"，没有发货状态}
+\vspace{2mm}
+\small \textbf{权限统一}：\texttt{RequireRole("merchant","admin")} —— admin 可在出问题时\textbf{代为操作}，便于客服兜底。\textbf{数据隔离}：所有查询 SQL 末尾强制 \texttt{AND boss\_id=ctx.UserId}，由 service 层注入，handler 不接受 \texttt{boss\_id} 入参。
+\srcnote{repository/db/dao/product.go:67--72 已有 WHERE id=? AND boss\_id=? 模板可复用}
+\end{frame}
+
+\begin{frame}[fragile]{merchant.Group 注册：18 行代码}
+\begin{lstlisting}[language=Go,firstnumber=157,
+  caption={\srcnote{routes/router.go merchant.Group 草案；与 admin.Group 同构}}]
+// 商家后台（新增）—— 与 admin 子组同级，
+// 资金类接口再叠一层 OTP，由 service 层校验
+merchant := authed.Group("/merchant")
+merchant.Use(middleware.RequireRole("merchant", "admin"))
+{
+    merchant.GET("dashboard", api.MerchantDashboardHandler())
+    merchant.GET("orders",    api.MerchantListOrdersHandler())
+    merchant.POST("orders/ship",
+        middleware.Idempotency(),
+        api.MerchantShipOrderHandler())
+    merchant.GET("products",  api.MerchantListProductsHandler())
+    merchant.GET("inventory/alert",
+        api.MerchantInventoryAlertHandler())
+    merchant.GET("settlement",
+        api.MerchantSettlementHandler())
+    merchant.POST("withdraw",
+        middleware.Idempotency(),
+        api.MerchantWithdrawHandler())
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{merchant.Group 草案逐行讲解}
+\begin{itemize}
+  \item \textbf{第 3 行 Group("/merchant")}：与 admin 子组同级挂在 \texttt{authed} 下，自动继承 \texttt{AuthMiddleware()} —— 没登录的请求根本进不到 RequireRole。
+  \item \textbf{第 4 行 RequireRole("merchant","admin")}：变长参数复用，admin 自动有 merchant 权限，避免"测试一个商家场景要新建一个用户"的反复切换。
+  \item \textbf{第 9 行 ship / 第 17 行 withdraw 加 Idempotency()}：两类\textbf{产生外部副作用}的接口（生成运单号、扣账户余额）；查询接口不需要幂等。
+  \item \textbf{未加 SlidingWindow}：商家后台是低频管理界面，单商家 QPS 几乎不会触发限流；加了反而增加 Redis 压力。
+  \item \textbf{未在路由层做 boss\_id 校验}：boss\_id 来自 \texttt{ctl.GetUserInfo(ctx).Id}，绝不从请求 body / query 读，避免越权。
+\end{itemize}
+\srcnote{middleware/auth.go AuthMiddleware；middleware/rbac.go:48--86 RequireRole；middleware/idempotency.go}
+\end{frame}
+
+\begin{frame}{从注册到正式上架：5 个阶段}
+\begin{tikzpicture}[node distance=2mm and 10mm,every node/.append style={align=center,font=\scriptsize,text width=24mm}]
+  \node[node-box,node-state-normal]      (reg)  {1. 注册账号\\RoleUser};
+  \node[node-box,node-state-transition,right=of reg]  (sub)  {2. 资质上传\\营业执照 / 法人身份证};
+  \node[node-box,node-state-transition,right=of sub]  (ocr)  {3. OCR + 自动校验\\结构化字段比对};
+  \node[node-box,node-state-transition,right=of ocr]  (rev)  {4. 人工审核\\BD / 法务};
+  \node[node-box,node-state-transition,below=8mm of rev]  (try)  {5. 试运行\\限 100 SKU / 7 天};
+  \node[node-box,node-state-alert,left=of try]       (live) {6. 正式上架\\RoleMerchant};
+  \node[node-box,below=8mm of sub] (rej)  {驳回\\退回阶段 2};
+  \draw[arrow] (reg) -- (sub);
+  \draw[arrow] (sub) -- (ocr);
+  \draw[arrow] (ocr) -- (rev);
+  \draw[arrow] (rev) -- (try);
+  \draw[arrow] (try) -- (live);
+  \draw[arrow-bad] (rev) -- (rej);
+  \draw[arrow-bad] (ocr.south) to[bend right=10] (rej.east);
+\end{tikzpicture}
+\vspace{1mm}
+\small 整个流程\textbf{平均 3--5 个工作日}：OCR 即时返回，人工审核占大头（24--48h）；试运行用于发现资质合规但实际运营粗糙的卖家。
+\srcnote{建议新增表 merchant\_apply(user\_id, license\_no, status, reviewer\_id, ...)；service/merchant\_apply.go 待建}
+\end{frame}
+
+\begin{frame}{阶段 2--3：资质上传与 OCR 字段校验}
+\begin{itemize}
+  \item \textbf{上传走 OSS}：\texttt{POST /merchant/apply/upload} 复用 \texttt{api/v1/upload.go} 的 OSS 上传链路，返回 URL。
+  \item \textbf{OCR 拉的字段}：营业执照号、企业名称、法人姓名、注册资本、经营范围。
+  \item \textbf{自动校验三件套}：(a) 营业执照号 18 位且校验位合法；(b) 法人姓名与身份证 OCR 一致；(c) 申请人手机号实名认证与法人姓名一致（运营商接口）。
+  \item \textbf{三项任一不过 $\to$ status=auto\_rejected}，直接返回错误码 \texttt{80001 "您的店铺还在审核"}，但内部状态记 \texttt{auto\_rejected\_reason="法人姓名不一致"}，客服可看不能改。
+  \item \textbf{OCR 服务挂了怎么办}：降级为"手动录入字段 + 人工目检图片"，不阻塞流程；与 deck 10 静默降级哲学一脉相承。
+\end{itemize}
+\srcnote{api/v1/upload.go OSS 上传链路；建议新建 service/ocr.go 抽象 OCR 供应商}
+\end{frame}
+
+\begin{frame}{阶段 4--5：人工审核与试运行}
+\begin{itemize}
+  \item \textbf{审核界面}：admin 后台新增 \texttt{/admin/merchant/apply/list} + \texttt{/admin/merchant/apply/decide}。BD / 法务双签：BD 看品类匹配度，法务看资质合规。
+  \item \textbf{审核 SLA}：48 小时内一审。超时进入"催办池"，自动 \@ 主管。
+  \item \textbf{试运行限额}：通过审核后状态进入 \texttt{trial}，\texttt{RoleMerchant} 已生效，但隐性加上 (a) SKU 数 $\le$ 100，(b) 单日订单 $\le$ 500，(c) 不能领大额营销资源位。
+  \item \textbf{试运行毕业条件}：7 天内 (a) 无客诉升级 (b) DSR $\ge$ 4.5 (c) 履约率 $\ge$ 95\%。三项达标自动升 \texttt{normal} 状态。
+  \item \textbf{异常退出}：试运行期 P0/P1 客诉 $\to$ 状态回退 \texttt{trial\_failed}，BD 介入复盘。
+\end{itemize}
+\srcnote{建议复用 service/admin.go:46--62 PromoteToAdmin 模板做 PromoteToMerchant；试运行限额可在 RBAC 之后挂一个 trial 中间件}
 \end{frame}
 
 % ============================================================
-\section{三层鉴权边界：merchant 角色的路线图}
+\section{商家看板：4 象限信息架构}
 % ============================================================
+
+\begin{frame}{商家看板首屏的 4 个象限}
+\begin{tikzpicture}[node distance=2mm and 12mm,every node/.append style={align=center,font=\scriptsize,text width=34mm,minimum height=14mm}]
+  \node[node-box,node-state-normal]        (rev)  {\textbf{今日营收}\\GMV / 单数 / 客单价\\order WHERE Type=2};
+  \node[node-box,node-state-transition,right=of rev] (wait) {\textbf{待发货}\\超 24h 红字\\order WHERE status=wait\_ship};
+  \node[node-box,node-state-alert,below=of rev]      (inv)  {\textbf{库存告警}\\$<$ 商家自设阈值\\product.Num};
+  \node[node-box,node-state-transition,below=of wait](cs)   {\textbf{客诉工单}\\未结案 + 今日新增\\ticket（待建）};
+\end{tikzpicture}
+\vspace{2mm}
+\small 4 个象限\textbf{对应商家一天打开后台的 4 个动作}：(a) 看赚了多少（左上），(b) 看要发什么（右上），(c) 看要补什么货（左下），(d) 看要处理什么投诉（右下）。\textbf{每个象限独立加载、独立缓存}，弱依赖不互相拖累。
+\srcnote{repository/db/model/order.go:12 BossID + Type；product.go:23 BossID + Num}
+\end{frame}
+
+\begin{frame}{4 象限的数据源与计算口径}
+\scriptsize
+\begin{tabular}{@{}lllll@{}}
+\toprule
+象限 & SQL/Redis 来源 & 计算口径 & 缓存策略 & 谁负责 \\
+\midrule
+今日营收 & order(BossID, Money, Type=2, created\_at) & SUM(Money) GROUP BY 日 & Redis 60s & service/merchant\_dashboard \\
+待发货 & order(BossID, status=wait\_ship) & COUNT + 列出超 24h & 列表 30s & service/merchant\_order \\
+库存告警 & ZSET inv\_alert:\{boss\} & ZRANGEBYSCORE 0 阈值 & 实时 & service/inventory \\
+客诉工单 & ticket(BossID, status='open') & COUNT 未结 & 缓存 60s & service/ticket（新表） \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 营收口径要在 deck 里讲清楚：\textbf{只算已支付（Type=2）}；\textbf{退款的减回去}（需要订单状态机 7 态完整落地后再加 \texttt{Refunded} 维度）。\textbf{缓存粒度按商家}：key 形如 \texttt{merchant:dashboard:\{boss\_id\}:\{date\}}，不同商家不会互相挤压。
+\srcnote{repository/db/model/order.go Type=2 已支付；订单状态机 7 态见 deck 09 v2}
+\end{frame}
+
+\begin{frame}{看板架构：读分离 + 三层缓存 + 异步预热}
+\begin{tikzpicture}[node distance=4mm and 10mm,every node/.append style={align=center,font=\scriptsize,text width=22mm}]
+  \node[node-box,node-state-normal]                  (ui)   {商家 PC\\后台};
+  \node[node-box,node-state-transition,right=of ui]  (api)  {merchant\\dashboard handler};
+  \node[node-box,node-state-transition,right=of api] (cache){Redis\\60s 聚合};
+  \node[node-box,node-state-transition,right=of cache](db)  {MySQL\\读从库};
+  \node[node-box,node-state-alert,below=12mm of cache](cron){Cron 预热\\08:00 / 12:00 / 18:00\\刷热门商家看板};
+  \draw[arrow]   (ui)  -- (api);
+  \draw[arrow]   (api) -- node[above,font=\tiny]{HIT 99\%}(cache);
+  \draw[arrow-async]   (cache) -- node[above,font=\tiny]{MISS}(db);
+  \draw[arrow-async] (cron.north) to[bend left=15] (cache.south);
+  \draw[arrow-async] (cron.east)  to[bend right=20] (db.south);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item \textbf{读分离}：所有查询打\textbf{从库}，避免占用下单链路的主库连接池。
+  \item \textbf{60s 缓存}：商家可接受 1 分钟的数据延迟（不是炒股盘）；同时把 DB 压力砍到 1/60。
+  \item \textbf{异步预热}：Cron 在三个高峰前把头部商家的看板提前算好，确保 p99 不抖。
+\end{itemize}
+\srcnote{initialize/cron.go 已有 cron 框架；缓存 key 命名遵循 cache/key.go 现有规约}
+\end{frame}
+
 
 \begin{frame}{今天只有两层墙，明天要加中间一层}
 \begin{tikzpicture}[node distance=4mm and 6mm,every node/.append style={align=center,font=\scriptsize,text width=28mm}]
@@ -136,29 +285,9 @@ func InvalidateRoleCache(id uint) { roleCache.Delete(id) }
 \end{lstlisting}
 \end{frame}
 
-\begin{frame}{lookupRole 逐行讲解}
-\begin{itemize}
-  \item \textbf{为什么要缓存}：每个 admin / merchant 请求都进 \texttt{RequireRole}，不缓存就每次打 DB；高并发下 user 表的 \texttt{SELECT WHERE id=?} 会变成路由瓶颈。
-  \item \textbf{为什么是 30s}：商家提权 / 降级是低频事件，30s 内权限漂移可接受；同时单点回源 DB 的 QPS 被砍到 1/30。
-  \item \textbf{为什么用 sync.Map}：单实例进程内只读为主、写少；不引入 Redis 避免把鉴权链路绑到 Redis 健康度上。
-  \item \textbf{为什么提权后必须显式 Invalidate}：商家刚被审核通过，第一次访问 \texttt{/merchant/*} 不能等 30s。\texttt{service/admin.go:59} 调 \texttt{InvalidateRoleCache(targetUserId)} 做精确失效。
-\end{itemize}
-\srcnote{service/admin.go:59 PromoteToAdmin 末尾的显式失效}
-\end{frame}
-
 % ============================================================
 \section{Jaeger：链路追踪解决的真实问题}
 % ============================================================
-
-\begin{frame}{为什么要在 router 第一行就挂 Jaeger}
-\begin{itemize}
-  \item gomall 一次下单要穿过：\texttt{ratelimit} $\to$ \texttt{Jaeger} $\to$ \texttt{Cors} $\to$ \texttt{Auth} $\to$ \texttt{Idempotency} $\to$ \texttt{OrderCreate} $\to$ \texttt{Redis Lua} $\to$ \texttt{MySQL} $\to$ \texttt{Outbox}。
-  \item 出问题时\textbf{只看错误日志}永远定位不到瓶颈：哪一段慢、哪一段挂、哪一段触发了重试 —— 日志里只有"成功"或"失败"。
-  \item Jaeger 把这条链做成一棵 \textbf{span 树}：每段耗时、每次依赖调用、每个上下游 traceId 都能串起来。
-  \item 业务价值：客服报"用户 X 下单 5 秒才返回" $\to$ 用 trace 一找 $\to$ 看到 4.7s 卡在第三方支付的 \texttt{paydown} 步。
-\end{itemize}
-\srcnote{routes/router.go:23 全局挂 \texttt{middleware.Jaeger()}}
-\end{frame}
 
 \begin{frame}{一次下单的 trace span 树}
 \begin{tikzpicture}[
@@ -236,32 +365,6 @@ func Jaeger() gin.HandlerFunc {
 \srcnote{stressTest/REPORT.md 链路压测表第 2、3 行；pkg/utils/track/track.go:15--27 GetDefaultConfig const sampler}
 \end{frame}
 
-\begin{frame}{Jaeger trace 在业务排障的三种典型用法}
-\begin{tabular}{@{}lll@{}}
-\toprule
-症状 & 用法 & 找的是什么 \\
-\midrule
-单笔卡 5s   & 按 traceId 拉单条 & 哪一段 span 最长 \\
-某接口变慢   & 按 service+op 拉 p99 & p99 是哪段 span 抬起来的 \\
-报错 70002 & 按 status 过滤 & CB Open 前最后一次成功调用是何时 \\
-\bottomrule
-\end{tabular}
-\vspace{3mm}
-\small 关键是\textbf{把 traceId 写进业务日志}：客服 / 商家投诉里只要附上 traceId，SRE 就能 1 分钟内定位。\\
-当前 gomall 的 \texttt{log.LogrusObj} 默认 JSON formatter 已经能塞字段，只差在 handler 层把 traceId 写进去。
-\srcnote{pkg/utils/log/logger.go:29--31 JSON formatter；middleware/track.go:26 span 写回 ctx}
-\end{frame}
-
-\begin{frame}{为什么 cmd/main.go 顶上有一行神秘 import}
-\begin{itemize}
-  \item \texttt{cmd/main.go:7} 写着 \texttt{\_ "github.com/apache/skywalking-go"}。
-  \item 这是 \textbf{Skywalking Go agent 的接入方式}：纯 import side-effect，不调任何 API。
-  \item 编译时配合 \texttt{skywalking-go-agent} 工具链\textbf{重写字节码}（Go 没有 JVM agent，靠 source-level rewrite），自动把标准库 / gin / gorm 的调用包成 span 上报。
-  \item \texttt{docker-compose.yml:101--148} 已经把 skywalking-oap + skywalking-ui 拉起来了，监听 11800（agent 上报）/ 8080（UI）。
-\end{itemize}
-\srcnote{cmd/main.go:7 import；docker-compose.yml:101--148 skywalking-oap/ui}
-\end{frame}
-
 \begin{frame}{Jaeger 与 Skywalking 同时存在的取舍}
 \begin{tabular}{@{}lll@{}}
 \toprule
@@ -280,45 +383,115 @@ gomall 用法 & 已落地，主线          & 备选，docker 起着 \\
 \end{frame}
 
 % ============================================================
-\section{日志、降级与业务码}
+\section{Prometheus 业务 metrics + Grafana 大盘}
 % ============================================================
 
-\begin{frame}{logrus 已经把 JSON 字段对齐了，差最后一公里}
-\begin{itemize}
-  \item \texttt{pkg/utils/log/logger.go:29--31} 已经设置 \texttt{JSONFormatter} + 标准时间格式。
-  \item 全站调用 \texttt{log.LogrusObj} 的地方共 \textbf{349 处}，覆盖 middleware / service / repository 三层。
-  \item 输出目标：\texttt{logs/<date>.log}，本地文件 append。
-  \item \textbf{差什么}：日志没带 traceId / userId / bossId，工单里"用户 X 7:23 报错"没法快速捞到对应日志。
-  \item \textbf{差什么 (2)}：日志只落文件，没集中收集；多实例部署后排障要 ssh 一台台抓。
-\end{itemize}
-\srcnote{pkg/utils/log/logger.go:14--41 InitLog；grep -rn log.LogrusObj 共 349 处}
-\end{frame}
-
-\begin{frame}{ELK / EFK 路线图：三步走}
-\begin{tikzpicture}[node distance=6mm and 10mm,every node/.append style={align=center,font=\scriptsize,text width=22mm}]
-  \node[node-box,node-state-normal] (app) {gomall app\\logrus JSON};
-  \node[node-box,node-state-transition,right=of app] (col) {Filebeat /\\Fluent Bit};
-  \node[node-box,node-state-transition,right=of col] (es) {Elasticsearch\\已经在 compose};
-  \node[node-box,node-state-alert,right=of es] (kb) {Kibana\\已经在 compose};
-  \draw[arrow] (app) -- node[above,font=\tiny]{tail -f} (col);
-  \draw[arrow] (col) -- node[above,font=\tiny]{bulk index} (es);
-  \draw[arrow] (es)  -- node[above,font=\tiny]{query} (kb);
-\end{tikzpicture}
+\begin{frame}{要给业务接的 4 类 metrics}
+\scriptsize
+\begin{tabular}{@{}lllll@{}}
+\toprule
+metric & 类型 & 标签 & 用途 & 来源代码 \\
+\midrule
+order\_created\_total       & Counter   & status, boss\_id\_bucket  & 单数 / 转化 & service/order.go OrderCreate \\
+order\_create\_duration\_ms & Histogram & status                    & p50/p99 & middleware/timing.go（新建） \\
+paydown\_total              & Counter   & channel, status           & 渠道占比 & service/order\_payment.go \\
+ratelimit\_hit\_total       & Counter   & scope                     & 限流命中率 & middleware/ratelimit.go SlidingWindow \\
+circuit\_state              & Gauge     & route                     & 熔断器实时态 & middleware/circuitbreaker.go state \\
+idempotency\_hit\_total     & Counter   & route                     & 60002 命中 & middleware/idempotency.go \\
+\bottomrule
+\end{tabular}
 \vspace{2mm}
-\small \textbf{当前完成度}：左两格还没接、右两格 \texttt{docker-compose.yml:44--99} 已经起着 ES 8.4.2 + Kibana。\\
-\textbf{下一步只差}：选一个 collector（Filebeat 或 Fluent Bit），把 \texttt{logs/*.log} tail 到 ES 索引。
-\srcnote{docker-compose.yml:44--71 elasticsearch；:85--99 kibana；pkg/utils/log/logger.go:38 留了 ES hook 接入位}
+\small 标签设计原则：\textbf{枚举值数量有限}。\texttt{boss\_id} 不能直接当标签（百万级 cardinality 会把 Prometheus 内存打爆），改成 \texttt{boss\_id\_bucket}（按 GMV 等级分 5 档）。
+\srcnote{middleware/ratelimit.go SlidingWindow / middleware/circuitbreaker.go state；指标可在两个中间件里挂}
 \end{frame}
 
-\begin{frame}{traceId 接入日志的最小改动}
+\begin{frame}[fragile]{接入 Prometheus：30 行起步}
+\begin{lstlisting}[language=Go,firstnumber=1,
+  caption={\srcnote{pkg/utils/metrics/metrics.go 草案；与 middleware/timing.go 配合}}]
+package metrics
+
+import (
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+    OrderCreatedTotal = promauto.NewCounterVec(
+        prometheus.CounterOpts{
+            Name: "gomall_order_created_total",
+            Help: "订单创建累计计数",
+        }, []string{"status", "boss_bucket"})
+
+    OrderDurMs = promauto.NewHistogramVec(
+        prometheus.HistogramOpts{
+            Name:    "gomall_order_create_duration_ms",
+            Help:    "下单耗时（毫秒）",
+            Buckets: []float64{5, 10, 25, 50, 100, 250, 500, 1000},
+        }, []string{"status"})
+
+    CircuitState = promauto.NewGaugeVec(
+        prometheus.GaugeOpts{
+            Name: "gomall_circuit_state",
+            Help: "熔断器状态 0=Closed 1=Open 2=HalfOpen",
+        }, []string{"route"})
+)
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{Prometheus 接入逐行讲解}
 \begin{itemize}
-  \item 当前 \texttt{log.LogrusObj.Errorln("rbac lookup role failed:", err)} 这样的调用很多。
-  \item 改造成 \texttt{log.LogrusObj.WithFields(logrus.Fields\{"traceId": tid, "userId": uid\}).Errorln(...)}。
-  \item traceId 从 \texttt{ctl.GetSpanContext(c)} 取 —— 这个工具函数已经在 \texttt{pkg/utils/ctl/ctl.go:73} 写好了。
-  \item 改动量：包一层 \texttt{log.WithCtx(ctx)} 的 helper，全站逐步替换。
-  \item 收益：客服把 traceId 贴进搜索框 $\to$ 全链路日志 + 全链路 trace 同时召回。
+  \item \textbf{promauto 而不是手 Register}：自动注册到默认 Registry，避免漏注册导致 metric 丢失。
+  \item \textbf{Counter vs Histogram vs Gauge}：单调递增用 Counter；分位用 Histogram（buckets 是预定义的耗时阈值，决定 p99 精度）；当前态用 Gauge。
+  \item \textbf{Histogram buckets 选择}：从 5ms 到 1000ms 八档，参考 \texttt{/orders/create} 实测 p95 $\approx$ 2.3ms（见 deck 10 压测表），5ms 起步刚好覆盖 p95 + p99。
+  \item \textbf{标签穷举}：\texttt{status} 取 \texttt{success / fail / limited / cb\_open / idempotent\_hit}，5 个值；\texttt{boss\_bucket} 按 GMV 分 \texttt{S / A / B / C / D}，5 个值。两个标签 5*5=25 个时间序列，可控。
+  \item \textbf{怎么暴露}：在 router 加 \texttt{r.GET("/metrics", gin.WrapH(promhttp.Handler()))}，Prometheus 默认 15s 抓一次。
 \end{itemize}
-\srcnote{pkg/utils/ctl/ctl.go:73 \texttt{ctx.Get(consts.SpanCTX)} 取出 span 上下文}
+\srcnote{Prometheus 官方建议 Counter / Histogram / Gauge 三类用法；stressTest/REPORT.md 第 1--3 行实测 p95 数据}
+\end{frame}
+
+\begin{frame}{Grafana 看板：5 个核心面板}
+\scriptsize
+\begin{tabular}{@{}llll@{}}
+\toprule
+面板 & 数据源 & 阈值（黄 / 红） & 告警接收人 \\
+\midrule
+订单总量趋势    & sum(rate(order\_created\_total[5m])) & --- / --- & 不告警 \\
+下单 p99 延迟  & histogram\_quantile(0.99, ...) & 200ms / 500ms & SRE \\
+下单错误率      & rate(...status="fail"...) / rate(...) & 1\% / 5\% & SRE + 业务 \\
+限流命中率      & rate(ratelimit\_hit\_total[1m]) / RPS & 0.5\% / 2\% & SRE \\
+熔断器开启次数 & changes(circuit\_state==1[5m]) & 1 次 / 3 次 & SRE + 商家域负责人 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \textbf{阈值不是拍脑袋}：基线数据来自压测 —— ping 64K RPS / p95 3.5ms 是\textbf{资源上限}，下单 50K RPS / p95 2.3ms 是\textbf{业务上限}。生产把警戒线放在压测 p95 的 5--10 倍，留出余量。
+\srcnote{stressTest/REPORT.md 链路压测表第 1、4 行 p95 数据；阈值倍率参考通用 SRE 实践}
+\end{frame}
+
+% ============================================================
+\section{ELK / EFK：日志集中化的工程化路线}
+% ============================================================
+
+\begin{frame}{规模化版本：Filebeat $\to$ Kafka $\to$ Logstash $\to$ ES}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.append style={align=center,font=\scriptsize,text width=20mm}]
+  \node[node-box,node-state-normal]                  (app) {gomall\\N 个实例};
+  \node[node-box,node-state-transition,right=of app] (fb)  {Filebeat\\边车 / Daemon};
+  \node[node-box,node-state-transition,right=of fb]  (kf)  {Kafka\\log-raw topic};
+  \node[node-box,node-state-transition,right=of kf]  (ls)  {Logstash\\过滤 / enrich};
+  \node[node-box,node-state-alert,right=of ls]       (es)  {Elasticsearch\\按天分索引};
+  \node[node-box,node-state-transition,below=10mm of es] (kb)  {Kibana\\DSL 检索};
+  \draw[arrow] (app) -- (fb);
+  \draw[arrow] (fb)  -- (kf);
+  \draw[arrow] (kf)  -- (ls);
+  \draw[arrow] (ls)  -- (es);
+  \draw[arrow] (es)  -- (kb);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item \textbf{为什么中间加 Kafka}：Filebeat 直连 ES，ES 抖动一次全站日志丢；Kafka 做 buffer，ES 可用性事故不会丢日志。
+  \item \textbf{Logstash 做什么}：把 \texttt{traceId} 提取成顶层字段、\texttt{userId} 脱敏（保留前 3 + 后 3 位）、\texttt{level=error} 的同时复制到 \texttt{alert} 索引。
+  \item \textbf{按天分索引}：\texttt{gomall-app-2026.05.16}，便于按时间清理（保留 30 天，冷归档到 OSS）。
+\end{itemize}
+\srcnote{docker-compose.yml:44--99 ES+Kibana 已有；Filebeat/Kafka/Logstash 是路线图}
 \end{frame}
 
 \begin{frame}{gomall 启动期的四个 tryInit}
@@ -367,58 +540,167 @@ func tryInitES(ctx context.Context) {
 \srcnote{cmd/main.go:54--97 四个 tryInit 同构}
 \end{frame}
 
-\begin{frame}{静默降级 vs 显式降级：什么时候用哪个}
-\begin{tabular}{@{}lll@{}}
+\begin{frame}{业务码：现有 5 段 + 待加 80xxx 商家段}
+\scriptsize
+\begin{tabular}{@{}llll@{}}
 \toprule
-依赖类型 & 降级策略 & gomall 实现 \\
+段 & 含义 & 现有 / 新增码 & 客服话术示例 \\
 \midrule
-启动期初始化（ES/Milvus/RMQ） & 静默 recover & cmd/main.go:54--97 \\
-请求期慢依赖（第三方支付）     & 熔断器        & middleware/circuitbreaker.go \\
-请求期限流（秒杀）             & 拒绝 + 业务码  & 70001 \\
-请求期幂等命中                & 直接返回      & 60002 \\
+20xxx & 业务通用 & ERROR=20001       & "请稍后再试" \\
+30xxx & 鉴权     & ErrorAuth*        & "登录已过期" \\
+50xxx & 第三方   & ErrorOss=50001    & "上传失败" \\
+60xxx & 并发 / 幂等 & 60002 命中     & 静默（用户无感）\\
+70xxx & 流量治理 & 70001 限流 / 70002 熔断 & "正在排队 / 当前繁忙" \\
+\midrule
+80001 & 店铺未审核     & 新增 & "您的店铺还在审核，1--3 工作日" \\
+80002 & 操作非本店 SKU & 新增 & "该商品不属于您的店铺" \\
+80003 & 提现额度不足   & 新增 & "本月额度已满，下月 1 号刷新" \\
+80004 & 发货超时改判即将触发 & 新增 & "您有 N 单超 72h 未发货" \\
+80005 & 库存低于阈值   & 新增 & "SKU XXX 库存 $<$ 阈值，请补货" \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small 编码原则同 deck 10：\textbf{HTTP 200 + status 字段}。商家段隔离避免与 admin / C 端文案串号。
+\srcnote{pkg/e/code.go 现有 5 段；docs/slides/10-business-traffic-governance.tex 话术映射模板}
+\end{frame}
+
+% ============================================================
+\section{静默降级 + SLO + trace 驱动决策}
+% ============================================================
+
+\begin{frame}{静默降级的 5 条铁律（提炼自 cmd/main.go 现状）}
+\begin{enumerate}
+  \item \textbf{依赖必须是"增量能力"}：搜索语义召回、订单延迟关闭、链下事件、消息异步 —— 这些都是"锦上添花"。下单 / 支付 / 鉴权\textbf{不能进降级名单}。
+  \item \textbf{兜底路径必须存在}：ES 挂 $\to$ \texttt{InitSearch} 不动，搜索退回 DB \texttt{LIKE \%keyword\%}；Milvus 挂 $\to$ \texttt{semantic-search} 接口短路返回 \texttt{\{items: []\}}。
+  \item \textbf{recover 必须配 Warn 日志 + traceId}：不能 silent。"sliently swallow + 0 日志"是事故制造机。
+  \item \textbf{recover 范围最小化}：只包 \texttt{InitX}，不包 \texttt{r.Run}。HTTP 主路径要 fail fast。
+  \item \textbf{对外可见性}：商家投诉"搜不到我新上的 SKU"时，SRE 一搜 Warn 日志 \texttt{"ES 初始化失败"} 就知道是哪种降级状态。
+\end{enumerate}
+\srcnote{cmd/main.go:54--97 四个 tryInit 的同构姿势；repository/es/ 退化路径}
+\end{frame}
+
+\begin{frame}[fragile]{静默降级的请求期版本：handler 内的弱依赖兜底}
+\begin{lstlisting}[language=Go,firstnumber=1,
+  caption={\srcnote{service/product\_search.go 草案；与 cmd/main.go:64--73 同构}}]
+// SearchProducts 弱依赖 ES，主路径返回 DB 结果，
+// ES 命中则用 ES 的更优排序覆盖
+func (s *ProductSrv) SearchProducts(
+    ctx context.Context, kw string) ([]*model.Product, error) {
+
+    // 1. 主路径：DB LIKE，必须返回
+    dbResult, err := s.dao.SearchByKeyword(ctx, kw)
+    if err != nil { return nil, err }
+
+    // 2. 锦上添花：ES 提供更好的排序
+    if !es.Available() {
+        log.WithCtx(ctx).Warnf("ES 不可用，搜索降级到 DB")
+        return dbResult, nil // 主路径已经够用
+    }
+    esResult, err := s.esRepo.SearchProducts(ctx, kw)
+    if err != nil {
+        log.WithCtx(ctx).Warnf("ES 查询出错，降级: %v", err)
+        return dbResult, nil
+    }
+    return mergeResults(dbResult, esResult), nil
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{请求期降级套路逐行讲解}
+\begin{itemize}
+  \item \textbf{第 5--6 行}：DB 是\textbf{底盘}，先拿到结果。ES 用还是不用，是优化问题，不是功能问题。
+  \item \textbf{第 9--10 行 es.Available()}：bool 缓存上一次健康检查结果（每 5s 更新），避免每次请求都打 ES。
+  \item \textbf{第 11 行 log.WithCtx(ctx).Warnf}：traceId 自动注入，客服报"搜不到" $\to$ Kibana 搜 traceId 一眼看清是降级了。
+  \item \textbf{第 14--17 行}：ES 报错时\textbf{不 return error}，因为 DB 已经给了答案，用户根本不需要知道 ES 有事。
+  \item \textbf{第 18 行 mergeResults}：把 ES 的语义排序 + DB 的 keyword 全量\textbf{融合}，ES 命中段排前，未命中段按 DB 顺序排后 —— 见 deck 21 v2 hybrid 排序。
+\end{itemize}
+\srcnote{cmd/main.go:64--73 启动期同构；deck 21 v2 hybrid 排序公式}
+\end{frame}
+
+\begin{frame}{99.9 / 99.95 / 99.99 各档预算}
+\scriptsize
+\begin{tabular}{@{}llllll@{}}
+\toprule
+SLO & 月不可用预算 & 一次事故上限 & 适用场景 & 成本 & gomall 当前 \\
+\midrule
+99.9\%  & 43m 12s & 30 分钟 & 商家后台 / 后台运营 & 单机即可 & 现状 \\
+99.95\% & 21m 36s & 10 分钟 & 商品浏览 / 搜索   & 主从 + Redis & 现状 \\
+99.99\% & 4m 19s & 2 分钟  & 下单 / 支付       & 多 AZ + 蓝绿 & 目标 \\
+99.999\% & 26s    & ---      & 不做（性价比极低） & --- & --- \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
-  \item \textbf{启动期}：不影响主流程，静默；启动一次就过去了。
-  \item \textbf{请求期}：每次都触发，必须显式让客户端知道"现在不行，待会再来"。
-  \item 两套思路并行，不矛盾 —— 启动静默 + 请求显式，是 gomall 现在的统一姿态。
+  \item \textbf{预算思想}：SRE Book 经典 —— "可靠性不是越高越好，多出来的可靠性预算应当转成产品迭代速度"。
+  \item \textbf{gomall 优先级}：下单 / 支付保 99.99\%，商家后台保 99.9\% 即可（商家可以等 15 分钟，但用户不能）。
+  \item \textbf{预算耗尽怎么办}：当月剩余预算 $<$ 50\% 时，\textbf{冻结非紧急上线}。
 \end{itemize}
-\srcnote{docs/slides/10-business-traffic-governance.tex 配套讲请求期降级}
+\srcnote{Google SRE Book Ch.4 SLO；阈值参考通用电商二线对标}
 \end{frame}
 
-\begin{frame}{现有业务码段已经分好域}
-\begin{tabular}{@{}llll@{}}
+\begin{frame}{P0--P3 告警分级与响应 SLA}
+\scriptsize
+\begin{tabular}{@{}lllll@{}}
 \toprule
-段 & 含义 & 现有码 & 备注 \\
+级别 & 触发条件示例 & 响应 SLA & 通知方式 & on-call 行为 \\
 \midrule
-20xxx & 业务通用错误     & ERROR=20001 等 & 兜底 \\
-30xxx & 鉴权 / token    & ErrorAuth*     & rbac 在用 \\
-50xxx & 第三方 / 存储    & ErrorOss=50001 & oss 上传 \\
-60xxx & 并发 / 幂等      & 60002 幂等命中 & idempotency \\
-70xxx & 流量治理         & 70001/70002    & limit/cb \\
+P0 & 下单错误率 $>$ 5\%、支付完全不可用 & 5 分钟 & 电话 + IM 全员 & 立即上线，主管同时介入 \\
+P1 & 下单 p99 $>$ 1s 持续 10 分钟、ES 全挂 & 15 分钟 & 电话 + IM & 主 on-call 上线 \\
+P2 & 限流命中率 $>$ 2\%、熔断器 5 分钟 3 次 & 30 分钟 & IM 通知 & 工作时间内排查 \\
+P3 & Warn 日志聚集、商家后台慢 & 4 小时 & IM 静默 & 次日复盘 \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
-\small 各段已经清晰隔开。\textbf{merchant 自助接口需要新增 80xxx 段}（暂定），覆盖"店铺未审核 / 资质过期 / 不属于本店 SKU / 提现额度不足"等。
-\srcnote{pkg/e/code.go 现有错误码段}
+\begin{itemize}
+  \item \textbf{分级原则}：不是"看告警严重程度"，是"看用户感知 + 业务收入"。下单挂了影响 GMV，P0；商家后台慢 P3 给 BD 解释一下就行。
+  \item \textbf{on-call 轮值}：每周一轮换，工作日 + 周末分两人；P0 双 on-call 自动同时呼叫。
+  \item \textbf{post-mortem}：所有 P0 / P1 事故 7 天内必须出 blameless 复盘，沉淀到 wiki。
+\end{itemize}
+\srcnote{告警阈值与本 deck "Grafana 看板：5 个核心面板" 阈值表对齐}
 \end{frame}
 
-\begin{frame}{建议的 80xxx 段业务码（待设计）}
-\begin{tabular}{@{}lll@{}}
-\toprule
-码 & 含义 & 客服话术 \\
-\midrule
-80001 & 店铺未通过资质审核 & "您的店铺还在审核，预计 1--3 个工作日" \\
-80002 & 当前操作不属于本店 SKU & "该商品不属于您的店铺" \\
-80003 & 提现额度不足 & "本月提现额度已满，下月 1 号刷新" \\
-80004 & 待发货超时即将自动改判 & "您有 N 单超过 72 小时未发货" \\
-80005 & 库存低于商家自设阈值 & "SKU XXX 库存 < 阈值，请尽快补货" \\
-\bottomrule
-\end{tabular}
+\begin{frame}{SLO 燃尽预算（Error Budget Burn Rate）}
+\begin{itemize}
+  \item \textbf{Burn rate} = 当前错误率 $\div$ SLO 允许的错误率。
+  \item \texttt{下单 SLO=99.99\%} $\to$ 允许错误率 0.01\%。当前 5 分钟内实测错误率 0.05\% $\to$ burn rate = 5。
+  \item \textbf{阈值告警}：
+  \begin{itemize}
+    \item burn rate $>$ 14.4：1 小时烧完月预算 $\to$ P0
+    \item burn rate $>$ 6：6 小时烧完 $\to$ P1
+    \item burn rate $>$ 3：1 天烧完 $\to$ P2
+    \item burn rate $>$ 1：1 个月烧完（即只是触线）$\to$ P3
+  \end{itemize}
+  \item \textbf{为什么不用静态阈值}：静态阈值在高峰期容易误报、在低谷期容易漏报；burn rate 是\textbf{相对预算的速率}，跨流量级别都准。
+\end{itemize}
+\srcnote{Google SRE Workbook Ch.5 Alerting on SLOs 烧穿率告警}
+\end{frame}
+
+\begin{frame}{真实案例：从 trace 找到订单列表深分页问题}
+\begin{itemize}
+  \item \textbf{症状}：商家投诉"翻到第 100 页特别慢"。客服无 traceId 可贴，先用 Kibana 按 \texttt{route: "/orders/old/list"} 拉日志，发现 90\% 请求耗时 $>$ 5s。
+  \item \textbf{用 trace 定位}：在 Jaeger 按 \texttt{op=GET /orders/old/list} 拉 p99 trace 一条，看到 \textbf{db.Query span 占 root 的 99\%}，扫了 4M 行。
+  \item \textbf{优化方案}：游标分页 + Redis 5min 首页缓存（见 PR \#38）。
+  \item \textbf{产出效果}：压测对照 —— 旧版 \textbf{8.3 RPS / p95 15.95s}，优化版 \textbf{58{,}406 RPS / p95 5ms}。吞吐 7000x，延迟 3200x。
+  \item \textbf{决策闭环}：trace 看出瓶颈 $\to$ PR 优化 $\to$ 压测对比 $\to$ 灰度 $\to$ Grafana 监控 p99 持续观察 1 周。
+\end{itemize}
+\srcnote{stressTest/REPORT.md 第 8、3 行；PR \#38 游标分页}
+\end{frame}
+
+\begin{frame}{trace + metrics + log 三件套的协同闭环}
+\begin{tikzpicture}[node distance=6mm and 10mm,every node/.append style={align=center,font=\scriptsize,text width=24mm}]
+  \node[node-box,node-state-normal]                  (m)   {Metrics\\Prometheus\\发现"有事"};
+  \node[node-box,node-state-transition,right=of m]   (t)   {Traces\\Jaeger\\定位"哪一段"};
+  \node[node-box,node-state-transition,right=of t]   (l)   {Logs\\Kibana\\看清"什么参数"};
+  \node[node-box,node-state-alert,below=8mm of t]    (pr)  {优化 PR\\压测 + 灰度};
+  \draw[arrow] (m) -- (t);
+  \draw[arrow] (t) -- (l);
+  \draw[arrow] (l.south) to[bend right=20] (pr.east);
+  \draw[arrow] (pr.west) to[bend right=20] (m.south);
+\end{tikzpicture}
 \vspace{2mm}
-\small 编码原则同 deck 10：\textbf{HTTP 200 + status 字段}，app / 商家 PC 端按 status 分支显示文案；不暴露内部技术细节，但要让客服\textbf{足够区分}。
-\srcnote{docs/slides/10-business-traffic-governance.tex 业务码-话术映射模板}
+\small 三件套缺一不可：单看 metrics 知道有事但不知道在哪；单看 trace 看个体但不知道总体；单看 log 看到细节但找不到趋势。\textbf{三者联查 + PR 闭环 + 灰度复盘 + 再监控}，是可观测性的真正闭环。
+\keypoint{可观测性不是 "把工具都装上"，而是\textbf{形成"发现 $\to$ 定位 $\to$ 优化 $\to$ 度量"的闭环}。gomall 当前到了"工具齐"的阶段，下一步是"流程齐"。}
+\srcnote{trace+metrics+log 三件套是当前 SRE / Observability 共识}
 \end{frame}
 
 \begin{frame}{三类人共用一套底层信号}
@@ -440,30 +722,54 @@ SRE   & p99、错误率、依赖健康度 & Jaeger / Skywalking \\
 \appendix
 % ============================================================
 
-\begin{frame}{面试 Q\&A}
+\begin{frame}{面试 Q\&A（1/2）：架构与权限}
 \textbf{Q1}：BossID 都在了，为什么不直接给商家开 admin？\\
-\hspace{4mm}\small A：admin 看全站数据，商家只能看自店；权限边界不能用"先开放再监控"的姿态做。merchant 角色 + RequireRole("merchant") 才是正确解。
+\hspace{4mm}\small A：admin 看全站数据，商家只能看自店；权限边界不能用"先开放再监控"做。merchant 角色 + \texttt{RequireRole("merchant")} 才是正确解。\textit{[middleware/rbac.go:48--86]}
 
-\vspace{2mm}
-\textbf{Q2}：Jaeger 在 64K RPS 下还撑得住吗？\\
-\hspace{4mm}\small A：实测 \texttt{/product/show} 全中间件跑 62{,}226 RPS（\texttt{/ping} 64{,}254），开销 $<$ 5\%。const 全量采样能压得住；担心损耗可切 probabilistic 0.001\%。
+\vspace{1mm}
+\textbf{Q2}：merchant.Group 为什么不在路由层校验 boss\_id？\\
+\hspace{4mm}\small A：boss\_id 从 \texttt{ctl.GetUserInfo(ctx).Id} 取，绝不进 body/query。handler 入参故意不暴露该字段 —— "入参里没有 = 没法越权"是设计层面的防御。\textit{[pkg/utils/ctl/ctl.go]}
 
-\vspace{2mm}
-\textbf{Q3}：tryInitES 为什么用 recover 不传 error？\\
-\hspace{4mm}\small A：底层 \texttt{es.InitEs()} 老代码 panic 风格；改签名牵连大。外层 recover + Warnf 是\textbf{对"启动期不可控依赖"的统一回应}，与请求期熔断（70002）形成两套互补。
+\vspace{1mm}
+\textbf{Q3}：roleCache 为什么 30s 不是 5min？\\
+\hspace{4mm}\small A：商家被提权后等 5min 才生效，谈判桌上没法解释。30s 是"权限漂移可接受 + 回源 DB 砍 30 倍"的平衡点；提权时 \texttt{InvalidateRoleCache} 让\textbf{当事人立即生效}。\textit{[middleware/rbac.go:22--45]}
+
+\vspace{1mm}
+\textbf{Q4}：商家入驻为什么要先 OCR 再人工审核？\\
+\hspace{4mm}\small A：OCR 即时返回，过滤掉资质号不合规、姓名不一致的 80\% 提交，让人工只看真案子。审核 SLA 48h，人工资源精确投放。\textit{[service/ocr.go 待建]}
+
+\vspace{1mm}
+\textbf{Q5}：商家看板 4 象限为什么独立加载？\\
+\hspace{4mm}\small A：弱依赖契约 —— Redis 挂、库存 ZSET 抖动，不能拖垮整页。每格 2s 独立超时，最差出现"加载中"占位但页面框架不挂。\textit{[与 cmd/main.go:54--97 静默降级同构]}
+
+\vspace{1mm}
+\textbf{Q6}：Jaeger 在 64K RPS 下还撑得住吗？\\
+\hspace{4mm}\small A：实测 \texttt{/product/show} 全中间件跑 \textbf{62{,}226 RPS}（\texttt{/ping} 64{,}254），开销 $<$ 5\%。const 全量采样压得住；担心损耗可切 probabilistic 0.001\%。\textit{[stressTest/REPORT.md]}
 \end{frame}
 
-\begin{frame}{Q\&A（续）}
-\textbf{Q4}：roleCache 为什么 30s 不是 5min？\\
-\hspace{4mm}\small A：商家被提权后等 5min 才生效，谈判桌上没法解释。30s 是"权限漂移可接受 + 回源 DB 砍 30 倍"的平衡点；提权时显式 \texttt{InvalidateRoleCache} 让\textbf{当事人立即生效}。
+\begin{frame}{面试 Q\&A（2/2）：可观测性与降级}
+\textbf{Q7}：Jaeger 和 Skywalking 同时存在，是不是重复建设？\\
+\hspace{4mm}\small A：单服务调试 Jaeger 细，多服务拓扑 Skywalking 直观。两者数据模型相同（trace+span），并存不冲突。gomall 主推 Jaeger，留 Skywalking 做 SRE 大盘。\textit{[cmd/main.go:7]}
 
-\vspace{2mm}
-\textbf{Q5}：Jaeger 和 Skywalking 同时存在，是不是重复建设？\\
-\hspace{4mm}\small A：单服务调试 Jaeger 细，多服务拓扑 Skywalking 直观。两者数据模型相同（trace + span），并存只是双写不冲突；当 gomall 真上微服务后，Skywalking 的全局拓扑图是 SRE 的主视角。
+\vspace{1mm}
+\textbf{Q8}：Prometheus 的 \texttt{boss\_id} 标签为什么不能直接用？\\
+\hspace{4mm}\small A：Prometheus 标签 cardinality 必须有限。百万级 boss\_id 会把内存撑爆。改成 \texttt{boss\_bucket}（按 GMV 分 5 档），时间序列数 = 标签笛卡尔积，可控。\textit{[pkg/utils/metrics/metrics.go 草案]}
 
-\vspace{2mm}
-\textbf{Q6}：商家自助接口和 admin 接口，业务码段为什么要分？\\
-\hspace{4mm}\small A：商家看到的错误码会出现在\textbf{商家 App 文案}里；admin 看到的只在内部后台。两套话术系统不同，业务码隔离段能避免文案串号。
+\vspace{1mm}
+\textbf{Q9}：Filebeat 直连 ES 不行吗，为什么还要 Kafka？\\
+\hspace{4mm}\small A：Filebeat 直连 $\to$ ES 抖动一次全站日志丢。Kafka 做 buffer，ES 故障期间日志先进 Kafka，恢复后由 Logstash 重放。可用性 $\gg$ 简洁性。\textit{[docker-compose.yml:44--99]}
+
+\vspace{1mm}
+\textbf{Q10}：tryInitES 为什么用 recover 不传 error？\\
+\hspace{4mm}\small A：底层 \texttt{es.InitEs()} 老代码 panic 风格，改签名牵连大。外层 recover + Warnf 是\textbf{对"启动期不可控依赖"的统一回应}，与请求期熔断（70002）互补。\textit{[cmd/main.go:64--73]}
+
+\vspace{1mm}
+\textbf{Q11}：99.99 SLO 怎么落到代码？\\
+\hspace{4mm}\small A：burn rate $>$ 14.4 触 P0；下单 / 支付按 P0 配人，商家后台按 P3 配。预算耗尽 50\% 冻结非紧急上线 —— 把可靠性变成 code review 的硬约束。\textit{[Grafana 阈值表对齐]}
+
+\vspace{1mm}
+\textbf{Q12}：商家自助接口和 admin 接口业务码段为什么要分？\\
+\hspace{4mm}\small A：商家看到的错误码会出现在\textbf{商家 App 文案}里；admin 只在内部后台。两套话术系统不同，业务码隔离段（80xxx vs 20xxx/30xxx）避免文案串号。\textit{[pkg/e/code.go]}
 \end{frame}
 
 \begin{frame}{代码位置一览}
@@ -474,14 +780,21 @@ SRE   & p99、错误率、依赖健康度 & Jaeger / Skywalking \\
   \item[Jaeger middleware]\srcnote{middleware/track.go:11--29}
   \item[Trace utility]\srcnote{pkg/utils/track/track.go:15--78}
   \item[Skywalking agent]\srcnote{cmd/main.go:7 import 副作用}
-  \item[logrus 初始化]\srcnote{pkg/utils/log/logger.go:14--72}
-  \item[静默降级]\srcnote{cmd/main.go:54--97 四个 tryInitX}
-  \item[admin promote 模板]\srcnote{service/admin.go:46--62}
-  \item[admin 路由组]\srcnote{routes/router.go:148--155}
-  \item[压测锚点]\srcnote{stressTest/REPORT.md ping/product/show 表}
+  \item[logrus 初始化]\srcnote{pkg/utils/log/logger.go:14--41}
+  \item[静默降级（启动期）]\srcnote{cmd/main.go:54--97 四个 tryInitX 同构}
+  \item[静默降级（请求期）]\srcnote{service/product\_search.go 草案；deck 21 v2 hybrid}
+  \item[merchant.Group 草案]\srcnote{routes/router.go merchant := authed.Group("/merchant")（本 deck p.10）}
+  \item[merchant API 7 接口]\srcnote{api/v1/merchant\_*.go 待建 7 个 handler}
+  \item[商家入驻申请]\srcnote{model merchant\_apply (待建)；service/merchant\_apply.go}
+  \item[Prometheus metrics]\srcnote{pkg/utils/metrics/metrics.go 草案；middleware/timing.go}
+  \item[ELK / EFK 落地]\srcnote{docker-compose.yml:44--99 ES+Kibana；Filebeat/Kafka/Logstash 路线图}
+  \item[admin promote 模板]\srcnote{service/admin.go:46--62 PromoteToAdmin}
+  \item[admin 路由组]\srcnote{routes/router.go:157--164 admin 子组三接口}
+  \item[CircuitBreaker 配置]\srcnote{routes/router.go:122--130 paydown}
+  \item[压测锚点]\srcnote{stressTest/REPORT.md：ping 64{,}254 / product 62{,}226 / 订单优化 58{,}406 vs 旧 8.3 RPS}
 \end{description}
 \vspace{1mm}
-\keypoint{配套：18-merchant-business.tex（商家旅程）/ 10-business-traffic-governance.tex（流量治理）}
+\keypoint{配套：18-merchant-business.tex（商家旅程）/ 10-business-traffic-governance.tex（流量治理）/ 09 v2 订单状态机 / 13 列表性能 / 21 v2 AI 检索}
 \end{frame}
 
 \end{document}
