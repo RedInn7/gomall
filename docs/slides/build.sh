@@ -46,7 +46,7 @@ clean_aux() {
 
 clean_all_aux() {
   info "清理中间产物 (.aux .log .toc .nav .snm .out .vrb ...)"
-  for f in 0?-*.tex; do
+  for f in [0-9][0-9]-*.tex; do
     [[ -f "$f" ]] || continue
     clean_aux "${f%.tex}"
   done
@@ -84,7 +84,7 @@ FAILED=0
 shopt -s nullglob
 # 注意：合订本封面 00-master-cover.tex 是辅助产物，仅 3 页，不参与 [20, 30]
 # 页数校验；它会在 master.pdf 拼接时单独编译（见 build.sh --master）。
-for src in 0?-*.tex; do
+for src in [0-9][0-9]-*.tex; do
   base="${src%.tex}"
   if [[ -n "$FILTER" && "$base" != ${FILTER}* ]]; then
     continue
