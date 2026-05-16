@@ -1,0 +1,124 @@
+Escrow 预期行为清单（无 solc 环境下作为人工验收用）
+
+合约文件: contracts/Escrow.sol
+
+================================================================
+A. 部署 / 构造器
+================================================================
+
+[A1] 正常部署
+  - 输入 buyer / seller / arbiter 三个非零地址 + amount > 0
+  - 期望：state == Created，所有 immutable 字段写入
+
+[A2] 任一地址为 0x0
+  - 期望：revert ZeroAddress()
+
+[A3] amount = 0
+  - 期望：revert "amount=0"
+
+
+================================================================
+B. fund() / fundWithOrderID(bytes32)
+================================================================
+
+[B1] buyer 在 Created 状态下精确转账 amount
+  - 期望：state == Funded，emit Funded(amount)，合约持有 amount wei
+
+[B2] buyer 在 Created 状态下用 fundWithOrderID 转账精确 amount
+  - 期望：state == Funded，orderID 写入，emit Funded(amount) + PaymentConfirmed(orderID, buyer, amount)
+
+[B3] 非 buyer 调用 fund / fundWithOrderID
+  - 期望：revert NotAuthorized(msg.sender)
+
+[B4] 转账金额不等于 amount（多 1 wei 或少 1 wei）
+  - 期望：revert WrongAmount(expected=amount, actual=msg.value)
+
+[B5] 在 Funded / Disputed / Released / Refunded 状态再次调 fund
+  - 期望：revert InvalidState(Created, current)
+
+
+================================================================
+C. release()
+================================================================
+
+[C1] buyer 在 Funded 状态调 release
+  - 期望：state == Released，emit Released(seller)，seller 余额 += amount，合约余额 = 0
+
+[C2] arbiter 在 Funded 状态调 release
+  - 期望：同 C1
+
+[C3] seller 调 release
+  - 期望：revert NotAuthorized(seller)
+
+[C4] buyer 在 Disputed 状态调 release（仲裁裁定释放）
+  - 期望：state == Released，seller 收钱
+
+[C5] 在 Created / Released / Refunded 调 release
+  - 期望：revert InvalidState(Funded, current)
+
+
+================================================================
+D. refund()
+================================================================
+
+[D1] seller 在 Funded 状态调 refund
+  - 期望：state == Refunded，emit Refunded(buyer)，buyer 余额 += amount
+
+[D2] arbiter 在 Funded 状态调 refund
+  - 期望：同 D1
+
+[D3] buyer 调 refund
+  - 期望：revert NotAuthorized(buyer)
+
+[D4] arbiter 在 Disputed 状态调 refund（仲裁裁定退款）
+  - 期望：state == Refunded，buyer 拿回钱
+
+[D5] 在 Created / Released / Refunded 调 refund
+  - 期望：revert InvalidState(Funded, current)
+
+
+================================================================
+E. dispute()
+================================================================
+
+[E1] buyer 在 Funded 状态调 dispute
+  - 期望：state == Disputed，emit Disputed(buyer)
+
+[E2] seller 在 Funded 状态调 dispute
+  - 期望：state == Disputed，emit Disputed(seller)
+
+[E3] arbiter 调 dispute
+  - 期望：revert NotAuthorized(arbiter)（仲裁人不主动 dispute，只裁决）
+
+[E4] 在 非 Funded 状态调 dispute
+  - 期望：revert InvalidState(Funded, current)
+
+
+================================================================
+F. 资金安全 / 重入
+================================================================
+
+[F1] release / refund 的状态迁移发生在 _safeSend 之前
+  - 任何被调地址回调 release/refund 都会撞 InvalidState 立即 revert
+  - 期望：不存在重入提款窗口
+
+[F2] 直接给合约地址转账（无 calldata）
+  - 合约没有 receive() / fallback()
+  - 期望：transfer 失败
+
+[F3] release / refund 成功后合约余额 = 0
+  - 任何剩余 dust 都视为 bug
+
+
+================================================================
+G. 事件 / 后端集成
+================================================================
+
+[G1] PaymentConfirmed 的 orderID 是 indexed
+  - 后端 EVM listener 可以按 topic[1] 过滤特定订单的 fund 事件
+
+[G2] PaymentConfirmed.buyer 是 indexed
+  - 可以按用户地址查所有付款
+
+[G3] Funded 不携带 orderID
+  - 仅作通用付款日志；接 PaymentConfirmed 才能反推链下订单
