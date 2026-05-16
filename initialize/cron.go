@@ -24,6 +24,20 @@ func InitCron() {
 	if err != nil {
 		panic(fmt.Sprintf("Cron 初始化失败: %v", err))
 	}
+
+	redPacketService := new(service.RedPacketTaskService)
+	_, err = c.AddFunc("0 */5 * * * *", func() {
+		defer func() {
+			if r := recover(); r != nil {
+				util.LogrusObj.Errorf("RedPacket Cron Panic: %v", r)
+			}
+		}()
+		redPacketService.RunRedPacketExpireCheck()
+	})
+	if err != nil {
+		panic(fmt.Sprintf("RedPacket Cron 初始化失败: %v", err))
+	}
+
 	c.Start()
 }
 
