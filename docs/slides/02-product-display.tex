@@ -184,7 +184,7 @@ emitProductChanged(ctx, req.ID, "update")               // outbox -> RMQ -> ES
 \section{HTTP cache：把流量挡在源站之外}
 % ============================================================
 
-\begin{frame}{三层缓存漏斗}
+\begin{frame}{四层缓存漏斗}
 \begin{tikzpicture}[node distance=4mm and 0mm]
   \node[node-box,minimum width=70mm,node-ok] (b) {浏览器 cache (Cache-Control max-age)};
   \node[node-box,minimum width=58mm,node-ok,below=of b] (cdn) {CDN / 反向代理 (ETag + If-None-Match)};
@@ -198,7 +198,49 @@ emitProductChanged(ctx, req.ID, "update")               // outbox -> RMQ -> ES
 \vspace{2mm}
 \small 业务侧的数字：上一档 cache 卸下的流量，比下一档便宜一个数量级。
 浏览器 304 没有源站成本，CDN 一次回源覆盖一千个用户，Redis 一次回填覆盖 10min 内所有同商品请求。
-\srcnote{routes/router.go:39--45 三档挂载点}
+\srcnote{routes/router.go:39--45 四档挂载点}
+\end{frame}
+
+\begin{frame}{每层命中率怎么算}
+\begin{tabular}{@{}lll@{}}
+\toprule
+层 & 命中率定义 & 度量口径 \\
+\midrule
+浏览器 & \texttt{304 / (200+304)}（按 referer 维度） & 前端埋点 \texttt{performance.getEntriesByType} \\
+CDN    & \texttt{(edge\_hit + 304) / total\_req}    & CDN 厂商日志 \texttt{cache\_status=HIT} \\
+Redis  & \texttt{1 - cache\_miss / total\_req}      & \texttt{INFO stats} 中 \texttt{keyspace\_hits / (hits+misses)} \\
+DB     & 反向口径：\texttt{1 - 上三层总命中率}      & 由 prometheus \texttt{db\_qps / req\_qps} 反推 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 业务侧不会单独看 Redis 命中率，会看\textbf{端到端漏斗}：浏览器 60\%、CDN 在剩下 40\% 里再截 20\%（绝对值 8\%）、Redis 在剩下 32\% 里再截 99\%（绝对值 31.7\%），DB 最终承担 \textbf{0.32\%} 的原始流量。10k QPS 进来，DB 实际只看到 32 QPS。
+\srcnote{Prometheus 指标：\texttt{redis\_hits\_total} / \texttt{http\_requests\_total\{code="304"\}}}
+\end{frame}
+
+\begin{frame}{命中率链式公式与业务含义}
+\keypoint{设各层命中率为 $h_1, h_2, h_3$，DB 流量 $= Q \cdot (1-h_1)(1-h_2)(1-h_3)$。}
+\begin{itemize}
+  \item \textbf{乘性效应}：任一层命中率掉 10\%，DB 流量翻倍不止。Redis 99\% $\to$ 90\% 时 DB 流量从 0.32\% 涨到 3.2\%，单机 MySQL 直接吃不消。
+  \item \textbf{业务对齐}：浏览器层 60\% 不是技术指标，是\textbf{产品约定 max-age=60s} 换来的。产品坚持"改价 1s 内必须可见"时这层掉到 0。
+  \item \textbf{容量规划反推}：先定 DB 能扛多少 QPS，倒推上游每层最低命中率，再倒推 TTL。
+\end{itemize}
+\srcnote{结合 stressTest/REPORT.md DB 单点 6 万级 QPS 与 product/show 62K RPS 的对齐}
+\end{frame}
+
+\begin{frame}{CDN 选型与命中率掉档的运维剧本}
+\begin{tabular}{@{}llll@{}}
+\toprule
+方案 & 节点 / 成本 & 命中率 KPI & 适用 \\
+\midrule
+阿里云 CDN     & 国内 2800+ / 0.2 元/GB & 95\%+ & 国内电商主流 \\
+Cloudflare    & 全球 300+ / 0.05 USD/GB & 92\%+ & 出海 / 多区域 \\
+自建 ATS       & 0 边际，前期 1M+      & 看运维 & 月流量 \textgreater 10 PB \\
+回源直发       & 0 + 源站带宽费        & N/A   & 试点 / 内网（gomall 当前）\\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \textbf{掉档剧本}：浏览器突降 = 前端发版改了 URL query，回滚或加 \texttt{Vary} 白名单；CDN 突降 = 回源带 cookie，\texttt{/product/show} 必须无 session；Redis 突降 = \texttt{evicted\_keys} 在涨，扩容或调 \texttt{allkeys-lfu}；DB QPS 突涨但 Redis 没变 = 新接口漏挂 cache，grep \texttt{HTTPCache} 白名单。
+\srcnote{Cloudflare cache analytics doc / 阿里云 CDN 计费规则 / Prometheus alert \texttt{cache\_hit\_ratio < 0.95 for 5m}}
 \end{frame}
 
 \begin{frame}{ETag 304 流程}
@@ -240,14 +282,15 @@ _, _ = original.Write(buf.body.Bytes())          // 200: 正常回写
 \end{lstlisting}
 \end{frame}
 
-\begin{frame}{ETag 中间件逐行讲解}
+\begin{frame}{ETag 中间件逐行讲解 + 为什么 POST 不挂}
 \begin{itemize}
   \item \textbf{弱 ETag (\texttt{W/"..."})}：只承诺"语义等价"，不承诺字节级等价。压缩/分块都不影响命中，业务上更适合 JSON。
-  \item \textbf{先 \texttt{c.Next()} 再比对}：必须等 handler 算完才能拿到 body，因此中间件用 \texttt{cacheBuffer} 包了 \texttt{ResponseWriter}。代价是\textbf{多一份内存}，但只对 GET 生效，不影响下单/支付。
+  \item \textbf{先 \texttt{c.Next()} 再比对}：handler 算完才能拿 body，中间件用 \texttt{cacheBuffer} 包 \texttt{ResponseWriter}，代价是多一份内存。
   \item \textbf{只对 \texttt{status=200} 生效}：4xx / 5xx 直接透传，业务码 70001 (限流) 不会被错误地长期缓存。
-  \item \textbf{命中 304 后删 \texttt{Content-Length / Content-Type}}：标准要求，否则 nginx / CDN 上游可能把空 body 算成 0 字节但仍发头，浏览器会拒收。
+  \item \textbf{304 后删 \texttt{Content-Length / Content-Type}}：标准要求，否则上游 nginx / CDN 把空 body 算成 0 字节但仍发头，浏览器会拒收。
+  \item \textbf{POST/PUT 不挂}：写接口挂 cache 等于"重复触发同一动作"，与幂等冲突；\texttt{POST /orders/create} 命中 cache 会让用户以为下单成功但实际没打到后端，对账少一笔。
 \end{itemize}
-\srcnote{middleware/httpcache.go:47--99}
+\srcnote{middleware/httpcache.go:47--99 + 方法判断 :54--58}
 \end{frame}
 
 \begin{frame}{TTL 怎么定：业务节奏决定}
@@ -267,14 +310,155 @@ _, _ = original.Write(buf.body.Bytes())          // 200: 正常回写
 \srcnote{routes/router.go:39 (30s) / :40 (60s) / :44 (300s) / :45 (300s)}
 \end{frame}
 
-\begin{frame}{为什么 POST/PUT 接口不能挂}
+% ============================================================
+\section{三态故障：击穿 / 穿透 / 雪崩}
+% ============================================================
+
+\begin{frame}{三种缓存故障的区别}
+\begin{tabular}{@{}lll@{}}
+\toprule
+名称 & 触发条件 & 后果 \\
+\midrule
+\textbf{击穿} & 单个热 key 过期，瞬间 N 个请求回源 & 单点 DB 被打爆 \\
+\textbf{穿透} & 请求查\textbf{不存在}的 key，cache 永远 miss & 每次都打 DB，CPU 100\% \\
+\textbf{雪崩} & 大量 key 同一时刻过期 & 整片回源，DB 链接池打满 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small 三态共同点：cache miss 引起 DB 流量\textbf{阶跃}上涨。区别在\textbf{key 的范围}（单 key / 不存在的 key / 多 key）和\textbf{时间分布}（瞬时 / 持续 / 同步）。
+对应防护手段三种：\textbf{SETNX 单飞} / \textbf{布隆过滤器} / \textbf{TTL 抖动}。下面分别讲。
+\srcnote{对应 service/product.go:50--58 SETNX + 后续准备引入的布隆过滤器和 TTL jitter}
+\end{frame}
+
+\begin{frame}{击穿：SETNX 单飞回源}
+\begin{tikzpicture}[node distance=10mm]
+  \foreach \name/\x in {Req1/0, Req2/30, Req3/60, Redis/100, DB/150} {
+    \node[node-box,minimum width=16mm] at (\x mm,0) (\name) {\name};
+    \draw[lifeline] (\x mm,-2mm) -- (\x mm,-50mm);
+  }
+  \draw[arrow] (0,-8mm)  -- node[above,font=\tiny]{GET (miss)} (100mm,-8mm);
+  \draw[arrow] (30mm,-12mm) -- node[above,font=\tiny]{GET (miss)} (100mm,-12mm);
+  \draw[arrow] (60mm,-16mm) -- node[above,font=\tiny]{GET (miss)} (100mm,-16mm);
+  \draw[arrow] (0,-22mm)  -- node[above,font=\tiny]{SETNX lock OK} (100mm,-22mm);
+  \draw[arrow-bad] (30mm,-26mm) -- node[above,font=\tiny\color{cBad}]{SETNX FAIL, sleep 50ms} (100mm,-26mm);
+  \draw[arrow-bad] (60mm,-30mm) -- node[above,font=\tiny\color{cBad}]{SETNX FAIL, sleep 50ms} (100mm,-30mm);
+  \draw[arrow] (0,-36mm)  -- node[above,font=\tiny]{回源} (150mm,-36mm);
+  \draw[arrow] (150mm,-42mm) -- node[above,font=\tiny]{回填 cache + DEL lock} (100mm,-42mm);
+  \draw[arrow-async] (30mm,-46mm)  -- node[above,font=\tiny]{retry GET (hit)} (100mm,-46mm);
+\end{tikzpicture}
+\srcnote{service/product.go:50--58 + repository/cache/product.go:56--62}
+\end{frame}
+
+\begin{frame}{穿透：布隆过滤器挡住"不存在"的 id}
 \begin{itemize}
-  \item \texttt{HTTPCache} 中间件首行就 \texttt{if method != GET \&\& method != HEAD: return}。
-  \item 业务原因：POST 是"发动作"，挂 cache 意味着\textbf{重复触发同一动作}，跟幂等机制冲突。
-  \item 例如 \texttt{POST /orders/create} 如果命中浏览器 cache 会让用户以为下单成功，实际\textbf{没打到后端}，对账会少一笔订单。
-  \item gomall 的写接口（create/update/delete/paydown）都走幂等中间件 + DB 兜底，从不进入 HTTP cache 层。
+  \item 攻击场景：脚本爬虫扫 \texttt{/product/show?id=99999999}，DB 返回 \texttt{record not found}，cache 不会回填 nil。下一次请求继续打 DB。
+  \item 直觉修法 1：cache 回填 \texttt{nil} 标记 + TTL 60s。代价：脏数据需要等过期，正常 id 上架后 60s 不可见。
+  \item 直觉修法 2：DB 前置布隆过滤器，启动时灌入所有合法 \texttt{product\_id}，新建商品时增量 \texttt{BF.ADD}。99.99\% 不存在的 id 在 Redis 层直接拒绝。
+  \item gomall 当前没接，但已经预留接口：\texttt{cache.ProductExists(id)} 在 ProductShow 入口可加一行短路。
 \end{itemize}
-\srcnote{middleware/httpcache.go:54--58 方法判断}
+\srcnote{规划中：repository/cache/bloom.go (Redis 4.0+ \texttt{BF.RESERVE product:bf})}
+\end{frame}
+
+\begin{frame}[fragile]{布隆过滤器伪代码}
+\begin{lstlisting}[language=Go,firstnumber=1,
+  caption={\srcnote{规划：repository/cache/bloom.go BF.MEXISTS 用法}}]
+// ProductExists 用布隆过滤器快速判 id 是否可能存在
+// 误判率 0.01%; 误判方向只可能是 false-positive (说存在但实际不存在)
+// 不会出现 false-negative (说不存在但实际存在), 业务侧零脏读
+func ProductExists(ctx context.Context, id uint) (bool, error) {
+    res, err := RedisClient.Do(ctx, "BF.EXISTS", "product:bf", id).Bool()
+    if err != nil { return true, err }  // BF 故障时放行, 走原回源链路
+    return res, nil
+}
+
+// ProductShow 入口处加短路
+exists, _ := cache.ProductExists(ctx, req.ID)
+if !exists {
+    return nil, e.ErrProductNotFound   // 0.01ms 直接拒绝
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{雪崩：TTL 抖动与多级兜底}
+\begin{itemize}
+  \item 触发场景：商家批量上架 1000 个 SKU，全部用默认 \texttt{ProductDetailTTL = 10min}。10 分钟后\textbf{同一秒}集中过期，回源瞬时打 1000 次 DB。
+  \item 修法 1：TTL \textbf{加随机抖动}。写入时 \texttt{ttl = base + rand(0, 0.2*base)}，把过期时间打散到 2 分钟窗口。
+  \item 修法 2：\textbf{多级 TTL}。L1 cache 10min、L2 cache 1h，L1 过期回 L2，L2 过期回 DB。gomall 暂未启用 L2，路线图上是 Redis cluster 上的 \texttt{ro-replica}。
+  \item 修法 3：\textbf{熔断兜底}。DB 拒连时整链路降级返回上一版 cache（哪怕过期），客服话术接受"价格延迟 1 分钟"。
+\end{itemize}
+\srcnote{规划：repository/cache/product.go SetProductDetail 加 jitter 实现}
+\end{frame}
+
+\begin{frame}[fragile]{TTL 抖动落地}
+\begin{lstlisting}[language=Go,firstnumber=42,
+  caption={\srcnote{规划改造：SetProductDetail 加 jitter}}]
+// SetProductDetail 写缓存, 带 0-20% 随机抖动避免批量同时过期
+func SetProductDetail(ctx context.Context, id uint, val interface{}) error {
+    b, err := json.Marshal(val)
+    if err != nil {
+        return err
+    }
+    // jitter: 10min * (1.0 + rand[0, 0.2]) -> 10-12min 区间均匀分布
+    jitter := time.Duration(rand.Int63n(int64(ProductDetailTTL / 5)))
+    return RedisClient.Set(ctx, ProductDetailKey(id), b, ProductDetailTTL+jitter).Err()
+}
+\end{lstlisting}
+\small 数学上：1000 个 key 集中写入，原方案在 \texttt{T+10min} 那 1 秒里有 1000 个 key 过期；加 20\% 抖动后均匀分布到 120 秒，每秒平均 8 个过期，DB 瞬时负载降低 \textbf{120 倍}。
+\end{frame}
+
+\begin{frame}{第二刀间隔的取舍}
+\begin{tabular}{@{}lll@{}}
+\toprule
+第二刀间隔 & 覆盖率 & 副作用 \\
+\midrule
+100ms & 覆盖 $\sim$ 80\% 回填窗口 & 改价后体感最快，但漏窗仍有 \\
+\textbf{500ms} & 覆盖 $\sim$ 99\% 回填窗口 & gomall 当前值，平衡点 \\
+1s    & 覆盖 $\sim$ 99.9\% 回填窗口 & 改价后用户最长等 1s + TTL \\
+3s    & 几乎全覆盖 & 用户体感差，且改价高峰时 goroutine 堆积 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small 数字怎么来：取决于\textbf{读路径回填耗时}的 P99。gomall 单次回填 = DB 查询 (3ms) + JSON marshal (1ms) + Redis SET (1ms) $\approx$ 5ms。考虑 GC / 抖动 / 网络重传，P99 不超过 100ms；500ms 留 5 倍余量。
+\srcnote{repository/cache/product.go:16 ProductDelayInterval = 500ms}
+\end{frame}
+
+\begin{frame}{并发场景下的双删时序}
+\begin{tikzpicture}[node distance=8mm]
+  \foreach \name/\x in {写者W/0, 读者R/40, Cache/90, DB/140} {
+    \node[node-box,minimum width=14mm] at (\x mm,0) (\name) {\name};
+    \draw[lifeline] (\x mm,-2mm) -- (\x mm,-50mm);
+  }
+  \draw[arrow] (0,-6mm)   -- node[above,font=\tiny]{T0: DEL cache (第一刀)} (90mm,-6mm);
+  \draw[arrow] (40mm,-12mm) -- node[above,font=\tiny]{T1: GET cache (miss)} (90mm,-12mm);
+  \draw[arrow] (40mm,-18mm) -- node[above,font=\tiny]{T2: 回源 DB (拿旧值)} (140mm,-18mm);
+  \draw[arrow] (0,-24mm)   -- node[above,font=\tiny]{T3: UPDATE DB 新值} (140mm,-24mm);
+  \draw[arrow-bad] (40mm,-30mm) -- node[above,font=\tiny\color{cBad}]{T4: R 把旧值写回 cache (不一致)} (90mm,-30mm);
+  \draw[arrow-alert] (0,-38mm) -- node[above,font=\tiny\color{cAccent}]{T5 = T0+500ms: DEL cache (第二刀)} (90mm,-38mm);
+  \node[font=\tiny,align=center] at (70mm,-46mm) {500ms $\ge$ T3-T0 + T4-T2 的 P99 $\Rightarrow$ 下次读回源拿新值};
+\end{tikzpicture}
+\srcnote{推导：T4-T0 = 写库耗时 + 读者从 miss 到回填耗时}
+\end{frame}
+
+\begin{frame}{Redis cluster 上的热 key 怎么找}
+\begin{itemize}
+  \item 现象：单分片 CPU 100\%、网络出带宽打满，其他分片闲；典型表现是\textbf{秒杀商品 / 双 11 主推品} 的 \texttt{product:detail:\{id\}}。
+  \item 探测方法 1：\texttt{redis-cli --hotkeys}（基于 LFU 采样，会暂停 4 秒，仅离线用）。
+  \item 探测方法 2：开 \texttt{slowlog} + \texttt{MONITOR} 抽样 1\% 流量，按 key 聚合统计 QPS。
+  \item 探测方法 3：在 Gin 层埋点，记录每个 \texttt{product\_id} 的请求计数到 \texttt{sync.Map}，1 分钟 \texttt{dump} 一次到 Prometheus；超过阈值（如 \textgreater 1000 QPS）告警。
+  \item gomall 当前是方法 3，路线图上接 Redis cluster 后会切到方法 2 + 客户端旁路缓存。
+\end{itemize}
+\srcnote{规划：middleware/hotkey.go + Prometheus counter \texttt{product\_view\_total}}
+\end{frame}
+
+\begin{frame}{热 key 三种拆分策略}
+\begin{description}
+  \item[本地 process cache] 在 Go 进程内加 \texttt{LRU(size=100, ttl=5s)}，对极热 key 直接走本地，绕过 Redis。代价是\textbf{一致性窗口扩到 5s}，仅适用于"商品详情"这类对一致性要求低的字段。
+  \item[Key 分片] 把 \texttt{product:detail:42} 拆成 \texttt{product:detail:42:shard0..N}，读时随机选一片，写时全部更新。N 取 10 时单分片 QPS 降 10 倍，代价是写放大。
+  \item[读写分离] 热 key 写 master、读从多副本 \texttt{ro-replica} 上读。最终一致窗口 = master-replica 同步延迟（约 10ms）。
+\end{description}
+\vspace{1mm}
+\small 业务侧选哪个看\textbf{读写比例}。商品详情读写 \textgreater 1000:1，本地 cache 最划算；秒杀库存读写 1:1，必须分片。
+\srcnote{方案对比：Twitter Manhattan / Facebook MCRouter 公开论文}
 \end{frame}
 
 % ============================================================
@@ -339,12 +523,63 @@ func (dao *ProductDao) CountProductByCondition(condition map[string]interface{})
 \midrule
 建 \texttt{category\_id} 索引 & 写入慢 5--10\% & 几乎无 \\
 近似计数 (\texttt{TABLE STATUS}) & total 有 5\% 误差 & 显示 "约 1{,}000 件" \\
+物化视图 (\texttt{category\_count}) & 异步刷新延迟 & 数字偶有 5min 滞后 \\
 干掉 total，前端无限滚动 & 产品改交互 & 翻页器消失 \\
 \bottomrule
 \end{tabular}
 \vspace{3mm}
 \small 后端常常想直接选"建索引"，但和产品/运营对齐后会发现\textbf{无限滚动}才是真正合理的选择：用户分页到第 50 页的概率 $<$ 0.1\%，业务上没人在乎 total。
 \srcnote{stressTest/REPORT.md \S 3 商品列表反模式 改进方向}
+\end{frame}
+
+\begin{frame}[fragile]{近似计数：用 \texttt{INFORMATION\_SCHEMA} 替代 \texttt{COUNT(*)}}
+\begin{lstlisting}[language=Go,firstnumber=66,
+  caption={\srcnote{规划改造：repository/db/dao/product.go ApproxCount}}]
+// ApproxCount 近似计数: 从 INFORMATION_SCHEMA 拿 InnoDB 估算行数
+// 误差 5-10%; 1M 行表从 2s 降到 1ms, 4 个量级
+func (dao *ProductDao) ApproxCount() (int64, error) {
+    var rows int64
+    err := dao.DB.Raw(`SELECT TABLE_ROWS FROM INFORMATION_SCHEMA.TABLES
+                        WHERE TABLE_SCHEMA = DATABASE()
+                          AND TABLE_NAME   = 'product'`).Scan(&rows).Error
+    return rows, err
+}
+\end{lstlisting}
+\small \texttt{TABLE\_ROWS} 是 InnoDB 统计样本估算值。按 category 分组要走\textbf{物化视图}：另起 \texttt{product\_count\_by\_cat} 表，binlog/outbox 异步增减。
+\end{frame}
+
+\begin{frame}{物化视图 / 无限滚动：选哪个}
+\begin{tabular}{@{}lllr@{}}
+\toprule
+方案 & 一致性 & 复杂度 & 查询耗时 \\
+\midrule
+\texttt{(category, on\_sale)} 复合索引 & 强 & 加索引一行 & 50--200ms \\
+物化视图 \texttt{product\_count\_by\_cat} & 5min 最终一致 & 中（需 outbox） & \textless 1ms \\
+近似计数 \texttt{TABLE\_ROWS} & 弱（10\% 误差） & 极低 & \textless 1ms \\
+无限滚动（cursor） & 不需要 total & 中（前端改） & \textless 1ms \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 物化视图临界点：\textbf{QPS \textgreater 1k \&\& 类目稳定}。gomall 当前 24.5 RPS 没到，先建索引。\\
+无限滚动是最优解：用户翻第 50 页概率 \textless 0.1\%，total 价值极低。\texttt{order/list} 已用游标 + 缓存把 QPS 从 8.3 拉到 \textbf{58{,}406}（\textasciitilde 7000 倍），商品列表可复用同样模板：cursor = \texttt{(sort\_key, id)} 二元组。
+\srcnote{游标分页模板已在 stressTest/REPORT.md \S 2 验证}
+\end{frame}
+
+\begin{frame}{容量规划：1k / 10k / 100k QPS 链路资源估算}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+入口 QPS & 1{,}000 & 10{,}000 & 100{,}000 \\
+\midrule
+浏览器卸载（60\%） & 400 到源 & 4{,}000 到源 & 40{,}000 到源 \\
+CDN 卸载（20\% 再截） & 320 到源站 & 3{,}200 到源站 & 32{,}000 到源站 \\
+源站 Redis（99\% 命中） & 3.2 到 DB & 32 到 DB & 320 到 DB \\
+DB 实际负载 & \textless 1\% 单机 & 10\% 单机 & 接近上限 \\
+源站 CPU（按 50K RPS/核） & 0.01 核 & 0.1 核 & 1 核 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 100k QPS 才把 DB 推到 320 QPS，远低于单机 6 万级 PK 上限。\textbf{单机够用}，所以 gomall 在百万级 DAU 之前不需要分库分表，只需要把 cache 命中率守住 99\%。
+\srcnote{基线数字来自 stressTest/REPORT.md /ping 64K RPS / product/show 62K RPS}
 \end{frame}
 
 % ============================================================
@@ -368,67 +603,93 @@ func (dao *ProductDao) CountProductByCondition(condition map[string]interface{})
 \srcnote{pkg/e/code.go:53--58 业务码定义}
 \end{frame}
 
-\begin{frame}{客诉拆解："为什么显示老价格"}
+\begin{frame}{客诉拆解 + 业务侧最终目标}
+\textbf{"为什么显示老价格"三种场景}：
 \begin{description}
-  \item[场景 A] 商家改价后 $\le$ 500ms 内用户刷新。\\\small 原因：双删第二刀还没到。处理：让用户再刷一次。
-  \item[场景 B] 商家改价后 1 -- 60s 内用户刷新。\\\small 原因：浏览器/CDN 强 cache（Cache-Control max-age=60）。处理：教用户硬刷新 (\texttt{Cmd+Shift+R})，或商家急时让运营走"强制下架重新上架"。
-  \item[场景 C] 商家改价后 $>$ 10min 仍是旧值。\\\small 原因：双删失败或 outbox 没投递。处理：开 P2 工单，查 \texttt{outbox} 表 \texttt{ProductChanged} 事件。
+  \item[A] 改价后 $\le$ 500ms：双删第二刀还没到，让用户再刷一次。
+  \item[B] 改价后 1--60s：浏览器/CDN 强 cache，教硬刷新 (\texttt{Cmd+Shift+R}) 或运营"强制下架重新上架"。
+  \item[C] 改价后 $>$ 10min 仍旧值：双删失败或 outbox 没投递，开 P2 工单查 \texttt{outbox} 表。
 \end{description}
-\srcnote{service/product.go:282--289 双删 + emitProductChanged 三联}
-\end{frame}
-
-\begin{frame}{业务侧的最终目标}
-\begin{itemize}
-  \item 首屏 1 秒：靠浏览器 304 + CDN 长缓存，源站只承担兜底。
-  \item 命中率 $>$ 99\%：靠 Redis Cache Aside + SETNX 单飞回源。
-  \item 改价 1s 内可见：靠延迟双删 + outbox 异步索引。
-  \item 翻页不炸：靠下掉全表 COUNT 改无限滚动。
-\end{itemize}
+\vspace{2mm}
+\textbf{业务侧最终目标}：首屏 1s（浏览器 304 + CDN）/ 命中率 \textgreater 99\%（Redis + SETNX）/ 改价 1s 内可见（双删 + outbox）/ 翻页不炸（cursor + 无限滚动）。
 \keypoint{商品展示不是"把数据从 DB 取出来"，是\textbf{把流量挡在 DB 之外}。}
+\srcnote{service/product.go:282--289 双删 + emitProductChanged 三联}
 \end{frame}
 
 % ============================================================
 \appendix
 % ============================================================
 
-\begin{frame}{面试 Q\&A}
+\begin{frame}{面试 Q\&A（一）}
+\small
 \textbf{Q1}：双删第二刀的间隔为什么是 500ms，不是 200ms 或 1s？\\
-\hspace{4mm}\small A：业务侧承诺"改价 1s 内可见"。第一刀已经挡 99\%，第二刀只为兜并发读+回写窗口；500ms 是估计的"读者从 cache miss 到回填完"的上界，再保守一倍也只到 1s。
+A：业务承诺"改价 1s 内可见"。第一刀挡 99\%，第二刀兜并发读+回写窗口；500ms 是"读者 cache miss 到回填完"P99 上界（实测 \textless 100ms）的 5 倍。
 
-\vspace{2mm}
-\textbf{Q2}：\texttt{/product/show} 已经 62K RPS 了，为什么还要挂 HTTP cache？\\
-\hspace{4mm}\small A：62K RPS 是\textbf{单机源站极限}，不可水平扩。挂 HTTP cache 后浏览器 / CDN 卸掉 60--80\% 流量，源站压力降到 1 万级，留出余量给写路径。
+\vspace{1mm}
+\textbf{Q2}：\texttt{/product/show} 已 62K RPS 了，为什么还要挂 HTTP cache？\\
+A：62K RPS 是\textbf{单机源站极限}，不可水平扩。挂 HTTP cache 后浏览器 / CDN 卸掉 60--80\% 流量，源站压力降到 1 万级，留出余量给写路径。
 
-\vspace{2mm}
+\vspace{1mm}
 \textbf{Q3}：商家改价后客诉"显示老价格"，怎么定位？\\
-\hspace{4mm}\small A：先看时间窗口。$\le$ 1s 是双删窗口（正常）；1 -- 60s 是 HTTP cache（教硬刷新）；$>$ 10min 是 outbox / 双删失败（开工单）。
+A：看时间窗口。$\le$ 1s 是双删窗口（正常）；1--60s 是 HTTP cache（教硬刷新）；$>$ 10min 是 outbox / 双删失败（开工单）。
+
+\vspace{1mm}
+\textbf{Q4}：为什么 \texttt{product/list} 不挂 Redis cache 而 \texttt{product/show} 挂？\\
+A：列表 key 维度 \texttt{(category, page, filter)} 笛卡尔积，命中率低；单品按 id 命中率 $\to$ 99\%。列表更适合 HTTP cache 或前端无限滚动。
 \end{frame}
 
-\begin{frame}{面试 Q\&A（续）}
-\textbf{Q4}：为什么 \texttt{product/list} 不挂 Redis cache 而 \texttt{product/show} 挂？\\
-\hspace{4mm}\small A：列表的 key 维度是 \texttt{(category, page, filter)} 笛卡尔积，cache 命中率低；单品按 id 命中率 $\to$ 99\%。列表更适合 HTTP cache (URL 是天然 key) 或前端无限滚动。
-
-\vspace{2mm}
+\begin{frame}{面试 Q\&A（二）}
+\small
 \textbf{Q5}：弱 ETag 和强 ETag 怎么选？\\
-\hspace{4mm}\small A：JSON 接口选弱（\texttt{W/"..."}），允许压缩/格式变化；二进制资源选强。gomall 全部是 JSON，统一弱 ETag。
+A：JSON 接口选弱（\texttt{W/"..."}）允许压缩/格式变化；二进制资源选强。gomall 全部 JSON，统一弱 ETag。
 
-\vspace{2mm}
+\vspace{1mm}
 \textbf{Q6}：商家秒级改价、用户必须秒级看到，怎么办？\\
-\hspace{4mm}\small A：改业务约定，不改技术。要么 max-age=0 取消强缓存（仅 ETag 协商），要么对该商品走\textbf{下单页直读 DB}的兜底路径。技术上"既要强缓存又要强一致"在分布式里没有解。
+A：改业务约定，不改技术。要么 max-age=0 取消强缓存，要么走\textbf{下单页直读 DB}兜底。"既要强缓存又要强一致"在分布式里没有解。
+
+\vspace{1mm}
+\textbf{Q7}：缓存击穿、穿透、雪崩三个名词怎么区分？\\
+A：击穿=单 key 过期瞬时并发回源（SETNX 单飞）；穿透=查不存在的 key 一直 miss（布隆过滤器）；雪崩=多 key 同时过期（TTL 抖动 + 多级 cache）。
+
+\vspace{1mm}
+\textbf{Q8}：单 key 热点（双 11 主推品）打爆 Redis 单分片怎么办？\\
+A：三选一：(1) Go 进程内 LRU 加 5s TTL；(2) key 拆 N 份读时随机选；(3) 走从副本读写分离。读写比 \textgreater 1000:1 选本地；均衡选分片。
+\end{frame}
+
+\begin{frame}{面试 Q\&A（三）}
+\small
+\textbf{Q9}：DB 实际承担多少 QPS 怎么算？\\
+A：链式公式 $Q \cdot (1-h_1)(1-h_2)(1-h_3)$。浏览器 60\% / CDN 20\% / Redis 99\%，10k QPS 进 DB 看到 32 QPS。任一层命中率掉 10\%，DB 流量翻倍以上。
+
+\vspace{1mm}
+\textbf{Q10}：监控该看总命中率还是分层命中率？\\
+A：必须分层。Redis 雪崩时浏览器/CDN 没异常，总命中率仍 80\%+ 看着像没事。每层独立报警阈值（如 \texttt{redis\_hit \textless 95\% for 5m}）。
+
+\vspace{1mm}
+\textbf{Q11}：\texttt{COUNT(*)} 四种修法业务上怎么选？\\
+A：QPS \textless 1k 加索引；要"约 1000 件"文案用近似计数；类目稳定且 QPS \textgreater 1k 上物化视图；产品愿意改交互直接无限滚动（最优解）。
+
+\vspace{1mm}
+\textbf{Q12}：百万级 DAU 时需要分库分表吗？\\
+A：不需要。100k QPS 入口、99\% 命中率，DB 实际看 320 QPS，远低于 6 万级 PK 上限。先把 cache 命中率守住，再考虑分片。
 \end{frame}
 
 \begin{frame}{代码位置一览}
+\scriptsize
 \begin{description}
   \item[读路径 Cache Aside]\srcnote{service/product.go:42--68 ProductShow}
   \item[写路径 双删]\srcnote{service/product.go:271--292 ProductUpdate}
   \item[Cache 包装]\srcnote{repository/cache/product.go:30--74 Get/Set/Del/DoubleDeleteAsync}
   \item[SETNX 回源锁]\srcnote{repository/cache/product.go:55--62 TryProductLock}
+  \item[Double Delete 异步]\srcnote{repository/cache/product.go:64--74 DoubleDeleteAsync 500ms}
   \item[HTTP cache 中间件]\srcnote{middleware/httpcache.go:47--106 HTTPCache + weakETag}
-  \item[路由挂载（show 60s / list 30s）]\srcnote{routes/router.go:39--40}
-  \item[路由挂载（category / carousels 300s）]\srcnote{routes/router.go:44--45}
-  \item[反例：全表 COUNT]\srcnote{repository/db/dao/product.go:58--64}
+  \item[ETag 304 比对]\srcnote{middleware/httpcache.go:78--99 If-None-Match 分支}
+  \item[路由挂载]\srcnote{routes/router.go:39--40 (show 60s / list 30s) + :44--45 (300s)}
+  \item[反例：全表 COUNT]\srcnote{repository/db/dao/product.go:58--64 CountProductByCondition}
+  \item[规划：布隆过滤器]\srcnote{规划 repository/cache/bloom.go BF.EXISTS}
+  \item[规划：TTL jitter / 热 key 探测]\srcnote{规划 SetProductDetail + rand jitter / middleware/hotkey.go}
   \item[业务码]\srcnote{pkg/e/code.go:53--58 (60001/60002/70001/70002)}
-  \item[压测数字]\srcnote{stressTest/REPORT.md 链路压测表 + \S 3 反模式}
+  \item[压测数字]\srcnote{stressTest/REPORT.md 链路压测表 + \S 3 反模式 + 基线 64{,}254 / 62{,}226 / 24.5 RPS}
 \end{description}
 \end{frame}
 
