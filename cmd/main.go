@@ -13,6 +13,7 @@ import (
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/es"
+	"github.com/RedInn7/gomall/repository/milvus"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 	"github.com/RedInn7/gomall/routes"
 )
@@ -38,6 +39,7 @@ func loading() {
 	initialize.InitOrderAsyncConsumer(context.Background())
 	tryInitES(context.Background())
 	tryInitWeb3Listener(context.Background())
+	tryInitMilvus(context.Background())
 	//kafka.InitKafka()
 	//track.InitJaeger()
 	fmt.Println("加载配置完成...")
@@ -78,4 +80,18 @@ func tryInitWeb3Listener(ctx context.Context) {
 		}
 	}()
 	initialize.InitWeb3Listener(ctx)
+}
+
+// tryInitMilvus Milvus 不可用时静默跳过，语义召回能力关闭，关键词搜索不受影响
+func tryInitMilvus(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Warnf("Milvus 初始化失败，语义召回能力关闭: %v", r)
+		}
+	}()
+	if err := milvus.InitMilvus(); err != nil {
+		util.LogrusObj.Warnf("Milvus 客户端连接失败，语义召回能力关闭: %v", err)
+		return
+	}
+	initialize.InitMilvusCollection(ctx)
 }
