@@ -1,0 +1,474 @@
+\input{preamble}
+
+\title{营销活动}
+\subtitle{优惠券 / 秒杀 / 抢红包 —— 三个 Lua 套路对照与防黑产}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{把三个场景拼到一张桌子上}
+% ============================================================
+
+\begin{frame}{优惠券 / 秒杀 / 抢红包 凭什么放一起讲}
+\begin{itemize}
+  \item 表面三类活动，骨架其实是同一套：
+  \begin{itemize}
+    \item 入口流量打到一个共享资源（库存 / 商品份额 / 红包份数）。
+    \item 必须原子扣减，否则超发 = 直接资金损失。
+    \item 防刷需求强：羊毛党盯的就是这种"低价 / 免费"场景。
+    \item 抢到只是第一步，还要落库 + 入账，链路天然要 Saga 兜底。
+  \end{itemize}
+  \item gomall 三个接口的代码其实长得像三胞胎：都是\textbf{中间件链 → Lua 一锤 → 事务落库 → outbox 投递}。
+  \item 本 deck 把三段 Lua 摆在一起读，挑差异、说原因。
+\end{itemize}
+\srcnote{对应 service/coupon.go, service/redpacket.go, service/skill\_goods.go}
+\end{frame}
+
+\begin{frame}{统一链路 + 三个路由的中间件链}
+\begin{tikzpicture}[node distance=4mm and 7mm]
+  \node[node-box] (cli) {Client};
+  \node[node-box,right=of cli,node-warn] (gw) {TokenBucket};
+  \node[node-box,right=of gw,node-warn] (sw) {SlidingWindow};
+  \node[node-box,right=of sw] (idem) {Idempotency};
+  \node[node-box,right=of idem,node-ok] (lua) {Lua};
+  \node[node-box,below=of lua] (tx) {DB Tx\\+ outbox};
+  \node[node-box,left=of tx,node-ok] (mq) {MQ 消费者};
+  \draw[arrow] (cli) -- (gw); \draw[arrow] (gw) -- (sw);
+  \draw[arrow] (sw) -- (idem); \draw[arrow] (idem) -- (lua);
+  \draw[arrow] (lua) -- (tx); \draw[arrow-async] (tx) -- (mq);
+  \draw[arrow-bad,bend right=20] (tx.north) to node[above,font=\tiny]{DB FAIL: Saga 回滚 Lua} (lua.east);
+\end{tikzpicture}
+\vspace{1mm}
+\scriptsize
+\begin{tabular}{@{}p{0.16\linewidth}p{0.34\linewidth}p{0.42\linewidth}@{}}
+\toprule
+活动 & 路由 & 中间件链 \\
+\midrule
+优惠券 & \texttt{POST /coupon/claim} & （仅全局 TokenBucket）\\
+秒杀   & \texttt{POST /skill\_product/skill} & SlidingWindow\{seckill, 3/s, ByUser\} \\
+抢红包 & \texttt{POST /redpacket/claim} & SlidingWindow\{redpacket, 3/s, ByUser\} + Idempotency \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\srcnote{routes/router.go:22 全局桶；:72 coupon；:79--84 红包；:136--143 秒杀}
+\end{frame}
+
+% ============================================================
+\section{优惠券：库存 + 限领 二维原子}
+% ============================================================
+
+\begin{frame}[fragile]{coupon Lua 脚本（业务画像 + 10 行实现）}
+\small \texttt{coupon:batch:\{id\}:stock} 整型库存；\texttt{coupon:user:\{uid\}:batch:\{id\}} 单人计数 TTL 24h。Lua 必须一锤完成：库存 > 0 ？单人 < \texttt{PerUser} ？两道闸过了才 DECR + INCR。
+\begin{lstlisting}[language=LuaRedis,firstnumber=30,
+  caption={\srcnote{repository/cache/coupon.go:30--44 claimScript}}]
+local stock = tonumber(redis.call('GET', KEYS[1]))
+if stock == nil or stock <= 0 then
+    return -1                                  -- 已抢光
+end
+local owned = tonumber(redis.call('GET', KEYS[2]))
+if owned == nil then owned = 0 end
+if owned >= tonumber(ARGV[1]) then
+    return -2                                  -- 超出单人上限
+end
+redis.call('DECR', KEYS[1])
+redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+return 1
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{Lua 脚本逐行解读}
+\begin{itemize}
+  \item \textbf{L1--L4}：读库存，\textbf{nil 当 0 处理}。返回 \texttt{-1} 给业务层翻译成 "已抢光"。
+  \item \textbf{L5--L9}：读单人计数。第一次领该券时 key 不存在，Lua 里 \texttt{nil} 强转 0；命中上限直接返回 \texttt{-2}。
+  \item \textbf{L10--L11}：DECR / INCR 在 Lua 里是同一个事务原子单位，不会出现"扣了库存但没记上单人"。
+  \item \textbf{L12}：每次领到都续命 24h —— 防止 key 在活动跨天时被 evict 导致重新可领。
+  \item 三个 return 码业务层映射成两种业务错误（见 \texttt{ClaimCouponAtomic}）。
+\end{itemize}
+\srcnote{repository/cache/coupon.go:57--75 错误码翻译}
+\end{frame}
+
+\begin{frame}{二维原子图 + REPORT 数字}
+\begin{minipage}[t]{0.42\linewidth}
+\begin{tikzpicture}[node distance=6mm and 10mm]
+  \node[node-state,node-state-normal] (s0) {可领};
+  \node[node-state,node-state-alert,right=of s0] (s1) {-1\\抢光};
+  \node[node-state,node-state-alert,below=of s1] (s2) {-2\\超限};
+  \node[node-state,node-state-transition,below=of s0] (s3) {1\\DECR\\+INCR};
+  \draw[arrow-bad]  (s0) -- (s1);
+  \draw[arrow-bad]  (s0) -- (s2);
+  \draw[arrow]      (s0) -- (s3);
+\end{tikzpicture}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.54\linewidth}
+\scriptsize
+\begin{tabular}{@{}lrr@{}}
+\toprule
+& Redis Lua & DB 锁 \\
+\midrule
+500 并发抢 100 张 & 零超发 & 零超发 \\
+吞吐 RPS          & 51{,}362 & 50{,}142 \\
+avg 延迟          & 1.24ms  & 1.29ms  \\
+\textbf{max 延迟} & \textbf{136ms} & \textbf{453ms} \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\vspace{2mm}
+\small \textbf{两道闸都要原子}：先 DECR 再判单人，已超限的请求会留"幽灵库存"。\\
+吞吐拉平，但 Lua vs FOR UPDATE \textbf{尾延迟差 3.3 倍}。
+\srcnote{repository/cache/coupon.go:30--44；stressTest/REPORT.md 链路压测表 第 5--6 行}
+\end{frame}
+
+\begin{frame}{coupon 的盲区：Lua 防超发但不防黑产}
+\begin{itemize}
+  \item Lua 看的是 \texttt{userId+batchId}：一个账号最多领 \texttt{PerUser} 张。
+  \item 但羊毛党的玩法是\textbf{一万个账号每号领一张}，Lua 看不出来。
+  \item 现状：router 上只有全局 TokenBucket 100 RPS / IP，单 IP 可以慢慢刷。
+  \item 改进建议：追加 \texttt{SlidingWindow\{Scope:"coupon", Limit:5, Window:1m, ByUser:true\}}。
+  \begin{itemize}
+    \item 真用户 1min 领 5 张够用。
+    \item 万号脚本：要么换号慢，要么被网关 TokenBucket 截掉。
+  \end{itemize}
+\end{itemize}
+\srcnote{routes/router.go:72 coupon/claim 路由（无单用户限频）}
+\end{frame}
+
+% ============================================================
+\section{秒杀：滑动窗口 + 单独商品表}
+% ============================================================
+
+\begin{frame}{秒杀和"普通下单"的根本差异}
+\begin{itemize}
+  \item 库存独立：\texttt{model.SkillProduct} 与 \texttt{Product} 分表，不污染主商品池。
+  \item 限流前置：\texttt{/skill\_product/skill} 强制挂 SlidingWindow，单用户 1s 最多 3 次。
+  \item 没有熔断：秒杀打开熔断 = "所有人都买不到"，业务等价于"活动作废"，比限流损失更大。
+  \item 没有 outbox：当前实现\textbf{只读缓存}，扣库存的真实路径留在 deck 11（库存业务）。
+\end{itemize}
+\srcnote{service/skill\_goods.go:122--134 SkillProduct；routes/router.go:136--143}
+\end{frame}
+
+\begin{frame}{SlidingWindow Lua 怎么算窗口 + 阈值取 3 的依据}
+\begin{tikzpicture}[scale=0.78, every node/.style={font=\scriptsize}]
+  \draw[arrow] (0,0) -- (12,0);
+  \node[below] at (0,-0.1) {now-1000ms};
+  \node[below] at (12,-0.1) {now};
+  % 旧请求
+  \draw[fill=cBad!20,draw=cBad] (-0.6,0.3) rectangle (0.0,0.9);
+  \node[font=\tiny] at (-0.3,0.6) {drop};
+  \draw[arrow-bad] (-0.3,1.0) -- node[right,font=\tiny]{ZREMRANGEBYSCORE} (0.5,1.7);
+  % 窗口内
+  \draw[fill=cMain!15,draw=cMain] (2,0.3) rectangle (2.6,0.9);
+  \draw[fill=cMain!15,draw=cMain] (5,0.3) rectangle (5.6,0.9);
+  \draw[fill=cMain!15,draw=cMain] (8,0.3) rectangle (8.6,0.9);
+  \node at (2.3,0.6) {1};
+  \node at (5.3,0.6) {2};
+  \node at (8.3,0.6) {3};
+  % 待入
+  \draw[fill=cAccent!30,draw=cAccent,dashed] (11.0,0.3) rectangle (11.6,0.9);
+  \node at (11.3,0.6) {?};
+  \draw[arrow-alert] (11.3,1.0) -- node[right,font=\tiny]{ZCARD>=3 -> reject 70001} (11.3,1.7);
+\end{tikzpicture}
+\vspace{2mm}
+\small ZSet member = 请求 id，score = 毫秒时间戳。Lua 先 \texttt{ZREMRANGEBYSCORE} 清窗外旧记录，再 \texttt{ZCARD} 判定。\\
+\textbf{阈值 = 3}：真人 300--500ms 一次，3 留 50\% 余量；取 10 形同没限，取 1 网络抖一下客诉爆。\textbf{比真人快、比脚本慢}，没有第二候选。
+\srcnote{repository/cache/ratelimit.go:18--34；routes/router.go:136--143}
+\end{frame}
+
+\begin{frame}{REPORT 数字：3/s/用户 误差 2.2\%}
+\textbf{场景}：30 VU × 15s 打 \texttt{/skill\_product/skill}，单 token，配置 \texttt{Limit=3 Window=1s ByUser=true}。
+
+\vspace{2mm}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+指标 & 实测 & 业务期望 \\
+\midrule
+通过请求数 & 46  & 15s × 3 = 45 \\
+被限流数   & 781{,}624 & 黑产应当被全部拦下 \\
+误差       & 2.2\% & < 5\% 视为合格 \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small "通过 46 次" 约等于"真用户最快也只能秒到 45 次/15s"，业务侧合理。\\
+被截 78 万次都是同一 token，正是黑产的标准画像。
+\srcnote{stressTest/REPORT.md \S 5 限流中间件}
+\end{frame}
+
+% ============================================================
+\section{抢红包：LPOP 一次取一份}
+% ============================================================
+
+\begin{frame}[fragile]{为什么红包不能用 DECR：发包时预拆 + 二倍均值法}
+\textbf{业务约束}：总额严格守恒（100 元发出去必须正好 100 元），每份金额不同 $\to$ DECR 拿不回金额，必须 LPOP 出队拿"那一份"。\textbf{发包时一次性拆好}，写入 Redis LIST。
+
+\begin{lstlisting}[language=Go,firstnumber=107,
+  caption={\srcnote{repository/cache/redpacket.go:107--141 SplitRedPacket}}]
+out := make([]int64, count)
+remain := total
+for i := 0; i < count-1; i++ {
+    left := int64(count - i)
+    avg := remain / left * 2          // 二倍均值
+    if avg < 2 { avg = 2 }
+    maxThisRound := remain - int64(count-1-i)  // 留至少 1 分给后面每份
+    hi := avg - 1
+    if hi > maxThisRound { hi = maxThisRound }
+    if hi < 1 { hi = 1 }
+    amt := splitRand.r.Int63n(hi) + 1  // [1, hi]
+    out[i] = amt
+    remain -= amt
+}
+out[count-1] = remain                  // 最后一份兜底
+splitRand.r.Shuffle(count, ...)        // 打散顺序，避免位置敏感
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{二倍均值逐行解读}
+\begin{itemize}
+  \item \textbf{avg = remain/left * 2}：剩余金额除以剩余份数 × 2，作为"本次最大可分到金额"的基础。
+  \item \textbf{maxThisRound}：留给后面每份至少 1 分（避免最后几份被迫为 0）。
+  \item \textbf{Int63n(hi)+1}：在 \texttt{[1, hi]} 闭区间随机，保证每份至少 1 分。
+  \item \textbf{out[count-1] = remain}：最后一份直接吃剩，确保总和守恒。
+  \item \textbf{Shuffle}：不打散的话，越靠前抢到的期望金额越大 —— 用户会推断"第一个抢的最大"。
+  \item \textbf{splitRand 进程内独占 rand}：\texttt{math/rand} 全局源加锁，热点路径并发不友好。
+\end{itemize}
+\srcnote{repository/cache/redpacket.go:92--142}
+\end{frame}
+
+\begin{frame}{二倍均值法分布示意（200 元 / 10 份）}
+\begin{tikzpicture}[scale=0.8, every node/.style={font=\scriptsize}]
+  \draw[arrow] (0,0) -- (11,0);
+  \node[below] at (0,0)  {第 1 份};
+  \node[below] at (5.5,0){第 5 份};
+  \node[below] at (10,0) {第 10 份};
+  % 模拟分布（示意，非精确）
+  \draw[fill=cMain!30] (0,0) rectangle (1,2.3);
+  \draw[fill=cMain!30] (1,0) rectangle (2,1.8);
+  \draw[fill=cMain!30] (2,0) rectangle (3,2.1);
+  \draw[fill=cMain!30] (3,0) rectangle (4,1.6);
+  \draw[fill=cMain!30] (4,0) rectangle (5,2.0);
+  \draw[fill=cMain!30] (5,0) rectangle (6,1.9);
+  \draw[fill=cMain!30] (6,0) rectangle (7,2.2);
+  \draw[fill=cMain!30] (7,0) rectangle (8,1.7);
+  \draw[fill=cMain!30] (8,0) rectangle (9,2.5);
+  \draw[fill=cAccent!50] (9,0) rectangle (10,1.9);
+  \draw[dashed,cGray] (0,2.0) -- (10,2.0) node[right,font=\tiny] {avg=20};
+\end{tikzpicture}
+\vspace{2mm}
+\small 每份在 \texttt{[1, 2*avg-1]} 之间随机，期望约等于 avg，方差由 hi 上界控制。\\
+末位（橙色）是 \texttt{remain} 兜底，shuffle 后位置随机。
+\srcnote{repository/cache/redpacket.go:113--141}
+\end{frame}
+
+\begin{frame}[fragile]{抢红包 Lua 脚本（8 行）}
+\begin{lstlisting}[language=LuaRedis,firstnumber=52,
+  caption={\srcnote{repository/cache/redpacket.go:52--63 claimRedPacketScript}}]
+if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then
+    return -2                                 -- 已领过
+end
+local amt = redis.call('LPOP', KEYS[1])
+if not amt then
+    return -1                                 -- 已抢完
+end
+redis.call('HSET', KEYS[2], ARGV[1], amt)
+redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
+return tonumber(amt)                          -- 抢到金额
+\end{lstlisting}
+\vspace{-1mm}
+\scriptsize \textbf{HEXISTS 前置}防同用户多抢；\textbf{LPOP 而非 BLPOP}抢完即 \texttt{-1}（业务码 RP-EMPTY）不阻塞连接；\textbf{return amt} 省一次 \texttt{HGET} 回查。与 coupon 对比：coupon 是对称扣减（计数器），红包是资源出队（队列）。
+\end{frame}
+
+\begin{frame}{抢红包 Saga：Lua 成功但 DB 失败怎么办}
+\begin{tikzpicture}[node distance=7mm and 12mm]
+  \node[node-box,node-ok] (lua) {Lua\\LPOP 50 分};
+  \node[node-box,right=of lua] (db) {DB Tx\\写 claim + outbox};
+  \node[node-box,right=of db,node-bad] (fail) {Tx Fail};
+  \node[node-box,below=of fail,node-warn] (rb) {Rollback Lua\\LPUSH 50 分\\HDEL user};
+  \node[node-box,left=of rb,node-ok] (ok) {Tx OK};
+  \draw[arrow] (lua) -- (db);
+  \draw[arrow] (db) -- node[above,font=\tiny]{commit} (ok);
+  \draw[arrow-bad] (db) -- node[right,font=\tiny]{err} (fail);
+  \draw[arrow-bad] (fail) -- (rb);
+\end{tikzpicture}
+\vspace{2mm}
+\small 把已 LPOP 的金额 \texttt{LPUSH} 回队头、同时撤销 \texttt{claimed} 标记，用户下次再抢可以正常领。\\
+对应 \texttt{rollbackRedPacketClaimScript}：两个动作放在一个 Lua 原子单元。
+\srcnote{repository/cache/redpacket.go:86--90 rollback；service/redpacket.go:155--162 调用}
+\end{frame}
+
+\begin{frame}{三个 Lua 在做什么：维度对照 + 选型逻辑}
+\scriptsize
+\begin{tabular}{@{}lp{0.20\linewidth}p{0.21\linewidth}p{0.26\linewidth}@{}}
+\toprule
+维度 & 优惠券 & 秒杀（限流） & 抢红包 \\
+\midrule
+核心命令 & DECR + INCR & ZADD + ZCARD & LPOP + HSET \\
+数据结构 & STRING × 2  & ZSet         & LIST + HASH \\
+原子单元 & 库存 + 单人计数 & 时间窗口集合 & 出队 + 去重标记 \\
+预热成本 & 一次 SET 库存 & 无（按需建窗口）& \textbf{发包时全量预拆} \\
+TTL 策略 & 用户标记 24h & 窗口大小 1s & claimed hash $>$ 红包过期 \\
+回滚    & INCR + DECR  & 无（不可逆）  & LPUSH + HDEL \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+
+\small 反过来用就不行：红包用 DECR $\to$ 并发算金额不守恒；优惠券用 LPOP $\to$ 浪费；限流用 DECR $\to$ 固定窗口边界 2× 突刺。
+\keypoint{\textbf{业务语义决定结构选型}：金额异质 $\to$ 队列；同质 $\to$ 计数器；时间窗口 $\to$ ZSet。}
+\srcnote{repository/cache/coupon.go, ratelimit.go, redpacket.go 三处实现}
+\end{frame}
+
+\begin{frame}{三段 Lua 的共同设计纪律}
+\begin{enumerate}
+  \item \textbf{失败也要原子}：判断条件不通过时\textbf{什么都不写}，直接 return 错误码（-1 / -2）。
+  \item \textbf{回滚也是 Lua}：DB 失败时的补偿动作要走\textbf{同一种原子机制}，不能 Go 侧两次 Redis 调用。
+  \item \textbf{TTL 永远要设}：尤其是抢/领标记类 key，否则用户停留态 key 会无限堆积。
+  \item \textbf{返回值留语义}：用 \texttt{>0 / 0 / 负数} 区分成功金额、抢完、已抢过、超限，业务层 switch 即可。
+  \item \textbf{进程内 rand}：发包拆分时\textbf{不要用 math/rand 全局}，热点路径并发争锁。
+\end{enumerate}
+\srcnote{repository/cache/redpacket.go:92--96 splitRand 局部源；coupon.go:30--44 错误码语义}
+\end{frame}
+
+% ============================================================
+\section{防黑产：分层与现状}
+% ============================================================
+
+\begin{frame}{为什么营销是黑产首选 + 四层防线}
+\textbf{黑产为何盯营销}：真金白银（券能转卖、红包能提现）+ 规则透明（必须对外通告）+ 多账号便宜（手机号能买）。本质是\textbf{把作弊单价拉到 > 收益}。
+
+\vspace{1mm}
+\scriptsize
+\begin{tabular}{@{}llll@{}}
+\toprule
+层级 & 工具 & gomall 现状 & 备注 \\
+\midrule
+L1 网络   & Anti-DDoS / CDN 黑名单 & 未覆盖 & 依赖云厂商 \\
+L2 网关   & IP TokenBucket         & 已接 & router.go:22 \\
+L3 业务   & 用户 SlidingWindow     & 部分 & 秒杀 + 红包，coupon 缺 \\
+L4 风控   & 设备指纹 / 行为模型     & 路线图 & 接外部风控 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \textbf{每多一层，黑产成本翻倍}：刷券既要换 IP（L2）、又要换号（L3）、又要换设备指纹（L4），单券薅羊毛就不划算了。gomall 站住 L2 + L3。
+\srcnote{routes/router.go:22 全局 IP 桶；:79--84, :136--143 用户滑动窗口}
+\end{frame}
+
+\begin{frame}{IP TokenBucket vs 用户 SlidingWindow 选哪个}
+\begin{tabular}{@{}llll@{}}
+\toprule
+维度 & TokenBucket (L2) & SlidingWindow (L3) \\
+\midrule
+key 维度 & ClientIP & userID \\
+精度    & 桶内突发可过冲 & 严格窗口 \\
+绕过成本 & 换 IP / 走代理 & 换账号 \\
+位置    & 全局，所有请求 & 营销 / 高敏接口 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small TokenBucket 挡的是"机器自动化"，SlidingWindow 挡的是"账号刷子"。\\
+两层一起上，黑产\textbf{必须同时凑齐 IP 池 + 账号池}才能突破，门槛指数级抬高。
+\srcnote{middleware/ratelimit.go TokenBucket vs SlidingWindow}
+\end{frame}
+
+\begin{frame}{客服话术：业务码到提示文案}
+\begin{tabular}{@{}lll@{}}
+\toprule
+状态码 & 含义       & 客服话术 \\
+\midrule
+70001  & 限流命中（SlidingWindow）& "操作过于频繁，请稍后再试" \\
+70002  & 熔断打开（CB-OPEN）       & "支付服务暂忙，1 分钟后" \\
+60002  & 幂等命中                  & "您的操作已受理" \\
+50001  & 库存不足                  & "已售罄" / RP-EMPTY \\
+-2 (coupon) & 单人超限              & "每人限领 N 张" \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small \textbf{业务侧约定}：70001 不是失败，是"稍后重试就行"；RP-EMPTY 是终态，告诉用户红包已被抢完。\\
+客服话术必须\textbf{区分}两种"稍后再试"，否则用户白等。
+\srcnote{pkg/e/code.go:53--58 业务码定义}
+\end{frame}
+
+\begin{frame}{三个活动的 SLO 与各角色视图}
+\scriptsize
+\begin{tabular}{@{}llll@{}}
+\toprule
+活动 & 可用率 & p99 & 备注 \\
+\midrule
+优惠券领取 & 99.9\% & < 200ms & 大促日双倍预热库存 \\
+秒杀下单   & 99\%   & < 200ms & 反黑产强需求，可接受偶发误伤 \\
+抢红包     & 99.9\% & < 300ms & 资金敏感，Saga 必须兜底 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+角色  & 关心指标 & 数据来源 \\
+\midrule
+运营   & 用券率 / 红包领完率 & coupon batch + finished 数 \\
+风控   & 70001 / 60002 占比 & 业务码统计 \\
+客服   & 投诉单 → 业务码反查 & status 字段 \\
+SRE   & Lua RTT p99 / Redis CPU & 监控大盘 \\
+财务   & 红包总额守恒 & DB sum vs outbox \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small 秒杀可用率最低 —— "全场抢光"是营销目标，5xx 短抖动不算事故。红包反过来：抢到没入账 = 投诉。\\
+70001 比例上升，运营看的是"参与热度"，风控看的是"被刷"。
+\srcnote{对照 deck 10 P0--P3 等级表；pkg/e/code.go}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{面试 Q\&A（上）}
+\textbf{Q1}：为什么 coupon 用 DECR，红包用 LPOP？\\
+\hspace{4mm}\small A：券同质，整型计数器即可；红包每份金额不同，必须出队拿"那一份"。
+
+\vspace{2mm}
+\textbf{Q2}：coupon Lua 里"先查库存再查单人"能不能换顺序？\\
+\hspace{4mm}\small A：可以换，但语义有别：先查单人会先消耗 user key 的读，库存爆满时反而更慢。当前顺序对"已抢光"这种最常见的失败短路更划算。
+
+\vspace{2mm}
+\textbf{Q3}：3/s/用户 这个数从哪来？\\
+\hspace{4mm}\small A：真人点击 300--500ms 一次，3 留 50\% 余量。压测 46/45 误差 2.2\%。
+\end{frame}
+
+\begin{frame}{面试 Q\&A（下）}
+\textbf{Q4}：红包 Lua 已经 LPOP 了，DB 落库失败怎么办？\\
+\hspace{4mm}\small A：Saga 回滚 —— 跑 \texttt{rollbackRedPacketClaimScript}，\texttt{LPUSH} 金额回队头 + \texttt{HDEL} 撤销 claimed 标记，用户下次能再抢。
+
+\vspace{2mm}
+\textbf{Q5}：羊毛党用一万个账号刷 coupon，gomall 现在能挡住吗？\\
+\hspace{4mm}\small A：挡不住。需要追加 \texttt{SlidingWindow\{coupon, 5/min, ByUser\}}。当前只能靠全局 TokenBucket 100 RPS/IP 拖速度。
+
+\vspace{2mm}
+\textbf{Q6}：秒杀为什么不挂 Idempotency？\\
+\hspace{4mm}\small A：秒杀重复点击的语义就是"再试一次"，幂等命中反而误导用户。限流截掉就够了。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}
+  \item[coupon Lua + 错误码]\srcnote{repository/cache/coupon.go:30--75}
+  \item[coupon 业务层]\srcnote{service/coupon.go:65--99 Claim}
+  \item[红包拆分算法]\srcnote{repository/cache/redpacket.go:102--142 SplitRedPacket}
+  \item[红包 claim Lua]\srcnote{repository/cache/redpacket.go:52--63}
+  \item[红包 Saga 回滚]\srcnote{repository/cache/redpacket.go:86--90 + service/redpacket.go:155--162}
+  \item[秒杀业务]\srcnote{service/skill\_goods.go:122--134}
+  \item[秒杀路由 + 滑动窗口]\srcnote{routes/router.go:136--143}
+  \item[红包路由 + 滑动窗口 + 幂等]\srcnote{routes/router.go:79--84}
+  \item[SlidingWindow Lua]\srcnote{repository/cache/ratelimit.go:18--34}
+  \item[业务码]\srcnote{pkg/e/code.go:53--58}
+\end{description}
+\vspace{2mm}
+\keypoint{配套技术 deck：05-ratelimit / 10-traffic-governance / 16-redpacket}
+\end{frame}
+
+\end{document}
