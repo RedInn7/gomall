@@ -36,18 +36,6 @@ HTTP 200 + 等 16 秒 = 监控看不见的"软故障"，比 5xx 还危险。
 \srcnote{stressTest/REPORT.md \S 2 订单列表表格}
 \end{frame}
 
-\begin{frame}{为什么这份 deck 关心这一个接口}
-\begin{itemize}
-  \item 5xx 看得见、有告警、有人盯。
-  \item p95 16s 的 200 OK 在 Prometheus 默认面板上\textbf{是绿色的}。
-  \item 用户不会读 HTTP code，只会卸载 app。
-  \item 这一组对比是 gomall 仓库里\textbf{最戏剧化的性能数据}：吞吐 7000$\times$、延迟 3200$\times$。
-  \item 它来自一行 SQL：\texttt{OFFSET 1999999 LIMIT 20}。
-\end{itemize}
-\keypoint{业务侧学的不是怎么改这行 SQL，是\textbf{怎么发现一行 SQL 在亏钱}。}
-\srcnote{repository/db/dao/order.go:78--113 旧版 DAO 全文}
-\end{frame}
-
 % ============================================================
 \section{p95 = 16s 对用户意味着什么}
 % ============================================================
@@ -90,33 +78,6 @@ HTTP 200 + 等 16 秒 = 监控看不见的"软故障"，比 5xx 还危险。
 \srcnote{stressTest/REPORT.md 链路压测表 第 9 行 p95=15.95s}
 \end{frame}
 
-\begin{frame}{7000$\times$ / 3200$\times$ 的视觉对比}
-\begin{tikzpicture}[every node/.style={font=\scriptsize}]
-  % 吞吐对比
-  \node[font=\small] at (3,4) {\textbf{吞吐 (RPS)}};
-  \draw[fill=cBad!40,draw=cBad] (0.5,3) rectangle (0.55,3.2);
-  \node[right=1mm] at (0.55,3.1) {旧版 8.3};
-  \draw[fill=cOK!40,draw=cOK]  (0.5,2.3) rectangle (6,2.5);
-  \node[right=1mm] at (6,2.4) {新版 58{,}406};
-
-  % p95 对比
-  \node[font=\small] at (10,4) {\textbf{p95 延迟}};
-  \draw[fill=cBad!40,draw=cBad] (7.5,3) rectangle (12.5,3.2);
-  \node[right=1mm] at (12.5,3.1) {旧版 15.95s};
-  \draw[fill=cOK!40,draw=cOK]  (7.5,2.3) rectangle (7.503,2.5);
-  \node[right=1mm] at (7.503,2.4) {新版 5ms};
-
-  % bottom annotation
-  \node[font=\footnotesize,align=center] at (6.5,1.3) {
-    左图：bar 长按比例画，旧版仅 0.014\% 宽度（$8.3/58{,}406$）。\\
-    右图：旧版条占满，新版条仅 0.03\% 宽度（$5\text{ms}/15{,}950\text{ms}$）。
-  };
-\end{tikzpicture}
-\vspace{2mm}
-\small 7000$\times$ 不是"快了一点"，是\textbf{把"几乎所有请求都失败"变成"几乎所有请求都成功"}。
-\srcnote{stressTest/REPORT.md \S 2 订单列表代差碾压表}
-\end{frame}
-
 % ============================================================
 \section{8.3 RPS 是什么概念}
 % ============================================================
@@ -140,25 +101,6 @@ HTTP 200 + 等 16 秒 = 监控看不见的"软故障"，比 5xx 还危险。
   \item 客服后台批量查"为什么这个用户说没收到货" $\to$ 一查一个超时。
 \end{itemize}
 \srcnote{stressTest/REPORT.md 链路压测表 第 9 行 RPS=8.3 / VUs=100}
-\end{frame}
-
-\begin{frame}{相同的反模式还藏在 \texttt{product/list}}
-\begin{tabular}{@{}lrr@{}}
-\toprule
-接口 & RPS & p95 \\
-\midrule
-\texttt{/orders/old/list} （\texttt{OFFSET 1999999}） & 8.3  & 15.95s \\
-\texttt{/product/list}    （\texttt{COUNT(*)} 全表）  & 24.5 & 2.50s \\
-\bottomrule
-\end{tabular}
-\vspace{3mm}
-\begin{itemize}
-  \item \texttt{product/list} 没有 OFFSET 病灶，但每次都 \texttt{SELECT COUNT(*)} 956K 行的 product 表。
-  \item COUNT 走全表 = 单次 2.5s，瓶颈在\textbf{要不要告诉用户"共 X 页"}。
-  \item 这是\textbf{产品决策}：要 "共 X 页" 还是要 24.5 $\to$ 5{,}000 RPS。
-  \item gomall 现状：还没改 —— 这是仓库里\textbf{第二大的性能债}。
-\end{itemize}
-\srcnote{repository/db/dao/product.go:59--64 \texttt{CountProductByCondition}}
 \end{frame}
 
 % ============================================================
@@ -285,21 +227,6 @@ err = query.
 \small 数字是简化模型，但量级方向是对的：性能问题首先是\textbf{钱的问题}。
 \end{frame}
 
-\begin{frame}{客服侧：投诉从"加载失败"消失}
-\begin{itemize}
-  \item 旧版客诉 top 3 关键词（业界典型）：
-  \begin{itemize}
-    \item "订单页一直转圈"
-    \item "为什么我的订单不显示"
-    \item "刚买的东西在哪里"
-  \end{itemize}
-  \item 这三类\textbf{本质都是同一个 bug}：列表太慢用户以为没下单 $\to$ 重新下单 $\to$ 双单 $\to$ 客诉。
-  \item 双单还会触发幂等\textbf{无关的}场景：用户主动点两次 = 业务层重复，幂等中间件\textbf{挡不住}（不同 idempotency key）。
-  \item 新版上线后，这一类\textbf{从客诉报表中整类消失}。
-  \item 客服培训成本、退款工单成本、商家结算成本都跟着降。
-\end{itemize}
-\srcnote{deck 01 idempotency 解决的是请求级重放，不解决"用户主动点两次"}
-\end{frame}
 
 % ============================================================
 \section{谁来发现这种 bug}
@@ -347,26 +274,6 @@ err = query.
 \end{itemize}
 \end{frame}
 
-\begin{frame}{SLO 告警的设计：监控分位数而非平均值}
-\begin{tabular}{@{}lll@{}}
-\toprule
-指标 & 旧版实测 & 内部 SLO 应当 \\
-\midrule
-avg 延迟       & 10.5s   & p99 < 500ms \\
-p95 延迟       & 15.95s  & p95 < 200ms \\
-错误率（HTTP）  & 0\%     & < 0.1\% \\
-\textbf{告警是否会响} & \textbf{不会} & \textbf{应该响} \\
-\bottomrule
-\end{tabular}
-\vspace{3mm}
-\begin{itemize}
-  \item 旧版"错误率 0\%"是 gomall 监控的盲区：HTTP 200 就算成功。
-  \item 应当加 \textbf{延迟分位数 SLO}：p95 > 1s 持续 5min 报警。
-  \item RUM 侧再加\textbf{用户感知 SLO}：首屏 > 3s 占比超过 10\% 报警。
-  \item 两者交叉验证，才能拦住"HTTP 200 + 等 16 秒"这种软故障。
-\end{itemize}
-\srcnote{stressTest/REPORT.md \S 2 旧版 p50=10.5s / p95=15.95s / max=16.29s}
-\end{frame}
 
 % ============================================================
 \section{四类角色看慢查询}
@@ -388,21 +295,12 @@ SRE  & 可用率 / 容量    & p95 / p99 / error rate & 200 OK 但 16s \\
   \item 四个角色看的是\textbf{同一个 bug 的不同切面}。
   \item 单看任何一个都不会触发 P0 故障 —— 必须\textbf{把四个切面拉到一张表}。
   \item gomall 现状：四个面都看不见，因为没有 RUM / 没有客诉关键词分类 / 监控没看 p95。
+  \item 运营做"双 11 我的订单"推送 = 1 分钟 10 万人点开，旧版 8.3 RPS 只服务 500 人，剩下 99{,}500 全超时——\textbf{活动效果差}就是这么来的。
 \end{itemize}
-\srcnote{routes/router.go:78--79 同一份业务两个 endpoint，方便 AB 对比}
+\keypoint{运营前问后端"这接口扛多少 RPS"——gomall 现在的答案应是 58K，不是 8.3。}
+\srcnote{routes/router.go:78--79 同业务两个 endpoint 便于 AB 对比}
 \end{frame}
 
-\begin{frame}{运营视角：推送链接秒杀掉 8 RPS 接口}
-\begin{itemize}
-  \item 运营做"双 11 我的订单一键查询"活动 $\to$ APP 推送 200 万 DAU。
-  \item 推送打开率 5\% $\to$ 10 万人在\textbf{1 分钟内}点开。
-  \item 旧版 8.3 RPS = 60s $\times$ 8.3 = \textbf{500 个请求能服务，剩下 99{,}500 个超时}。
-  \item 运营复盘："为什么转化这么差" $\to$ 看不出问题，因为\textbf{服务器没崩}。
-  \item 这是为什么"一个接口慢"在运营看来是\textbf{活动效果差}，看不到接口层。
-\end{itemize}
-\keypoint{运营做活动前必须问后端："这接口能扛多少 RPS？" —— gomall 现在的答案应该是 58K，不是 8.3。}
-\srcnote{stressTest/REPORT.md \S 2 RPS 7000$\times$ 表格}
-\end{frame}
 
 % ============================================================
 \section{反思：为什么开发会写出这种代码}
