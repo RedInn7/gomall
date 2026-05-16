@@ -35,6 +35,7 @@ func loading() {
 	initialize.InitInventory(context.Background())
 	tryInitRabbitMQ()
 	initialize.InitOutboxPublisher(context.Background())
+	initialize.InitOrderAsyncConsumer(context.Background())
 	tryInitES(context.Background())
 	//kafka.InitKafka()
 	//track.InitJaeger()
