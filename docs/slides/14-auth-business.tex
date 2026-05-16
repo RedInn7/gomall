@@ -52,10 +52,10 @@ admin    & 运营 / 客服 / 风控    & 以上 + \texttt{authed.admin.*} \\
 \end{frame}
 
 \begin{frame}{三层墙：匿名 / user / admin}
-\begin{tikzpicture}[node distance=8mm and 14mm]
-  \node[node-box,node-state-normal] (open)  {匿名可见\\product/show, ping, register, login};
-  \node[node-box,node-state-transition,right=of open] (user) {登录后可用\\orders/create, coupon/claim, paydown};
-  \node[node-box,node-state-alert,right=of user] (admin) {仅 admin\\users, promote, search/backfill};
+\begin{tikzpicture}[node distance=6mm and 6mm,every node/.append style={align=center,font=\scriptsize,text width=30mm}]
+  \node[node-box,node-state-normal] (open)  {匿名可见\\\texttt{product/show}\\\texttt{ping / register / login}};
+  \node[node-box,node-state-transition,right=of open] (user) {登录后可用\\\texttt{orders/create}\\\texttt{coupon/claim, paydown}};
+  \node[node-box,node-state-alert,right=of user] (admin) {仅 admin\\\texttt{users / promote}\\\texttt{search/backfill}};
   \draw[arrow]      (open) -- node[above,font=\tiny]{AuthMiddleware} (user);
   \draw[arrow-alert](user) -- node[above,font=\tiny]{RequireRole("admin")}(admin);
 \end{tikzpicture}
@@ -191,11 +191,11 @@ access + refresh 都泄露 & 最长 10 天 & 整个续期周期 \\
 \end{tikzpicture}
 \vspace{2mm}
 \begin{itemize}
-  \item 鉴权每个 admin 请求都走——若每次 \texttt{SELECT role FROM user} 则 QPS 翻倍 + 连接池竞争。
-  \item 真实场景：用户角色变更频率 < 一年 10 次。"30s 最终一致"换"高 QPS 不打挂 DB"——业务可接受。
-  \item \textbf{命中}微秒级 / \textbf{未命中}打一次 DB 回填 / \textbf{显式失效} \texttt{InvalidateRoleCache(userId)}：提权 / 降权动作主动调，客服关心的"立刻生效"仍是秒级。
+  \item 鉴权每个 admin 请求都走——每次 \texttt{SELECT role FROM user} 会 QPS 翻倍 + 连接池竞争。
+  \item 角色变更频率 < 一年 10 次。"30s 最终一致"换"DB 不被压垮"，业务可接受。
+  \item 命中微秒 / 未命中回填 / 提权降权主动调 \texttt{InvalidateRoleCache}，客服侧"立刻生效"仍是秒级。
 \end{itemize}
-\srcnote{middleware/rbac.go:24 roleCacheTTL=30s；:28--45 lookupRole；:88--91 Invalidate；service/admin.go:59 PromoteToAdmin 后调用}
+\srcnote{middleware/rbac.go:24,28--45,88--91；service/admin.go:59 提权后调 Invalidate}
 \end{frame}
 
 \begin{frame}{30s 不一致 + 链路开销实测}
@@ -302,9 +302,9 @@ C 被封号         & C 仍能下单 30s       & 严重，需 token 黑名单 \\
 70002  & 熔断打开        & "支付服务暂忙，1 分钟后"   \\
 \bottomrule
 \end{tabular}
-\vspace{3mm}
-\small 30001 vs 30002 表面像："鉴权失败"通常是 token 被改了 / 没带；"超时"是过期。30005 客服遇到要警惕：要么用户走错入口，要么有人在试 admin 接口。\\
-gomall 所有鉴权失败统一返 \texttt{HTTP 200} + \texttt{\{status: 3000x\}}（老版本 app 网关吞不下 401/403）——所以\textbf{监控告警必须基于业务 status，不是 HTTP code}。
+\vspace{2mm}
+\small 30001 是 token 被改 / 没带；30002 是过期；30005 要警惕用户走错入口或脚本试 admin。\\
+所有鉴权失败统一返 \texttt{HTTP 200 + \{status:3000x\}}（老 app 网关吞不下 401/403），\textbf{监控告警基于 status，不是 HTTP code}。
 \srcnote{pkg/e/code.go:35--58；middleware/jwt.go:24,38,51 三处 c.JSON(200,...)}
 \end{frame}
 
@@ -316,19 +316,13 @@ gomall 所有鉴权失败统一返 \texttt{HTTP 200} + \texttt{\{status: 3000x\}
 \begin{frame}{遗留风险与改进方向}
 \textbf{目前的洞}：
 \begin{itemize}
-  \item \textbf{无 token 黑名单}：用户改密 / 主动下线后，旧 access\_token 仍在 1 天内有效。
-  \item \textbf{无 admin 操作审计表}：promote / backfill 这种动作只写 log，未入审计 DB。
+  \item \textbf{无 token 黑名单}：改密 / 主动下线后旧 access\_token 仍 1 天内有效。
+  \item \textbf{无 admin 操作审计表}：promote / backfill 只写 log，未入审计 DB。
   \item \textbf{admin 没有二次确认}：promote 一个用户不需要主管复核。
-  \item \textbf{admin 补券接口未实现}：当前客服只能通过改 DB 这种"野路子"补券。
+  \item \textbf{admin 补券接口未实现}：当前客服只能通过改 DB 这种"野路子"。
 \end{itemize}
 \vspace{2mm}
-\textbf{改进顺序}（按 ROI 排）：
-\begin{enumerate}
-  \item admin 补券接口（业务最痛）。
-  \item admin 操作审计表（合规线）。
-  \item token 黑名单（被盗号止血）。
-  \item admin 二次确认 / 双人复核（额度更大才有必要）。
-\end{enumerate}
+\textbf{改进顺序}（按 ROI）：admin 补券接口（业务最痛）$\to$ admin 操作审计表（合规）$\to$ token 黑名单（被盗号止血）$\to$ admin 二次确认（额度更大才需要）。
 \srcnote{middleware/jwt.go 当前无黑名单查询；routes/router.go:125--131 admin 子组无审计中间件}
 \end{frame}
 
@@ -345,10 +339,8 @@ RBAC 缓存 TTL                & SRE + 安全（一致性 vs QPS）\\
 bootstrap 用过谁来确认       & 运维 SOP \\
 \bottomrule
 \end{tabular}
-\vspace{2mm}
-\small 鉴权不是"开发自己写"的事，是"几个角色谈出来"的事。开发把边界翻译成 router.go 里几行 \texttt{authed} / \texttt{admin}。
-\vspace{2mm}
-\textbf{业务侧最终目标}：用户感受不到登录（双 token 续命）/ 客服 1 分钟补券（admin 接口走通）/ 黑产领不到券（L1+L2+L3）/ 内鬼搞不出大损失（审计 + 额度，待补）/ 出事能止血（token 黑名单，待补）。
+\vspace{1mm}
+\small \textbf{业务侧最终目标}：用户感受不到登录 / 客服 1 分钟补券 / 黑产领不到券 / 内鬼搞不出大损失（审计待补）/ 出事能止血（token 黑名单待补）。
 \keypoint{鉴权不是把门关上，是\textbf{给不同角色留刚刚好够用的钥匙}。}
 \end{frame}
 
@@ -404,8 +396,7 @@ bootstrap 用过谁来确认       & 运维 SOP \\
   \item[Role 字段定义]\srcnote{repository/db/model/user.go:23, 30--31}
   \item[业务码定义]\srcnote{pkg/e/code.go:35--58；pkg/e/msg.go:31--52}
 \end{description}
-\vspace{2mm}
-\keypoint{配套压测数据：stressTest/REPORT.md 链路压测表前 7 行。}
+\small 配套压测数据：stressTest/REPORT.md 链路压测表前 7 行。
 \end{frame}
 
 \end{document}
