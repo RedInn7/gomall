@@ -1,0 +1,544 @@
+\input{preamble}
+% 缩小本 deck 的代码字号，避免长 lstlisting 溢出
+\lstset{basicstyle=\ttfamily\tiny}
+
+\title{法币支付：金额加密、第三方调用与熔断幂等}
+\subtitle{gomall /paydown 业务侧 deck}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{支付链路全景与四个硬约束}
+% ============================================================
+
+\begin{frame}{/paydown 在 gomall 的位置}
+\begin{itemize}
+  \item 用户视角：只是一次"点确认"。
+  \item 系统视角：一次 \texttt{POST /paydown} 必须\textbf{同时}做对四件事：
+  \begin{itemize}
+    \item 解密买家密文金额、扣款、加密回写。
+    \item 解密卖家密文金额、入账、加密回写。
+    \item DB 扣库存 + 翻订单状态到 \texttt{PendingShipping}。
+    \item 写 \texttt{order.paid} outbox 事件。
+  \end{itemize}
+  \item 任一步失败：全部回滚 + 客户端可重试 + \textbf{绝不扣两次}。
+\end{itemize}
+\srcnote{service/payment.go:35--200；routes/router.go:114--121}
+\end{frame}
+
+\begin{frame}{业务侧的四个硬约束}
+\begin{tabular}{@{}lll@{}}
+\toprule
+约束 & 设计回应 & 代码位置 \\
+\midrule
+金额不能明文落盘 & AES-128-CBC 加密 & user.go:59--79 \\
+密码错不能扣款 & 长度 + 解密失败即 abort & payment.go:42--45 \\
+第三方支付会挂 & CircuitBreaker 5/10s/3 & circuitbreaker.go \\
+客户端会重试 & Idempotency-Key + Lua & idempotency.go \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 四条由\textbf{合规 + 客诉 + 监控}三方倒推。后面四节按此顺序展开。
+\srcnote{routes/router.go:114--121 paydown 完整中间件栈}
+\end{frame}
+
+\begin{frame}{明文存金额会出什么事}
+\begin{itemize}
+  \item \textbf{合规}：等保 2.0 / PCI-DSS 要求"敏感字段不得明文落盘"，金额属于此类。
+  \item \textbf{防内鬼}：DBA / 离职工程师拿到一次 dump → 全站余额裸了。
+  \item \textbf{防误日志}：明文金额一旦被 \texttt{log.Debug(user)} 序列化 → 上传到 ELK。
+  \item \textbf{审计}：金额被 SQL 直改 → 密文校验失败可立刻发现。
+\end{itemize}
+\keypoint{加密金额不是"加密功能"，是\textbf{把金额从数据库视野里抹掉}。运维看到的永远是乱码。}
+\end{frame}
+
+\begin{frame}{gomall 的金额加密链路}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-box] (u) {Client\\req.Key};
+  \node[node-box,right=of u] (svc) {PayDown};
+  \node[node-box,right=of svc,node-warn] (aes) {AES-128-CBC\\(MoneySecret, key)};
+  \node[node-box,below=of aes] (db) {MySQL\\money: 密文};
+  \draw[arrow] (u) -- node[above,font=\tiny]{支付密码} (svc);
+  \draw[arrow] (svc) -- node[above,font=\tiny]{加/解密} (aes);
+  \draw[arrow] (aes) -- node[right,font=\tiny]{读写} (db);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item 双密钥：服务端 \texttt{MoneySecret} + 用户支付密码 \texttt{key}。
+  \item 任一方泄漏\textbf{都不足以}独立解密 → 密钥分离。
+  \item 改密码 = 解密旧密文 + 用新 key 重新加密。
+\end{itemize}
+\srcnote{repository/db/model/user.go:59--79}
+\end{frame}
+
+\begin{frame}[fragile]{加解密的代码长这样}
+\begin{lstlisting}[language=Go,firstnumber=59,
+  caption={\srcnote{repository/db/model/user.go:59--79}}]
+// EncryptMoney 加密金额
+func (u *User) EncryptMoney(key string) (money string, err error) {
+    aesObj, err := secret.NewAesEncrypt(
+        conf.Config.EncryptSecret.MoneySecret, // 服务端持有
+        key,                                   // 用户支付密码
+        "", secret.AesEncrypt128, secret.AesModeTypeCBC)
+    if err != nil { return }
+    money = aesObj.SecretEncrypt(u.Money)
+    return
+}
+
+// DecryptMoney 返回值单位为分
+func (u *User) DecryptMoney(key string) (money int64, err error) {
+    aesObj, _ := secret.NewAesEncrypt(
+        conf.Config.EncryptSecret.MoneySecret, key, "",
+        secret.AesEncrypt128, secret.AesModeTypeCBC)
+    money = cast.ToInt64(aesObj.SecretDecrypt(u.Money))
+    return
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{逐行讲解：加解密做了什么}
+\begin{itemize}\small
+  \item \textbf{61 行}：服务端密钥 + 用户密码当两个独立输入，任一方旋转都让原密文失效。
+  \item \textbf{64 行 CBC 而非 ECB}：同一笔金额每次密文不同，防"对照表"猜金额。
+  \item \textbf{65 行 \texttt{Money string}}：密文是 base64 长度可变，直接存 string。
+  \item \textbf{77 行 \texttt{cast.ToInt64}}：解密回 int64，\textbf{单位是分} —— 全链路避免浮点。
+  \item \textbf{错误传播}：密码错 → 乱码 → \texttt{ToInt64} 返 0 → 金额校验失败 → TX 回滚。
+\end{itemize}
+\srcnote{repository/db/model/user.go:59--79}
+\end{frame}
+
+\begin{frame}{支付密码 vs 登录密码：为什么分两套}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+        & 登录密码     & 支付密码     \\
+\midrule
+作用    & 拿 JWT      & 解密金额     \\
+长度    & $\geq 6$    & 固定 6 位    \\
+泄漏    & 看订单地址  & 直接扣款     \\
+隔离    & bcrypt 单向 & AES 双向     \\
+存储    & 哈希        & 不存(仅入参) \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\begin{itemize}
+  \item 登录密码哈希存：服务端只校验、不还原。
+  \item 支付密码\textbf{不存}：用户每次手输 → 整库 dump 也解不开。
+  \item 入口校验 \texttt{len(req.Key) == 6}，太短直接拒。
+\end{itemize}
+\srcnote{service/payment.go:42--45；consts/user.go:35}
+\end{frame}
+
+% ============================================================
+\section{PayDown 主体：四件事必须原子}
+% ============================================================
+
+\begin{frame}{PayDown 在一次事务里做的五件事}
+\begin{tikzpicture}[node distance=5mm and 8mm]
+  \node[node-box] (s1) {1.取订单\\(UnPaid?)};
+  \node[node-box,right=of s1] (s2) {2.扣买家\\Dec/Enc};
+  \node[node-box,right=of s2] (s3) {3.入卖家\\Dec/Enc};
+  \node[node-box,below=of s2] (s4) {4.减库存\\+翻状态};
+  \node[node-box,right=of s4] (s5) {5.写 outbox\\order.paid};
+  \node[node-box,below=of s5,node-bad] (rb) {任一失败\\TX rollback};
+  \draw[arrow] (s1) -- (s2);
+  \draw[arrow] (s2) -- (s3);
+  \draw[arrow] (s3) |- (s4);
+  \draw[arrow] (s4) -- (s5);
+  \draw[arrow-bad] (s5) -- (rb);
+\end{tikzpicture}
+\vspace{1mm}
+\small 五步在同一 \texttt{tx}，\textbf{要么全成功要么全不动}。outbox 也在 TX 内写 —— 事务消息防丢核心（deck 04）。
+\srcnote{service/payment.go:52--184}
+\end{frame}
+
+\begin{frame}[fragile]{PayDown 的关键 18 行}
+\begin{lstlisting}[language=Go,firstnumber=55,
+  caption={\srcnote{service/payment.go:55--96 节选}}]
+order, err := dao.NewOrderDaoByDB(tx).GetOrderById(req.OrderId, uId)
+if err != nil { return err }
+if order.Type != consts.UnPaid {
+    return errors.New("订单状态非未支付，无法重复支付")
+}
+totalMoney := order.Money * int64(num)
+
+user, err := userDao.GetUserById(uId)
+if err != nil { return err }
+
+userMoney, err := user.DecryptMoney(req.Key)   // 用支付密码解密
+if err != nil { return err }
+if userMoney-totalMoney < 0 {
+    return errors.New("金额不足")               // TX 内，自动回滚
+}
+
+user.Money = strconv.FormatInt(userMoney-totalMoney, 10)
+user.Money, err = user.EncryptMoney(req.Key)   // 同密码重新加密
+if err != nil { return err }
+err = userDao.UpdateUserById(uId, user)        // 落 DB
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{逐行讲解：扣款这一步的三个要点}
+\begin{itemize}
+  \item \textbf{57 行 UnPaid 校验在 TX 内}：不能 TX 外读再进事务 —— 否则典型 TOCTOU，两并发支付都看到 UnPaid → 双扣。
+  \item \textbf{65 行 \texttt{DecryptMoney(req.Key)}}：密码错 → 解出乱码 → \texttt{userMoney} 几乎一定不够 → 走"金额不足"分支。\textbf{密码错和余额不足表象一致}，防穷举。
+  \item \textbf{71--72 行 重新加密}：\texttt{Money} 是 string 不能直接减；必须 decrypt $\to$ int64 减 $\to$ encrypt。整段在 TX 里，失败回滚干净。
+  \item \textbf{金额不足也 \texttt{return err}}：让 TX 走 rollback，\texttt{order.Type} 不会推进，客户端可原 OrderId 重试。
+\end{itemize}
+\srcnote{service/payment.go:55--96}
+\end{frame}
+
+\begin{frame}[fragile]{outbox 写在事务尾}
+\begin{lstlisting}[language=Go,firstnumber=174,
+  caption={\srcnote{service/payment.go:174--184}}]
+// outbox 事件：order.paid，投递交给 publisher 异步
+return dao.NewOutboxDaoByDB(tx).Insert(
+    "order", "OrderPaid", "order.paid", order.ID,
+    events.OrderPaid{
+        OrderID: order.ID, OrderNum: order.OrderNum,
+        UserID: uId, ProductID: productID, Num: num,
+    },
+)
+\end{lstlisting}
+\vspace{1mm}
+\small \texttt{outbox.Insert} 用的是\textbf{同一个 tx} —— 事务消息：扣款与"已发事件"同生共死，\textbf{绝不会"钱扣了但下游没收到"}。Redis 预占释放走 TX 外，失败仅记日志，对账兜底。
+\srcnote{service/payment.go:193--197 cache.CommitReservation}
+\end{frame}
+
+% ============================================================
+\section{第三方支付与熔断}
+% ============================================================
+
+\begin{frame}{当前 gomall 的"第三方支付"是什么}
+\begin{itemize}
+  \item gomall 当前未接真实支付宝/微信，"扣买家、入卖家"在本地 DB 完成。
+  \item 但 \texttt{/paydown} 已挂 \texttt{CircuitBreaker} —— \textbf{给未来留位置}：
+  \begin{itemize}
+    \item 接入真实网关后链路变成"DB tx + 同步 RPC 第三方"。
+    \item 第三方是慢依赖：p99 数百 ms + 会"集体抽风"。
+    \item 不熔断 → goroutine 堆积 → 进程 OOM → 全站崩。
+  \end{itemize}
+  \item 熔断作用：\textbf{宁可 5\% 用户立即看到"稍后重试"，也不让 100\% 用户白屏 30s}。
+\end{itemize}
+\srcnote{routes/router.go:114--121；service/payment.go 当前实现}
+\end{frame}
+
+\begin{frame}{CircuitBreaker 的三态}
+\begin{tikzpicture}[node distance=10mm and 16mm]
+  \node[node-state,node-state-normal] (cl) {Closed};
+  \node[node-state,node-state-alert,right=of cl] (op) {Open};
+  \node[node-state,node-state-transition,right=of op] (ho) {HalfOpen};
+  \draw[arrow]       (cl) -- node[above,font=\tiny]{失败 $\geq 5$} (op);
+  \draw[arrow-alert] (op) -- node[above,font=\tiny]{$10$s} (ho);
+  \draw[arrow,bend left=30]  (ho) to node[above,font=\tiny]{3 个全成功} (cl);
+  \draw[arrow-bad,bend right=30] (ho) to node[below,font=\tiny]{任一失败} (op);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{tabular}{@{}lll@{}}
+\toprule
+状态     & 含义              & 用户体感        \\
+\midrule
+Closed   & 正常放行          & 正常下单        \\
+Open     & 全拒、立即返回    & 立刻 70002      \\
+HalfOpen & 放 3 个探测       & 部分通过        \\
+\bottomrule
+\end{tabular}
+\srcnote{middleware/circuitbreaker.go:17--21；routes/router.go:115--119}
+\end{frame}
+
+\begin{frame}[fragile]{allow() —— 决定能否放行}
+\begin{lstlisting}[language=Go,firstnumber=76,
+  caption={\srcnote{middleware/circuitbreaker.go:76--106}}]
+func (cb *circuitBreaker) allow() error {
+    switch circuitState(cb.state.Load()) {
+    case stateClosed:
+        return nil                            // 热路径零开销
+    case stateOpen:
+        if time.Now().UnixNano()-cb.openedAt.Load() < int64(cb.opt.OpenTimeout) {
+            return errCircuitOpen             // 未到自愈窗口
+        }
+        cb.mu.Lock(); defer cb.mu.Unlock()
+        if circuitState(cb.state.Load()) == stateOpen { // double-check
+            cb.state.Store(int32(stateHalfOpen))         // Open -> HalfOpen
+            cb.halfOpenReq.Store(0)
+        }
+        if cb.halfOpenReq.Add(1) > cb.opt.HalfOpenMaxReq {
+            return errCircuitOpen             // 探测配额满
+        }
+        return nil
+    }
+    return nil
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{逐行讲解：allow() 的关键决策}
+\begin{itemize}
+  \item \textbf{Closed 分支零开销}：只一次原子 Load → return nil，不抢锁不计数。这是熔断器能放 paydown 入口的前提。
+  \item \textbf{Open 早返回}：\texttt{time.Now() - openedAt} 无锁原子读，99\% 的 Open 期请求从这里返回。
+  \item \textbf{加锁切 HalfOpen}：只有自愈窗口的\textbf{第一个}请求加锁切状态 —— double-check 防两 goroutine 同时切。
+  \item \textbf{HalfOpen 探测配额}：\texttt{halfOpenReq.Add(1) > 3} 保证半开期最多放 3 个试水。
+  \item \textbf{report() 配套}：3 个全成功 → 回 Closed；任一失败 → 立即重新 Open，时钟重置。
+\end{itemize}
+\srcnote{middleware/circuitbreaker.go:76--128}
+\end{frame}
+
+\begin{frame}[fragile]{失败的定义 + 阈值 5 / 10s / 3}
+\begin{lstlisting}[language=Go,firstnumber=69,caption={\srcnote{middleware/circuitbreaker.go:69--70}}]
+failed := len(c.Errors) > 0 || c.Writer.Status() >= http.StatusInternalServerError
+cb.report(failed)
+\end{lstlisting}
+\vspace{1mm}
+\begin{itemize}
+  \item \textbf{只看 5xx 不看 4xx}：4xx 是密码错/余额不足等业务正常路径，不熔断。200 + 业务码 70001/70002 也不算失败。
+  \item \textbf{阈值 5}：1--2 次抖动不算挂，连续 5 次 = 真挂。
+  \item \textbf{OpenTimeout 10s}：第三方支付重启通常 5--30s，10s 是中位数。
+  \item \textbf{HalfOpenMaxReq 3}：试 3 个够判定，再多浪费用户体验。
+\end{itemize}
+\srcnote{routes/router.go:115--119 当前硬编码 5/10s/3}
+\end{frame}
+
+% ============================================================
+\section{幂等：客户端必须带原 Idempotency-Key 重试}
+% ============================================================
+
+\begin{frame}{为什么熔断器之后还要挂幂等}
+\begin{tikzpicture}[node distance=8mm and 12mm]
+  \node[node-box] (cli) {Client};
+  \node[node-box,right=of cli,node-warn] (cb)  {CircuitBreaker};
+  \node[node-box,right=of cb,node-ok]   (id)  {Idempotency};
+  \node[node-box,right=of id] (svc) {PayDown};
+  \draw[arrow] (cli) -- (cb);
+  \draw[arrow] (cb)  -- (id);
+  \draw[arrow] (id)  -- (svc);
+  \draw[arrow-bad,bend left=20] (cb.south) to node[below,font=\tiny]{Open: 70002} (cli.south);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item 熔断器关心\textbf{保护下游}（5xx 多了断开）。
+  \item 幂等关心\textbf{保护用户钱包}（同一笔单只扣一次）。
+  \item 目标正交，必须\textbf{同时}挂。返回 \texttt{200+status=70002}，HTTP 仍是 200 → app 端老网关不会按 5xx 处理。
+\end{itemize}
+\srcnote{routes/router.go:114--121；pkg/e/code.go:58 ErrCircuitOpen=70002}
+\end{frame}
+
+\begin{frame}{客户端的重试时序（关键约定）}
+\begin{tikzpicture}[x=1mm,y=1mm]
+  \node[font=\small] (cli) at (0,0)  {Client};
+  \node[font=\small] (svr) at (60,0) {Server};
+  \draw[lifeline] (0,-2) -- (0,-42);
+  \draw[lifeline] (60,-2) -- (60,-42);
+  \draw[arrow]      (0,-8)  -- node[above,font=\tiny]{POST /paydown · IK=abc-001} (60,-8);
+  \draw[arrow-bad]  (60,-14) -- node[above,font=\tiny]{70002 (CB Open)} (0,-14);
+  \node[font=\tiny] at (30,-20) {等 1s (exp backoff)};
+  \draw[arrow]      (0,-26) -- node[above,font=\tiny]{POST /paydown · IK=abc-001 (\textbf{同一个})} (60,-26);
+  \draw[arrow]      (60,-34) -- node[above,font=\tiny]{200 success (回放原结果)} (0,-34);
+\end{tikzpicture}
+\vspace{1mm}
+\small \textbf{重试必须带原 Idempotency-Key} —— 万一原请求其实成功（CB 误判 / 网络分区），第二次会被 Idempotency 拦下，返回\textbf{原结果}，绝不二次扣款。
+\srcnote{middleware/idempotency.go:96--110}
+\end{frame}
+
+\begin{frame}[fragile]{Idempotency 中间件的 responseRecorder}
+\begin{lstlisting}[language=Go,firstnumber=17,caption={\srcnote{middleware/idempotency.go:17--31, 96--110}}]
+// responseRecorder 拷贝写入的响应体，便于幂等命中时回放
+type responseRecorder struct {
+    gin.ResponseWriter
+    body *bytes.Buffer
+}
+func (r *responseRecorder) Write(b []byte) (int, error) {
+    r.body.Write(b)                        // 旁路缓存
+    return r.ResponseWriter.Write(b)       // 同时真写出去
+}
+
+// 主流程末尾:
+recorder := &responseRecorder{ResponseWriter: c.Writer, body: bytes.NewBuffer(nil)}
+c.Writer = recorder
+c.Next()
+if len(c.Errors) > 0 || recorder.Status() >= http.StatusBadRequest {
+    cache.ReleaseIdempotencyLock(c.Request.Context(), key)   // 失败: 回 init
+    return
+}
+cache.CommitIdempotencyResult(c.Request.Context(), key, recorder.body.String())
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{逐行讲解：responseRecorder 解决了什么}
+\begin{itemize}
+  \item \textbf{嵌入 gin.ResponseWriter}：包一层而非替换，\texttt{Header/Status/Hijack} 透明转发，链路下游无感。
+  \item \textbf{双写}：先写 \texttt{bytes.Buffer} 再调原 \texttt{Writer.Write} —— 顺序很重要，反过来客户端断连缓存会写不完。
+  \item \textbf{Hook 时机}：在 \texttt{c.Next()} 之前替换 Writer，业务函数写入时被拦截。
+  \item \textbf{失败回滚}：4xx 或 \texttt{c.Errors} → 回退到 init → 同 IK 还能再试（业务失败 ≠ 永久失败）。
+  \item \textbf{成功提交}：把完整 JSON 写进 Redis done 态 → 后续同 IK 由 Lua 直接回放，业务代码不再执行。
+\end{itemize}
+\srcnote{middleware/idempotency.go:17--112}
+\end{frame}
+
+\begin{frame}{Lua 脚本里的四态机 + 业务码地图}
+\begin{tikzpicture}[node distance=8mm and 14mm]
+  \node[node-state,node-state-normal] (init) {init};
+  \node[node-state,node-state-transition,right=of init] (proc) {processing};
+  \node[node-state,node-state-normal,right=of proc] (done) {done};
+  \draw[arrow] (init) -- node[above,font=\tiny]{Acquire} (proc);
+  \draw[arrow] (proc) -- node[above,font=\tiny]{Commit} (done);
+  \draw[arrow-bad,bend left=30] (proc) to node[below,font=\tiny]{Release} (init);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{tabular}{@{}llll@{}}
+\toprule
+状态码 & 含义               & 客户端动作          & 客服话术       \\
+\midrule
+60001  & IK 不存在/过期    & 重新申领            & "刷新重试" \\
+60002  & 幂等命中处理中    & 等 1s 再试          & "请稍后"       \\
+70002  & 熔断 Open         & 指数退避 + 带原 IK  & "支付暂忙"     \\
+\bottomrule
+\end{tabular}
+\srcnote{repository/cache/idempotency.go:32--50；pkg/e/code.go:53--58}
+\end{frame}
+
+% ============================================================
+\section{支付失败 Saga + 实测数字 + 业务承诺}
+% ============================================================
+
+\begin{frame}{支付失败链路 —— Saga 回滚}
+\begin{tikzpicture}[node distance=6mm and 9mm]
+  \node[node-box] (p1) {/paydown\\TX fail};
+  \node[node-box,right=of p1] (p2) {Order=UnPaid};
+  \node[node-box,right=of p2,node-warn] (p3) {30min\\等支付};
+  \node[node-box,below=of p3,node-bad] (p4) {Cron 扫\\超时未付};
+  \node[node-box,left=of p4] (p5) {Saga 关单\\+ 释放预占};
+  \node[node-box,left=of p5] (p6) {outbox\\order.cancelled};
+  \draw[arrow] (p1) -- (p2);
+  \draw[arrow] (p2) -- (p3);
+  \draw[arrow-alert] (p3) -- (p4);
+  \draw[arrow] (p4) -- (p5);
+  \draw[arrow] (p5) -- (p6);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}
+  \item 支付失败 = TX 回滚 = \texttt{order.Type} 仍 UnPaid，库存\textbf{从未真扣}。
+  \item 30min 未续支付 → Cron → \texttt{CancelUnpaidOrder}。
+  \item Saga 不回写 \texttt{product.Num}（从未扣过），仅释放 Redis \texttt{reserved}。
+\end{itemize}
+\srcnote{service/order\_cancel.go:14--62；与 deck 09 / 15 衔接}
+\end{frame}
+
+\begin{frame}[fragile]{CancelUnpaidOrder 的幂等设计}
+\begin{lstlisting}[language=Go,firstnumber=30,
+  caption={\srcnote{service/order\_cancel.go:30--51}}]
+err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
+    ok, err := dao.NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
+    if err != nil { return err }
+    if !ok { return nil }                  // 已被别处关过, no-op
+    closed = true
+    return dao.NewOutboxDaoByDB(tx).Insert(
+        "order", "OrderCancelled", "order.cancelled", order.ID,
+        events.OrderCancelled{
+            OrderID: order.ID, OrderNum: orderNum,
+            UserID: order.UserID, ProductID: order.ProductID,
+            Num: order.Num, Reason: "timeout",
+        },
+    )
+})
+\end{lstlisting}
+\vspace{1mm}
+\small \textbf{CloseOrderWithCheck} 用 \texttt{WHERE type=UnPaid} 条件 update，第二次调用自然 affected=0 → 函数变 no-op。这是\textbf{用 DB 行做幂等键}。Redis 释放走 TX 外，失败仅记日志。
+\end{frame}
+
+\begin{frame}{基线对照：两个中间件接入后的吞吐}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+链路 & RPS & p95 \\
+\midrule
+/ping 基线 (无中间件)                & 64{,}254 & 3.51 ms \\
+/product/show (无 CB / 无 Idem)      & 62{,}226 & 3.01 ms \\
+/orders/create (\textbf{Idempotency}) & 50{,}319 & 2.33 ms \\
+/skill\_product/skill (RateLimit)    & 52{,}082 & 1.24 ms \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item Idempotency 让吞吐 62K → 50K，约 \textbf{19\% 损耗}。换来"755K 请求 → 1 笔订单"的强幂等。
+  \item 损耗源：每请求一次 Redis Lua + responseRecorder 拷贝。
+  \item CircuitBreaker Closed 态\textbf{零锁开销}（仅 atomic.Load），吞吐影响可忽略。
+\end{itemize}
+\srcnote{stressTest/REPORT.md 链路压测表前 7 行}
+\end{frame}
+
+\begin{frame}{Idempotency 的极限场景：755K 请求 → 1 笔订单}
+\begin{itemize}
+  \item 50 VU $\times$ 15s 用\textbf{同一个 IK} 反复打 \texttt{/orders/create}。
+  \item 累计 \textbf{755{,}033 次请求}，DB 实际订单数 \textbf{= 1}：
+  \begin{itemize}
+    \item \texttt{SELECT COUNT(*) FROM `order` WHERE user\_id=10 AND created\_at > NOW() - 2 MIN} → 1
+  \end{itemize}
+  \item 第一次走完业务后，后续全部由 Lua 读 \texttt{done} 态直接回放 → 50K RPS。
+  \item \textbf{业务承诺}：客户端在熔断反复触发期间无脑重试 10K 次，仍只扣一次款。
+\end{itemize}
+\keypoint{重试是客户端的权利，幂等是服务端的义务。两者共同维护"恰好一次"。}
+\srcnote{stressTest/REPORT.md \S 4 幂等中间件压测}
+\end{frame}
+
+\begin{frame}{把 paydown 的设计翻译成业务承诺}
+\begin{tabular}{@{}ll@{}}
+\toprule
+技术选择                  & 业务承诺                            \\
+\midrule
+AES-128-CBC + 双密钥      & DBA 拿 dump 也看不到余额            \\
+6 位支付密码不存盘        & 整库泄漏没密码也解不开              \\
+单次 TX 五件事原子        & 不会出现"扣了钱没改订单"            \\
+outbox 在 TX 内写         & 不会出现"扣了钱下游没收到"          \\
+CircuitBreaker 5/10s/3   & 第三方挂了 5\% 用户受影响，不是 100\% \\
+Idempotency 全程伴随     & 重试 10K 次也只扣一次               \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small 六条产品 / 运营 / 客服三方都能背的话术，每条都在代码里找得到位置。
+\srcnote{routes/router.go:114--121 + service/payment.go:35--200}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{面试 Q\&A}
+\small
+\textbf{Q1}：金额为什么不直接 \texttt{decimal} 存？\\
+\hspace{4mm} A：合规要求"敏感字段不得明文落盘"。AES + 服务端密钥 + 用户密码双因子，比 decimal 多一道防线。
+
+\vspace{1mm}
+\textbf{Q2}：熔断打开期间客户端怎么处理？\\
+\hspace{4mm} A：拿 70002 → 指数退避 (1s/2s/4s) → 重试\textbf{必须带原 Idempotency-Key}。第一次若其实成功，第二次回放原结果不会二次扣款。
+
+\vspace{1mm}
+\textbf{Q3}：为何不用 Redis 分布式锁做幂等，要用 Lua？\\
+\hspace{4mm} A：分布式锁只解决"不重入"，不解决"结果回放"。Lua 是真状态机 (init/processing/done)：第一次走完后，同 IK 请求直接 Lua 内回放，\textbf{不进业务代码}。
+
+\vspace{1mm}
+\textbf{Q4}：密码错和余额不足为什么都返回"金额不足"？\\
+\hspace{4mm} A：密码错 → 乱码 → int64 几乎不够 → 走金额不足分支。\textbf{有意为之}：防穷举区分。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\scriptsize
+\begin{description}
+  \item[PayDown]\srcnote{service/payment.go:35--200}
+  \item[AES 加解密]\srcnote{repository/db/model/user.go:59--79；pkg/utils/encryption/money\_encrypt.go}
+  \item[CircuitBreaker]\srcnote{middleware/circuitbreaker.go:44--128}
+  \item[Idempotency]\srcnote{middleware/idempotency.go:17--112；repository/cache/idempotency.go:32--90}
+  \item[paydown 路由]\srcnote{routes/router.go:114--121}
+  \item[支付失败 Saga]\srcnote{service/order\_cancel.go:14--62}
+  \item[业务码 + 压测]\srcnote{pkg/e/code.go:53--58；stressTest/REPORT.md \S 4--5}
+\end{description}
+\keypoint{配套：deck 01 (幂等) / deck 04 (outbox+saga) / deck 15 (关单衔接)。}
+\end{frame}
+
+\end{document}
