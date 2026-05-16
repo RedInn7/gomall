@@ -1,0 +1,434 @@
+\input{preamble}
+
+\title{订单履约业务全景}
+\subtitle{从一笔订单的生与死，到下游事件总线的回声}
+\author{gomall · 业务实战}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============== 1. 业务背景 ==============
+\section{一笔订单一生要走过的路}
+
+\begin{frame}{为什么订单要做状态机}
+\begin{itemize}
+  \item 订单不是一行 DB 记录，是一段\textbf{有时间跨度的契约}：用户、商家、平台、第三方支付都在里面有义务。
+  \item 任意一段时间内，订单只能处于\textbf{一个明确的业务态}：未支付、待发货、配送中、已收货、已取消、已退款。
+  \item 没有状态机就没有"什么时候才能发货" / "什么时候允许退款" / "什么时候释放库存"的语义边界。
+\end{itemize}
+\vspace{2mm}
+\keypoint{在 gomall 里，状态机 = \texttt{consts/order.go} 里那一组 iota 常量；它定义了所有合法的"现在"。}
+\srcnote{consts/order.go:3--16}
+\end{frame}
+
+\begin{frame}[fragile]{gomall 的订单状态常量}
+\begin{lstlisting}[language=Go,firstnumber=3,
+  caption={\srcnote{consts/order.go:3--16}}]
+const (
+    OrderTypeUnPaid = iota + 1     // 1 未支付
+    OrderTypePendingShipping       // 2 已支付 待发货
+    OrderTypeShipping              // 3 已发货 待收货
+    OrderTypeReceipt               // 4 已收货 完结
+)
+const (
+    Unknown = iota
+    UnPaid                         // 创建时的初始态
+    Paid
+    Cancelled
+    Refunded
+)
+\end{lstlisting}
+\small 两组常量分别覆盖"主流程时序"与"取消/退款旁路"。订单创建时写入的是 \texttt{consts.UnPaid}（\texttt{service/order.go:52}）。
+\end{frame}
+
+\begin{frame}{业务态四主线 + 两旁路}
+\begin{tabular}{@{}llll@{}}
+\toprule
+状态 & 含义 & 触发者 & 时长上限 \\
+\midrule
+UnPaid & 未支付，已占住库存 & 用户下单 & \textbf{15--30 分钟}（关单） \\
+PendingShipping & 已支付，待发货 & 用户付款 & 商家 48 小时内发货 \\
+Shipping & 已发货，配送中 & 商家点发货 & 物流约 1--7 天 \\
+Receipt & 已收货，交易完结 & 用户确认 / 系统超时 & 终态 \\
+\midrule
+Cancelled & 用户取消 / 超时关单 & 用户 / 平台调度 & 任意时点（仅未支付）\\
+Refunded & 已退款 & 平台 / 商家审核 & 完结后 7--15 日内 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 时长上限来自电商行业惯例（淘宝 / 京东公开规则），gomall 把"未支付关单"硬编码为 15 分钟（见 \texttt{service/order.go:89} 的 zset score）和 30 分钟（见 \texttt{repository/rabbitmq/order\_delay.go:22}）两套互补机制。
+\srcnote{service/order.go:88--98 + repository/rabbitmq/order\_delay.go:22}
+\end{frame}
+
+\begin{frame}{订单状态机全景图}
+\begin{tikzpicture}[node distance=10mm and 16mm,font=\scriptsize]
+  \node[node-state,node-state-normal] (up) {UnPaid};
+  \node[node-state,node-state-normal,right=of up] (ps) {Pending\\Shipping};
+  \node[node-state,node-state-normal,right=of ps] (sh) {Shipping};
+  \node[node-state,node-state-normal,right=of sh] (rc) {Receipt};
+  \node[node-state,node-state-alert,below=of up] (cc) {Cancelled};
+  \node[node-state,node-state-alert,below=of rc] (rf) {Refunded};
+
+  \draw[arrow] (up) -- node[above,font=\tiny]{PayDown} (ps);
+  \draw[arrow] (ps) -- node[above,font=\tiny]{商家发货} (sh);
+  \draw[arrow] (sh) -- node[above,font=\tiny]{用户确认} (rc);
+
+  \draw[arrow-alert] (up) -- node[left,font=\tiny]{超时 / 主动取消} (cc);
+  \draw[arrow-alert] (rc) -- node[right,font=\tiny]{售后退款} (rf);
+  \draw[arrow-alert,bend right=15] (ps) to node[below right,font=\tiny]{未发货退款} (rf);
+\end{tikzpicture}
+\vspace{2mm}
+\small 主流程是一条单向链；Cancelled 只能从 UnPaid 进入；Refunded 可从 PendingShipping / Receipt 进入。
+\srcnote{service/payment.go:146 (UnPaid$\to$PendingShipping) + service/order\_cancel.go:32 (UnPaid$\to$Cancelled)}
+\end{frame}
+
+% ============== 2. 库存预扣 ==============
+\section{为什么下单要预扣库存而不是直接扣 DB}
+
+\begin{frame}{业务问题：库存到底什么时候"少一件"}
+\begin{itemize}
+  \item 直觉答案：用户下单时少一件。
+  \item 但下单 $\ne$ 付款。用户挂着购物车不付款的比例非常高（电商业内通用统计在 60--70\%）。
+  \item 如果下单立即扣 DB \texttt{product.num}：
+  \begin{itemize}
+    \item 大量未支付订单 $\to$ DB 库存被假占用 $\to$ 真正想买的用户看到"无货"
+    \item 取消时必须把库存\textbf{加回去}，一旦"取消路径"和"下单路径"不对称就出 bug
+  \end{itemize}
+\end{itemize}
+\srcnote{stressTest/REPORT.md \S 已修：库存虚高 + 历史 PR \#51 / \#58}
+\end{frame}
+
+\begin{frame}{gomall 的设计：两个桶}
+\begin{tikzpicture}[node distance=28mm]
+  \node[node-box,minimum width=34mm,minimum height=18mm,node-ok]
+    (av) {available\\\texttt{stock:available:\{pid\}}};
+  \node[node-box,minimum width=34mm,minimum height=18mm,node-warn,right=of av]
+    (rv) {reserved\\\texttt{stock:reserved:\{pid\}}};
+  \node[node-box,minimum width=34mm,minimum height=18mm,below=18mm of rv,node-bad]
+    (sold) {sold\\(DB \texttt{product.num} 减少)};
+  \draw[arrow,bend left=18] (av) to node[above,font=\tiny]{reserve(n) 下单} (rv);
+  \draw[arrow,bend left=18] (rv) to node[below,font=\tiny]{release(n) 取消/超时} (av);
+  \draw[arrow] (rv) -- node[right,font=\tiny]{commit(n) 支付成功} (sold);
+\end{tikzpicture}
+\vspace{1mm}
+\keypoint{不变量：\texttt{available + reserved + sold = 初始库存}。任何一步只在两个桶间挪，不会凭空多/少。}
+\srcnote{repository/cache/inventory.go:11--14 + 24--75}
+\end{frame}
+
+\begin{frame}[fragile]{OrderCreate 里这套桶怎么用}
+\begin{lstlisting}[language=Go,firstnumber=57,
+  caption={\srcnote{service/order.go:57--86}}]
+// 1) Redis 预扣库存: available -> reserved，失败直接拒单
+if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
+    return nil, err
+}
+// 2) 同事务写订单 + 写 outbox 事件
+err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+    if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+        return e
+    }
+    return dao.NewOutboxDaoByDB(tx).Insert(...)
+})
+if err != nil {
+    // 3) 事务失败：释放刚扣的预占库存，回到 available
+    cache.ReleaseReservation(ctx, req.ProductID, int64(req.Num))
+}
+\end{lstlisting}
+\small 三步顺序：预扣 $\to$ 写订单 $\to$ 失败回退。预扣失败直接拒单；订单写失败回退库存 —— 状态机闭环。
+\end{frame}
+
+\begin{frame}{压测验证：500 并发抢 100 件零超卖}
+\begin{tabular}{@{}lr@{}}
+\toprule
+项 & 数值 \\
+\midrule
+初始 available 桶 & 100 \\
+并发 goroutine 数 & 500 \\
+每个 goroutine 试图 reserve & 1 件 \\
+\midrule
+成功 reserve 数 (\texttt{success}) & \textbf{100} \\
+available 桶最终值 & \textbf{0} \\
+reserved 桶最终值 & \textbf{100} \\
+超卖次数 & \textbf{0} \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 单条 Lua 脚本里 \texttt{GET}+\texttt{DECRBY}+\texttt{INCRBY} 原子执行，500 个 goroutine 排队跑，正好抢光 100 件。
+\srcnote{repository/cache/inventory\_test.go:52--82 \texttt{TestInventory\_NoOversellUnderConcurrency}}
+\end{frame}
+
+% ============== 3. 事件流 ==============
+\section{一笔订单的事件流}
+
+\begin{frame}{时间轴：从下单点击到完结}
+\begin{tikzpicture}[node distance=4mm and 6mm,font=\tiny,
+    every node/.append style={minimum width=15mm,minimum height=7mm}]
+  \node[node-box,node-ok] (a) {点下单};
+  \node[node-box,node-warn,right=of a] (b) {Reserve\\预扣};
+  \node[node-box,right=of b] (c) {INSERT\\order};
+  \node[node-box,right=of c] (d) {Outbox\\order.created};
+  \node[node-box,below=4mm of d] (e) {用户付款};
+  \node[node-box,left=of e] (f) {Commit\\reserved};
+  \node[node-box,left=of f] (g) {Outbox\\order.paid};
+  \node[node-box,left=of g] (h) {商家发货};
+  \node[node-box,below=4mm of h] (i) {用户收货};
+  \node[node-box,node-ok,right=of i] (j) {完结};
+  \draw[arrow] (a) -- (b);
+  \draw[arrow] (b) -- (c);
+  \draw[arrow] (c) -- (d);
+  \draw[arrow,dashed] (d) -- (e);
+  \draw[arrow] (e) -- (f);
+  \draw[arrow] (f) -- (g);
+  \draw[arrow,dashed] (g) -- (h);
+  \draw[arrow,dashed] (h) -- (i);
+  \draw[arrow] (i) -- (j);
+\end{tikzpicture}
+\vspace{2mm}
+\small 实线 = 同步发生在请求里；虚线 = 异步等待（用户操作 / 物流时间）。Outbox 把异步段的开始时刻\textbf{记录下来}。
+\end{frame}
+
+\begin{frame}{order.paid 事件：动作分裂为多条业务支线}
+\begin{itemize}
+  \item \textbf{库存正式扣}：\texttt{commit(reserved)} 在支付事务里同步做了；事件不再负责扣库存，但负责\textbf{通知}。
+  \item \textbf{商家通知}：发短信 / IM，"您有新订单"。
+  \item \textbf{推荐系统}：用户买了什么 $\to$ 用户画像更新 $\to$ 召回池调整。
+  \item \textbf{对账系统}：把 order\_id + amount 入对账明细，T+1 跟支付通道核对。
+  \item \textbf{BI}：实时 GMV / 客单价 / 转化率。
+  \item \textbf{营销返券}：满足规则的订单触发返券、积分、等级。
+\end{itemize}
+\srcnote{service/payment.go:174--184 (写 outbox order.paid) + service/events/events.go:17--23}
+\end{frame}
+
+\begin{frame}{order.cancelled 事件：补偿与通知}
+\begin{itemize}
+  \item \textbf{库存释放}：\texttt{ReleaseReservation()} 在写完 outbox 后同步执行（\texttt{service/order\_cancel.go:59}）—— 桶状态机回退。
+  \item \textbf{商家通知}：发"取消"提醒，让商家更新待发货列表。
+  \item \textbf{营销回滚}：如果下单时发过预占券 / 满减锁定，要释放回去。
+  \item \textbf{BI}：转化漏斗里这一单标记为"流失"，纳入流失分析。
+  \item \textbf{风控}：高频取消 + 短时间内多账号 $\to$ 套券 / 刷单嫌疑。
+\end{itemize}
+\vspace{2mm}
+\srcnote{service/order\_cancel.go:30--62 + service/events/events.go:25--32}
+\end{frame}
+
+% ============== 4. Outbox 业务侧 ==============
+\section{Outbox 在业务侧的角色}
+
+\begin{frame}{Outbox 把"一次业务"变成"一束事件"}
+\begin{tikzpicture}[node distance=6mm and 14mm,font=\scriptsize]
+  \node[node-box,minimum width=24mm,minimum height=12mm,node-warn] (tx)
+    {同一个 DB 事务\\order + outbox};
+  \node[node-box,right=14mm of tx] (pub) {publisher};
+  \node[node-box,right=of pub,minimum width=20mm] (mq) {RabbitMQ\\\texttt{domain.events}};
+  \node[node-box,right=14mm of mq.north east,anchor=west,node-ok] (sub1) {对账};
+  \node[node-box,below=of sub1,node-ok] (sub2) {BI};
+  \node[node-box,below=of sub2,node-ok] (sub3) {风控};
+  \node[node-box,below=of sub3,node-ok] (sub4) {推荐};
+  \draw[arrow] (tx) -- (pub);
+  \draw[arrow] (pub) -- (mq);
+  \draw[arrow-async] (mq) -- (sub1);
+  \draw[arrow-async] (mq) -- (sub2);
+  \draw[arrow-async] (mq) -- (sub3);
+  \draw[arrow-async] (mq) -- (sub4);
+\end{tikzpicture}
+\vspace{2mm}
+\small 业务侧不需要"逐一通知"。它只写一行 outbox，下游愿意来订就来订 —— \textbf{业务和增长解耦}。
+\srcnote{repository/db/model/outbox.go:17--37}
+\end{frame}
+
+\begin{frame}[fragile]{outbox\_event 表结构再看一眼}
+\begin{lstlisting}[language=Go,firstnumber=24,
+  caption={\srcnote{repository/db/model/outbox.go:24--35}}]
+type OutboxEvent struct {
+    gorm.Model
+    AggregateType string  // "order" / "product"
+    AggregateID   uint    // 业务实体 id
+    EventType     string  // "OrderCreated" / "OrderCancelled"
+    RoutingKey    string  // "order.created"
+    Payload       string  // JSON body (events.OrderCreated 等)
+    Status        int     // 1 pending / 2 sent / 3 dead
+    Attempts      int
+    NextRetryAt   time.Time
+    LastError     string
+}
+\end{lstlisting}
+\small \texttt{AggregateType}+\texttt{AggregateID} 是业务追踪根；\texttt{RoutingKey} 决定谁能订阅；\texttt{Status} 是 publisher 的视角。
+\end{frame}
+
+\begin{frame}{业务侧下游订阅者清单}
+\begin{tabular}{@{}lll@{}}
+\toprule
+下游 & 关注事件 & 业务价值 \\
+\midrule
+对账 & order.paid / order.refunded & 资金流闭环，T+1 跟支付通道核对 \\
+BI & 全量 order.* & GMV / 客单 / 转化漏斗 \\
+风控 & order.created / cancelled & 异常订单识别 \\
+推荐 & order.paid & 行为打点 $\to$ 召回排序 \\
+营销 & order.created / paid & 返券 / 满减判断 \\
+商家工作台 & order.paid / shipped & 待办列表 \\
+ES 索引 & product.changed / order.paid & 搜索增量索引 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 真实电商每条 routing key 背后至少 3--5 个订阅者；gomall 现网先接了 ES 索引（\texttt{service/search/indexer.go}）。
+\srcnote{service/search/indexer.go:28 (Consume) + repository/rabbitmq/domain.go:10}
+\end{frame}
+
+% ============== 5. 事故复盘 ==============
+\section{真实事故：库存虚高 bug 业务复盘}
+
+\begin{frame}[fragile]{现象：库存数字一路膨胀}
+\begin{itemize}
+  \item 商家投诉："我商品明明只有 100 件，怎么后台显示 130 / 160 / 200？"
+  \item 售前页面显示有货，用户下单付钱，售后却"无货发不出"。
+  \item 客服侧不断收到"已付款但商家说没货"的工单。
+\end{itemize}
+\vspace{2mm}
+\small 这是一个典型的\textbf{业务表象 $\to$ 代码根因}的链条：现象在客服系统里，根因在两个 Go 函数里。
+\srcnote{stressTest/REPORT.md \S 已修：库存虚高 + service/order\_task.go:33--35 \texttt{RollbackStock}}
+\end{frame}
+
+\begin{frame}[fragile]{根因：一对不对称的孪生函数}
+\begin{lstlisting}[language=Go,basicstyle=\ttfamily\scriptsize]
+// 旧版 OrderCreate (PR #58 前)
+// -> 没有任何 product.Num -= n 的语句
+//    库存不动，只写订单
+
+// 旧版超时关单 (service/order_task.go:33)
+//    txProductDao.RollbackStock(order.ProductID, order.Num)
+//    -> UPDATE product SET num = num + n
+\end{lstlisting}
+\vspace{2mm}
+\begin{itemize}
+  \item 下单不扣，关单却"还回去"。
+  \item 每个超时未支付订单 = 库存凭空 +N。
+  \item 几个月累计下来，热门商品的 \texttt{product.num} 离真实值越来越远。
+\end{itemize}
+\srcnote{service/order\_task.go:33 + 历史 PR \#51 引入延迟关单时埋下伏笔}
+\end{frame}
+
+\begin{frame}{业务推演：单商品 100 件，跑一个月}
+\begin{tikzpicture}[node distance=8mm and 14mm,font=\scriptsize]
+  \node[node-box,node-ok] (init) {Day 0\\product.num = 100};
+  \node[node-box,below right=of init,node-warn] (d10) {Day 10\\超时未付 30 单\\$\to$ +30};
+  \node[node-box,right=of d10,node-bad] (d20) {Day 20\\再来 40 单\\$\to$ 170};
+  \node[node-box,below=of d20,node-bad] (d30) {Day 30\\已售 100 件\\但显示 220};
+  \draw[arrow] (init) -- (d10);
+  \draw[arrow] (d10) -- (d20);
+  \draw[arrow] (d20) -- (d30);
+\end{tikzpicture}
+\vspace{2mm}
+\small "下单不扣 + 取消加回"这对不对称行为，配合电商常态化的 60\%+ 弃单率，几乎注定会爆。
+\end{frame}
+
+\begin{frame}{修法：把库存状态机显式化}
+\begin{tabular}{@{}lll@{}}
+\toprule
+方案 & 改动量 & 评价 \\
+\midrule
+A. 加一列 \texttt{reserved\_num} & 小 & 治标，状态机仍隐式 \\
+B. 双桶 + reserve/commit/release & 中 & \textbf{推荐}：显式三态、闭环对称 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 选 B（即 Deck 04 的双桶设计）。
+  \item 下单 = reserve（available $\to$ reserved），不动 DB。
+  \item 付款 = commit（reserved $\to$ 真扣 DB）。
+  \item 取消 = release（reserved $\to$ available），\textbf{不再回写 DB}。
+\end{itemize}
+\srcnote{service/order\_cancel.go:14--18 关键注释：不再回写 product.Num}
+\end{frame}
+
+% ============== 6. 性能与业界 ==============
+\section{性能与业界对照}
+
+\begin{frame}{订单列表压测：游标分页的代差碾压}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+指标 & 优化版（游标 + 缓存） & 旧版（OFFSET 深分页） \\
+\midrule
+吞吐 (RPS) & \textbf{58,406} & 8.3 \\
+p50 延迟 & 1.04 ms & 10.5 s \\
+p95 延迟 & \textbf{5 ms} & 15.95 s \\
+最大延迟 & 348 ms & 16.29 s \\
+错误率 & 0\% & 0\% \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 同一个业务"我的订单列表"，深分页时 p95 接近 16 秒 —— 这在真实业务里等于直接超时；用游标 + Redis 缓存的优化版 p95 拉到 5 ms，相差\textbf{约 3,200 倍}。
+\srcnote{stressTest/REPORT.md \S 2. 订单列表：游标分页的代差碾压}
+\end{frame}
+
+\begin{frame}{业界 framing：电商订单系统怎么设计}
+\begin{itemize}
+  \item \textbf{阿里}：交易中心把订单建模成"状态机 + 事件流"，公开技术博客多次提到"扁平化状态机"+"领域事件总线"。
+  \item \textbf{京东}：履约链路按"接单 / 履约 / 完结"三大域，每个域独立状态机，通过事件解耦。QCon 公开分享强调"补偿事务 + 异步消息"是底线设计。
+  \item \textbf{Saga 模式}：业界电商对长事务的事实标准 —— gomall 用 Outbox + 协同式 Saga 是同一族思路。
+\end{itemize}
+\vspace{2mm}
+\begin{tabular}{@{}lll@{}}
+\toprule
+维度 & gomall & 大型电商 \\
+\midrule
+状态数 & 4 主 + 2 旁 & 数十个细分 \\
+事件总线 & 单 RabbitMQ exchange & 多级 / 跨域 / 多机房 \\
+补偿事务 & 协同式 Saga + 释放库存 & 编排式 Saga + 人工兜底 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}\\
+\small \textbf{原理一致，工程量天差地别}。这里只列方向不引数字，避免不可考的"百万 TPS"之类。
+\end{frame}
+
+% ============== Q&A ==============
+\appendix
+
+\begin{frame}{面试 Q\&A（上）}
+\textbf{Q1}：为什么下单不直接扣 DB？\\
+\hspace{4mm}\small A：DB 库存 $\ne$ 售前可见库存。下单只是占用，付款才是消耗。两者混淆会导致"超时单 + 反向补偿"的不对称 bug。预扣（reserved 桶）就是把"占用"这个时间窗口显式建模。
+
+\vspace{2mm}
+\textbf{Q2}：reserved 桶里的库存，售前要怎么显示？\\
+\hspace{4mm}\small A：售前页面读 \texttt{available} 桶 —— reserved 对售前不可见。\\\texttt{available + reserved + sold = 初始水位} 这个不变量保证你怎么算都不会超。
+
+\vspace{2mm}
+\textbf{Q3}：为什么不直接 DB 加锁 \texttt{SELECT FOR UPDATE}？\\
+\hspace{4mm}\small A：可以，但每次下单都锁行 + 等锁排队，吞吐会塌。Redis Lua 是\textbf{单线程原子}，性能差一个数量级。本项目压测 500 并发零超卖（\texttt{repository/cache/inventory\_test.go:52--82}）。
+\end{frame}
+
+\begin{frame}{面试 Q\&A（下）}
+\textbf{Q4}：order.paid 事件的下游有哪些？\\
+\hspace{4mm}\small A：对账、商家通知、推荐、BI、营销返券、ES 索引。Outbox + RabbitMQ 把它们都解耦 —— 业务侧只写一行 \texttt{outbox.Insert}。
+
+\vspace{2mm}
+\textbf{Q5}：库存虚高事故你怎么排查？\\
+\hspace{4mm}\small A：从业务现象（商家投诉、售前售后不一致）反推：库存只增不减 $\to$ 找所有 \texttt{product.Num +=} 的地方 $\to$ 发现 \texttt{RollbackStock}，再找有没有对称的 \texttt{-=} $\to$ 发现 OrderCreate 根本没扣 $\to$ 根因是状态机隐式 / 路径不对称。修法：显式化双桶状态机。
+
+\vspace{2mm}
+\textbf{反追问}：如果未付款订单有几十万，关单怎么扛？\\
+\hspace{4mm}\small A：本项目用 RabbitMQ 死信队列做延迟关单（\texttt{repository/rabbitmq/order\_delay.go:22} 默认 30 分钟）+ 定时任务兜底（\texttt{service/order\_task.go} 扫超过 15 分钟的）。两条路径都做了幂等（\texttt{CloseOrderWithCheck}），重复触发 no-op。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}
+  \item[订单状态常量]\srcnote{consts/order.go:3--16}
+  \item[OrderCreate + 预扣 + Outbox]\srcnote{service/order.go:40--102}
+  \item[PayDown + 状态转移 + Commit]\srcnote{service/payment.go:35--200}
+  \item[CancelUnpaidOrder + Release]\srcnote{service/order\_cancel.go:14--63}
+  \item[双桶库存状态机]\srcnote{repository/cache/inventory.go:16--138}
+  \item[Outbox 表 + 事件类型]\srcnote{repository/db/model/outbox.go:17--37}
+  \item[事件 payload]\srcnote{service/events/events.go:9--38}
+  \item[延迟关单拓扑]\srcnote{repository/rabbitmq/order\_delay.go:13--105}
+  \item[500 并发库存测试]\srcnote{repository/cache/inventory\_test.go:52--82}
+\end{description}
+\vspace{1mm}
+\keypoint{业务复盘的关键引用：\texttt{service/order\_cancel.go:14--18} 注释里写明"不再回写 product.Num"。}
+\end{frame}
+
+\end{document}
