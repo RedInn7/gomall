@@ -1,0 +1,374 @@
+\input{preamble}
+
+\title{商品详情页业务实践}
+\subtitle{从 \texttt{product} 表字段到 Cache Aside 的业务取舍}
+\author{gomall · 业务侧扩展}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============== 1. 业务地位 ==============
+\section{商品详情页的业务地位}
+
+\begin{frame}{从流量入口看详情页}
+\begin{tikzpicture}[node distance=5mm and 14mm]
+  \node[node-box] (home) {首页推荐};
+  \node[node-box,below=of home] (list) {分类列表};
+  \node[node-box,below=of list] (search) {搜索结果};
+  \node[node-box,below=of search] (rec) {个性化推荐};
+  \node[node-box,below=of rec] (share) {社交分享};
+  \node[node-box,right=22mm of search,node-warn,minimum width=26mm] (detail) {商品详情页\\\scriptsize\texttt{/product/show}};
+  \node[node-box,right=18mm of detail,node-ok] (cart) {加购 / 下单};
+  \draw[arrow] (home.east) -- (detail.west);
+  \draw[arrow] (list.east) -- (detail.west);
+  \draw[arrow] (search.east) -- (detail.west);
+  \draw[arrow] (rec.east) -- (detail.west);
+  \draw[arrow] (share.east) -- (detail.west);
+  \draw[arrow] (detail) -- node[above,font=\tiny]{转化} (cart);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 五条入口路径汇聚到\textbf{同一个接口} —— 任何一条爆量都会引发读放大。
+  \item 详情页是转化漏斗里离"下单"最近的一步：延迟 / 不一致直接砸 GMV。
+  \item 业界长期观察：详情页首屏每多一秒，跳出率显著上升、加购率显著下降。
+\end{itemize}
+\srcnote{service/product.go:38--68 \texttt{ProductShow}}
+\end{frame}
+
+% ============== 2. product 表字段 ==============
+\section{\texttt{product} 表字段的业务含义}
+
+\begin{frame}[fragile]{gomall 的 \texttt{Product} 模型}
+\begin{lstlisting}[language=Go,firstnumber=12,
+  caption={\srcnote{repository/db/model/product.go:12--26}}]
+type Product struct {
+    gorm.Model
+    Name          string `gorm:"size:255;index"`  // 商品短名
+    CategoryID    uint   `gorm:"not null"`         // 一级分类
+    Title         string                            // 长标题/卖点
+    Info          string `gorm:"size:1000"`         // 详情正文
+    ImgPath       string                            // 主图
+    Price         string                            // 原价
+    DiscountPrice string                            // 折后价
+    OnSale        bool   `gorm:"default:false"`     // 在售开关
+    Num           int                                // 库存数（DB 真值）
+    BossID        uint                               // 商家 ID
+    BossName      string                             // 冗余商家名
+    BossAvatar    string                             // 冗余商家头像
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{Name / Title / Info / Price / DiscountPrice}
+\begin{tikzpicture}[node distance=4mm and 10mm]
+  \node[node-box,minimum width=22mm] (n) {\textbf{Name}\\\scriptsize 列表卡片};
+  \node[node-box,minimum width=22mm,right=of n,node-warn] (t) {\textbf{Title}\\\scriptsize 首屏 H1};
+  \node[node-box,minimum width=22mm,right=of t,node-ok] (i) {\textbf{Info}\\\scriptsize 正文 1000 字};
+  \draw[arrow] (n) -- node[above,font=\tiny]{信息密度 $\uparrow$} (t);
+  \draw[arrow] (t) -- (i);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \texttt{Name} 上加 \texttt{index}：列表 / 搜索靠它；\texttt{Title} 承担首屏注意力；\texttt{Info} 1000 字决定停留时长但\textbf{不进索引}。
+  \item \texttt{Price} 是\textbf{划线价}，\texttt{DiscountPrice} 是真实结算价 —— 制造\textbf{价格锚点} + 支持大促只动后者。
+  \item 两个金额字段都是 \texttt{string}，\textbf{不能}直接算术：金额一律走 \texttt{decimal} / 整数分。
+\end{itemize}
+\srcnote{repository/db/model/product.go:14--20}
+\end{frame}
+
+\begin{frame}{Num — DB 真值与 Redis 预占的关系}
+\begin{tikzpicture}[node distance=6mm and 14mm]
+  \node[node-box,node-ok] (db) {\texttt{product.Num}\\\scriptsize DB 真值};
+  \node[node-box,right=of db,node-warn] (redis) {\texttt{stock:\{pid\}}\\\scriptsize Redis 可售余量};
+  \node[node-box,right=of redis] (user) {下单请求};
+  \draw[arrow] (user) -- node[above,font=\tiny]{Lua DECR} (redis);
+  \draw[arrow-async] (redis) -- node[above,font=\tiny]{异步落库} (db);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 详情页展示的"库存剩 N"是\textbf{展示值}，可走 DB 也可走缓存。
+  \item 真正"能不能下单"在 Redis 预占（见 Deck 02），\texttt{Num} 是\textbf{对账依据}：Saga 失败、订单超时取消都回滚到这里。
+  \item \textbf{结论}：详情页缓存里写 \texttt{Num} 没问题，下单链路必须读\textbf{运行时余量}。
+\end{itemize}
+\srcnote{repository/db/model/product.go:22}
+\end{frame}
+
+\begin{frame}{OnSale / CategoryID / Boss* 三组字段}
+\begin{itemize}
+  \item \texttt{OnSale}：商家自助、平台风控、运营批量、算法\textbf{都能改}；普通用户、缓存层\textbf{不能改}。
+  \item \texttt{CategoryID}：承担 \textbf{SEO}（关键词 / 面包屑）+ \textbf{推荐}（"你可能感兴趣"）+ \textbf{业务分组}（限购 / 退换 / 税率）三重职责，所以加了 \texttt{not null}。
+  \item \texttt{BossID / BossName / BossAvatar}：冗余\textbf{不是}设计错误：
+  \begin{itemize}
+    \item 详情页一次查询展示商家头像 + 名称 —— 避免每次 JOIN 商家表。
+    \item 商家改名 / 换头像\textbf{低频}，可接受短暂不同步。
+    \item 整页缓存友好：1 次 GET 给前端全部素材。
+  \end{itemize}
+\end{itemize}
+\keypoint{冗余是"读多写少"业务的工程妥协，不是范式违规。}
+\srcnote{repository/db/model/product.go:15, 21, 23--25}
+\end{frame}
+
+% ============== 3. 谁能更新 ==============
+\section{谁能更新商品}
+
+\begin{frame}{四类写入主体共享同一条写路径}
+\begin{tikzpicture}[node distance=5mm and 14mm]
+  \node[node-box] (merchant) {商家自助};
+  \node[node-box,below=of merchant] (risk) {平台风控};
+  \node[node-box,below=of risk] (ops) {运营批量};
+  \node[node-box,below=of ops] (algo) {算法降价};
+  \node[node-box,right=18mm of risk,node-warn,minimum width=28mm] (api) {\texttt{ProductUpdate}\\\scriptsize service/product.go:271};
+  \node[node-box,right=16mm of api,node-ok] (db) {DB + 双删};
+  \draw[arrow] (merchant.east) -- (api);
+  \draw[arrow] (risk.east) -- (api);
+  \draw[arrow] (ops.east) -- (api);
+  \draw[arrow] (algo.east) -- (api);
+  \draw[arrow] (api) -- (db);
+\end{tikzpicture}
+\vspace{1mm}
+
+\begin{tabular}{@{}llll@{}}
+\toprule
+主体 & 频率 & 改的字段 & 一致性诉求 \\
+\midrule
+商家自助 & 中 & \texttt{Title/Info/Price/...} & 自己看得到 \\
+平台风控 & 低 & \texttt{OnSale=false} & 立即下架 \\
+运营批量 & 突发 & \texttt{DiscountPrice/OnSale} & 大促瞬间生效 \\
+算法降价 & 高 & \texttt{DiscountPrice} & 分钟级容忍 \\
+\bottomrule
+\end{tabular}
+\srcnote{service/product.go:271--292}
+\end{frame}
+
+% ============== 4. 延迟的业务影响 ==============
+\section{更新延迟的业务影响}
+
+\begin{frame}{事故 1：下架后用户仍能买}
+\begin{tikzpicture}[node distance=8mm]
+  \foreach \name/\x in {商家/0, DB/30, Redis/60, 用户 A/95, 用户 B/130} {
+    \node[node-box,minimum width=14mm] at (\x mm,0) (\name) {\name};
+    \draw[lifeline] (\x mm,-2mm) -- (\x mm,-44mm);
+  }
+  \draw[arrow] (0,-8mm) -- node[above,font=\tiny]{下架} (30mm,-8mm);
+  \draw[arrow-bad] (95mm,-16mm) -- node[above,font=\tiny\color{cBad}]{读旧缓存} (60mm,-16mm);
+  \draw[arrow-bad] (130mm,-24mm) -- node[above,font=\tiny\color{cBad}]{读旧缓存} (60mm,-24mm);
+  \draw[arrow-bad] (95mm,-32mm) -- node[above,font=\tiny\color{cBad}]{下单成功} (30mm,-32mm);
+  \draw[arrow-bad] (130mm,-40mm) -- node[above,font=\tiny\color{cBad}]{付款} (30mm,-40mm);
+\end{tikzpicture}
+\vspace{1mm}
+\small 商家已下架但缓存未失效 —— 用户付完钱才发现卖家不发货，客服压力暴涨。
+\end{frame}
+
+\begin{frame}{事故 2：改价后旧价单的业务处理}
+\begin{itemize}
+  \item 大促 0:00:00，运营把 \texttt{DiscountPrice} 从 ¥199 改到 ¥99。
+  \item 0:00:00.300，缓存还没失效，用户 A 看到 ¥199 下单。业务部门要选：
+  \begin{itemize}
+    \item \textbf{让利方案}：按 ¥99 结算，多付差价退还（最常见）。
+    \item \textbf{补差方案}：保持 ¥199，下发"漏发优惠券"安抚。
+    \item \textbf{严格方案}：让 A 重新下单（用户体验最差）。
+  \end{itemize}
+  \item 任何业务方案都要求技术层把"看到旧价"的窗口压到\textbf{秒级以内}。
+  \item 延迟成本不在 Redis，是\textbf{客服补救}（下架下单）+ \textbf{财务退差}（改价旧单）+ \textbf{用户流失}（看到旧值）。
+\end{itemize}
+\keypoint{延迟双删 + 短 TTL = 把"看到旧值"的窗口压到分钟以内。}
+\end{frame}
+
+% ============== 5. TTL 10min ==============
+\section{TTL 10min 的业务依据}
+
+\begin{frame}{为什么 TTL 定 10 分钟}
+\begin{columns}[T,onlytextwidth]
+\column{0.50\linewidth}
+\begin{itemize}\small
+  \item \texttt{ProductDetailTTL = 10 * time.Minute}
+  \item TTL 太短：命中率低，DB 压力大。
+  \item TTL 太长：商家改商品几小时还看不到。
+  \item 10 min 对应：
+  \begin{itemize}
+    \item 商家改商品平均间隔 $\gg$ 10 min。
+    \item 用户能容忍"几分钟内生效"。
+    \item 单条记录 10 min 内多次访问。
+  \end{itemize}
+  \item TTL 只是\textbf{兜底}，主动 DEL 才是日常路径。
+\end{itemize}
+
+\column{0.50\linewidth}
+\begin{tikzpicture}[scale=0.65]
+  \draw[->,thick] (0,0) -- (8,0) node[right]{\small TTL};
+  \draw[->,thick] (0,0) -- (0,4.5) node[above]{\small 收益};
+  \draw[thick,cMain] plot[smooth] coordinates {(0.3,0.4) (1,1.4) (2,2.3) (3,2.9) (4,3.3) (5,3.5) (6,3.5) (7,3.3)};
+  \draw[thick,dashed,cBad] plot[smooth] coordinates {(0.3,4.0) (1,3.7) (2,3.2) (3,2.6) (4,2.0) (5,1.4) (6,0.9) (7,0.4)};
+  \node[cMain,font=\scriptsize] at (5.7,3.9) {命中率};
+  \node[cBad,font=\scriptsize] at (5.9,1.7) {新鲜度};
+  \draw[dotted,thick,cAccent] (3.2,0) -- (3.2,4.3);
+  \node[cAccent,font=\scriptsize] at (3.2,4.5) {10 min};
+\end{tikzpicture}
+\end{columns}
+\srcnote{repository/cache/product.go:14}
+\end{frame}
+
+% ============== 6. 延迟双删 ==============
+\section{延迟双删的业务意义}
+
+\begin{frame}[fragile]{ProductUpdate 的双删写路径}
+\begin{lstlisting}[language=Go,firstnumber=271,
+  caption={\srcnote{service/product.go:271--292}}]
+func (s *ProductSrv) ProductUpdate(ctx context.Context, req *types.ProductUpdateReq) (resp interface{}, err error) {
+    product := &model.Product{
+        Name: req.Name, CategoryID: req.CategoryID,
+        Title: req.Title, Info: req.Info,
+        Price: req.Price, DiscountPrice: req.DiscountPrice,
+        OnSale: req.OnSale,
+    }
+    _ = cache.DelProductDetail(ctx, req.ID)                       // 1. 第一次删
+    err = dao.NewProductDao(ctx).UpdateProduct(req.ID, product)   // 2. 写 DB
+    if err != nil { log.LogrusObj.Error(err); return }
+    cache.DoubleDeleteAsync(req.ID, 0)                            // 3+4. 异步 500ms 后再删
+    emitProductChanged(ctx, req.ID, "update")
+    return
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{为什么"再删一次"重要}
+\begin{tikzpicture}[node distance=8mm]
+  \foreach \name/\x in {写者 W/0, DB/30, Redis/60, 读者 R/95} {
+    \node[node-box,minimum width=14mm] at (\x mm,0) (\name) {\name};
+    \draw[lifeline] (\x mm,-2mm) -- (\x mm,-52mm);
+  }
+  \draw[arrow] (0,-8mm) -- node[above,font=\tiny]{1. DEL} (60mm,-8mm);
+  \draw[arrow-bad] (95mm,-15mm) -- node[above,font=\tiny\color{cBad}]{GET miss} (60mm,-15mm);
+  \draw[arrow-bad] (95mm,-22mm) -- node[above,font=\tiny\color{cBad}]{读 DB (旧值)} (30mm,-22mm);
+  \draw[arrow] (0,-29mm) -- node[above,font=\tiny]{2. UPDATE} (30mm,-29mm);
+  \draw[arrow-bad] (95mm,-36mm) -- node[above,font=\tiny\color{cBad}]{SET 旧值回缓存} (60mm,-36mm);
+  \draw[arrow,draw=cOK] (0,-45mm) -- node[above,font=\tiny\color{cOK}]{3+4. DEL again (500ms)} (60mm,-45mm);
+\end{tikzpicture}
+\vspace{1mm}
+\small 读者 R 在写者 W 之间穿插，把"旧值"塞回缓存。\textbf{第二次 DEL 清掉它}。
+\textbf{业务感知}：旧值最多存活 500\,ms —— 客服几乎不会收到投诉。
+\srcnote{repository/cache/product.go:16 \texttt{ProductDelayInterval = 500ms}}
+\end{frame}
+
+% ============== 7. 单飞回源 ==============
+\section{单飞回源 (SETNX)}
+
+\begin{frame}{SETNX 单飞：一个请求回源，其他人等结果}
+\begin{tikzpicture}[node distance=5mm]
+  \node[node-box] (r1) {Req 1};
+  \node[node-box,below=of r1] (r2) {Req 2};
+  \node[node-box,below=of r2] (r3) {Req 3};
+  \node[node-box,below=of r3] (rn) {... 1\,000};
+  \node[node-box,right=18mm of r2,node-warn] (lock) {SETNX\\\scriptsize product:lock};
+  \node[node-box,right=18mm of lock,node-ok] (db) {DB};
+  \draw[arrow] (r1.east) -- node[above,font=\tiny]{抢到} (lock);
+  \draw[arrow-async] (r2.east) -- (lock);
+  \draw[arrow-async] (r3.east) -- (lock);
+  \draw[arrow-async] (rn.east) -- (lock);
+  \draw[arrow] (lock) -- node[above,font=\tiny]{1 个回源} (db);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{业务风险}：大主播带货 $\to$ 单个 \texttt{product\_id} 瞬间几万 QPS。缓存正好失效 $\to$ 全部打 DB $\to$ 击穿。
+  \item 1 个赢家回源 DB，其他 sleep 50\,ms 重读缓存（多半命中）。
+  \item \texttt{ProductLockTTL = 3s}：DB 查询 P99 < 500\,ms，3\,s 给 6 倍冗余；崩溃最多锁死 3\,s。
+\end{itemize}
+\srcnote{repository/cache/product.go:55--62 + service/product.go:50--58}
+\end{frame}
+
+\begin{frame}[fragile]{ProductShow 的回源锁逻辑}
+\begin{lstlisting}[language=Go,firstnumber=42,
+  caption={\srcnote{service/product.go:42--68}}]
+cached := &types.ProductResp{}
+if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
+    return cached, nil
+}
+locked, _ := cache.TryProductLock(ctx, req.ID)
+if !locked {
+    time.Sleep(50 * time.Millisecond)
+    if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
+        return cached, nil
+    }
+} else {
+    defer cache.UnlockProduct(ctx, req.ID)
+}
+pResp, err := s.loadProductFromDB(ctx, req.ID)
+if err != nil { return nil, err }
+cache.SetProductDetail(ctx, req.ID, pResp)
+return pResp, nil
+\end{lstlisting}
+\end{frame}
+
+% ============== 8. 压测 ==============
+\section{压测数据}
+
+\begin{frame}{商品详情 PK 查询的极限}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+链路 & RPS & p95 \\
+\midrule
+Ping 基线 (gin + 中间件) & 64{,}254 & 3.51\,ms \\
+商品详情 PK 查询 (DB，未接缓存) & \textbf{62{,}226} & \textbf{3.01\,ms} \\
+\bottomrule
+\end{tabular}
+
+\vspace{3mm}
+\begin{itemize}
+  \item \texttt{product/show} 走完 \texttt{ClientIP} $\to$ MySQL PK 查询的链路，跟 \texttt{/ping} \textbf{几乎重合}。
+  \item 单点查询基本不增加延迟 —— 瓶颈在\textbf{热点商品并发}和\textbf{大表 list 查询}上。
+  \item \textbf{业务解读}：缓存\textbf{首要价值不是延迟}，而是\textbf{削峰}（防击穿）和\textbf{容错}（DB 故障兜底）。
+\end{itemize}
+\keypoint{把缓存看成"业务保险"，比看成"加速器"更准确。}
+\srcnote{stressTest/REPORT.md 第 36--37 行 + stressTest/product\_show.js}
+\end{frame}
+
+% ============== Q&A ==============
+\appendix
+
+\begin{frame}{面试 Q\&A（上）}
+\textbf{Q1}：详情页为什么是电商最敏感的页？\\
+\hspace{4mm}\small A：流量入口的终点 + 转化漏斗的最后一步；任何延迟 / 不一致直接砸 GMV。
+
+\vspace{2mm}
+\textbf{Q2}：\texttt{BossName} / \texttt{BossAvatar} 冗余是不是数据库设计错误？\\
+\hspace{4mm}\small A：不是。详情页是读多写少的极致代表，冗余换的是\textbf{少一次 JOIN} + 整页缓存友好。
+
+\vspace{2mm}
+\textbf{Q3}：\texttt{Num} 和 Redis 库存的关系？\\
+\hspace{4mm}\small A：\texttt{Num} 是 DB 真值（对账依据），Redis 是\textbf{下单预占运行时余量}（见 Deck 02）。
+\end{frame}
+
+\begin{frame}{面试 Q\&A（下）}
+\textbf{Q4}：为什么 TTL 选 10 分钟？\\
+\hspace{4mm}\small A：折中命中率和数据新鲜度；商家改商品平均间隔远 $>$ 10 min，业务能接受这个延迟。
+
+\vspace{2mm}
+\textbf{Q5}：缓存延迟带来的业务成本主要是哪几块？\\
+\hspace{4mm}\small A：客服补救（下架后下单）、财务退差（改价旧单）、用户流失（看到旧值）。
+
+\vspace{2mm}
+\textbf{反追问}：商品详情单点查询不是瓶颈，为什么还要做缓存？\\
+\hspace{4mm}\small A：单点不是瓶颈，但热点商品并发会击穿 DB；缓存价值是\textbf{削峰 + 容错}。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}
+  \item[字段定义]\srcnote{repository/db/model/product.go:12--26}
+  \item[Cache Aside 读]\srcnote{service/product.go:42--68 \texttt{ProductShow}}
+  \item[延迟双删写]\srcnote{service/product.go:271--292 \texttt{ProductUpdate}}
+  \item[TTL / 锁常量]\srcnote{repository/cache/product.go:13--17}
+  \item[回源锁 SETNX]\srcnote{repository/cache/product.go:55--62}
+  \item[DoubleDeleteAsync]\srcnote{repository/cache/product.go:64--74}
+  \item[压测脚本]\srcnote{stressTest/REPORT.md 第 36--37 行 + stressTest/product\_show.js}
+\end{description}
+\vspace{2mm}
+\keypoint{复现：\texttt{k6 run stressTest/product\_show.js}}
+\end{frame}
+
+\end{document}
