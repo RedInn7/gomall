@@ -83,14 +83,14 @@ HTTP 200 + 等 16 秒 = 监控看不见的"软故障"，比 5xx 还危险。
 % ============================================================
 
 \begin{frame}{8.3 RPS = 一台机器只够 8 个并发}
-\begin{tikzpicture}[node distance=4mm and 6mm]
-  \node[node-box,node-ok,minimum width=18mm] (u1) {用户 1};
-  \node[node-box,node-ok,minimum width=18mm,right=of u1] (u2) {用户 2};
-  \node[node-box,node-ok,minimum width=18mm,right=of u2] (u3) {用户 3};
-  \node[node-box,node-ok,minimum width=18mm,right=of u3] (u4) {用户 4};
-  \node[node-box,node-ok,minimum width=18mm,right=of u4] (u5) {用户 5};
-  \node[node-box,node-ok,minimum width=18mm,right=of u5] (u6) {\dots 8};
-  \node[node-box,node-bad,minimum width=18mm,right=of u6] (u7) {\textbf{用户 9}};
+\begin{tikzpicture}[node distance=2mm and 2mm,every node/.append style={minimum width=11mm,font=\scriptsize}]
+  \node[node-box,node-ok] (u1) {用户 1};
+  \node[node-box,node-ok,right=of u1] (u2) {用户 2};
+  \node[node-box,node-ok,right=of u2] (u3) {用户 3};
+  \node[node-box,node-ok,right=of u3] (u4) {用户 4};
+  \node[node-box,node-ok,right=of u4] (u5) {用户 5};
+  \node[node-box,node-ok,right=of u5] (u6) {\dots 8};
+  \node[node-box,node-bad,right=of u6] (u7) {\textbf{用户 9}};
   \draw[arrow-bad,bend left=20] (u7.north) to node[above,font=\tiny]{超时 / 白屏} (u7.north east);
 \end{tikzpicture}
 \vspace{2mm}
@@ -180,7 +180,7 @@ err = query.
   \item 数据库每次只扫 20 行：从 last\_id 沿 PK 索引倒序拿。
   \item 第一页结果再加 5min Redis 缓存 $\to$ 多数请求不进 DB。
 \end{itemize}
-\srcnote{repository/db/dao/order.go:50--75 新版 DAO 全文}
+\srcnote{repository/db/dao/order.go:35--76 ListOrderByCondition 含首页 5min 缓存}
 \end{frame}
 
 % ============================================================
@@ -292,13 +292,11 @@ SRE  & 可用率 / 容量    & p95 / p99 / error rate & 200 OK 但 16s \\
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
-  \item 四个角色看的是\textbf{同一个 bug 的不同切面}。
-  \item 单看任何一个都不会触发 P0 故障 —— 必须\textbf{把四个切面拉到一张表}。
-  \item gomall 现状：四个面都看不见，因为没有 RUM / 没有客诉关键词分类 / 监控没看 p95。
-  \item 运营做"双 11 我的订单"推送 = 1 分钟 10 万人点开，旧版 8.3 RPS 只服务 500 人，剩下 99{,}500 全超时——\textbf{活动效果差}就是这么来的。
+  \item 四个角色看同一个 bug 的不同切面，单看任何一个都不触发 P0。
+  \item gomall 现状：四个面都看不见——没 RUM / 没客诉关键词分类 / 监控没看 p95。
+  \item 推送场景：10 万人点开，8.3 RPS 只服务 500 人，运营问"扛多少 RPS"，答案应是 58K 而不是 8.3。
 \end{itemize}
-\keypoint{运营前问后端"这接口扛多少 RPS"——gomall 现在的答案应是 58K，不是 8.3。}
-\srcnote{routes/router.go:78--79 同业务两个 endpoint 便于 AB 对比}
+\srcnote{routes/router.go:78--79 同业务两个 endpoint}
 \end{frame}
 
 
@@ -384,7 +382,7 @@ SRE  & 可用率 / 容量    & p95 / p99 / error rate & 200 OK 但 16s \\
   \item[旧版 OFFSET 深分页 DAO]\srcnote{repository/db/dao/order.go:78--113}
   \item[订单 service 新版]\srcnote{service/order.go:104--122}
   \item[订单 service 旧版]\srcnote{service/order.go:124--142}
-  \item[订单列表请求结构]\srcnote{types/order.go:30--46（LastId 字段）}
+  \item[请求 LastId 字段]\srcnote{types/common.go:5--9 BasePage；types/order.go:43--46 OrderListResp 回写}
   \item[product COUNT(*) 全表]\srcnote{repository/db/dao/product.go:59--64}
   \item[压测脚本对]\srcnote{stressTest/order\_list\_deep\_pagination.js + order\_list\_optimized.js}
   \item[压测报告]\srcnote{stressTest/REPORT.md \S 2 / \S 3}
