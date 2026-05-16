@@ -41,19 +41,21 @@
 \end{frame}
 
 \begin{frame}{为什么不是 5min / 15min / 60min}
-\begin{tabular}{@{}llp{5cm}@{}}
+{\small
+\begin{tabular}{@{}llp{5.2cm}@{}}
 \toprule
 方案 & 用户体感 & 业务后果 \\
 \midrule
 5 分钟    & 切卡 / 等短信都不够 & 商家投诉"刚下单就被取消"，付款转化掉 10\%+ \\
-15 分钟   & 多数人够用         & 高峰期仍有 5--8\% 误关，弱网用户感受不友好 \\
+15 分钟   & 多数人够用         & 高峰期仍有 5--8\% 误关，弱网感受不友好 \\
 \textbf{30 分钟} & 含切卡 + 短信冗余  & 大促锁单可控，商家 / 运营都能接受 \\
 60 分钟   & 用户不抱怨         & 双 11 锁 1 小时，爆款一直显示"已售罄" \\
 24 小时   & 客服零投诉         & 库存周转崩盘，恶意囤货成本为零 \\
 \bottomrule
 \end{tabular}
-\vspace{2mm}
-\small 30min 是\textbf{工业界经验值}：京东 30min / 天猫 30min--1h / 拼多多 15min。改这个值要谈\textbf{5 个角色}：商家（锁单投诉）/ 运营（大促临时缩短）/ 风控（黑产窗口）/ 客服（付款重试）/ 财务（待支付科目）——代码侧只是把决策落到 \texttt{OrderCancelDelay} 一行。
+}
+\vspace{1mm}
+\small 30min 是工业界经验值（京东 30min / 天猫 30min--1h / 拼多多 15min）。改这个值要谈\textbf{5 个角色}：商家 / 运营 / 风控 / 客服 / 财务——代码侧只落到 \texttt{OrderCancelDelay} 一行。
 \srcnote{repository/rabbitmq/order\_delay.go:21--22 30min 常量}
 \end{frame}
 
@@ -109,24 +111,23 @@
 % ============================================================
 
 \begin{frame}{为什么不能只留一条链路}
-\begin{tikzpicture}[node distance=10mm and 14mm]
+\begin{tikzpicture}[node distance=8mm and 12mm]
   \node[node-box] (order) {下单};
   \node[node-box,right=of order,node-warn] (mq) {RMQ 延迟队列\\\scriptsize TTL 30min};
   \node[node-box,right=of mq,node-ok] (close1) {关单};
-  \node[node-box,below=of mq,node-warn] (cron) {Cron 兜底\\\scriptsize 扫 UnPaid + 15min};
+  \node[node-box,below=of mq,node-warn] (cron) {Cron 兜底\\\scriptsize 扫 UnPaid+15min};
   \draw[arrow] (order) -- (mq);
   \draw[arrow] (mq) -- (close1);
   \draw[arrow,dashed] (order) to[bend right=20] (cron);
   \draw[arrow,dashed] (cron) to[bend right=20] (close1);
 \end{tikzpicture}
-\vspace{2mm}
 \begin{itemize}
-  \item \textbf{只 RMQ}：进程挂 / 队列丢消息 / nack 进 DLX = 订单停在 UnPaid，库存永远不释放。
-  \item \textbf{只 Cron}：5min 间隔 + 单批 100 条上限，库存释放 lag 偏大；高峰期跟不上下单速度。
-  \item \textbf{双保险}：RMQ 主路径（30min 准点）+ Cron 兜底（15min 窗口 / 5min 节奏）。
-  \item \textbf{为什么 Cron 是 15min 窗口而非 30min}：RMQ 正常时 Cron 扫到的订单到 30min 已被 RMQ 关掉（WHERE type=UnPaid 失败）→ Cron 不抢功；RMQ 挂掉时 Cron 立刻接管，库存最多多锁 15--20min。
+  \item \textbf{只 RMQ}：进程挂 / 丢消息 / nack 进 DLX = 订单永远停 UnPaid。
+  \item \textbf{只 Cron}：5min 间隔 + 单批 100 上限，库存释放 lag 偏大。
+  \item \textbf{双保险}：RMQ 30min 准点 + Cron 15min 窗口 / 5min 节奏。
+  \item \textbf{Cron 用 15min 而非 30min}：RMQ 正常时订单 30min 已被关掉、Cron 不抢功；RMQ 挂时 Cron 立刻接管，最多多锁 15--20min。
 \end{itemize}
-\srcnote{repository/rabbitmq/order\_delay.go:24--56 拓扑；service/order\_task.go:14--48 + :16 GetTimeoutOrders(15,100)}
+\srcnote{order\_delay.go:24--56；order\_task.go:14--48,:16 GetTimeoutOrders(15,100)}
 \end{frame}
 
 \begin{frame}{RMQ 延迟队列拓扑：死信交换换出"延迟"}
@@ -204,22 +205,18 @@
 \begin{lstlisting}[language=Go,firstnumber=185,
   caption={repository/db/dao/order.go:185--196},captionpos=b]
 func (dao *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
-    res := dao.DB.Model(&model.Order{}).Where(
-        "order_num=? and type=?", orderNum, consts.UnPaid).
+    res := dao.DB.Model(&model.Order{}).
+        Where("order_num=? and type=?", orderNum, consts.UnPaid).
         Update("type", consts.Cancelled)
-    if res.Error != nil {
-        return false, res.Error
-    }
+    if res.Error != nil { return false, res.Error }
     return res.RowsAffected > 0, nil
 }
 \end{lstlisting}
-\vspace{1mm}
 \begin{itemize}
-  \item \textbf{关键是 WHERE 里那个 \texttt{type=UnPaid}}：只有 UnPaid 才会被改成 Cancelled，已 Cancelled / Paid 直接 RowsAffected=0。
-  \item 第二次调用看到 RowsAffected=0 → \texttt{closed = false} → 直接 return，不释放库存、不写 outbox。
-  \item \textbf{一行 SQL 兜住了 4 个调用方的并发竞争}。
+  \item \texttt{WHERE type=UnPaid}：只有 UnPaid 会被改成 Cancelled，已 Cancelled / Paid 直接 RowsAffected=0。
+  \item 第二次调用 RowsAffected=0 $\to$ closed=false $\to$ 直接 return，不释放库存 / 不写 outbox。
 \end{itemize}
-\srcnote{repository/db/dao/order.go:185--196 幂等关单 SQL；service/order\_cancel.go:30--57 closed 旗标}
+\srcnote{order.go:185--196 幂等 SQL；order\_cancel.go:30--57 closed 旗标}
 \end{frame}
 
 \begin{frame}{幂等失守会发生什么}
@@ -267,19 +264,13 @@ outbox 发 N 条 cancelled & 下游收 N 次 & ES 删 N 次、商家通知 N 次
 
 \begin{frame}{不能给商家发"发货通知"}
 \begin{itemize}
-  \item 关单事件 \texttt{order.cancelled} 的下游消费者绝对\textbf{不能}包含"通知商家发货"——
-  \begin{itemize}
-    \item 商家收到"发货"通知 → 真发货 → 用户没付款 → 商家亏运费 + 货损。
-  \end{itemize}
-  \item 关单事件的合理下游：\textbf{ES 删除索引、库存对账、客服工单关闭、消息推送"订单已取消"}。
-  \item \textbf{关键不变量}：\texttt{order.cancelled} 永远只对应 type=UnPaid 的订单（已 Paid 走的是\texttt{order.refunded}）。
-  \item 业务侧：客服收到"订单已取消"工单时，不需要联系商家——状态机保证。
+  \item \texttt{order.cancelled} 下游绝对\textbf{不能}包含"通知商家发货"——商家收到"发货" $\to$ 真发货 $\to$ 用户没付款 $\to$ 商家亏运费 + 货损。
+  \item 合理下游：ES 删索引 / 库存对账 / 客服工单关闭 / 推送"订单已取消"。
+  \item \textbf{关键不变量}：\texttt{order.cancelled} 永远只对应 type=UnPaid（已 Paid 走 \texttt{order.refunded}）。
 \end{itemize}
-\vspace{2mm}
-\keypoint{关单不是简单的状态翻转，是触发\textbf{一组下游业务动作}的金融事件——\\
-谁该消费、谁不该消费，必须在事件设计时就定死。}
+\keypoint{关单是触发一组下游业务动作的金融事件——谁该消费、谁不该，事件设计时定死。}
 \vspace{1mm}
-\small \textbf{对账兜底}：凌晨低峰跑 \texttt{SUM(reserved)} vs \texttt{SUM(UnPaid.Num)}，偏差告警——双保险都漏时的最后一道闸。当前 gomall 运维 backlog 第 1 项，待落地。
+\small \textbf{对账兜底}：凌晨低峰跑 \texttt{SUM(reserved)} vs \texttt{SUM(UnPaid.Num)} 偏差告警，是双保险都漏时的最后一道闸（运维 backlog 第 1 项，待落地）。
 \srcnote{service/order\_cancel.go:40--50 outbox payload；repository/cache/inventory.go:127--138 对账入口}
 \end{frame}
 
@@ -289,15 +280,17 @@ outbox 发 N 条 cancelled & 下游收 N 次 & ES 删 N 次、商家通知 N 次
 % ============================================================
 
 \begin{frame}{遗留 1：三处时长口径不一致}
+{\small
 \begin{tabular}{@{}lll@{}}
 \toprule
 位置 & 数值 & 用途 \\
 \midrule
-\texttt{repository/rabbitmq/order\_delay.go:22} & 30min & RMQ TTL（业务关单时机）\\
-\texttt{service/order\_task.go:16} & 15min & Cron 扫表窗口（兜底安全余量）\\
+\texttt{order\_delay.go:22}      & 30min & RMQ TTL（业务关单时机）\\
+\texttt{order\_task.go:16}       & 15min & Cron 扫表窗口（兜底安全余量）\\
 \texttt{service/order.go:88--92} & 15min & Redis ZSet score 偏移 \\
 \bottomrule
 \end{tabular}
+}
 \vspace{2mm}
 \begin{itemize}
   \item 三处口径\textbf{业务含义不同}（关单时机 / 兜底窗口 / 内部排序），但都涉及"15min 这个数"。
@@ -317,33 +310,26 @@ outbox 发 N 条 cancelled & 下游收 N 次 & ES 删 N 次、商家通知 N 次
   \draw[arrow-bad] (svc) -- (sql);
   \draw[arrow,dashed] (svc) -- (correct);
 \end{tikzpicture}
-\vspace{2mm}
+\vspace{1mm}
 \begin{itemize}
-  \item \texttt{routes/router.go:81} 的 \texttt{orders/delete} 直接调 \texttt{OrderDelete} → \texttt{DeleteOrderById}（GORM 软删除）。
-  \item \textbf{漏了 release reservation 和 outbox 写}——用户"删除"未支付订单后，Redis 桶仍占着库存，下游 ES 不知道订单消失。
-  \item 这是一条\textbf{绕过关单链路}的捷径，建议要么对 UnPaid 改走 CancelUnpaidOrder，要么禁掉这个 endpoint。
+  \item \texttt{routes/router.go:81} 的 \texttt{orders/delete} 直接调 OrderDelete $\to$ DeleteOrderById（GORM 软删除）。
+  \item \textbf{漏了 release reservation 和 outbox 写}——Redis 桶仍占库存，下游 ES 不知道订单消失。
+  \item 建议要么对 UnPaid 改走 CancelUnpaidOrder，要么禁掉这个 endpoint。
 \end{itemize}
-\srcnote{routes/router.go:81；service/order.go:168--192 OrderDelete；repository/db/dao/order.go:149--154 DeleteOrderById}
+\srcnote{routes/router.go:81；service/order.go:168--192；repository/db/dao/order.go:149--154}
 \end{frame}
 
 \begin{frame}[fragile]{遗留 3：Cron 表达式 bug——意图 5min 一次, 实际 60 次}
 \begin{lstlisting}[language=Go,firstnumber=14,
-  caption={initialize/cron.go:14--23 当前代码},captionpos=b]
+  caption={initialize/cron.go:14--16 触发表达式},captionpos=b]
 c := cron.New(cron.WithSeconds())
 orderService := new(service.OrderTaskService)
-_, err := c.AddFunc("* */5 * * * *", func() {
-    defer func() {
-        if r := recover(); r != nil { /* ... */ }
-    }()
-    orderService.RunOrderTimeoutCheck()
-})
+_, err := c.AddFunc("* */5 * * * *", func() { /* ... */ })
 \end{lstlisting}
-\vspace{1mm}
 \begin{itemize}
-  \item 表达式 \texttt{* */5 * * * *} 含义是 "每月 / 每周日 / 每天 / 每 5 分钟 / 每分钟内每秒"——\textbf{即 5min 里每秒都触发 60 次}。
-  \item 业务意图是 "每 5 分钟跑一次"，正确写法是 \texttt{0 */5 * * * *}（秒位 = 0）。
-  \item 影响：Cron 调度器 5min 内调用 RunOrderTimeoutCheck 60 次，\textbf{DB 被无谓打了 60 倍}。
-  \item 幸运的是 CloseOrderWithCheck 幂等，没有功能性 bug——但成本暴涨且日志告警淹没。
+  \item 6 字段 cron \texttt{秒 分 时 日 月 周}：\texttt{* */5 * * * *} = 第 0/5/10/\dots 分钟里\textbf{每秒都触发}，5min 窗口内打 60 次。
+  \item 业务意图 "每 5 分钟跑一次"，正确写法 \texttt{0 */5 * * * *}（秒位 = 0）。
+  \item 影响：DB 被无谓打 60 倍 + 日志被淹没。功能层面靠 CloseOrderWithCheck 幂等没产生 bug。
 \end{itemize}
 \srcnote{initialize/cron.go:16；robfig/cron/v3 with-seconds 字段顺序}
 \end{frame}
@@ -388,12 +374,11 @@ _, err := c.AddFunc("* */5 * * * *", func() {
 \begin{itemize}
   \item 30 分钟不是延迟队列的 TTL 参数，是\textbf{商家、运营、风控、客服、财务}五方的合同。
   \item RMQ + Cron 不是技术冗余，是\textbf{业务承诺}：哪怕 RMQ 整个挂了，库存最多多锁 35min。
-  \item CancelUnpaidOrder 幂等不是为了"代码优雅"，是因为\textbf{真的有 4 个调用方}会并发触发。
-  \item 关单是金融事件，不是状态翻转——下游消费者必须设计成\textbf{不能给商家发货通知}。
-  \item 三处遗留（口径 / orders/delete / cron 表达式）说明：\textbf{业务承诺到代码的最后一公里需要持续打磨}。
+  \item CancelUnpaidOrder 幂等不是"代码优雅"，是因为\textbf{真的有 4 个调用方}并发触发。
+  \item 关单是金融事件——下游消费者必须设计成\textbf{不能给商家发货通知}。
+  \item 三处遗留（口径 / orders/delete / cron 表达式）说明业务承诺到代码的最后一公里需要持续打磨。
 \end{itemize}
-\keypoint{关单治理的核心不是"延迟队列怎么用"，是\textbf{把"30 分钟"这条业务线\\
-落到 6 条承诺 + 双保险机制 + 幂等 SQL 上}。}
+\keypoint{关单治理的核心是\textbf{把"30 分钟"落到 6 条承诺 + 双保险 + 幂等 SQL 上}。}
 \end{frame}
 
 % ============================================================
@@ -419,19 +404,19 @@ _, err := c.AddFunc("* */5 * * * *", func() {
 
 \begin{frame}{业务 Q\&A（下）}
 \textbf{Q5}：Cron 表达式 bug 为什么没人发现？\\
-\hspace{4mm}\small A：因为幂等关单 SQL 兜住了功能正确性——CloseOrderWithCheck 看到已 Cancelled 直接 RowsAffected=0。但 DB QPS 被无谓放大 60 倍，监控里能看出 SELECT type=UnPaid 异常高频。改成 \texttt{0 */5 * * * *} 即可。
+\hspace{4mm}\small A：幂等关单 SQL 兜住了功能正确性，但 DB QPS 被无谓放大 60 倍；监控里能看出 SELECT type=UnPaid 异常高频。改 \texttt{0 */5 * * * *} 即可。
 
 \vspace{2mm}
-\textbf{Q6}：为什么不直接用 Redis ZSet 做延迟队列，省掉 RMQ？\\
-\hspace{4mm}\small A：service/order.go:88--92 确实有 ZSet 但只用作内部状态。换成 ZSet 替代 RMQ 也行，但要自己写消费循环 + ack + 重试 + DLX——RMQ 把这些都打包了。当前业务量下 RMQ 性价比更高。
+\textbf{Q6}：为什么不直接用 Redis ZSet 替代 RMQ？\\
+\hspace{4mm}\small A：order.go:88--92 的 ZSet 只用作内部状态。换 ZSet 替代 RMQ 要自己写消费循环 + ack + 重试 + DLX——RMQ 已经打包好了，当前业务量性价比更高。
 
 \vspace{2mm}
 \textbf{Q7}：对账脚本什么时候上？\\
-\hspace{4mm}\small A：运维 backlog 第 1 项。当前依赖客服反馈兜底——商家投诉"库存对不上"才去查 GetStockSnapshot。不是好状态，需要补凌晨 cron。
+\hspace{4mm}\small A：运维 backlog 第 1 项。当前靠商家反馈"库存对不上"才查 GetStockSnapshot，不是好状态。
 
 \vspace{2mm}
-\textbf{Q8}：双保险设计能保证 100\% 不漏单吗？\\
-\hspace{4mm}\small A：不能。还有一条漏：DB tx 提交了 outbox 但 outbox publisher 挂了 → 下游 ES / 客服系统不知道关单。这就是为什么需要\textbf{对账}作为最终兜底。
+\textbf{Q8}：双保险能保证 100\% 不漏单吗？\\
+\hspace{4mm}\small A：不能。outbox 提交但 publisher 挂掉这条漏，仍要靠\textbf{对账}做最终兜底。
 \end{frame}
 
 \begin{frame}{代码位置一览}
