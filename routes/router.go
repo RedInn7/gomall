@@ -106,6 +106,12 @@ func NewRouter() *gin.Engine {
 				middleware.Idempotency(),
 				api.OrderPaymentHandler())
 
+			// Web3 钱包签名支付：先取 nonce，再带签名提交。链上确认由 listener 兜底
+			authed.GET("paydown/crypto/nonce", api.CryptoPaydownNonceHandler())
+			authed.POST("paydown/crypto",
+				middleware.Idempotency(),
+				api.CryptoPaydownHandler())
+
 			// 显示金额
 			authed.POST("money", api.ShowMoneyHandler())
 
