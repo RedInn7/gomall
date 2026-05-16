@@ -1,0 +1,502 @@
+\input{preamble}
+
+\title{Web3 支付：Escrow 托管 + 钱包签名 + 链上监听}
+\subtitle{gomall 把"第三方支付"换成"可审计代码"的工程链路}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{业务目的：传统支付吃不下的那批订单}
+% ============================================================
+
+\begin{frame}{为什么 gomall 引入 Web3 支付}
+\begin{itemize}
+  \item \textbf{加密原生用户}：DeFi 用户钱包里全是链上资产，刷卡通道用不上。
+  \item \textbf{跨境结算}：传统通道 1--3\% 手续费 + T+1 到账，跨境争议解决依赖银行 SWIFT。
+  \item \textbf{资金托管增信}：买卖双方互不信任的大额订单，把"中介"从银行换成审计过的合约。
+  \item \textbf{业务收益}：开新渠道，不是替代旧通道，跑在传统 \texttt{/paydown} 旁边。
+\end{itemize}
+\srcnote{routes/router.go:113--127 paydown（fiat）与 paydown/crypto（web3）平行挂载}
+\end{frame}
+
+\begin{frame}{传统第三方支付 vs Escrow 托管}
+\begin{tabular}{@{}lll@{}}
+\toprule
+维度 & 第三方支付 & Web3 escrow \\
+\midrule
+信任锚    & 银行 / 支付牌照     & 智能合约 + 链 \\
+结算时间  & T+0 / T+1           & 1 块 30--60s, 6 块 $\approx$ 90s \\
+跨境费用  & 1--3\%              & gas 固定 + 兑换损耗 \\
+退款主导  & 平台仲裁           & 合约 + 仲裁人 \\
+身份证明  & 实名 + 卡密         & 钱包私钥 EIP-191 签名 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small Web3 不替代第三方支付，而是\textbf{补齐}传统通道吃不下的订单。
+\srcnote{contracts/README.md:1--36 合约职责与状态机不变式}
+\end{frame}
+
+\begin{frame}{端到端 6 步链路}
+\begin{tikzpicture}[node distance=4mm and 8mm,font=\scriptsize]
+  \node[node-box] (w)   {1. 用户钱包};
+  \node[node-box,right=of w]   (be)  {2. 后端\\颁 nonce};
+  \node[node-box,right=of be]  (sig) {3. 钱包\\personal\_sign};
+  \node[node-box,below=of sig,node-warn] (vfy) {4. 后端验签\\+ outbox pending};
+  \node[node-box,left=of vfy] (esc) {5. 用户调合约\\fundWithOrderID};
+  \node[node-box,left=of esc] (evt) {6. 链上 emit\\PaymentConfirmed};
+  \node[node-box,below=of evt,node-ok] (lis) {listener 写 outbox\\confirmed};
+  \node[node-box,right=of lis] (ord) {订单推进\\Paid};
+  \draw[arrow] (w)   -- (be);
+  \draw[arrow] (be)  -- (sig);
+  \draw[arrow] (sig) -- (vfy);
+  \draw[arrow] (vfy) -- (esc);
+  \draw[arrow] (esc) -- (evt);
+  \draw[arrow] (evt) -- (lis);
+  \draw[arrow] (lis) -- (ord);
+\end{tikzpicture}
+\vspace{2mm}
+\small 钱进合约前订单永远 pending；钱进合约后由 listener 兜底推进，避免"先付款后失踪"。
+\srcnote{routes/router.go:123--127 GET paydown/crypto/nonce + POST paydown/crypto}
+\end{frame}
+
+% ============================================================
+\section{Escrow 合约：把"第三方"换成代码}
+% ============================================================
+
+\begin{frame}{Escrow 状态机：5 个状态、3 个角色}
+\begin{tikzpicture}[node distance=8mm and 14mm,font=\scriptsize]
+  \node[node-state,node-state-normal] (c) {Created};
+  \node[node-state,node-state-transition,right=of c] (f) {Funded};
+  \node[node-state,node-state-alert,right=of f] (d) {Disputed};
+  \node[node-state,node-state-normal,above right=4mm and 14mm of d] (rl) {Released\\seller};
+  \node[node-state,node-state-normal,below right=4mm and 14mm of d] (rf) {Refunded\\buyer};
+  \draw[arrow]       (c)  -- node[above,font=\tiny]{fund} (f);
+  \draw[arrow-alert] (f)  -- node[above,font=\tiny]{dispute} (d);
+  \draw[arrow]       (f.east) to[bend left=15]  node[above,font=\tiny]{release} (rl.west);
+  \draw[arrow]       (f.east) to[bend right=15] node[below,font=\tiny]{refund}  (rf.west);
+  \draw[arrow]       (d.east) to[bend left=15]  (rl.west);
+  \draw[arrow]       (d.east) to[bend right=15] (rf.west);
+\end{tikzpicture}
+\vspace{1mm}
+\small 不变式：\textbf{Created $\to$ Funded} 只能发生一次（\texttt{inState(Created)} 守卫）；
+\textbf{Funded / Disputed $\to$ Released | Refunded} 终态不可逆；
+所有 immutable 参数（buyer/seller/arbiter/amount）部署后无法改。
+\srcnote{contracts/Escrow.sol:13--19 enum；:68--82 fund/fundWithOrderID；:85--107 release/refund/dispute}
+\end{frame}
+
+\begin{frame}{合约状态 $\leftrightarrow$ 订单状态映射}
+\begin{tabular}{@{}lll@{}}
+\toprule
+合约状态     & 订单状态        & 触发动作 \\
+\midrule
+Created      & 已下单未支付    & 合约部署完成 \\
+Funded       & 已支付待发货    & 买家 \texttt{fundWithOrderID} \\
+（链下）     & 商家发货 / 物流 & 链下流程，不影响合约 \\
+Released     & 已完成          & 买家 / 仲裁人 \texttt{release} \\
+Refunded     & 已退款          & 卖家 / 仲裁人 \texttt{refund} \\
+Disputed     & 售后争议        & 买家或卖家 \texttt{dispute} \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 链上只记"钱在谁那里"；订单详情 / 物流 / 对账都在链下。\\
+合约的不变式 = 业务对外的最低承诺。
+\srcnote{contracts/README.md:31--36 合约不变式条款}
+\end{frame}
+
+\begin{frame}[fragile]{Escrow.sol 关键路径：fundWithOrderID}
+\begin{lstlisting}[language=Java,firstnumber=74,
+  caption={\srcnote{contracts/Escrow.sol:74--82 fundWithOrderID}}]
+function fundWithOrderID(bytes32 _orderID)
+    external payable onlyBuyer inState(State.Created)
+{
+    if (msg.value != amount) revert WrongAmount(amount, msg.value);
+    orderID = _orderID;
+    state = State.Funded;
+    emit Funded(msg.value);
+    emit PaymentConfirmed(_orderID, msg.sender, msg.value);
+}
+\end{lstlisting}
+\small \textbf{逐行解读}：
+\begin{itemize}
+  \item \texttt{onlyBuyer + inState(Created)}：只能 buyer 调，且只能在 Created 态调，状态机入口唯一。
+  \item \texttt{msg.value != amount}：链上强校验金额，少 1 wei 也 revert，业务侧零信任。
+  \item \texttt{orderID = \_orderID}：链下订单号写进 storage，listener 拿它 join 业务库。
+  \item \texttt{emit PaymentConfirmed}：\textbf{indexed orderID} 让 listener 只订一个 topic 就能精确过滤。
+\end{itemize}
+\end{frame}
+
+% ============================================================
+\section{钱包签名：EIP-191 personal\_sign + nonce 防重放}
+% ============================================================
+
+\begin{frame}{为什么不能把私钥交给后端}
+\begin{itemize}
+  \item 私钥 = 钱包的全部，给了后端就不再是"用户的钱包"。
+  \item 业界做法：后端给一段消息 $\to$ 钱包客户端内签 $\to$ 后端 \texttt{ecrecover} 反推地址。
+  \item 业务收益：
+  \begin{itemize}
+    \item \textbf{不可否认}：地址匹配 = 用户授权过；
+    \item \textbf{零私钥泄漏面}：签名发生在钱包客户端内部；
+    \item \textbf{防钓鱼}：消息明文人类可读，钱包弹窗能让用户看清自己在签什么。
+  \end{itemize}
+\end{itemize}
+\srcnote{pkg/web3/signature/verify.go:1--13 包注释设计意图}
+\end{frame}
+
+\begin{frame}{签名消息模板：chainID + orderID + nonce 全钉进去}
+\begin{tikzpicture}[node distance=3mm,font=\scriptsize]
+  \node[node-box,minimum width=80mm] (m) {\texttt{gomall:paydown:order=\{id\}:nonce=\{n\}:chain=\{cid\}}};
+  \node[node-box,below=of m,minimum width=80mm,node-warn] (h) {EIP-191: keccak256("\textbackslash x19Ethereum Signed Message:\textbackslash n<len>" + msg)};
+  \node[node-box,below=of h,minimum width=80mm,node-ok] (s) {ecrecover(hash, sig) $\to$ address \quad vs \quad 钱包地址};
+  \draw[arrow] (m) -- (h);
+  \draw[arrow] (h) -- (s);
+\end{tikzpicture}
+\vspace{1mm}
+\small
+\begin{itemize}
+  \item \textbf{chainID 入消息}：防一条签名在 mainnet / L2 之间互通造成跨链重放。
+  \item \textbf{orderID + nonce}：绑定订单 + 防同链重放。
+  \item \textbf{前缀 \texttt{gomall:paydown:}}：让用户在钱包弹窗里识别"我在给 gomall 付款"。
+  \item \textbf{v 值归一}：钱包 27/28，go-ethereum 还原 pubkey 要 0/1，必须归一。
+\end{itemize}
+\srcnote{service/payment\_crypto.go:39--46 signMessageTemplate}
+\srcnote{pkg/web3/signature/verify.go:31--67 VerifyPersonalSign}
+\end{frame}
+
+\begin{frame}{验签时序：4 拍完成"是不是这个钱包"}
+\begin{tikzpicture}[node distance=8mm and 14mm,font=\scriptsize]
+  \node (cli) {Wallet};
+  \node[right=30mm of cli] (be) {Backend};
+  \draw[lifeline] (cli) -- ++(0,-4.5);
+  \draw[lifeline] (be)  -- ++(0,-4.5);
+  \node[font=\tiny] at ($(cli)+(0,-0.6)$)  (a1) {};
+  \node[font=\tiny] at ($(be)+(0,-0.6)$)   (a2) {};
+  \draw[arrow] (a2) -- (a1) node[midway,above,font=\tiny]{1. nonce + msg 模板};
+  \node[font=\tiny] at ($(cli)+(0,-1.4)$)  (b1) {};
+  \node[font=\tiny] at ($(be)+(0,-1.4)$)   (b2) {};
+  \draw[arrow] (b1) -- (b2) node[midway,above,font=\tiny]{2. addr + sig};
+  \node[font=\tiny] at ($(be)+(0,-2.2)$)   (c2) {};
+  \node[font=\tiny,right=2mm of c2] {3. keccak256(prefix+msg) $\to$ ecrecover $\to$ addr};
+  \node[font=\tiny] at ($(be)+(0,-3.0)$)   (d2) {};
+  \node[font=\tiny] at ($(cli)+(0,-3.0)$)  (d1) {};
+  \draw[arrow] (d2) -- (d1) node[midway,above,font=\tiny]{4. accept / W3-SIG-INVALID};
+\end{tikzpicture}
+\vspace{1mm}
+\small 全过程后端不接触私钥；签名失败 $\to$ \texttt{W3-SIG-INVALID}；nonce 失效 $\to$ \texttt{W3-NONCE-EXPIRED}。
+\srcnote{service/payment\_crypto.go:104--124 VerifyAndPark 第 1--2 段}
+\end{frame}
+
+\begin{frame}[fragile]{VerifyPersonalSign：EIP-191 + ecrecover 12 行}
+\begin{lstlisting}[language=Go,firstnumber=31,
+  caption={\srcnote{pkg/web3/signature/verify.go:31--67}}]
+func VerifyPersonalSign(addr string, msg []byte, sig []byte) (bool, error) {
+    if len(sig) != personalSigLen { return false, fmt.Errorf("...") }
+    if !common.IsHexAddress(addr) { return false, errors.New("...") }
+    rsv := make([]byte, personalSigLen)
+    copy(rsv, sig)
+    switch rsv[64] {
+    case 27, 28: rsv[64] -= 27
+    case 0, 1:   // already normalized
+    default:     return false, fmt.Errorf("非法 v 值: %d", rsv[64])
+    }
+    hash := personalSignHash(msg)             // EIP-191 prefix + keccak256
+    pubKey, err := crypto.SigToPub(hash, rsv) // ecrecover
+    if err != nil { return false, err }
+    recovered := crypto.PubkeyToAddress(*pubKey)
+    expected  := common.HexToAddress(addr)
+    return bytes.Equal(recovered.Bytes(), expected.Bytes()), nil
+}
+\end{lstlisting}
+\small \textbf{逐行}：长度 65 (r+s+v) 必须严格；地址 hex 校验阻拦明显非法输入；拷贝 rsv 避免污染调用方 slice；v 归一兼容钱包/go-ethereum 两种语义；\texttt{personalSignHash} 内部 \texttt{"\textbackslash x19Ethereum Signed Message:\textbackslash n"+len+msg} 前缀 + keccak256；\texttt{SigToPub} = ecrecover；最后 byte-level 比对地址（\texttt{HexToAddress} 自带 EIP-55 checksum 规整，大小写无关）。
+\end{frame}
+
+\begin{frame}[fragile]{IssueNonce + VerifyAndPark 主流程拼图}
+\small Redis key \texttt{web3:nonce:\{userID\}:\{orderID\}}（用户 + 订单双维度）TTL 5min；二次签发自动覆盖旧 nonce；消费走 Lua \texttt{GET+DEL}（server 端原子，并发只能一个拿到 1）；Pending 占位 \texttt{paydown:web3:pending:\{orderID\}} TTL 30min。
+\srcnote{repository/cache/web3.go:21--26 TTL；:60--89 consumeNonceScript}
+\vspace{1mm}
+\begin{lstlisting}[language=Go,firstnumber=49,
+  caption={\srcnote{service/payment\_crypto.go:49--148 节选}}]
+// IssueNonce: 校验订单归属 + 状态 + 颁发
+order, _ := dao.NewOrderDao(ctx).GetOrderById(req.OrderId, u.Id)
+if order.Type != consts.UnPaid { return errors.New("订单状态非未支付") }
+nonce, _ := randomNonce()                          // 16 字节 -> 32 hex
+cache.PutWeb3Nonce(ctx, u.Id, req.OrderId, nonce)  // SET + 5min TTL
+
+// VerifyAndPark: 消费 nonce -> 验签 -> 事务内写 outbox
+if err := cache.ConsumeWeb3Nonce(ctx, u.Id, req.OrderID, req.Nonce); err != nil {
+    return err  // -1 missing / -2 mismatch -> W3-NONCE-EXPIRED
+}
+msg := []byte(BuildSignMessage(req.OrderID, req.Nonce, req.ChainID))
+ok, _ := web3sig.VerifyPersonalSign(req.WalletAddr, msg, sigBytes)
+if !ok { return errors.New("签名与钱包地址不匹配") } // W3-SIG-INVALID
+
+err = dao.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
+    return dao.NewOutboxDaoByDB(tx).Insert(
+        "order", "Web3PaymentPending", "web3.payment.pending", order.ID,
+        events.Web3PaymentPending{ OrderID: order.ID, WalletAddr: walletAddr, ... })
+})
+cache.SetWeb3Pending(ctx, order.ID, walletAddr) // 占位 30min
+\end{lstlisting}
+\small \textbf{逐行}：先 ConsumeNonce（一旦通过 nonce 立即消失，第二次必失败 = 防重放）$\to$ 用同一份 \texttt{chainID/orderID/nonce} 还原签名消息 $\to$ \texttt{VerifyPersonalSign} 返回 false 立刻拒；通过后用 \textbf{Gorm 事务}把 outbox 写入和业务校验绑定（要么都成功要么都回滚）；\texttt{SetWeb3Pending} 失败只警告不阻塞，outbox 已经把事件落了。
+\end{frame}
+
+% ============================================================
+\section{链上对账：链是异步的}
+% ============================================================
+
+\begin{frame}{链是异步的：4 个时间锚点}
+\begin{tikzpicture}[font=\scriptsize]
+  \draw[arrow,thick] (0,0) -- (11,0);
+  \foreach \x/\name in {0.5/调用,3/打包,6/上链,9/N 确认} {
+    \draw[cMain] (\x,-0.1) -- (\x,0.15);
+    \node[font=\tiny,above,cMain] at (\x,0.15) {\name};
+  }
+  \node[font=\tiny,below,cGray] at (0.5,-0.1) {0s};
+  \node[font=\tiny,below,cGray] at (3,-0.1)   {12--15s};
+  \node[font=\tiny,below,cGray] at (6,-0.1)   {30--60s};
+  \node[font=\tiny,below,cGray] at (9,-0.1)   {6 块 $\approx$ 90s};
+\end{tikzpicture}
+\vspace{4mm}
+\begin{itemize}
+  \item \textbf{0s 调用}：钱包广播 tx 到内存池。
+  \item \textbf{12--15s 打包}：validator 把 tx 装进区块。
+  \item \textbf{30--60s 1 确认}：业务可显示"已上链"。
+  \item \textbf{90s 6 确认}：抗 reorg，金额越大 N 越大（大额 12--20 块）。
+\end{itemize}
+\small 链下到链上不是同步调用；用户体验走 ticket 模式：返回 \texttt{W3-PENDING} + 客服话术"等待区块确认（约 30--60s）"。
+\srcnote{service/web3/listener.go:177--230 connectAndServe head 推进}
+\end{frame}
+
+\begin{frame}{listener 的 3 项基本功：重连 / catch-up / 幂等}
+\begin{tikzpicture}[node distance=6mm and 10mm,font=\scriptsize]
+  \node[node-box] (rpc) {RPC};
+  \node[node-box,right=of rpc,node-warn] (sub) {Subscribe (WS)\\head+1 起};
+  \node[node-box,below=of sub] (cu)  {catch-up\\FilterLogs\\(last+1, head)};
+  \node[node-box,right=of sub,node-ok] (dd) {dedupe SETNX\\72h TTL};
+  \node[node-box,right=of dd]  (ob) {outbox\\confirmed};
+  \node[node-box,below=of dd]  (lb) {last\_block\\Redis};
+  \draw[arrow] (rpc) -- (sub);
+  \draw[arrow] (rpc) -- (cu);
+  \draw[arrow] (sub) -- (dd);
+  \draw[arrow] (cu)  -- (dd);
+  \draw[arrow] (dd)  -- (ob);
+  \draw[arrow-async] (dd.south) -- (lb.north);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 启动 / 重连后先 \texttt{catchUp(last+1, head)} 把停机漏掉的事件批量回放。
+  \item 每条 log 落 outbox 前过 \texttt{web3:event:\{txhash\}:\{logIdx\}} SETNX 72h 幂等。
+  \item 处理一条就 \texttt{saveLastBlock}，重启不重做已成功事件。
+  \item 重连退避：\textbf{1s $\to$ 2s $\to$ 4s $\to$ \ldots $\to$ 60s 封顶}，连上后 reset。
+\end{itemize}
+\srcnote{service/web3/listener.go:232--248 catchUp；:296--301 dedupeKey；:316--326 tryClaim}
+\srcnote{service/web3/listener.go:25--31 eventDedupeTTL=72h；:364--377 backoff}
+\end{frame}
+
+\begin{frame}[fragile]{StartPaymentListener 主循环 + connectAndServe}
+\begin{lstlisting}[language=Go,firstnumber=177,
+  caption={\srcnote{service/web3/listener.go:177--230 connectAndServe}}]
+client, _ := l.dial(ctx, l.rpcURL)
+defer client.Close()
+head, _ := client.BlockNumber(ctx)
+last := l.loadLastBlock(ctx)
+if last == 0 || last > head { last = head }
+if last < head {
+    l.catchUp(ctx, client, last+1, head)   // 回放停机期间漏掉的事件
+}
+l.saveLastBlock(ctx, head)
+logsCh := make(chan types.Log, subscribeBuffer)   // = 64
+sub, _ := client.SubscribeFilterLogs(ctx,
+    l.query(big.NewInt(int64(head+1)), nil), logsCh)
+defer sub.Unsubscribe()
+l.backoff.reset()                                // 连上立即清退避
+for {
+    select {
+    case <-ctx.Done():    return ctx.Err()
+    case err := <-sub.Err(): return err           // -> 外层重连
+    case lg := <-logsCh:
+        if lg.Removed { continue }                // reorg 撤销，跳过
+        if err := l.handleLog(ctx, lg); err != nil { continue }
+        l.saveLastBlock(ctx, lg.BlockNumber)
+    }
+}
+\end{lstlisting}
+\small \textbf{逐行}：dial 失败由外层 \texttt{run()} 走指数退避重试；\texttt{BlockNumber} 拿到当前头；\texttt{last\_block} 缓存（key \texttt{web3:listener:last\_block}）兜底进程重启；catch-up 走 \texttt{FilterLogs}（HTTP 一次拉历史），订阅走 \texttt{SubscribeFilterLogs}（WS 持续推）；\texttt{lg.Removed} 是 reorg 信号，依赖 SETNX 幂等兜底就好；每条 log 处理完才 \texttt{saveLastBlock}，确保进度只前进不后退。
+\end{frame}
+
+\begin{frame}{容错矩阵：reorg / 重启 / 重复 / RPC 断}
+\begin{tabular}{@{}lll@{}}
+\toprule
+异常        & listener 行为                          & 业务影响 \\
+\midrule
+RPC 断连    & backoff 1s $\to$ 60s 指数重连          & 短暂延迟，不掉单 \\
+进程重启    & loadLastBlock 后 catchUp(last+1, head) & 不掉单 \\
+log.Removed & reorg 撤销，跳过                       & 依赖 SETNX 兜底 \\
+重复事件    & SETNX 72h key 已存在 return            & 不重复推进订单 \\
+RPC 慢      & Subscribe 不阻塞主流程，buffer=64      & log 缓冲，不丢 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 复用 deck 04 outbox 总线：listener 写入 \texttt{web3.payment.confirmed}，与传统支付的 \texttt{order.paid} 走同一条总线，对账可复用。
+\srcnote{service/web3/listener.go:155--175 run() 退避重连；:218--221 reorg 跳过}
+\srcnote{service/web3/listener.go:296--301 dedupeKey 72h；:303--311 outbox.Insert}
+\end{frame}
+
+\begin{frame}{链下 vs 链上时间线对比 + ticket UX}
+\begin{tikzpicture}[font=\scriptsize]
+  \draw[cMain,thick] (0,1.2) -- (11,1.2);
+  \node[font=\tiny,left,cMain] at (0,1.2) {fiat};
+  \foreach \x/\name in {0.5/调用,2/网关,3.5/回调,5/Paid} {
+    \draw[cMain] (\x,1.1) -- (\x,1.3);
+    \node[font=\tiny,above,cMain] at (\x,1.3) {\name};
+  }
+  \node[font=\tiny,below,cGray] at (5,1.0) {< 5s 全链路};
+  \draw[cAccent,thick] (0,0) -- (11,0);
+  \node[font=\tiny,left,cAccent] at (0,0) {web3};
+  \foreach \x/\name in {0.5/签名,2/广播,5/打包,8/1 确认,10/6 确认} {
+    \draw[cAccent] (\x,-0.1) -- (\x,0.1);
+    \node[font=\tiny,above,cAccent] at (\x,0.1) {\name};
+  }
+  \node[font=\tiny,below,cGray] at (8,-0.1) {30--60s};
+  \node[font=\tiny,below,cGray] at (10,-0.1) {$\approx$ 90s};
+\end{tikzpicture}
+\vspace{2mm}
+\small Web3 不可能"秒级到账"。业务侧 UX 走 ticket 模式：钱包签名后立即返回 \texttt{W3-PENDING} + ticket\#，前端轮询订单状态；1 确认前不发货，6 确认（大额 12+）才走 release；客服话术 \texttt{W3-PENDING} = "等待区块确认（约 30--60s）"，不是失败。
+\end{frame}
+
+% ============================================================
+\section{业务边界：业务码 / 角色 / 合规}
+% ============================================================
+
+\begin{frame}{Web3 业务码 + 客服话术}
+\begin{tabular}{@{}lll@{}}
+\toprule
+业务码            & 含义                    & 客服话术 \\
+\midrule
+W3-NONCE-EXPIRED  & nonce 5min 过期或被消费 & "请重新发起支付" \\
+W3-SIG-INVALID    & 签名地址与提交不匹配    & "请用绑定钱包重试" \\
+W3-PENDING        & 链上未确认              & "等待区块确认（约 30--60s）" \\
+W3-REORG          & 链上 reorg 撤销         & "网络回滚，已自动退款" \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 业务码不暴露技术细节，但要给客服\textbf{足够区分}的话术。\\
+\texttt{W3-PENDING} 与 \texttt{W3-NONCE-EXPIRED} 表面像，应对策略完全不同：前者等链确认，后者重发 nonce。
+\srcnote{repository/cache/web3.go:29--33 ErrWeb3NonceMissing / ErrWeb3NonceMismatch}
+\end{frame}
+
+\begin{frame}{各角色关心什么}
+\begin{tabular}{@{}lll@{}}
+\toprule
+角色   & 关心               & 看哪里 \\
+\midrule
+用户   & 钱安全吗            & 合约审计报告 + 多签 + 退款流程 \\
+商家   & 何时到账            & 链上确认数 + release 时机 \\
+客服   & 链上失败咋办        & W3-* 业务码对应处理 SOP \\
+SRE    & 节点稳定否          & RPC 多源切换 + listener 健康 \\
+法务   & 合规边界            & KYC + 多签 + 司法管辖 \\
+财务   & 链上链下并存对账     & outbox + 链上事件 + 法币入账 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \texttt{outbox} 总线让财务对账拿到\textbf{统一格式}的事件：channel = fiat / web3-eth / web3-usdc，按 \texttt{order\_id} 维度 join。\\
+\textbf{业务边界}：链 / 币 / gas 三选一组合，MVP 推荐 \textbf{L2 + 稳定币 + 用户自付 gas}；正式运营后逐步上 gas 补贴 + 多链路由。
+\srcnote{contracts/README.md:88--103 多签建议；service/payment\_crypto.go:41 多 chainID 接口}
+\end{frame}
+
+\begin{frame}{风险与合规 + Arbiter 多签升级路线图}
+\small
+\begin{itemize}
+  \item \textbf{合约 immutable}：bug 只能换合约；缓解：第三方审计 + 充分单测。
+  \item \textbf{私钥丢失}：链上无"重置密码"；缓解：仲裁人核实身份后 refund 到新地址。
+  \item \textbf{gas 飙升}：mainnet 拥堵 tx 失败；缓解：默认 L2，fallback mainnet。
+  \item \textbf{Reorg}：浅确认下 release 可能撤销；缓解：大额提高 N 确认 + outbox 兜底。
+  \item \textbf{AML / OFAC}：制裁名单地址必须拒绝；缓解：验签阶段地址过滤。
+\end{itemize}
+\vspace{1mm}
+\begin{tabular}{@{}lll@{}}
+\toprule
+阶段 & arbiter 形态  & 适用金额上限 \\
+\midrule
+MVP  & 平台 EOA     & 等值 \$100 以内 \\
+2    & 2-of-3 多签  & 等值 \$10{,}000 以内（Gnosis Safe） \\
+3    & DAO 治理     & 超大额 / 跨组织 \\
+\bottomrule
+\end{tabular}
+\srcnote{service/web3/listener.go:218--221 reorg 跳过；contracts/README.md:88--103 arbiter 多签}
+\end{frame}
+
+\begin{frame}{从技术决策回看业务依据 + 最终目标}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+技术选择                        & 业务依据 \\
+\midrule
+EIP-191 personal\_sign          & 钱包弹窗让用户看到明文，钓鱼可识别 \\
+nonce 走 Redis + Lua            & 防重放门槛要原子，单实例语义不够 \\
+chainID 入签名消息              & 防 mainnet / L2 跨链重放 \\
+合约 emit PaymentConfirmed       & listener 订一个 event 就能精确对账 \\
+listener 写 outbox 而非直推订单 & 复用 deck 04 的最终一致体系 \\
+SETNX 72h 事件级幂等            & reorg / 重连 / 重启不会重复推进 \\
+arbiter 走多签路线              & 单签平台跑路风险无法对外解释 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\keypoint{业务价值不在"潮"，而在于\textbf{把"第三方"从"中介机构"换成"可审计的代码"}。}
+\srcnote{routes/router.go:123--127 Web3 路由接入位}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{面试 Q\&A（上）}
+\textbf{Q1}：链 reorg 把已 release 的资金撤销了怎么办？\\
+\hspace{4mm}\small A：金额越大 N 确认越多（大额至少 12--20 块）；listener 监听 \texttt{lg.Removed} 跳过 reorg log，订单状态不会被错误推进；已发货走对账兜底 + 仲裁人介入。
+
+\vspace{2mm}
+\textbf{Q2}：用户钱包私钥丢了订单怎么处理？\\
+\hspace{4mm}\small A：链上没有"重置密码"。资金在 Funded 态可由仲裁人核实身份后 refund 到新地址；已 Released 给商家则只能走链下补偿。
+
+\vspace{2mm}
+\textbf{Q3}：gas 飙升导致用户支付 tx 失败怎么补救？\\
+\hspace{4mm}\small A：默认路由到 L2；nonce 5min 内允许用户重新提交带更高 gas 的 tx；超时则重新颁发 nonce + 签名。
+\end{frame}
+
+\begin{frame}{面试 Q\&A（下）}
+\textbf{Q4}：和传统第三方支付的对账如何并存？\\
+\hspace{4mm}\small A：两条通道都把支付事件落到同一条 outbox 总线，事件加 channel 字段（fiat / web3-eth / web3-usdc）。对账任务按 \texttt{order\_id} join 法币入账 + 链上 confirmed event。
+
+\vspace{2mm}
+\textbf{Q5}：为什么 nonce 必须后端发，前端自己生成不行吗？\\
+\hspace{4mm}\small A：前端可生成的 nonce 后端没法保证唯一性也没法做时效控制；攻击者拿到一次有效签名后可无限重放。后端 Redis + Lua 原子 GET+DEL 才能保证"一次性"。
+
+\vspace{2mm}
+\textbf{Q6}：listener 进程重启会不会丢事件？\\
+\hspace{4mm}\small A：不会。\texttt{loadLastBlock} 从 Redis 拿到最后处理过的块号，\texttt{catchUp(last+1, head)} 用 \texttt{FilterLogs} 批量回放停机期漏掉的事件，再叠加 SETNX 72h 幂等，重启不会重做也不会丢做。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\small
+\begin{description}
+  \item[Escrow 合约 + 状态机]\srcnote{contracts/Escrow.sol:7--113}
+  \item[钱包验签 EIP-191]\srcnote{pkg/web3/signature/verify.go:31--82}
+  \item[Nonce 颁发 + 验签业务]\srcnote{service/payment\_crypto.go:49--160}
+  \item[Web3 Redis 协议（nonce/pending）]\srcnote{repository/cache/web3.go:21--101}
+  \item[链上 listener]\srcnote{service/web3/listener.go:108--326}
+  \item[退避重连]\srcnote{service/web3/listener.go:360--377 backoff 1s$\to$60s}
+  \item[路由接入位]\srcnote{routes/router.go:123--127}
+  \item[合约部署 / 多签建议]\srcnote{contracts/README.md:1--104}
+\end{description}
+\keypoint{现状：合约 + binding 在 feat/web3-escrow PR；\textbf{未上链}，上线前需第三方审计。}
+\end{frame}
+
+\end{document}
