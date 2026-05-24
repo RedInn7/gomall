@@ -1,7 +1,7 @@
 \input{preamble}
 
-\title{商品搜索：从 LIKE 到 ES + Milvus hybrid}
-\subtitle{用代码 + 业务双视角讲清 gomall 的搜索全链路}
+\title{商品搜索：从业务漏斗倒推技术选型}
+\subtitle{用 LIKE / ES / ES + Milvus 三档能力，撑住 gomall 最宽的一跳入口}
 \author{gomall · deck 03 (v2 expanded)}
 \date{}
 
@@ -14,10 +14,41 @@
 \end{frame}
 
 % ============================================================
-\section{搜索是流量入口，不是普通功能}
+\section{业务定位：搜索是漏斗最宽一跳}
 % ============================================================
 
-\begin{frame}{用户进站后第一件事就是搜}
+\begin{frame}{先回答一个业务问题：为什么搜索值得单独立项}
+\begin{itemize}
+  \item 用户进站后的\textbf{第一动作}：60\% 直接点搜索框 —— 比类目、推荐、首页 Banner 都靠前。
+  \item C 端体感最直接：搜不到 = 没卖；搜偏 = 货架乱；搜慢 = 应用卡。三种坏体验都是\textbf{秒级流失}。
+  \item 商家 KPI 锚点：商家上架的下一秒，最关心的事是"我的货搜得到吗"。
+  \item 运营 GMV 杠杆：召回 / 排序 / 加权三个旋钮，任一动 1\% CTR，对应今日 GMV 涨跌都是六位数。
+\end{itemize}
+\keypoint{搜索系统的对外契约同时绑定 4 个角色 KPI，不是普通"功能页"，而是\textbf{业务入口}。}
+\srcnote{routes/router.go:41 /product/search 关键词入口；:42 /product/semantic-search hybrid 入口}
+\end{frame}
+
+\begin{frame}{五角色对"搜索"四件事的关心}
+\begin{tabular}{@{}lll@{}}
+\toprule
+角色      & 关心的事                                       & 在 gomall 的对应能力                  \\
+\midrule
+C 端用户   & 搜得到 / 搜得准 / 搜得快                       & ES + Milvus hybrid / p95 < 200ms     \\
+商家      & "我的货 5min 内搜得到吗"                       & outbox + indexer 5min SLA            \\
+运营      & "今日特卖能不能强插第一屏"                     & function\_score / 字段加权 / boost   \\
+客服      & "用户说搜不到，给个交代"                       & 业务码 + 兜底 LIKE + 重建命令         \\
+SRE      & "ES 挂了主站会不会一起挂"                      & 静默降级 + 三档降级树                \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 4 件事并不矛盾：用户要"准"、商家要"快"、运营要"调"、客服要"答"、SRE 要"稳"。
+  \item 后面 35 页都是围绕这五个角色拆开讲。
+\end{itemize}
+\srcnote{业务码表 pkg/e/code.go:46--58（50001 / 60002 / 70001 / 70002）}
+\end{frame}
+
+\begin{frame}{用户漏斗：每一跳的业务意义}
 \begin{tikzpicture}[node distance=4mm and 9mm]
   \node[node-box]                            (home) {首页\\100\%};
   \node[node-box,right=of home]              (sch)  {搜索框\\$\sim$60\%};
@@ -32,19 +63,42 @@
 \end{tikzpicture}
 \vspace{2mm}
 \begin{itemize}
-  \item 进站用户里约 60\% 会主动用搜索，是漏斗最宽的一跳。
-  \item "搜不到 / 搜偏" 用户不会换词，直接退出 App。
-  \item 入口处的相关性，决定后面三跳还能不能继续。
+  \item \textbf{首页 $\to$ 搜索框 (100\% $\to$ 60\%)}：用户主动表达意图，是\textbf{高价值流量}。
+  \item \textbf{搜索框 $\to$ 列表 (60\% $\to$ 45\%)}：列表 0 命中 / 空页 $\to$ 这一跳直接断。
+  \item \textbf{列表 $\to$ 详情 (45\% $\to$ 18\%)}：排序差 / 缩略图差 $\to$ 用户翻三页就退出。
+  \item \textbf{详情 $\to$ 下单 (18\% $\to$ 3\%)}：搜索质量决定"用户看到的是不是想要的"。
 \end{itemize}
-\srcnote{routes/router.go:41 /product/search 是入口；:42 /product/semantic-search 是 hybrid 入口}
+\srcnote{stressTest/REPORT.md：/product/show 同库 PK 查询 62{,}226 RPS / p95 3ms 为时延锚点}
+\end{frame}
+
+\begin{frame}{搜不到 = GMV 静默漏走（定量算账）}
+\textbf{假设} ：日 UV 100 万 / 客单 200 元 / 当前漏斗系数 = 60\% × 75\% × 40\% × 17\% = 3.06\%
+\vspace{1mm}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+召回率变化         & 漏斗系数      & 日 GMV 影响      \\
+\midrule
+基线 100\%        & 3.06\%       & 612 万          \\
+召回 -1pp $\to$ 99\% & 3.03\%       & -6 万 / 日      \\
+召回 -5pp $\to$ 95\% & 2.91\%       & \textbf{-30 万 / 日} \\
+召回 -10pp $\to$ 90\% & 2.76\%       & \textbf{-60 万 / 日} \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 召回率每损 1pp，下游所有跳都按比例缩水 —— \textbf{杠杆效应明显}。
+  \item ES 不上中文分词、Milvus 不接长尾语义，召回率直接掉到 60\%--80\% 区间。
+  \item 这就是为什么 hybrid 检索值得花成本：不是炫技，是\textbf{止损}。
+\end{itemize}
+\srcnote{service/search/semantic.go:1--56 hybrid 主入口与默认权重}
 \end{frame}
 
 \begin{frame}{业务对搜索的四条硬约定}
 \begin{itemize}
-  \item \textbf{召回}：用户搜得到的词，能跑出至少一条相关结果。
-  \item \textbf{时延}：p95 < 200ms，列表页才不会"卡半秒空白"。
-  \item \textbf{新鲜度}：商家上架 $\to$ 站内可搜，SLA $\le$ 5min。
-  \item \textbf{兜底}：ES 挂掉，搜索接口不能 5xx，必须有降级路径。
+  \item \textbf{召回}：用户搜得到的词，能跑出至少一条相关结果（C 端）。
+  \item \textbf{时延}：p95 < 200ms，列表页才不会"卡半秒空白"（C 端）。
+  \item \textbf{新鲜度}：商家上架 $\to$ 站内可搜，SLA $\le$ 5min（商家）。
+  \item \textbf{兜底}：ES 挂掉，搜索接口\textbf{不能 5xx}，必须有降级路径（SRE / 客服）。
 \end{itemize}
 \vspace{2mm}
 \keypoint{这四条决定了搜索系统不能只是 \texttt{SELECT * WHERE name LIKE '\%kw\%'}。}
@@ -66,6 +120,7 @@
   \item 用户脑里是中文，商家上架习惯写英文型号。
   \item LIKE 不知道"苹果 == Apple == iPhone"，子串不匹配 = 0 命中。
   \item 这不是用户拼错，是搜索系统欠用户一个"分词 + 同义"能力。
+  \item 业务后果：每天数万次"明明有货却 0 结果"的搜索，全部计入\textbf{静默流失}。
 \end{itemize}
 \srcnote{repository/db/dao/product.go:80--98 是当前 DB 兜底用的 LIKE 实现}
 \end{frame}
@@ -78,16 +133,17 @@
 product 表行数              & 956K 行  \\
 product 表磁盘大小          & 364 MB   \\
 LIKE \texttt{'\%X\%'} 能走索引？ & 否（前缀通配） \\
-全表扫预估单 query 耗时      & 秒级     \\
+\texttt{/product/list} 全表 count 实测 & \textbf{24.5 RPS / p95 2.50s} \\
 \bottomrule
 \end{tabular}
 \vspace{3mm}
 \begin{itemize}
   \item \texttt{LIKE '\%kw\%'} 前缀是通配符，B+ 树用不上，必扫全表。
   \item 96 万行 + 364 MB 数据，单查就吃满一颗 CPU。
-  \item 对照：同库 \texttt{/product/show} 走主键命中 \textbf{62{,}226 RPS / p95 3ms}。
+  \item 对照：同库 \texttt{/product/show} 走主键命中 \textbf{62{,}226 RPS / p95 3ms} —— \textbf{2{,}500 倍差距}。
+  \item 业务感知：列表页转圈 2.5s，用户直接退出，转化率掉 15--30\%。
 \end{itemize}
-\srcnote{stressTest/REPORT.md \S 数据规模 + 链路压测表第 1 行}
+\srcnote{stressTest/REPORT.md：product 956K 行 / 364MB；/product/list 24.5 RPS / 2.50s 反例；/product/show 62{,}226 RPS / 3ms 锚点}
 \end{frame}
 
 \begin{frame}{LIKE 缺的三件事，全是业务能力}
@@ -102,17 +158,17 @@ LIKE \texttt{'\%X\%'} 能走索引？ & 否（前缀通配） \\
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
-  \item 分词决定召回，字段加权决定排序，高亮决定点击率。
+  \item 分词决定召回，字段加权决定排序，高亮决定点击率 —— 三件事都是\textbf{业务旋钮}。
   \item 三件事任一缺失，"搜索"就退化成"碰运气包含"。
   \item 这才是 gomall 换 ES 的业务动机，不是图组件新潮。
 \end{itemize}
 \end{frame}
 
 % ============================================================
-\section{ES 集群、索引设计与排序}
+\section{ES 升级：从词重合到相关性，给商家与运营留旋钮}
 % ============================================================
 
-\begin{frame}{ES 替 LIKE 做什么}
+\begin{frame}{ES 替 LIKE 做什么（业务视角）}
 \begin{tikzpicture}[node distance=6mm and 12mm]
   \node[node-box]                            (q)   {用户输入\\\textit{苹果手机}};
   \node[node-box,right=of q,node-warn]       (an)  {分词\\\textit{苹果} / \textit{手机}};
@@ -126,9 +182,9 @@ LIKE \texttt{'\%X\%'} 能走索引？ & 否（前缀通配） \\
 \end{tikzpicture}
 \vspace{2mm}
 \begin{itemize}
-  \item \textbf{分词}：按词切（中文走 IK 或 standard fallback）。
-  \item \textbf{倒排索引}：term 直接索引到 doc 列表，避开全表扫。
-  \item \textbf{打分}：\texttt{multi\_match} + 字段加权，name \textgreater{} title \textgreater{} info。
+  \item \textbf{分词}：召回不再"碰运气"，"苹果手机" 中"手机"二字命中 iPhone 13。
+  \item \textbf{倒排索引}：单 query 毫秒级返回，p95 落进 200ms 业务 SLA。
+  \item \textbf{打分 + 字段加权}：运营第一次拿到"调权"旋钮，无需上线即可调首屏。
 \end{itemize}
 \srcnote{repository/es/product\_index.go:163--227 SearchProductsWithScore 多字段加权查询}
 \end{frame}
@@ -147,7 +203,7 @@ LIKE \texttt{'\%X\%'} 能走索引？ & 否（前缀通配） \\
 \begin{itemize}
   \item 用户搜 "iPhone"，"标题就叫 iPhone 13" 应当排在"info 提到 iPhone"前面。
   \item 加权由运营调，不是开发拍。大促可临时把 \texttt{title} 上调到 $\times 4$。
-  \item 不加权 $\to$ "标签店家把热词塞进 info" 会霸占第一屏。
+  \item 不加权 $\to$ "标签店家把热词塞进 info" 会霸占第一屏 $\to$ 用户骂"全是广告"。
 \end{itemize}
 \srcnote{repository/es/product\_index.go:174--177 \texttt{fields=\{name\^{}3,title\^{}2,info\}}}
 \end{frame}
@@ -176,118 +232,98 @@ q := map[string]any{
 \srcnote{repository/es/product\_index.go:170--191 关键片段}
 \end{frame}
 
-\begin{frame}{代码段 1 逐行讲解}
+\begin{frame}{代码段 1 逐行讲解（业务对照）}
 \begin{itemize}
-  \item \textbf{L170--175}：\texttt{multi\_match} 同时查 name / title / info，靠 \texttt{\^{}N} 给字段加权。这一行就是上一页那张加权表的代码落点。
-  \item \textbf{L176--180}：\texttt{filter} 走 \texttt{term}，类目过滤不参与打分，只做 yes/no 过滤，性能更稳。运营按类目限定时进这条分支。
-  \item \textbf{L182--189}：\texttt{bool.must + filter} 是 ES 的标准组合 —— must 决定相关性，filter 决定可见性。两者分离，分页和打分才不会互相干扰。
-  \item \textbf{业务对应}：name 权重最高，对应"用户最在意主名命中"；filter 不打分，对应"类目是硬过滤，不是建议"。
+  \item \textbf{L170--175}：\texttt{multi\_match} 同时查 name / title / info，靠 \texttt{\^{}N} 给字段加权 —— 这就是运营"今日特卖 title 加权"的代码落点。
+  \item \textbf{L176--180}：\texttt{filter} 走 \texttt{term}，类目过滤\textbf{不参与打分}，只做 yes/no 过滤。业务上对应"用户在 3C 类目里搜，绝不让美妆混进来"。
+  \item \textbf{L182--189}：\texttt{bool.must + filter} 是 ES 标准组合 —— must 决定\textbf{相关性}，filter 决定\textbf{可见性}。两者分离，分页 + 打分互不干扰。
+  \item \textbf{运营能改 / 不能改}：fields 数组里的 \texttt{\^{}N} 数字是运营旋钮，filter 数组是开发硬约束。这个边界必须写进运营手册。
 \end{itemize}
 \end{frame}
 
-\begin{frame}{must / should / filter / must\_not 四件套}
+\begin{frame}{must / should / filter / must\_not 四件套（业务怎么用）}
 \begin{tabular}{@{}lll@{}}
 \toprule
-子句         & 是否打分 & 典型用途                       \\
+子句         & 业务用途                        & gomall 现状     \\
 \midrule
-\texttt{must}    & 是      & 关键词召回，决定相关性          \\
-\texttt{should}  & 是      & 可选加分项，命中即上调          \\
-\texttt{filter}  & 否      & 硬过滤：类目 / 上架 / 库存 \textgreater 0 \\
-\texttt{must\_not} & 否      & 黑名单：下架 / 违禁 / 自家店     \\
+\texttt{must}    & 关键词召回 / 相关性主链路       & 已用            \\
+\texttt{should}  & 同义词加分 / 品牌偏好           & 路线图           \\
+\texttt{filter}  & 类目 / 上架 / 库存 \textgreater 0 / 价格区间 & 类目已用       \\
+\texttt{must\_not} & 下架 / 违禁 / 自家店 / 黑名单店  & 路线图（商家入驻后）\\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
-  \item 打分子句进 query cache miss 时重算，filter 子句进 filter cache 长期命中。
+  \item 业务上的"必须 / 优先 / 限定 / 排除"四件事，正好对应 ES 四个子句。
   \item 把所有"硬条件"塞进 filter 是最常见的性能优化，可使 QPS 翻倍。
-  \item \texttt{should} 配合 \texttt{minimum\_should\_match} 还能做"至少命中 N 个同义词"。
+  \item \texttt{must\_not} 配上"自家店"是商家自助上架后的\textbf{合规要求}（防自买自卖刷单）。
 \end{itemize}
-\srcnote{ES 官方 query DSL 与 gomall 用法已对齐：repository/es/product\_index.go:170--191}
+\srcnote{repository/es/product\_index.go:170--191 当前实现 must + filter；should / must\_not 路线图}
 \end{frame}
 
-\begin{frame}{BM25 vs TF-IDF：现代 ES 默认值}
+\begin{frame}{BM25 + function\_score：把相关性与业务分挂在一起}
 \begin{itemize}
-  \item TF-IDF：\texttt{tf} 直接线性，长文档天然占便宜。
-  \item BM25：\texttt{tf} 走饱和函数 \texttt{(k+1)*tf / (k+tf*\dots)}，词频再高也不会无脑加分。
-  \item BM25 引入文档长度归一 \texttt{b}，长 info 不再压制短 name。
-  \item ES 7.x 起默认 \texttt{similarity=BM25}，gomall 不显式覆盖，保留默认。
+  \item \textbf{BM25 (ES 7.x 默认)}：\texttt{tf} 走饱和函数，词频再高不无脑加分；长度归一让短 name 不被长 info 压制。运营报"排序偏长描述"先查 \texttt{k1/b} 是否被改。
+  \item \textbf{字段加权 \texttt{name\^{}3}}：当前生效旋钮，大促可临时升 title 到 \texttt{\^{}4}。
+  \item \textbf{function\_score}：相关性 $\times$ 销量 / 评分 / 时效，挂在 BM25 外面，\textbf{不污染相关性调试}。
+  \item \textbf{召回 / 粗排 / 精排}三段拆开背 KPI：召回看漏召率、粗排看 NDCG@10、精排看 CTR / CVR。gomall 当前到粗排为止。
 \end{itemize}
-\keypoint{BM25 是"被工业界打磨过 20 年的 TF-IDF"；运营提"搜索结果偏长描述"时，先验证是不是误改了 \texttt{k1/b}。}
-\srcnote{repository/es/product\_index.go:20--41 mapping 未覆盖 similarity，沿用集群默认 BM25}
-\end{frame}
-
-\begin{frame}{function\_score 与 boost：业务分挂在相关性上}
-\begin{tabular}{@{}ll@{}}
-\toprule
-机制                  & 典型用途                            \\
-\midrule
-\texttt{function\_score} & 相关性 $\times$ 销量 / 评分 / 时效  \\
-\texttt{fields:"name\^{}3"} & 字段级权重（gomall 当前用法）   \\
-顶层 \texttt{boost}      & A/B 桶整路召回乘系数               \\
-\texttt{negative\_boost} & 命中黑词不杀只压                   \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-\begin{itemize}
-  \item function\_score 把业务分挂在 BM25 外面，不污染相关性调试。
-  \item 字段级 boost 最稳，运营改的就是 \texttt{name\^{}3}；大促把 title 调到 \texttt{\^{}4}。
-  \item 改过的 boost 必须打到 dashboard，否则后人查"为什么排序变了"会无从下手。
-\end{itemize}
-\srcnote{当前 fields=\{name\^{}3,title\^{}2,info\}；function\_score 接入点 service/search/semantic.go:107--111}
-\end{frame}
-
-\begin{frame}{把"召回 vs 排序"拆开}
-\begin{tikzpicture}[node distance=5mm and 10mm]
-  \node[node-box]                            (q)   {query};
-  \node[node-box,right=of q,node-warn]       (rec) {召回\\TopK $\times$ N};
-  \node[node-box,right=of rec]               (cgr) {粗排\\BM25 + boost};
-  \node[node-box,right=of cgr]               (fgr) {精排\\(LTR / DNN)};
-  \node[node-box,right=of fgr,node-ok]       (out) {Top K};
-  \draw[arrow] (q) -- (rec);
-  \draw[arrow] (rec) -- (cgr);
-  \draw[arrow] (cgr) -- (fgr);
-  \draw[arrow] (fgr) -- (out);
-\end{tikzpicture}
-\vspace{2mm}
-\begin{itemize}
-  \item 召回管"宁可错杀不可漏掉"，几百到几千条。
-  \item 粗排在 ES 里就完成，毫秒级。
-  \item 精排是 PS / 用户特征上的二次打分，几十毫秒，命中率才是 KPI。
-\end{itemize}
-\srcnote{gomall 当前实现到粗排为止；精排留作后续 PR，接入点见 service/search/semantic.go:107--111}
-\end{frame}
-
-\begin{frame}{个性化排序：三类特征 + 挂载点}
-\begin{tabular}{@{}lll@{}}
-\toprule
-特征类      & 例子                          & 来源                  \\
-\midrule
-用户画像    & 性别 / 年龄段 / 价格带偏好   & user profile 表       \\
-历史点击    & 7 天内点过的类目 / 品牌       & 点击日志 + 实时流     \\
-协同信号    & 同类用户买过什么             & 离线 i2i / u2i 矩阵   \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-\begin{itemize}
-  \item 历史点击走"近因衰减" \texttt{exp(-(now-ts)/\(\tau\))}，\(\tau\) 取 3--7 天。
-  \item 挂载点：\texttt{h.Score += wPersonal * personalScore(uid, h.Product)}，加在融合分外面。
-  \item Redis miss 走默认 0（保中性），永远比"用户画像污染基线"安全。
-\end{itemize}
-\srcnote{service/search/semantic.go:107--111 融合分赋值处是个性化加权的唯一注入点}
+\keypoint{运营调过的 boost 必须打到 dashboard，否则后人查"为什么排序变了"无从下手。}
+\srcnote{repository/es/product\_index.go:20--41 mapping 沿用集群默认 BM25；service/search/semantic.go:107--111 是 function\_score / 精排的统一挂载点}
 \end{frame}
 
 % ============================================================
-\section{上架到可搜：outbox + 异步索引 + 兜底}
+\section{5min 上架可搜 SLA：商家最关心的事}
 % ============================================================
 
-\begin{frame}{业务承诺：商家上架 5 分钟内必须搜得到}
+\begin{frame}{商家上架后第一句话：我的货搜得到吗}
 \begin{itemize}
-  \item 商家后台点"上架" $\to$ 站内搜索能搜到，业务侧的 SLA 是 $\le$ 5min。
-  \item 5min 是商家容忍上限：拍照 / 调价 / 改文案的反馈节奏。
-  \item 写 DB 同步写 ES 行不行？\textbf{不行}：ES 抖动直接 fail 上架，商家退出。
-  \item 必须\textbf{解耦}：DB 写完就返回成功，ES 异步追上。
+  \item 商家点"上架"按钮 $\to$ 立刻去 App 搜 $\to$ \textbf{搜不到就慌}。
+  \item 5min 是商家的\textbf{容忍上限}：拍照 / 调价 / 改文案的反馈节奏。超过 5min，商家就会反复点上架键 / 给客服发消息。
+  \item 同步写 ES 行不行？\textbf{不行}：ES 抖动直接 fail 上架，商家完全失去信心。
+  \item 业务承诺：\textbf{DB 写成功 = 上架成功；ES 索引慢一点没关系，5min 内追上}。
 \end{itemize}
 \srcnote{service/product.go:155, 253, 289 三处商品写入后调 emitProductChanged}
+\end{frame}
+
+\begin{frame}{5min SLA 的时间预算拆解}
+\begin{tabular}{@{}lrl@{}}
+\toprule
+环节                                   & 时间预算    & 商家体验      \\
+\midrule
+1) 商家点上架 $\to$ DB commit          & 5--20 ms    & 立返 "上架成功" \\
+2) DB outbox 行 $\to$ Publisher 扫到   & $\le$ 1 s   & 无感         \\
+3) Publisher $\to$ RMQ 投递            & 10--500 ms  & 无感         \\
+4) Indexer 消费 $\to$ ES \texttt{UpsertProduct} & 20--50 ms   & 无感         \\
+5) ES \texttt{refresh\_interval} 可见窗口 & $\le$ 1 s   & 搜索可见     \\
+\midrule
+\textbf{合计 (p95)}                    & \textbf{$\sim$2 s} & 顺畅         \\
+\textbf{合计 (p99, RMQ 堆积)}          & \textbf{$\sim$30 s} & 仍达标       \\
+\textbf{业务 SLA 红线}                 & \textbf{300 s} & 必须告警     \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\srcnote{service/product.go:257--265 emitProductChanged；service/outbox/publisher.go:21--32 PollInterval=1s 默认；service/search/indexer.go:25 Qos=32}
+\end{frame}
+
+\begin{frame}{每步如果挂掉，商家看到什么 / 客服怎么答}
+\begin{tabular}{@{}lll@{}}
+\toprule
+挂的环节       & 商家体感                        & 客服应答模板                    \\
+\midrule
+DB commit      & 上架按钮转圈 / 报错              & "系统繁忙，请稍后重试"          \\
+outbox 不扫    & 上架成功但永远搜不到             & "后台同步中，5min 内可搜"       \\
+RMQ 不通       & 同上                            & 同上 + 排查 RMQ 监控            \\
+Indexer 慢     & 上架后 1--10min 才搜得到         & "已收到，5min 内同步完成"        \\
+ES 全挂        & 搜得到，但走的 DB LIKE 慢路径    & "搜索系统抢修中，结果仍可用"     \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 客服话术分级，对应工程上的\textbf{故障定位树}。
+  \item 任何一步挂，上架本身\textbf{都不挂} —— 这是 outbox 解耦的\textbf{业务价值}。
+\end{itemize}
+\srcnote{service/product.go:257--265 outbox 写入；service/search/indexer.go:32--46 消费 + Nack 重投}
 \end{frame}
 
 \begin{frame}{outbox $\to$ MQ $\to$ indexer 的链路}
@@ -306,7 +342,7 @@ q := map[string]any{
 \end{tikzpicture}
 \vspace{2mm}
 \begin{itemize}
-  \item 上架事务里只写 product + outbox，二者同库同事务，原子。
+  \item 上架事务里只写 product + outbox，二者\textbf{同库同事务}，原子。
   \item Publisher 后台扫 outbox $\to$ 投递到 \texttt{product.changed} 路由。
   \item Indexer 消费后写 ES。Qos=32 控制并发，避免 ES 被写穿。
 \end{itemize}
@@ -338,38 +374,15 @@ func StartProductIndexer(ctx context.Context) error {
 \srcnote{service/search/indexer.go:17--49（折行省略错误处理）}
 \end{frame}
 
-\begin{frame}{代码段 2 逐行讲解}
+\begin{frame}{代码段 2 逐行讲解（业务对照）}
 \begin{itemize}
-  \item \textbf{L18--19}：\texttt{BindDomainQueue} 把 \texttt{product.changed} 路由绑到 \texttt{search.product.indexer} 队列。上架 / 改价 / 下架共用一条路由。
-  \item \textbf{L22}：\texttt{Qos(32, 0, false)} 让消费端最多在途 32 条未 ack。这是给 ES 写入设的"流量阀"，对应 deck 05 的"在网关之外，每个消费者也要节流"。
-  \item \textbf{L30--34}：JSON 解析失败 $\to$ \texttt{Nack(false, false)}，不重投。脏消息进死信，不阻塞健康消息。
-  \item \textbf{L35--38}：业务处理失败 $\to$ \texttt{Nack(false, true)} 重投，给 ES 短抖动一次自愈机会。
-  \item \textbf{L39}：成功才 ack，保证 at-least-once。索引是幂等的（同 docID 覆盖），重复消费无害。
+  \item \textbf{L18--19}：\texttt{BindDomainQueue} 把 \texttt{product.changed} 路由绑到 \texttt{search.product.indexer} 队列。上架 / 改价 / 下架\textbf{共用一条路由}，业务上一致。
+  \item \textbf{L22}：\texttt{Qos(32, 0, false)} = 给 ES 写入设的\textbf{流量阀}。大商家批量上架 1 万个 SKU 时不会冲垮 ES。
+  \item \textbf{L30--34}：脏消息 $\to$ \texttt{Nack(false, false)} 进死信，\textbf{不阻塞健康消息}。运营每天扫一次死信队列。
+  \item \textbf{L35--38}：业务处理失败 $\to$ \texttt{Nack(false, true)} 重投，对应"ES 短抖动 1s 自愈"。
+  \item \textbf{L39}：成功才 ack。索引是\textbf{幂等}的（同 docID 覆盖），重复消费无害 —— 这是 at-least-once 能成立的前提。
 \end{itemize}
-\srcnote{service/search/indexer.go:25 Qos=32；:36/:42 Nack 语义}
-\end{frame}
-
-\begin{frame}{outbox $\to$ ES 端到端延迟拆解 + 幂等}
-\begin{tabular}{@{}lr@{}}
-\toprule
-环节                                   & 典型值       \\
-\midrule
-上架事务 commit                        & 5--20 ms     \\
-Outbox publisher 轮询周期              & 1 s          \\
-RabbitMQ 投递 + 队列等待               & 10--500 ms   \\
-Indexer 写 ES \texttt{UpsertProduct}    & 20--50 ms    \\
-ES \texttt{refresh\_interval} 可见窗口  & $\le$ 1 s   \\
-\midrule
-\textbf{合计 (p95)}                    & \textbf{$\sim$2 s} \\
-\textbf{合计 (p99, RMQ 堆积)}          & \textbf{$\sim$30 s} \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-\begin{itemize}
-  \item 5min SLA 还有 10$\times$ 余量，吸收 RMQ 堆积告警前的窗口。
-  \item \texttt{DocumentID = product.ID} + \texttt{Refresh:false} 同 ID 覆盖 + 1s 刷新窗口，幂等 + 吞吐两兼顾。
-\end{itemize}
-\srcnote{service/search/indexer.go:51--60 handleProductChanged；repository/es/product\_index.go:105--131 UpsertProduct}
+\srcnote{service/search/indexer.go:25 Qos=32；:37/:42 Nack 语义；repository/es/product\_index.go:115--120 DocumentID = product.ID 决定幂等}
 \end{frame}
 
 \begin{frame}[fragile]{代码段 3：product mapping（建索引时的 schema）}
@@ -388,16 +401,20 @@ ES \texttt{refresh\_interval} 可见窗口  & $\le$ 1 s   \\
 \srcnote{repository/es/product\_index.go:20--41 productIndexMapping（节选）}
 \end{frame}
 
-\begin{frame}{代码段 3 逐行讲解}
+\begin{frame}{代码段 3 逐行讲解（业务对应）}
 \begin{itemize}
-  \item \textbf{shards=1 / replicas=0}：gomall 单节点部署，不做多副本。生产换多节点要把 replicas 拉到 1，read 走主+副两副本。
-  \item \textbf{name/title/info 是 \texttt{text}}：参与分词 + 倒排，是关键词召回的目标字段。
-  \item \textbf{price 是 \texttt{keyword}}：不分词，整串做 filter / exact match。价格永远不会被"分词"成"99" + "元"。
-  \item \textbf{category\_id / boss\_id 是 \texttt{long}}：做 \texttt{term} 过滤（按类目 / 按店铺筛），不打分。
-  \item \textbf{on\_sale 是 \texttt{boolean}}：下架商品要从结果里隐藏，靠这个字段做硬过滤。
+  \item \textbf{shards=1 / replicas=0}：gomall 单节点部署。生产换多节点要把 replicas 拉到 1。
+  \item \textbf{name/title/info 是 \texttt{text}}：参与分词 + 倒排 —— 商家上架\textbf{写的文案直接决定能不能被搜到}。
+  \item \textbf{price 是 \texttt{keyword}}：不分词，整串做 filter / exact match。价格不会被"分词"成"99" + "元"。
+  \item \textbf{category\_id / boss\_id 是 \texttt{long}}：按类目 / 按店铺筛，硬过滤。
+  \item \textbf{on\_sale 是 \texttt{boolean}}：\textbf{下架商品要从结果里隐藏} —— 客诉里"为什么搜到下架商品"基本都是这里没维护好。
   \item \textbf{analyzer=standard}：未装 IK 分词器时的 fallback，保证集群裸装也能跑通。
 \end{itemize}
 \end{frame}
+
+% ============================================================
+\section{ES 挂了不能 5xx：降级与运营 SOP}
+% ============================================================
 
 \begin{frame}{业务约定：搜索接口不许 5xx，启动也不许阻塞}
 \begin{tikzpicture}[node distance=5mm and 10mm]
@@ -411,16 +428,71 @@ ES \texttt{refresh\_interval} 可见窗口  & $\le$ 1 s   \\
 \end{tikzpicture}
 \vspace{1mm}
 \begin{itemize}
-  \item 5xx 等于 app 崩页，比"结果不准"业务损失大得多。LIKE 慢也能用。
+  \item 5xx 等于 \textbf{app 崩页}，比"结果不准"业务损失大得多。LIKE 慢也能用。
   \item \texttt{tryInitES} 用 \texttt{defer recover()} 把启动 panic 压平成 warn —— ES 故障不阻塞启动。
   \item \textbf{ES 是优化项，不是依赖项}。
 \end{itemize}
 \srcnote{service/product.go:294--323 兜底；cmd/main.go:64--73 tryInitES；initialize/search.go:13--31}
 \end{frame}
 
+\begin{frame}{ES 全挂的运营 SOP（5 步）}
+\begin{enumerate}
+  \item \textbf{自动降级} ：\texttt{es.EsClient == nil} $\to$ \texttt{ProductSearch} 走 \texttt{dao.SearchProduct}，对外仍然 200。
+  \item \textbf{监控告警}：\texttt{search\_es\_fallback\_total} counter 跳变 $\to$ 触发 P1 告警。
+  \item \textbf{用户体感公告}：超过 30min 仍未恢复 $\to$ App 顶部 banner "搜索结果可能不全，工程师正在抢修"。
+  \item \textbf{客服话术统一}：内部 IM 推送应答模板，避免每个客服自行发挥。
+  \item \textbf{恢复后回填}：ES 起来 $\to$ 调 \texttt{admin/search/backfill} 把降级期间的上架 / 改价回灌索引。
+\end{enumerate}
+\vspace{2mm}
+\keypoint{降级期间用户体验差：搜索很慢 + 中文同义搜不到，但\textbf{接口仍可用}，比"白屏 500"业务好 10 倍。}
+\srcnote{service/product.go:294--325 ES nil $\to$ DB LIKE；service/search/backfill.go:13--43 全量回填；routes/router.go:163 admin/search/backfill}
+\end{frame}
+
+\begin{frame}{三档降级决策树}
+\begin{tikzpicture}[node distance=6mm and 14mm,every node/.style={font=\small}]
+  \node[node-box]                                (root)  {搜索接口被调用};
+  \node[node-box,below left=10mm and 18mm of root,node-ok]     (es)    {ES 健康？};
+  \node[node-box,below=10mm of root,node-warn]                 (mv)    {Milvus 健康？};
+  \node[node-box,below right=10mm and 18mm of root,node-bad]   (emb)   {Embedding 服务？};
+  \node[node-box,below=of es,node-ok]                          (k)     {hybrid\\(权重默认)};
+  \node[node-box,below=of mv,node-warn]                        (kw)    {纯 ES\\(关键词)};
+  \node[node-box,below=of emb,node-bad]                        (like)  {DB LIKE\\(最后兜底)};
+  \draw[arrow] (root) -- (es);
+  \draw[arrow] (root) -- (mv);
+  \draw[arrow] (root) -- (emb);
+  \draw[arrow] (es) -- (k);
+  \draw[arrow] (mv) -- (kw);
+  \draw[arrow] (emb) -- (like);
+\end{tikzpicture}
+\vspace{1mm}
+\small ES + Milvus 都健康 $\to$ hybrid；Milvus 挂 $\to$ 纯关键词；ES 挂 $\to$ DB LIKE 兜底。\\
+对应客服话术：A 档 "正常"；B 档 "结果可能略有偏差"；C 档 "搜索结果可能不全"。
+\srcnote{service/search/semantic.go:84--87 ES 失败时 keywordHits=nil；service/product.go:294--323 ES 全挂回 LIKE}
+\end{frame}
+
 % ============================================================
-\section{语义层：Milvus + Embedding + 故障预案}
+\section{Hybrid 检索：把"商家不会写 SEO"的锅自己背了}
 % ============================================================
+
+\begin{frame}{纯 ES vs 纯向量：业务漏斗对照}
+\begin{tabular}{@{}lll@{}}
+\toprule
+策略     & 优点                & 业务漏斗损失                  \\
+\midrule
+纯 LIKE   & 0 依赖             & 召回 40--50\%，损 GMV 50\%+   \\
+纯 ES     & 快 / 加权 / 字段灵活 & 中文同义召回 60--75\%，长尾差 \\
+纯向量    & 语义召回好         & 短 query 不准、品牌型号搜偏   \\
+\textbf{Hybrid} & 各取所长       & 召回 90\%+，覆盖短 + 长 query \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 业务上的"搜不到"是\textbf{召回率问题}，"搜偏"是\textbf{排序问题}。
+  \item 纯关键字 / 纯向量都解决半个；hybrid \textbf{两个一起解}。
+  \item gomall 默认 50:50，给短 query (品牌型号) 和长 query (自然语言) 都留余量。
+\end{itemize}
+\srcnote{service/search/semantic.go:17--23 默认权重 weightSemantic=0.5 / weightKeyword=0.5}
+\end{frame}
 
 \begin{frame}{ES 关键词搞不定的三类 query}
 \begin{tabular}{@{}lll@{}}
@@ -436,9 +508,21 @@ query 类型 & 例子                      & ES 行为                          
 \begin{itemize}
   \item ES 衡量\textbf{词重合度}，不是\textbf{语义接近度}。
   \item 用户被短视频 / LLM 养成自然语言搜的习惯，长尾流量比例上升。
-  \item 长尾召回率掉到 60\% 以下，整段 GMV 静默漏走，没有告警。
+  \item 长尾召回率掉到 60\% 以下，整段 GMV 静默漏走，\textbf{没有告警}。
 \end{itemize}
 \srcnote{service/search/semantic.go:1--56 hybrid 入口注释与默认权重}
+\end{frame}
+
+\begin{frame}{Hybrid 的"商家友好"价值}
+\begin{itemize}
+  \item \textbf{以前}：商家必须写 SEO 优化标题"iPhone 13 苹果手机 5G 全网通 国行" 才能被搜到。
+  \item \textbf{现在}：商家只写"iPhone 13 Pro 256G"，hybrid 用向量召回也能匹配"苹果手机最新款"。
+  \item 商家\textbf{体验}：少了 30\% 文案运营成本，专心做商品本身。
+  \item 用户\textbf{体验}：自然语言搜得到，不再需要"切换搜索关键词"的耐心。
+  \item 这是 hybrid \textbf{对两端都赚}的业务价值，不是技术炫技。
+\end{itemize}
+\keypoint{把"商家不会写 SEO"这个能力缺口，由搜索系统自己用 embedding 补上 —— 这是 AI 检索对业务的核心贡献。}
+\srcnote{service/search/semantic.go:54--143 hybrid 主流程；70--87 embedding + 向量 + 关键词三路召回}
 \end{frame}
 
 \begin{frame}{hybrid 三层：关键词 + 向量 + 业务调权}
@@ -502,13 +586,12 @@ for id, h := range fused {
 \srcnote{service/search/semantic.go:89--111 融合主体（折行示意）}
 \end{frame}
 
-\begin{frame}{代码段 4 逐行讲解}
+\begin{frame}{代码段 4 逐行讲解（业务对照）}
 \begin{itemize}
-  \item \textbf{L89--90}：两路分数先各自 min-max 归一到 \([0,1]\)，避免 BM25 的 0--100 量纲压死向量的 0--1 量纲。
-  \item \textbf{L93--99}：两路按 \texttt{product\_id} 取并集 —— 仅在一路出现的 ID 也计入，另一路缺失视为 0。
-  \item \textbf{L100--103}：加权融合。weightSemantic / weightKeyword 是常量，A/B 时换 hash 分桶决定。
-  \item \textbf{业务对应}：min-max 在小 batch（30--100 条）下稳定，单 query 内部即可计算，无需全局统计量。
-  \item 全等分（如 ES miss 所有向量召回 fallback）时归一化结果给常量 1，意味着"两路一样可信，靠另一路决定排序"。
+  \item \textbf{L89--90}：两路分数各自 min-max 归一到 \([0,1]\)，避免 BM25 的 0--100 量纲压死向量的 0--1 量纲 —— 业务上对应"两边权重\textbf{真正平等}才能调"。
+  \item \textbf{L93--99}：两路按 \texttt{product\_id} 取并集 —— \textbf{仅一路出现的 ID 也计入}（另一路补 0）。业务上对应"向量召回到、ES 没召回到的长尾商品也有机会出现"。
+  \item \textbf{L100--103}：加权融合。\texttt{weightSemantic / weightKeyword} 是常量，\textbf{A/B 时换 hash 分桶决定} —— 运营调权的工程出口。
+  \item \textbf{业务对应}：min-max 在小 batch（30--100 条）下稳定，单 query 内部即可计算，无全局统计量 —— 工程上易复制 / 易回滚。
 \end{itemize}
 \srcnote{service/search/semantic.go:170--198 minMaxNormalize 全等集合返回 1}
 \end{frame}
@@ -537,7 +620,7 @@ for id, h := range fused {
 \srcnote{service/search/embedding.go:52--113；service/search/milvus\_stub.go:9--47；cmd/main.go:86--97 tryInitMilvus}
 \end{frame}
 
-\begin{frame}{HNSW 的三个核心参数}
+\begin{frame}{HNSW 的三个核心参数（业务旋钮）}
 \begin{tabular}{@{}lll@{}}
 \toprule
 参数              & 含义                             & gomall 当前值 \\
@@ -551,7 +634,7 @@ for id, h := range fused {
 \begin{itemize}
   \item \texttt{M} 大 $\to$ 图更密集，召回更准，但内存涨。常见 16--48。
   \item \texttt{efConstruction} 大 $\to$ 建图更慢但更优，回填速度敏感场景调低。
-  \item \texttt{efSearch} 大 $\to$ 召回更准延迟更高，是\textbf{查询时}唯一可调旋钮。
+  \item \texttt{efSearch} 大 $\to$ 召回更准延迟更高，是\textbf{查询时}唯一可调旋钮 —— SRE 故障时的\textbf{减压阀}。
 \end{itemize}
 \srcnote{repository/milvus/product\_vector.go:25--28 hnswM=16 / hnswEfConstruction=200 / hnswEfSearch=64}
 \end{frame}
@@ -578,68 +661,115 @@ results, _ := MilvusClient.Search(ctx, ProductVectorCollection,
 \srcnote{repository/milvus/product\_vector.go:80--96 EnsureProductVectorCollection；:141--162 SearchProductVector}
 \end{frame}
 
-\begin{frame}{代码段 5 逐行讲解}
+\begin{frame}{代码段 5 逐行讲解（业务对照）}
 \begin{itemize}
   \item \textbf{L81}：\texttt{NewIndexHNSW(L2, M, efConstruction)} 决定索引结构；L2 是欧氏距离，与 BGE / text-embedding-3 默认归一化向量兼容。
-  \item \textbf{L82--87}：先 \texttt{DescribeIndex} 判断有没有索引，没有才建。EnsureProductVectorCollection 是幂等的，重启不会重建。
-  \item \textbf{L88}：\texttt{LoadCollection} 让 collection 进入内存。HNSW 索引是 in-memory 结构，没 load 就不能查。
-  \item \textbf{L91--96}：\texttt{NewIndexHNSWSearchParam(efSearch)} 是\textbf{查询时}调旋钮，不需要重建索引就可以调召回精度/延迟权衡。
-  \item \textbf{业务对应}：efSearch 是 SRE 故障时的"减压阀"，告警来了先调小，召回准确性损 1\%--3\% 换 P95 减半。
+  \item \textbf{L82--87}：先 \texttt{DescribeIndex} 判断有没有索引，\textbf{没有才建}。EnsureProductVectorCollection 幂等，重启不会重建 —— SRE 安心运维。
+  \item \textbf{L88}：\texttt{LoadCollection} 让 collection 进入内存。HNSW 索引\textbf{in-memory}，没 load 就不能查。
+  \item \textbf{L91--96}：\texttt{NewIndexHNSWSearchParam(efSearch)} 是\textbf{查询时}调旋钮 —— 不用重建索引就能调召回精度/延迟权衡。
+  \item \textbf{业务对应}：efSearch 是 SRE 故障时的\textbf{减压阀}，告警来了先调小，召回准确性损 1\%--3\% 换 P95 减半。
 \end{itemize}
 \srcnote{repository/milvus/product\_vector.go:25--28 三个参数常量}
 \end{frame}
 
-\begin{frame}{HNSW vs IVF vs Annoy 选型}
-\begin{tabular}{@{}llll@{}}
+% ============================================================
+\section{客服话术：三个真实客诉怎么答}
+% ============================================================
+
+\begin{frame}{客诉案例 1：用户搜不到 + 客服话术}
+\textbf{用户原话}："我搜'蓝牙耳机'一个都没有，你们是不是没货？"
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{后台排查 (30s)}：进 admin 后台搜同词 $\to$ 看是否走 ES / 走 LIKE。
+  \item \textbf{若 ES 全挂}：业务码无（HTTP 200），监控 \texttt{search\_es\_fallback\_total}。
+  \item \textbf{客服回复模板}："您看到的是降级结果，搜索系统正在抢修，30 分钟内恢复。您可以按类目浏览。"
+  \item \textbf{若 ES 正常但 0 命中}：检查类目过滤是否锁死、检查"蓝牙"是否被分词器分错。
+  \item \textbf{客服回复模板}："您可以试试'无线耳机'或具体品牌名，系统会推荐更相关的商品。"
+\end{itemize}
+\srcnote{service/product.go:294--323 ES nil 走 dao.SearchProduct LIKE 兜底；service/search/semantic.go:84--87 ES 失败 keywordHits=nil}
+\end{frame}
+
+\begin{frame}{客诉案例 2：商家"我上架了为什么搜不到" + 客服话术}
+\textbf{商家原话}："我刚上架的 SKU 12345，搜不到，是不是上架失败？"
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{后台排查 (1min)}：查 \texttt{product} 表 SKU 12345 存在 $\to$ 上架\textbf{未失败}。
+  \item \textbf{排查 outbox}：查 \texttt{outbox} 表对应 product\_id 的 \texttt{product.changed} 行 status：
+        \begin{itemize}\item \texttt{pending} 5min 内 $\to$ 正在同步，等就好\item \texttt{pending} \textgreater 5min $\to$ Publisher 卡住 / RMQ 不通\item \texttt{sent} 但 ES 无 $\to$ Indexer 报错或 ES 拒收\end{itemize}
+  \item \textbf{客服回复模板}："上架已成功，搜索索引同步中，预计 5 分钟内可搜。如超时请回复我们。"
+  \item \textbf{兜底操作}：调 \texttt{admin/search/backfill} 直接灌一次 ES。
+\end{itemize}
+\srcnote{service/product.go:257--265 emitProductChanged 写 outbox；repository/db/dao/outbox.go status 字段 pending/sent/dead；routes/router.go:163 admin/search/backfill}
+\end{frame}
+
+\begin{frame}{客诉案例 3：用户搜到下架商品 + 客服话术}
+\textbf{用户原话}："我搜到一个商品点进去显示已下架，是不是骗人？"
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{根因}：商家下架 $\to$ DB \texttt{on\_sale=false} $\to$ \textbf{outbox 事件未投递 / Indexer 漏消费} $\to$ ES 里 \texttt{on\_sale=true} 仍在召回。
+  \item \textbf{后台排查 (1min)}：DB \texttt{on\_sale} 与 ES doc 字段对比，不一致即定位。
+  \item \textbf{业务码}：无（HTTP 200，命中后端再过滤）。
+  \item \textbf{客服回复模板}："该商品已下架，搜索结果尚在更新，5 分钟内会消失。给您带来困扰，赠送 5 元无门槛券。"
+  \item \textbf{兜底操作}：手动 \texttt{DeleteProduct(ID)} 删除 ES 文档；事后补 backfill。
+  \item \textbf{长期方案}：搜索结果在返回 client 前\textbf{再过一遍 DB} 校验 on\_sale —— 牺牲 5ms 延迟换 0 客诉。
+\end{itemize}
+\srcnote{service/search/indexer.go:51--60 handleProductChanged 处理 delete；repository/es/product\_index.go:134--150 DeleteProduct}
+\end{frame}
+
+% ============================================================
+\section{业务边界、容量与个性化路线图}
+% ============================================================
+
+\begin{frame}{业务边界：本搜索不做什么（诚实清单）}
+\begin{itemize}
+  \item \textbf{无同义词字典}：分词靠 standard analyzer，\textbf{未装 IK 与同义词包} —— "苹果手机"靠向量召回兜，不靠词典。
+  \item \textbf{无搜索历史}：用户搜过什么不存，无"最近搜索"功能。
+  \item \textbf{无 trending 词}：首页搜索框无热词推荐，无"大家都在搜"。
+  \item \textbf{无搜索建议（suggest）}：输入框不联想，无前缀补全。
+  \item \textbf{无商家 SEO 自助调权重}：商家不能自己买"高权重位置"，所有商品按 BM25 + name\^{}3 公平排。
+  \item \textbf{无个性化排序}：用户画像 / 历史点击 / 协同信号挂载点已留，\textbf{特征工程链路未接}。
+  \item \textbf{无以图搜图}：CLIP / SigLIP 路线图阶段。
+\end{itemize}
+\keypoint{这些"不做"列出来不是甩锅，是\textbf{划清当前能力边界} —— 后续每接一条都要走 PRD + A/B。}
+\srcnote{repository/es/product\_index.go:20--41 mapping 无 synonym filter；service/search/semantic.go:107--111 个性化挂载点 TBD}
+\end{frame}
+
+\begin{frame}{个性化排序路线图：三类特征 + 挂载点}
+\begin{tabular}{@{}lll@{}}
 \toprule
-索引   & 召回率 & 查询延迟 & 内存开销 \\
+特征类      & 例子                          & 来源                  \\
 \midrule
-HNSW   & 95\%--99\%  & 1--5 ms (1M) & 高（图结构）   \\
-IVF\_FLAT & 90\%--95\%  & 5--20 ms (1M) & 中             \\
-IVF\_PQ  & 80\%--90\%  & 2--10 ms (1M) & 低（量化压缩） \\
-Annoy   & 88\%--94\%  & 5--15 ms (1M) & 中             \\
+用户画像    & 性别 / 年龄段 / 价格带偏好   & user profile 表       \\
+历史点击    & 7 天内点过的类目 / 品牌       & 点击日志 + 实时流     \\
+协同信号    & 同类用户买过什么             & 离线 i2i / u2i 矩阵   \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
-  \item \textbf{HNSW}：默认选择，召回质量稳定，gomall 用这个。
-  \item \textbf{IVF\_FLAT/PQ}：10M+ 向量考虑，PQ 量化省内存但精度损失。
-  \item \textbf{Annoy}：Spotify 系，磁盘友好，更新成本高。
-  \item 选 HNSW 是工程默认，等到向量量级 \textgreater 10M / 内存紧张再考虑 IVF\_PQ。
+  \item 历史点击走"近因衰减" \texttt{exp(-(now-ts)/\(\tau\))}，\(\tau\) 取 3--7 天。
+  \item \textbf{挂载点}：\texttt{h.Score += wPersonal * personalScore(uid, h.Product)}，加在融合分外面。
+  \item Redis miss 走默认 0（保中性），永远比"用户画像污染基线"安全。
 \end{itemize}
-\srcnote{repository/milvus/product\_vector.go:80 NewIndexHNSW 是当前生效的索引类型}
+\srcnote{service/search/semantic.go:107--111 融合分赋值处是个性化加权的唯一注入点}
 \end{frame}
 
-\begin{frame}{Embedding 模型选型矩阵}
+\begin{frame}{容量规划：1M / 10M / 100M SKU}
 \begin{tabular}{@{}llll@{}}
 \toprule
-模型                       & 维度  & 成本 (1M tokens) & 中文表现 \\
+量级    & ES 节点         & Milvus 内存        & 索引重建时长   \\
 \midrule
-OpenAI text-embedding-3-small & 1536$\to$768 & \$0.02         & 中等     \\
-OpenAI text-embedding-3-large & 3072$\to$768 & \$0.13         & 优秀     \\
-BGE-base-zh-v1.5           & 768   & 自托管 GPU 成本  & 优秀     \\
-E5-large-v2                & 1024  & 自托管 GPU 成本  & 良好     \\
-SHA-256 stub (gomall 默认)  & 768   & 0               & 仅占位   \\
+1M     & 1 node (4C8G)  & 4 GB (HNSW)        & 30 min        \\
+10M    & 3 nodes (8C16G) & 32 GB (HNSW)      & 4 h           \\
+100M   & 5+ nodes (16C32G) & 256 GB / 切 IVF\_PQ & 24 h+         \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
-  \item \texttt{embeddingDim=768} 是 mapping 硬约束，切模型必须降维到 768 才能复用 collection。
-  \item 上线节奏：本地 stub $\to$ OpenAI 3-small（贴近 BGE）$\to$ 自托管 BGE 省 token。
-  \item BGE / E5 自托管的成本拐点：单日 query 量 \textgreater 50 万次，自托管划算。
+  \item gomall 当前 \textbf{956K} SKU，落在 1M 档，单节点足够。
+  \item 10M 是分水岭：ES 必须分片 + 副本；HNSW 内存接近 32 GB 拐点。
+  \item 100M 切 IVF\_PQ 量化索引，召回率换内存；同时考虑冷热分层。
 \end{itemize}
-\srcnote{service/search/embedding.go:17--24 embeddingDim=768 / 默认 model=text-embedding-3-small}
-\end{frame}
-
-\begin{frame}{Embedding 切换的工程红线}
-\begin{itemize}
-  \item \textbf{维度不能变}：768 是 Milvus collection schema 硬约束，切模型先 reindex。
-  \item \textbf{距离度量要对齐}：BGE 推 cosine，gomall 当前 L2；归一化向量后 L2 = 2 - 2cos，等价。
-  \item \textbf{stub 必须保留}：CI / 本地起服务不能因为忘配 env 就 5xx。
-  \item \textbf{超时 5s 硬上限}：\texttt{embeddingTimeout = 5 * time.Second}，OpenAI 卡顿不能拖垮搜索 P99。
-\end{itemize}
-\keypoint{embedding 是\textbf{库外依赖}，切换前先在 staging 跑一遍 NDCG / MRR 评估，不要直接上生产。}
-\srcnote{service/search/embedding.go:18 embeddingDim=768；:19 embeddingTimeout=5s}
+\srcnote{stressTest/REPORT.md：product 956K 行 / 364MB 是 1M 档实测数据}
 \end{frame}
 
 \begin{frame}{以图搜图路线图 (CLIP / SigLIP)}
@@ -663,48 +793,8 @@ SHA-256 stub (gomall 默认)  & 768   & 0               & 仅占位   \\
 \srcnote{规划落地点：repository/milvus/ 复用 product\_vector 模板新增 image\_vector}
 \end{frame}
 
-\begin{frame}{三档降级决策树}
-\begin{tikzpicture}[node distance=6mm and 14mm,every node/.style={font=\small}]
-  \node[node-box]                                (root)  {搜索接口被调用};
-  \node[node-box,below left=10mm and 18mm of root,node-ok]     (es)    {ES 健康？};
-  \node[node-box,below=10mm of root,node-warn]                 (mv)    {Milvus 健康？};
-  \node[node-box,below right=10mm and 18mm of root,node-bad]   (emb)   {Embedding 服务？};
-  \node[node-box,below=of es,node-ok]                          (k)     {hybrid\\(权重默认)};
-  \node[node-box,below=of mv,node-warn]                        (kw)    {纯 ES\\(关键词)};
-  \node[node-box,below=of emb,node-bad]                        (like)  {DB LIKE\\(最后兜底)};
-  \draw[arrow] (root) -- (es);
-  \draw[arrow] (root) -- (mv);
-  \draw[arrow] (root) -- (emb);
-  \draw[arrow] (es) -- (k);
-  \draw[arrow] (mv) -- (kw);
-  \draw[arrow] (emb) -- (like);
-\end{tikzpicture}
-\vspace{1mm}
-\small ES + Milvus 都健康 $\to$ hybrid；Milvus 挂 $\to$ 纯关键词；ES 挂 $\to$ DB LIKE 兜底。
-\srcnote{service/search/semantic.go:84--87 ES 失败时 keywordHits=nil；service/product.go:294--323 ES 全挂回 LIKE}
-\end{frame}
-
-\begin{frame}{容量规划：1M / 10M / 100M SKU}
-\begin{tabular}{@{}llll@{}}
-\toprule
-量级    & ES 节点         & Milvus 内存        & 索引重建时长   \\
-\midrule
-1M     & 1 node (4C8G)  & 4 GB (HNSW)        & 30 min        \\
-10M    & 3 nodes (8C16G) & 32 GB (HNSW)      & 4 h           \\
-100M   & 5+ nodes (16C32G) & 256 GB / 切 IVF\_PQ & 24 h+         \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-\begin{itemize}
-  \item gomall 当前 \textbf{956K} SKU，落在 1M 档，单节点足够。
-  \item 10M 是分水岭：ES 必须分片 + 副本；HNSW 内存接近 32 GB 拐点。
-  \item 100M 切 IVF\_PQ 量化索引，召回率换内存；同时考虑冷热分层。
-\end{itemize}
-\srcnote{stressTest/REPORT.md：product 956K 行 / 364MB 是 1M 档实测数据}
-\end{frame}
-
 % ============================================================
-\section{业务侧总结}
+\section{业务侧总结：四角色 KPI 全打通}
 % ============================================================
 
 \begin{frame}{一张表把这套搜索系统讲完}
@@ -727,9 +817,12 @@ DB 兜底     & ES 客户端为 nil $\to$ LIKE        & service/product.go:294  
 
 \begin{frame}{四方视角 + 压测数据复核}
 \begin{itemize}
-  \item \textbf{用户 / 商家 / 运营 / SRE}：搜得到、5min 可搜、能调权、挂了不出 5xx。
+  \item \textbf{C 端}：hybrid 召回 90\%+，自然语言搜得到，p95 < 200ms。
+  \item \textbf{商家}：上架 5min 内可搜，outbox 解耦 = 上架本身永远不挂。
+  \item \textbf{运营}：\texttt{name\^{}3} 字段加权 / 融合权重 / function\_score 三档旋钮齐备。
+  \item \textbf{客服 / SRE}：ES / Milvus / Embedding 三档降级，主流程永不 5xx。
   \item 同库 PK 查询能跑 \textbf{62{,}226 RPS / p95 3ms} (product/show)，证明慢的是\textbf{查询类型}（LIKE / count），不是数据库本身。
-  \item 把"模糊 + 排序"搬到 ES，是把一个本不该 DB 干的活儿挪到合适的引擎。
+  \item 反例 \texttt{/product/list} 全表 count 实测 \textbf{24.5 RPS / p95 2.50s}，验证"搬到 ES"是必选项。
 \end{itemize}
 \vspace{1mm}
 \keypoint{副本系统判据：\textbf{副本旧一点点不要命，副本错乱才要命}。outbox 把 "上架成功" 和 "可搜" 解耦，是 5min SLA 的工程根据。}
@@ -753,8 +846,8 @@ DB 兜底     & ES 客户端为 nil $\to$ LIKE        & service/product.go:294  
 \hspace{4mm}\small A：业务值，不是技术值。先 50/50 跑一轮，A/B 观察 CTR / 转化。短 query 偏关键词，长 query 偏语义。代码：\srcnote{service/search/semantic.go:21--23}
 
 \vspace{2mm}
-\textbf{Q4}：BM25 和 TF-IDF 在生产里有什么实操差别？\\
-\hspace{4mm}\small A：BM25 词频走饱和函数，长文档不再天然占便宜；ES 7.x 起默认 BM25。运营说"排序偏长描述"先查 \texttt{k1/b} 是否被改。
+\textbf{Q4}：商家说"上架后 10 分钟还搜不到"，怎么定位？\\
+\hspace{4mm}\small A：四步走：查 product 表确认入库 $\to$ 查 outbox 行 status $\to$ 查 RMQ 队列深度 $\to$ 查 ES doc。每步对应一个客服话术（见客诉案例 2）。代码：\srcnote{repository/db/dao/outbox.go status 字段}
 \end{frame}
 
 \begin{frame}{面试 Q\&A (2/3)}
@@ -770,11 +863,11 @@ DB 兜底     & ES 客户端为 nil $\to$ LIKE        & service/product.go:294  
 \hspace{4mm}\small A：nopMilvusSearcher 返回空，hybrid 退化为纯 ES。关键词召回不受影响，只丢自然语言长尾。代码：\srcnote{service/search/milvus\_stub.go:19--24}
 
 \vspace{2mm}
-\textbf{Q8}：换 embedding 模型要走什么流程？\\
-\hspace{4mm}\small A：维度必须仍是 768（mapping 硬约束），先 staging 跑 NDCG/MRR 评估，再灰度。代码：\srcnote{service/search/embedding.go:17--24}
+\textbf{Q8}：搜索结果命中下架商品（客诉案例 3）根因有几种？\\
+\hspace{4mm}\small A：三种：DB 改 \texttt{on\_sale} 但 outbox 漏写、outbox 写了但 indexer 没消费、indexer 调 DeleteProduct 但 ES 拒收。长期方案：返回前再过一次 DB 校验。代码：\srcnote{service/search/indexer.go:51--60}
 \end{frame}
 
-\begin{frame}{面试 Q\&A (3/3) + 代码位置}
+\begin{frame}{面试 Q\&A (3/3)}
 \textbf{Q9}：5 分钟新鲜度 SLA 在哪一步可能掉？\\
 \hspace{4mm}\small A：堆积一般出现在 RMQ 与 indexer 之间，Qos=32 + ES refresh\_interval=1s 下 p95 < 30s。监控 \texttt{search.product.indexer} queue\_depth。代码：\srcnote{service/search/indexer.go:25}
 
@@ -783,8 +876,8 @@ DB 兜底     & ES 客户端为 nil $\to$ LIKE        & service/product.go:294  
 \hspace{4mm}\small A：ES 切多分片 + 副本；HNSW 内存撑不住改 IVF\_PQ 量化；冷热分层把老 SKU 放冷索引。\srcnote{repository/milvus/product\_vector.go:80 NewIndexHNSW}
 
 \vspace{2mm}
-\textbf{Q11}：以图搜图怎么接？\\
-\hspace{4mm}\small A：CLIP/SigLIP 编码图片到 512/768 维向量，单独 collection \texttt{image\_vector}，走相同 outbox 路由。\srcnote{规划中：repository/milvus/ 新增 image\_vector}
+\textbf{Q11}：为什么不接同义词字典 / 搜索历史 / trending？\\
+\hspace{4mm}\small A：业务边界。当前流量没到拐点，同义词靠 hybrid 向量召回兜，搜索历史涉及用户隐私单独立项，trending 词运营手动维护轮播。详见"业务边界"帧。\srcnote{service/search/semantic.go hybrid 主入口}
 
 \vspace{2mm}
 \textbf{Q12}：mapping 改了字段类型怎么办？\\
@@ -804,9 +897,10 @@ DB 兜底     & ES 客户端为 nil $\to$ LIKE        & service/product.go:294  
   \item[Milvus HNSW] \srcnote{repository/milvus/product\_vector.go:25--28, 80--96, 141--162}
   \item[Milvus 接口抽象] \srcnote{service/search/milvus\_stub.go:9--47}
   \item[启动静默] \srcnote{cmd/main.go:64--73 + initialize/search.go:13--31}
+  \item[业务码表] \srcnote{pkg/e/code.go:46--58}
 \end{description}
 \vspace{2mm}
-\small \textbf{配套}：deck 04 outbox / saga；deck 10 流量治理与降级；deck 21 AI 检索；stressTest/REPORT.md；docs/blog/10-milvus-vector-search.md；docs/blog/11-semantic-search.md。
+\small \textbf{配套}：deck 04 outbox / saga；deck 10 流量治理与降级；deck 11 一致性；stressTest/REPORT.md；docs/blog/10-milvus-vector-search.md；docs/blog/11-semantic-search.md。
 \end{frame}
 
 \end{document}

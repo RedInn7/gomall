@@ -1,7 +1,7 @@
 \input{preamble}
 
 \title{用户与鉴权的业务边界}
-\subtitle{gomall · 注册 / 双 token / RBAC / admin bootstrap / 三层鉴权路线图}
+\subtitle{gomall · 五角色视角 / 注册 / 双 token / RBAC / admin bootstrap}
 \author{gomall · 业务侧 deck}
 \date{}
 
@@ -14,8 +14,94 @@
 \end{frame}
 
 % ============================================================
-\section{业务困局：鉴权不止是 "登录拿 token"}
+\section{五角色视角：鉴权到底在为谁工作}
 % ============================================================
+
+\begin{frame}{为什么把"用户鉴权"放在第一份 deck}
+\begin{itemize}
+  \item 一笔 100 元的订单，从浏览到收货要经过 20+ 个技术环节。\textbf{鉴权是第一环}，错了后面 19 环全是危房。
+  \item 鉴权失败的代价不是 5xx 报错，是真金白银：
+  \begin{itemize}
+    \item C 端越权下单 \(\to\) 用户用 A 账号的余额买 B 账号的商品。
+    \item 商家越权发货 \(\to\) 把别家的订单标"已发"，钱货两失。
+    \item admin 误授权 \(\to\) 客服把全场红包发给自己。
+  \end{itemize}
+  \item 所以 deck 01 不讲"怎么写 JWT 库"，讲\textbf{每条鉴权决策背后的业务取舍 + 客服话术 + SLO}。
+\end{itemize}
+\keypoint{鉴权 = 用最少的代码表达\textbf{业务对"信任"的明确表态}：信谁、信多久、信他能干什么。}
+\end{frame}
+
+\begin{frame}{五个角色，五种"鉴权痛"}
+\begin{tabular}{@{}llp{4.6cm}@{}}
+\toprule
+角色 & 鉴权诉求 & 出错的真实后果 \\
+\midrule
+C 端用户   & 一次登录管 10 天，改密码立即生效 & 频繁踢登 \(\to\) DAU 流失 \\
+商家       & 只看自家订单 / SKU              & 越权读单 \(\to\) 商业泄密 \\
+运营平台   & 大促撞库不打爆 bcrypt           & 登录 502 \(\to\) GMV 损失 \\
+客服       & 用户怒投诉时能精确定位         & 30001 vs 30002 给一致话术 \\
+SRE       & 鉴权链路不能成性能瓶颈          & 解 token 慢 \(\to\) 全站 p99 抬升 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 本 deck 每个 section 前都会标注\textbf{本节解决谁的痛}。
+  \item 项目 README "业务全景表" 5 行对应的就是这 5 个角色，鉴权是这 5 行的最小公约数。
+\end{itemize}
+\srcnote{routes/router.go:34--45 公开 vs authed；:148--155 admin；middleware/rbac.go RequireRole}
+\end{frame}
+
+\begin{frame}{鉴权链路 SLO（项目业务承诺表口径）}
+\begin{tabular}{@{}lll@{}}
+\toprule
+指标 & 目标 & gomall 现状 \\
+\midrule
+登录接口可用率           & 99.9\%（P1）        & 单机 bcrypt 限制 \\
+登录 p99                & $<$ 800ms          & bcrypt cost=12 \(\to\) \textasciitilde 250ms 主导 \\
+鉴权中间件 p99          & $<$ 5ms             & HS256 解析 \(<\) 1ms / 单机 \\
+RBAC 缓存命中率         & $\geq$ 99\%（30s 窗）& sync.Map 单实例命中 $\sim$ 99.5\% \\
+admin bootstrap 可用率  & 一次性接口，发布期 SLA & count $>$ 0 自锁 \\
+authed 链路 RPS         & $\geq$ 50k（P1 读）   & 实测 58k / p95 5ms \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{宁可慢、不能 429}：鉴权链路\textbf{不挂限流}，让流量打到下游再被治理。
+  \item p99 5ms 对照 \texttt{/ping} 基线 3.5ms，鉴权开销仅 \(\approx\) 9\%。
+\end{itemize}
+\srcnote{stressTest/REPORT.md /ping 64254 RPS · /orders/list 58406 RPS；middleware/jwt.go:16--64；middleware/rbac.go:22--45}
+\end{frame}
+
+\begin{frame}{鉴权侧不做什么（业务边界）}
+诚实列出，对照 README "业务边界" 一节：
+\begin{itemize}
+  \item \textbf{不做扫码登录}：app 跨设备扫码授权（PC 扫手机码）需要长连接 + 设备绑定表，路线图。
+  \item \textbf{不做短信验证码登录}：短信通道 + 风控阈值 + 国际号段适配 = 三件独立工程，路线图。
+  \item \textbf{merchant 自助注册没做}：商家身份借 user 表 Role 字段表达，独立 merchant group 路线图阶段。
+  \item \textbf{不做 SSO / 企业 OIDC}：gomall 是 2C 电商，不接 SAML / Azure AD。
+  \item \textbf{不维护 token 黑名单}：登出 = 客户端丢 token，服务端不主动作废。
+  \item \textbf{找回密码只走邮箱}：手机找回需短信 + 实人认证，路线图。
+\end{itemize}
+\keypoint{"不做什么"和"做什么"一样重要：明确边界，工程才有节奏。}
+\srcnote{README.md 业务边界节；middleware/jwt.go:32--57 无黑名单实现}
+\end{frame}
+
+\begin{frame}{业务困局：鉴权不止是"登录拿 token"}
+\begin{itemize}
+  \item 鉴权 = 三件事：\textbf{身份 / 角色 / 边界}。三件单挑都不难，难在配合：
+  \begin{itemize}
+    \item 身份对了角色错 \(\to\) 客服越权补券给自己。
+    \item 角色对了边界错 \(\to\) admin 接口暴露给 C 端。
+    \item 身份角色都对，边界没画清 \(\to\) 商家 A 看见商家 B 的订单。
+  \end{itemize}
+  \item gomall 的回答：
+  \begin{itemize}
+    \item 身份：双 token + bcrypt cost=12，下面 section 2 讲。
+    \item 角色：RBAC + 30s sync.Map 缓存，section 3 讲。
+    \item 边界：路由分组 + middleware 链 + admin bootstrap，section 4 讲。
+  \end{itemize}
+\end{itemize}
+\end{frame}
 
 \begin{frame}{鉴权是商业模式的边界}
 \begin{itemize}
@@ -68,6 +154,16 @@
 \section{注册 + 登录 + 双 token：第一道业务边界}
 % ============================================================
 
+\begin{frame}{本节角色视角：C 端用户 + SRE + 客服}
+\begin{itemize}
+  \item \textbf{C 端用户}：登录够快 / 不重登 / 改密码立刻生效。
+  \item \textbf{SRE}：登录链路是日常 50k RPS、大促 100k RPS 的入口，不能 502。
+  \item \textbf{客服}：用户喊"登不上"时，得能从业务码差异判断是\textbf{密码错 / token 错 / 账号被锁 / SDK bug} 四种情况之一。
+  \item 商家 / 运营本节不出现 —— 商家走同一套用户表（merchant group 路线图）；运营不直接走 C 端登录。
+\end{itemize}
+\keypoint{本节业务目标：让 90\% 用户 10 天内不重登、让被偷设备最多 24h 失效、让客服一眼分清四种登录失败。}
+\end{frame}
+
 \begin{frame}{注册 / 登录 / 颁发 token 的时序}
 \begin{tikzpicture}[node distance=8mm and 14mm]
   \node[node-box] (cli)  {Client};
@@ -101,6 +197,28 @@
 \srcnote{repository/db/model/user.go:34--48 SetPassword / CheckPassword；service/user.go:56 注册调用；pkg/utils/jwt/jwt.go:95--134 EmailClaims}
 \end{frame}
 
+\begin{frame}{bcrypt cost=12 的业务后果（用钱算账）}
+\textbf{被拖库情景}：黑产拿到 \texttt{password\_digest} 全表，离线撞库。
+\begin{tabular}{@{}lrr@{}}
+\toprule
+配置 & 1 万弱密码账号破解成本 & 1 万账号破解时长 \\
+\midrule
+明文 / MD5         & \textasciitilde 0 美元   & 秒级 \\
+bcrypt cost=10     & \textasciitilde 600 美元 GPU & \textasciitilde 8 小时 \\
+\textbf{bcrypt cost=12} & \textbf{\textasciitilde 9{,}600 美元 GPU} & \textbf{\textasciitilde 5 天} \\
+bcrypt cost=14     & \textasciitilde 150k 美元 & \textasciitilde 80 天 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\textbf{登录 RT 代价}：cost=12 单次 \textasciitilde 250ms。
+\begin{itemize}
+  \item 经验数据：登录页 RT 每多 100ms，注册转化率掉 \(\sim\) 0.8\%，DAU 留存掉 \(\sim\) 0.3\%。
+  \item 250ms 落在 "用户感知阈值 300ms" 之内，转化和留存基本不动。
+  \item 反例：cost=14 单次 1s \(\to\) 用户感知"卡顿" \(\to\) 大促日新用户注册流失估算 5--8\%。
+\end{itemize}
+\srcnote{repository/db/model/user.go:28 PassWordCost=12}
+\end{frame}
+
 \begin{frame}{双 token 续期的状态机}
 \begin{tikzpicture}[node distance=10mm and 16mm]
   \node[node-state,node-state-normal] (s1) {access\\valid};
@@ -117,6 +235,25 @@
   \item \textbf{两者都过期}：返回 \texttt{30001}，C 端跳登录页。
 \end{itemize}
 \srcnote{pkg/utils/jwt/jwt.go:67--93 ParseRefreshToken；middleware/jwt.go:59 SetToken；consts/user.go:31--32 24h/10d}
+\end{frame}
+
+\begin{frame}{refresh 10d / 7d / 30d 三选一：复购漏斗 vs 安全风险}
+\begin{tabular}{@{}lp{3.4cm}p{3.4cm}@{}}
+\toprule
+refresh 取值 & 业务收益 & 安全代价 \\
+\midrule
+7d  & 周一上班大概率重登，复购漏斗\textbf{在登录页流失 \(\sim\) 8\%} & 偷设备最多 7d 危险窗 \\
+\textbf{10d} & 黄金周 + 双休回流用户\textbf{无感登录}（电商目标用户群行为吻合） & 偷设备 10d 危险窗，可接受 \\
+30d & 月活用户几乎不重登，登录页流失 $\sim$ 2\% & 偷设备 30d \(\to\) 客诉激增，黑产二手交易"账号即资产" \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item gomall 选 10d 是\textbf{业务行为画像决定的}：电商用户两周内打开 app 概率 $>$ 85\%。
+  \item 30d 看似友好，实际放大\textbf{被偷账号挂闲鱼"包登录" 黑产}：被盗号 24h 内不修改资料，老主人完全感知不到。
+  \item 10d 是合规线（很多支付牌照要求 token 长度 $\leq$ 14d）。
+\end{itemize}
+\srcnote{consts/user.go:31--32 RefreshTokenExpireDuration=10d}
 \end{frame}
 
 \begin{frame}{24h / 10d 这两个数字的业务依据}
@@ -195,6 +332,16 @@ c.Request = c.Request.WithContext(
 \section{RBAC：30s 缓存为什么业务能接受}
 % ============================================================
 
+\begin{frame}{本节角色视角：运营 + 客服 + SRE}
+\begin{itemize}
+  \item \textbf{运营}：提一个客服为 admin，最多等 30s。运营操作的是\textbf{人事}，不是秒杀，30s 完全可接受。
+  \item \textbf{客服}：被降权后，最多 30s 还能看到 admin 菜单。\textbf{业务码 30005} 就是为这 30s 兜底的提示。
+  \item \textbf{SRE}：RBAC 不能成为性能瓶颈。30s sync.Map 命中率 99\%+ \(\to\) 鉴权 p99 维持在 1ms 以内。
+  \item \textbf{为什么不是 5s / 60s}：5s 太短，DB 命中率掉到 95\% 以下；60s 太长，封号恶意 admin 时尾巴太长。
+\end{itemize}
+\keypoint{30s 是\textbf{业务对最终一致的明确容忍度}：99\% 走 0ms 缓存，关键路径用显式失效保 1\%。}
+\end{frame}
+
 \begin{frame}{RBAC 30s 内存缓存命中链路}
 \begin{tikzpicture}[node distance=7mm and 12mm]
   \node[node-box] (req)  {请求};
@@ -268,6 +415,16 @@ func lookupRole(ctx context.Context, userId uint) (string, error) {
 \section{admin bootstrap + 三层边界路线图}
 % ============================================================
 
+\begin{frame}{本节角色视角：SRE + 运营 + 商家（路线图）}
+\begin{itemize}
+  \item \textbf{SRE}：上线新实例第一件事就是开 admin —— 这是\textbf{部署 SOP 的第一步}。
+  \item \textbf{运营}：bootstrap 接口"自锁"后，所有后续提权必须走 admin promote \(\to\) \textbf{留审计痕迹}。
+  \item \textbf{商家（路线图）}：未来 merchant 自助入驻后，商家身份独立于 admin / user，需要单独 group 和 DAO 层 shop\_id 隔离。
+  \item \textbf{客服}：业务码 \texttt{30005} "需要管理员权限" 出现时，客服要能识别这是\textbf{正常 RBAC 拦截}而不是 bug。
+\end{itemize}
+\keypoint{冷启动有解、提权可追、降权快、误打有交代 —— 这是 admin 体系的四个业务目标。}
+\end{frame}
+
 \begin{frame}{冷启动悖论}
 \begin{itemize}
   \item 上线一个全新 gomall 实例，users 表是空的。
@@ -331,6 +488,27 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
 \end{itemize}
 \end{frame}
 
+\begin{frame}{admin bootstrap "占用"的运维 SOP（客服 + SRE 协同）}
+\textbf{情境}：运维 B 在 prod 上第二次调 \texttt{/admin/bootstrap}，得到错误"系统已存在 admin"。
+\begin{tabular}{@{}p{2.5cm}p{8cm}@{}}
+\toprule
+角色 & 该做什么 \\
+\midrule
+运维 B（调用者） & 不要重试，先排查 admin 是不是已有人开过 \\
+客服话术    & 不直面用户 —— 这是内部 SOP，对外无客诉 \\
+SRE 操作    & 查 admin\_audit（路线图）或 \texttt{SELECT id, name FROM users WHERE role='admin'} 找到首位 admin \\
+后续路径    & 让首位 admin 走 \texttt{/admin/users/promote} 把 B 提为 admin \\
+真实事故钩子 & 若首位 admin 离职 \(\to\) 走数据库直改 role（堡垒机审计），不再走 bootstrap \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item bootstrap"自锁"的意义：\textbf{排除"调两遍把别人覆盖掉"的灾难}。
+  \item 没有错误码（不是 30005），是因为这\textbf{不该被 C 端看到}，只可能出现在 SRE 控制台。
+\end{itemize}
+\srcnote{service/admin.go:72--78 count 校验；deck 12 admin\_audit 路线图}
+\end{frame}
+
 \begin{frame}{C 端 / merchant / admin 三层对比}
 \begin{tabular}{@{}llll@{}}
 \toprule
@@ -372,6 +550,38 @@ admin          & admin 子组   & + RequireRole       & 提权 / 后台 \\
 % ============================================================
 \section{业务场景：补券 / 业务码 / 客服话术}
 % ============================================================
+
+\begin{frame}{本节角色视角：客服 + 运营（主角）}
+\begin{itemize}
+  \item 前 3 个 section 把"系统怎么做"讲完了。这一节翻面 —— \textbf{用户怒投诉时客服该说什么}。
+  \item 鉴权出错的用户视角永远只有 5 个字："为什么不行"。客服话术必须把 30001 / 30002 / 30005 翻译成\textbf{用户能听懂、又不暴露系统细节}的人话。
+  \item 业务码的设计原则：\textbf{对外少} —— 用户看到的提示越统一越好，防枚举；\textbf{对内多} —— 客服 / SRE 拿到的码越细越好，便于审计和定位。
+\end{itemize}
+\keypoint{业务码不是给程序员看的，是\textbf{给客服 SOP 用的}。一个码对应一句话术 + 一个排查路径。}
+\end{frame}
+
+\begin{frame}{客服话术总表：用户看到什么 / 客服说什么 / 运维做什么}
+\scriptsize
+\begin{tabular}{@{}lp{2.4cm}p{2.8cm}p{3.4cm}@{}}
+\toprule
+码 & 用户看到 & 客服该说 & 运维该做 \\
+\midrule
+400        & "请重试"        & "升级 app 再试" & 查 SDK 版本分布，可能 OS 推送 \\
+10003      & 用户名或密码错  & 一致话术（防枚举） & 看登录失败计数曲线 \\
+10005      & 用户名或密码错  & 一致话术（防枚举） & 失败激增触发撞库告警 \\
+10011（路线图）& 弹人机验证      & "完成验证后重试" & 看验证码通过率 \\
+30001      & "请重新登录"    & "请重新登录" & 检查 token 是否被截断 \\
+30002      & "10 天未登录"   & "您已超 10 天未登录，请重登" & 一般不需处理，若集中爆发查 jwt secret 轮换 \\
+30005      & "需要管理员权限"& "该操作需要管理员，请联系您的客户经理" & 查用户是不是误打 admin URL \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\begin{itemize}
+  \item \textbf{30001 vs 30002 给客服}：用户视角都是"重登"，但客服比例曲线异常 \(\to\) 风控介入（30001 突增多半是被换设备登录）。
+  \item \textbf{10003 vs 10005 给用户}：必须一致 —— 否则黑产能用"用户名不存在"vs"密码错"差异\textbf{枚举用户名}。
+\end{itemize}
+\srcnote{pkg/e/code.go:8 InvalidParams=400；:13--15 10003/10005；:35--39 30001--30005}
+\end{frame}
 
 \begin{frame}{客服补券的路径选择}
 \begin{tabular}{@{}llll@{}}
@@ -500,6 +710,16 @@ func (s *UserSrv) preflight(ctx context.Context, name, cap string) error {
 % ============================================================
 \section{双 token 失效 / 强制下线 / 多端隔离}
 % ============================================================
+
+\begin{frame}{本节角色视角：客服 + 风控 + 商家（路线图）}
+\begin{itemize}
+  \item \textbf{客服}：用户哭诉"账号被盗了" \(\to\) 客服必须 5 分钟内\textbf{强制下线所有端}，不能等 access 24h 自然过期。
+  \item \textbf{风控}：同 userId 同时出现在 2 个 IP 段 \(\to\) 自动触发强制下线。这一步是\textbf{机器决策、客服只通知}。
+  \item \textbf{商家（路线图）}：商家账号被盗影响整店 GMV，强制下线 SLA 必须 $<$ 1min（vs C 端 5min）。
+  \item \textbf{业务后果**}：盗号场景如果 24h 才失效，平均一个被盗号造成的退款 / 客诉成本 \(\sim\) 200--500 元。强制下线把这个数压到 $<$ 20 元。
+\end{itemize}
+\keypoint{失效慢是 JWT 的"原罪"。\texttt{token\_ver} 是用一字段成本 + 一次 DB UPDATE 把这罪赎回来。}
+\end{frame}
 
 \begin{frame}{token 黑名单方案：版本号 vs SET}
 \begin{tabular}{@{}lll@{}}
