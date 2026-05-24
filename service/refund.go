@@ -103,7 +103,7 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 		return ErrInvalidOrderStateTransition
 	}
 	amount := order.Money * int64(order.Num)
-	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
+	txErr := baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		ok, err := dao.NewOrderDaoByDB(tx).ApproveRefund(orderNum)
 		if err != nil {
 			return err
@@ -122,6 +122,22 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 			},
 		)
 	})
+	if txErr != nil {
+		return txErr
+	}
+
+	// 退款落单成功，把满减预算退还。失败仅打日志，不影响主流程：
+	// 用户已被告知退款获批；预算挂账由 SRE / 数据脚本兜底回收。
+	if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
+		if rdErr := GetPromoSrv().ReleaseDiscount(ctx, order.ID, order.PromoRuleID, order.PromoDiscountCents, "refund"); rdErr != nil {
+			util.LogrusObj.Errorf("[promo] release on refund failed orderNum=%d rule=%d err=%v",
+				orderNum, order.PromoRuleID, rdErr)
+		} else {
+			util.LogrusObj.Infof("[promo] released on refund orderNum=%d rule=%d discount=%d",
+				orderNum, order.PromoRuleID, order.PromoDiscountCents)
+		}
+	}
+	return nil
 }
 
 // RejectRefund 运营驳回退款，订单回到 Completed。

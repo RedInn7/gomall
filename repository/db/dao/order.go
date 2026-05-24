@@ -31,6 +31,19 @@ func (dao *OrderDao) CreateOrder(order *model.Order) error {
 	return dao.DB.Create(&order).Error
 }
 
+// UpdatePromoFields 满减预算耗尽降级时，把订单上的满减字段改回无折扣。
+// 仅在下单事务里使用：调用方已持有 tx；不要在事务外调用，否则违反 FinalCents 与
+// PromoDiscountCents 必须同进同退的约束。
+func (dao *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, finalCents int64) error {
+	return dao.DB.Model(&model.Order{}).
+		Where("id = ?", orderID).
+		Updates(map[string]interface{}{
+			"promo_rule_id":        ruleID,
+			"promo_discount_cents": discountCents,
+			"final_cents":          finalCents,
+		}).Error
+}
+
 // ListOrderByCondition 获取订单List
 func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r *types.OrderListResp, err error) {
 	req.BasePage.Normalize()

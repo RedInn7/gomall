@@ -34,6 +34,7 @@ require (
 	gopkg.in/yaml.v2 v2.4.0
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.0
+	gorm.io/driver/sqlite v1.4.4
 	gorm.io/gorm v1.25.0
 	gorm.io/plugin/dbresolver v1.4.1
 )
@@ -131,6 +132,5 @@ require (
 	google.golang.org/genproto v0.0.0-20230410155749-daa745c078e1 // indirect
 	gopkg.in/alexcesaro/quotedprintable.v3 v3.0.0-20150716171945-2caba252f4dc // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
-	gorm.io/driver/sqlite v1.4.4 // indirect
 	skywalking.apache.org/repo/goapi v0.0.0-20230314034821-0c5a44bb767a // indirect
 )
