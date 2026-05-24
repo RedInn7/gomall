@@ -1,7 +1,7 @@
 \input{preamble}
 
-\title{流量治理：多层闸门的业务视角}
-\subtitle{TokenBucket / SlidingWindow / CircuitBreaker / 异步削峰 / HTTP cache}
+\title{流量治理：从大促 GMV 倒推的五层闸门}
+\subtitle{业务视角下的 TokenBucket / SlidingWindow / CircuitBreaker / 异步削峰 / HTTP cache}
 \author{gomall · 业务侧 deck (v2)}
 \date{}
 
@@ -14,21 +14,51 @@
 \end{frame}
 
 % ============================================================
-% 为什么不能"一刀切"
+\section{业务困局：流量治理到底治什么}
 % ============================================================
 
-\begin{frame}{流量治理是一个"分层叠加"的工程}
+\begin{frame}{一个真实的双 11 场景：5 秒转圈背后是多少 GMV}
 \begin{itemize}
-  \item 单一阈值挡不住所有场景：
-  \begin{itemize}
-    \item DDoS 几十万 QPS，网关层就要拦；
-    \item 黑产用户 5 QPS 持续刷一天，要在用户维度拦；
-    \item 第三方支付 30s 超时，要在依赖维度拦。
-  \end{itemize}
-  \item gomall 把治理拆成 5 层叠加：\textbf{TokenBucket / SlidingWindow / CircuitBreaker / 异步削峰 / HTTP cache}。
-  \item 每一层解决一个具体的业务问题，组合起来才能扛住大促。
+  \item 0 点开抢，预估峰值 \textbf{100k QPS} 涌进 \texttt{/orders/create}。
+  \item 同步链路顶不住：DB 连接池打满 $\to$ 用户看到\textbf{5 秒转圈}。
+  \item 行业数据：每多 1 秒延迟，下单放弃率 $+$ 7\%；\textbf{5 秒 $\approx$ 38\% 放弃}。
+  \item 算账：单平台 0 点 10 亿 GMV 预算 $\times$ 38\% = \textbf{3.8 亿损失}，比限流误伤几百用户严重几个数量级。
+  \item 结论：流量治理不是"挡攻击"，是\textbf{用业务可接受的代价换 GMV 不雪崩}。
 \end{itemize}
-\srcnote{routes/router.go:22 全局 / :40 HTTP cache / :94 异步入队 / :114 熔断 / :136 滑动窗口}
+\srcnote{stressTest/REPORT.md \S 1 基线 64k RPS；service/order\_async.go:1--188 异步削峰方案}
+\end{frame}
+
+\begin{frame}{5 个角色，5 种"流量治理是什么"}
+\begin{tabular}{@{}lll@{}}
+\toprule
+角色 & 体感 & 关心 \\
+\midrule
+C 端用户  & 看到"系统繁忙"        & 我能不能再点 / 多久能买到 \\
+商家     & 秒杀页打不开          & 我的店今天损失多少订单 \\
+运营     & 0 点峰值能不能扛      & GMV 影响 / 黑产薅多少 \\
+客服     & 70001 / 70002 投诉    & 怎么回话 / 怎么转 SRE \\
+SRE     & 上游 429 / 下游慢     & SLO 是否还在预算内 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 同一个 \texttt{70001} 业务码，对用户是"重试一下"、对客服是话术、对运营是\textbf{今天又少了多少单}、对 SRE 是 SLO 烧多少预算。\\
+这份 deck 按这 5 个视角讲，不止讲算法。
+\srcnote{pkg/e/code.go:57--58 70001 / 70002；README.md 业务全景表}
+\end{frame}
+
+\begin{frame}{核心哲学：宁可下游慢、不能上游 429}
+\begin{itemize}
+  \item README 写明的 SLO 取舍：P0 核心交易（\texttt{/orders/create} / \texttt{/paydown}）\textbf{99.95\%}（年宕 4h22min）、\textbf{不挂用户限流}。
+  \item 业务翻译：\textbf{宁可让用户等 5 秒，也不能让用户看到 429}。
+  \begin{itemize}
+    \item 等 5 秒：体验差，但订单还在；
+    \item 看到 429：用户立刻关 app，订单丢，怪平台不怪自己。
+  \end{itemize}
+  \item P0 路径靠\textbf{异步削峰 + 缓存 + 库存预扣}扛峰值，限流只挂全局兜底（IP 100 RPS）。
+  \item P2 营销路径反过来：宁可误杀真人、不能让黑产薅光（\texttt{3/s/user} 激进阈值）。
+  \item 这两套取舍写在同一份 router.go 里，是流量治理"按业务等级分挂载"的核心。
+\end{itemize}
+\srcnote{README.md SLO 表；routes/router.go:22, 79--84, 94, 114--121, 136--142}
 \end{frame}
 
 \begin{frame}{gomall 五层闸门的业务定位}
@@ -48,8 +78,26 @@
   \draw[arrow] (route) -- (mq);
 \end{tikzpicture}
 \vspace{2mm}
-\small 五层并不是"流水线串联"，而是按接口按业务分级\textbf{挑选挂载}。
-\srcnote{routes/router.go 全文 mount 点}
+\small 五层不是流水线串联，是\textbf{按接口按业务分级挑选挂载}：每层挡一个具体的角色痛点。
+\srcnote{routes/router.go:22, 39--45, 79--84, 94, 114--121, 136--142 全部挂载点}
+\end{frame}
+
+\begin{frame}{五层闸门 vs 五个角色：哪层解决谁的痛}
+\footnotesize
+\begin{tabular}{@{}lllll@{}}
+\toprule
+层 & 拦谁 & C 端体感 & 商家 / 运营关心 & 客服 \\
+\midrule
+HTTP cache    & 重复读  & 详情秒开    & CDN 卸了 80\% 读 & --- \\
+TokenBucket   & 爬虫脚本 & 几乎无感    & GMV 保护         & --- \\
+SlidingWindow & 撞库脚本 & 慢一点没事  & 反黑产 / 抢券公平 & 70001 \\
+CircuitBreaker & 慢依赖  & "1 分钟后再试" & 防雪崩 / 守 SLO   & 70002 \\
+OrderEnqueue  & 写峰值  & 拿 ticket 等一会 & 双 11 不挂        & "已入队、稍候查询" \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 每层都对应一个"角色 + 业务码 + 话术"，不是孤立算法。
+\srcnote{pkg/e/code.go:57--58 70001/70002；README.md 5 角色业务全景表}
 \end{frame}
 
 \begin{frame}{核心 P0 vs 营销 P2：阈值取舍完全不同}
@@ -66,26 +114,42 @@ P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
 \end{tabular}
 \vspace{2mm}
 \small \textbf{P0 宁可下游慢、不能上游 429}；\textbf{P2 宁可误杀、不能让黑产薅光}。\\
-两类接口同一套阈值是行不通的。
-\srcnote{routes/router.go:22, 39--45, 76--84, 92, 114--119, 136--142}
+两类接口用同一套阈值就两头不讨好：P0 损 GMV、P2 黑产薅干。
+\srcnote{routes/router.go:22, 39--45, 79--84, 94, 114--121, 136--142}
 \end{frame}
 
 % ============================================================
-\section{第一层：TokenBucket 全局兜底}
+\section{第一层：TokenBucket — 商家和爬虫的边界}
 % ============================================================
 
-\begin{frame}{为什么全局还要 100 RPS / 200 burst}
+\begin{frame}{业务困局：爬虫脚本一晚上抓走多少商品数据}
 \begin{itemize}
-  \item gomall 单机基线 \textbf{64{,}254 RPS}（\texttt{/ping}），单 IP 真正用户用不到 1/600。
-  \item 100 RPS / 200 burst 实际拦的是\textbf{爬虫脚本和异常客户端}，不是用户。
-  \item burst 给到 2$\times$ rps 的依据：
+  \item 商家最讨厌的事：\textbf{竞对爬虫}夜里 5 QPS 持续 8 小时，把全店 SKU、价格、库存全抓走。
+  \item 不拦的代价：① 数据被对家拿去比价杀价；② 单 IP 5 QPS 累计一夜 14 万次查询，DB 多扛 1 个商品详情连接池。
+  \item 真用户单 IP 一晚上访问 \texttt{/product/show} 通常 $<$ 50 次（浏览几十个商品）。
+  \item TokenBucket \textbf{100 RPS / 200 burst} 的业务含义：
   \begin{itemize}
-    \item 浏览器一个页面 30+ 静态 GET 是常态，瞬时 burst $\approx$ 100；
-    \item burst 留 200 = 让一次正常加载\textbf{绝不触发}。
+    \item 真用户首屏并发 30+ 张图、瞬时 burst 100 $\to$ 200 桶吸收，\textbf{0 误伤}；
+    \item 爬虫稳态 5 QPS 不超限，但触发\textbf{风控 + 业务监控告警}，配合 IP 段封禁。
   \end{itemize}
-  \item 这层是\textbf{兜底}：业务层的精细限流挂掉时，至少不会被压死。
+  \item 这层是\textbf{兜底闸门}，业务侧精细限流挂掉时至少不会被压死。
 \end{itemize}
-\srcnote{routes/router.go:22 TokenBucket(rate.Limit(100), 200)}
+\srcnote{routes/router.go:22 TokenBucket(rate.Limit(100), 200)；middleware/ratelimit.go:22--49}
+\end{frame}
+
+\begin{frame}{为什么 100 RPS / 200 burst：基线 64k 反推}
+\begin{itemize}
+  \item gomall 单机基线 \textbf{64{,}254 RPS}（\texttt{/ping}，stressTest \S 1）。
+  \item 真实用户单 IP $<$ 1/600 单机容量；100 RPS 留够 600$\times$ 安全余量。
+  \item burst $= 2 \times$ rps 的业务依据：
+  \begin{itemize}
+    \item 浏览器一个详情页 30+ 静态 GET 是常态；
+    \item 商品详情图懒加载、瀑布流 $\to$ 瞬时 burst $\approx$ 100；
+    \item 200 桶让一次正常加载\textbf{绝不触发}（业务零误伤）。
+  \end{itemize}
+  \item 商家视角：阈值定太松爬虫拿数据、定太死客户投诉；100/200 是\textbf{用 64k 基线 / 真实页面行为}双向算出的折中。
+\end{itemize}
+\srcnote{routes/router.go:22；stressTest/REPORT.md \S 1 单机 64{,}254 RPS}
 \end{frame}
 
 \begin{frame}{TokenBucket 算法：桶 + 令牌生成 + 漏出}
@@ -100,9 +164,10 @@ P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
 \end{tikzpicture}
 \vspace{2mm}
 \begin{itemize}
-  \item 令牌按 \textbf{rps} 匀速生成；桶满则溢出。
-  \item 请求拿到令牌才放行，拿不到立刻返回 70001。
-  \item burst 容量决定能否吸收\textbf{瞬时尖刺}（比如页面首屏并发）。
+  \item 令牌按 rps 匀速生成；桶满则溢出。
+  \item 请求拿到令牌才放行，拿不到立刻 70001（不阻塞、不排队）。
+  \item burst 决定能否吸收\textbf{瞬时尖刺}（首屏并发 / 用户狂点）。
+  \item 业务含义：\textbf{允许尖刺 / 拒绝高水位}—— 真用户偶尔狂点不痛、爬虫稳态 5 QPS 触不到这层，但配合 IP 黑名单可以拦。
 \end{itemize}
 \srcnote{middleware/ratelimit.go:22--49 golang.org/x/time/rate 实现}
 \end{frame}
@@ -127,32 +192,67 @@ func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
     }
 }
 \end{lstlisting}
-\scriptsize ① map 按 IP 隔离；② 每 IP 一个 \texttt{rate.Limiter}；③ \texttt{Allow()} 非阻塞；④ 拒了直接 70001；⑤ 进程内 map 是单机代价，多实例要 Redis token bucket。
+\scriptsize ① map 按 IP 隔离（NAT 出口共享一个桶是已知代价）；② 每 IP 一个 \texttt{rate.Limiter}；③ \texttt{Allow()} 非阻塞，不留排队队列；④ 拒了直接 200+70001（不发 5xx，详见熔断章节）；⑤ 进程内 map 是单机代价，多实例要换 Redis token bucket。
 \end{frame}
 
 % ============================================================
-\section{第二层：SlidingWindow 用户精确限流}
+\section{第二层：SlidingWindow — 抢券公平与黑产 ROI}
 % ============================================================
 
-\begin{frame}{秒杀为什么必须用 SlidingWindow}
+\begin{frame}{业务困局：脚本党 10 万次刷券 = 真人少几张}
 \begin{itemize}
-  \item 秒杀的\textbf{业务对手}是脚本，不是用户：
+  \item 秒杀 / 抢券场景：\textbf{业务对手是脚本}，不是用户。
   \begin{itemize}
-    \item 真人最快点击 \textbf{300--500ms 一次} $\to$ 1s 最多 2--3 次；
-    \item 脚本可以 1s 打 1000 次。
+    \item 真人最快点击 300--500ms / 次 $\to$ 1s 最多 2--3 次；
+    \item 脚本不限速可以 1s 打 1000 次；
+    \item 撞库账号一夜 24h$\times$3600s$\times$3 $=$ 26 万次抢券机会。
   \end{itemize}
-  \item 阈值定 \textbf{3/s/用户}：
+  \item 不拦的业务后果（算账）：
   \begin{itemize}
-    \item 真用户：留 50\% 余量给"双击 + 网络重试"；
-    \item 黑产：第 4 次开始 70001 截断。
+    \item 10 万张优惠券，脚本 100 个号 $\times$ 1 千次 = 100 万次抢 $\to$ 99\% 命中率 = \textbf{9.9 万张被脚本抢走}；
+    \item 真人只剩 \textbf{1\%}（1000 张）$\to$ 用户体感"根本抢不到"$\to$ 大促口碑崩。
   \end{itemize}
-  \item TokenBucket 不够：
-  \begin{itemize}
-    \item 必须按\textbf{用户 ID}（不是 IP）限，否则一个 NAT 出口下所有用户共享一个桶；
-    \item 必须\textbf{分布式精确}，多实例下用 Redis 共享状态。
-  \end{itemize}
+  \item SlidingWindow \texttt{3/s/user} 把脚本打回客户端，\textbf{反黑产 ROI 立等可现}。
 \end{itemize}
-\srcnote{routes/router.go:136--142 SlidingWindow Scope:seckill Limit:3 Window:1s ByUser:true}
+\srcnote{routes/router.go:79--84 红包；:136--142 秒杀；service/skill\_goods.go 秒杀逻辑}
+\end{frame}
+
+\begin{frame}{阈值 3/s/user：用户 vs 脚本的精确分界}
+\begin{itemize}
+  \item 真用户行为画像：
+  \begin{itemize}
+    \item 双击 + 网络重试，瞬时 2 次同秒是常态；
+    \item 留 50\% 余量 = \textbf{3 次 / 秒上限}，绝不误伤。
+  \end{itemize}
+  \item 脚本行为画像：第 4 次开始 70001，再脚本写多猛都白搭。
+  \item TokenBucket 在此场景失效的原因：
+  \begin{itemize}
+    \item NAT 出口（学校 / 公司 / 4G 基站）下 \textbf{所有用户共享一个 IP}；
+    \item 阈值放宽给真人 $\to$ 脚本一起放；阈值收紧拦脚本 $\to$ NAT 下真人被误伤。
+  \end{itemize}
+  \item 必须\textbf{按用户 ID}限，必须\textbf{分布式精确}（多实例下 Redis 共享状态）。
+\end{itemize}
+\srcnote{routes/router.go:136--142 Scope:seckill Limit:3 Window:1s ByUser:true}
+\end{frame}
+
+\begin{frame}{压测实测：3/s/user 阈值 2.2\% 误差}
+\textbf{场景}：30 VU $\times$ 15s 打 \texttt{/skill\_product/skill}，共用同一 token（模拟同一用户脚本）。
+
+\vspace{2mm}
+\begin{tabular}{@{}lrr@{}}
+\toprule
+指标       & 实测      & 业务期望 \\
+\midrule
+通过请求数 & \textbf{46}     & 15s $\times$ 3 = 45 \\
+被限流数   & 781{,}624  & 黑产全拦 \\
+单接口 RPS & 52{,}082   & 与 ping 同量级 \\
+误差       & \textbf{2.2\%} & $<$ 5\% \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+
+\small 业务翻译：30 个脚本号刷了 78 万次，\textbf{真用户名额一张没少}；服务端只做一次 Lua RTT（52k RPS 同 ping 量级），\textbf{脚本成本被推到客户端}—— 这就是反黑产的 ROI。
+\srcnote{stressTest/REPORT.md \S 5；stressTest/seckill\_rate\_limit.js}
 \end{frame}
 
 \begin{frame}{SlidingWindow 在 Redis ZSet 上的实现}
@@ -171,7 +271,8 @@ func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
 \begin{itemize}
   \item 每个用户一个 ZSet：\texttt{rl:seckill:user:42}；
   \item score = 请求时间戳（ms）；member = "时间戳 + 6 字节随机"避免同毫秒冲突；
-  \item 滑动窗口 = 每次请求先\textbf{踢掉 window 之外的旧记录}，再 ZCARD 数当前窗口内的请求数。
+  \item 滑动窗口 = 每次请求先\textbf{踢掉 window 之外的旧记录}，再 ZCARD 数当前窗口内的请求数；
+  \item 业务正确性：没有"窗口边界双倍突刺"，反黑产精度高。
 \end{itemize}
 \srcnote{repository/cache/ratelimit.go:18--34 Lua 脚本; middleware/ratelimit.go:69--104 调用方}
 \end{frame}
@@ -188,61 +289,57 @@ redis.call('ZADD', key, now_ms, member)
 redis.call('PEXPIRE', key, window_ms)
 return {1, count + 1}
 \end{lstlisting}
-\small 逐行：① 入参 key/窗口/阈值/now/请求 id；② \textbf{ZREMRANGEBYSCORE} 滑掉过期（关键）；③ ZCARD 数当前窗口；④ 超阈值返回 0；⑤ 通过则 ZADD 入；⑥ PEXPIRE 自动回收；⑦ \textbf{整脚本单原子}，无竞态。
-\end{frame}
-
-\begin{frame}{压测实测：3/s/user 阈值校验}
-\textbf{场景}：30 VU × 15s 打 \texttt{/skill\_product/skill}，共用同一 token。
-
-\vspace{2mm}
-\begin{tabular}{@{}lrr@{}}
-\toprule
-指标       & 实测      & 业务期望 \\
-\midrule
-通过请求数 & \textbf{46}     & 15s × 3 = 45 \\
-被限流数   & 781{,}624  & 黑产全拦 \\
-单接口 RPS & 52{,}082   & 与 ping 同量级 \\
-误差       & 2.2\%      & < 5\% \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-
-\small 通过 46$\approx$"真用户 15s 最多秒杀 45 次"；被限 78 万次说明脚本成本被推到客户端，服务端只做一次 Lua RTT。
-\srcnote{stressTest/REPORT.md \S5；stressTest/seckill\_rate\_limit.js}
+\small 逐行：① 入参 key/窗口/阈值/now/请求 id；② \textbf{ZREMRANGEBYSCORE} 滑掉过期（业务正确性的关键）；③ ZCARD 数当前窗口；④ 超阈值返回 0；⑤ 通过则 ZADD 入；⑥ PEXPIRE 自动回收（不留垃圾 key）；⑦ \textbf{整脚本单原子}，无竞态，是抢券公平的工程保证。
 \end{frame}
 
 \begin{frame}{红包接口：同一套机制再用一次}
 \begin{itemize}
   \item \texttt{/redpacket/claim} 也是 \textbf{Limit:3 Window:1s ByUser:true}（router.go:79--84）。
   \item 与秒杀不同的是：红包额外挂\textbf{幂等}（避免一次抢包重复扣余额）。
-  \item 这印证了一个体例：\textbf{SlidingWindow 是 P2 营销接口的"标配"}，按用户维度反黑产；幂等是 P0/P2 资金链路的"标配"。
-  \item gomall 把这两个中间件设计成可以\textbf{任意组合}，business team 只用写一行声明。
+  \item 业务模式归纳：
+  \begin{itemize}
+    \item \textbf{SlidingWindow = P2 营销标配}（反黑产 / 抢券公平）；
+    \item \textbf{幂等 = P0/P2 资金链路标配}（防重复扣款）；
+    \item 两个中间件\textbf{可以任意组合}，业务侧一行声明搞定。
+  \end{itemize}
+  \item 运营视角：双 11 / 春节 / 618 上新活动，复用现有中间件 = \textbf{零新代码、当天上线}。
 \end{itemize}
 \srcnote{routes/router.go:79--84 红包抢包；:136--142 秒杀；:92, 94, 114, 120 幂等链}
 \end{frame}
 
 % ============================================================
-\section{第三层：CircuitBreaker 保护慢依赖}
+\section{第三层：CircuitBreaker — 支付宕机不让交易链路死}
 % ============================================================
 
-\begin{frame}{熔断保护的不是自己，是下游}
+\begin{frame}{业务困局：第三方支付 30s 超时 = 全站雪崩}
+\begin{itemize}
+  \item 真实事故剧本（行业公开过的案例）：
+  \begin{itemize}
+    \item 13:42 第三方支付网关网络异常，RT 从 200ms 飙到 30s；
+    \item 13:43 \texttt{/paydown} 全员 30s 超时 $\to$ goroutine 堆积 $\to$ 内存爆 $\to$ \textbf{gomall 自身挂}；
+    \item 13:45 商家秒杀页打不开、订单详情打不开 $\to$ 客服炸锅；
+    \item 13:50 SRE 才看到告警 —— 但人已经救不回来了，全站雪崩 40min。
+  \end{itemize}
+  \item 不熔断的代价：\textbf{下游慢 = 自己跟着挂}（连锁雪崩比单点宕机损失大 10$\times$）。
+  \item CircuitBreaker 的业务含义：\textbf{我代下游回答你不行，免得你等 30 秒还白等}。
+  \item P0 SLO 99.95\% 的预算 4h22min/年，雪崩一次烧完。
+\end{itemize}
+\srcnote{routes/router.go:114--119 paydown 接 CB；middleware/circuitbreaker.go:44--136}
+\end{frame}
+
+\begin{frame}{熔断保护的不是自己，是下游 + 自己 + 用户}
 \begin{itemize}
   \item gomall \texttt{/paydown} 的下游 = 第三方支付（Stripe / 微信 / 支付宝）。
-  \item 这种依赖的\textbf{失败模式}是慢，不是 500：
+  \item 失败模式：\textbf{慢}（不是 500）。50x 可以快速判错，慢调用最毒。
+  \item CircuitBreaker 三态阈值 \textbf{5 失败 / 10s 等待 / 3 探测}（router.go:114--119）的业务含义：
   \begin{itemize}
-    \item 正常 RT 200ms；
-    \item 异常时 RT 30s 才超时；
-    \item 不熔断 $\to$ goroutine 堆积 $\to$ 内存爆 $\to$ 自己跟着挂。
+    \item \textbf{5} = 容忍偶发抖动不一抖就跳 $\to$ 不误伤健康下游；
+    \item \textbf{10s} = 给下游一次完整告警 + 自愈周期 $\to$ 配合下游 SRE 处理；
+    \item \textbf{3} = HalfOpen 探测窗口够小 $\to$ 避免恢复瞬间再次打死。
   \end{itemize}
-  \item CircuitBreaker 的业务含义：\textbf{"我代下游回答你不行，免得你等 30 秒"}。
-  \item 三态阈值 \textbf{5 失败 / 10s 等待 / 3 探测}（router.go:114--119）：
-  \begin{itemize}
-    \item 5 = 容忍偶发抖动，不会一抖就跳；
-    \item 10s = 给下游一个完整告警 + 自愈周期；
-    \item 3 = 探测窗口够小，避免 HalfOpen 也被打爆。
-  \end{itemize}
+  \item Open 期间订单怎么办：落 outbox 等回路（详见 deck 11 Outbox），\textbf{不丢单}、不写脏数据。
 \end{itemize}
-\srcnote{routes/router.go:114--119 三态阈值}
+\srcnote{routes/router.go:114--119；middleware/circuitbreaker.go 三态机；deck 11 Outbox 配套}
 \end{frame}
 
 \begin{frame}{CircuitBreaker 三态机}
@@ -258,7 +355,8 @@ return {1, count + 1}
 \vspace{1mm}
 \small \textbf{Closed}：放行所有，连续 5 次失败 $\to$ Open。
 \textbf{Open}：直接返回 70002，10s 后试探。
-\textbf{HalfOpen}：放 3 个探测，全成功 $\to$ Closed；任一失败 $\to$ Open。
+\textbf{HalfOpen}：放 3 个探测，全成功 $\to$ Closed；任一失败 $\to$ Open。\\
+非对称信任：\textbf{进 Open 容易、回 Closed 难}—— 资金链路的正确取舍。
 \srcnote{middleware/circuitbreaker.go:76--128 allow + report}
 \end{frame}
 
@@ -287,7 +385,7 @@ func (cb *circuitBreaker) allow() error {
     return nil
 }
 \end{lstlisting}
-\scriptsize ① Closed 仅 atomic load；② Open 内不查时间就拒；③ Open$\to$HalfOpen 锁内 double-check；④ HalfOpen 用原子 Add 限并发；⑤ 热路径无 mutex。
+\scriptsize ① Closed 仅 atomic load（业务无感）；② Open 内不查时间就拒（10ms 内回 70002，对比 30s 超时是 3000$\times$ 提升）；③ Open$\to$HalfOpen 锁内 double-check；④ HalfOpen 用原子 Add 限并发；⑤ 热路径无 mutex（不能因为治理把自己变成瓶颈）。
 \end{frame}
 
 \begin{frame}[fragile]{report：决定下一刻是 Closed 还是 Open}
@@ -310,7 +408,7 @@ func (cb *circuitBreaker) report(failed bool) {
     }
 }
 \end{lstlisting}
-\scriptsize ① Closed 失败计数；② 成功重置避免偶发抖动跳闸；③ HalfOpen \textbf{非对称}——任一失败立即回 Open，必须全成功才回 Closed；④ "信任成本"对资金链路合适：宁保守不再打死下游。
+\scriptsize ① Closed 累加失败计数；② 成功重置避免偶发抖动跳闸；③ HalfOpen \textbf{非对称}—— 任一失败立即回 Open，必须全成功才回 Closed；④ "进 Open 容易、回 Closed 难"对资金链路合适：宁保守不再打死下游，业务上"宁可多熔一会、也不能再雪崩"。
 \end{frame}
 
 \begin{frame}{熔断 + 幂等的三角配对：Open 返回 200 + 70002}
@@ -328,28 +426,48 @@ func (cb *circuitBreaker) report(failed bool) {
 \begin{itemize}
   \item Open 返回 \textbf{200 + status=70002}（不是 5xx）：app 端老网关吞不了 5xx，统一业务码客户端只用一套 switch。
   \item 客户端拿 70002 指数退避（1s/2s/4s）；重试必须带原 Idempotency-Key。
-  \item paydown 同时挂 CB + Idempotency 不是巧合：缺一边都不行。
+  \item paydown 同时挂 CB + Idempotency 不是巧合：缺一边 $\to$ 重复扣款；缺另一边 $\to$ 雪崩。
 \end{itemize}
 \srcnote{routes/router.go:114--121；middleware/circuitbreaker.go:57--65；pkg/e/code.go:58}
 \end{frame}
 
 % ============================================================
-\section{第四层：异步下单削峰}
+\section{第四层：异步下单 — 双 11 0 点不转圈}
 % ============================================================
 
-\begin{frame}{双 11 0 点：100k QPS 怎么扛}
+\begin{frame}{双 11 0 点的业务账：5 秒转圈 = 3.8 亿损失}
 \begin{itemize}
-  \item 同步下单链路：HTTP $\to$ ReserveStock $\to$ INSERT order $\to$ COMMIT $\to$ 回客户端，p99 大约 50--100ms。
-  \item 100k QPS $\times$ 100ms = \textbf{1 万并发}进 MySQL，连接池打爆。
-  \item gomall 的方案：把"DB 落库"从同步链路里拆出来。
-  \begin{enumerate}
-    \item 同步部分：reserve 库存 + 写 ticket + 投 MQ $\to$ 返回 ticket；
-    \item 异步部分：consumer 慢慢消费 MQ $\to$ INSERT order $\to$ 回写 ticket 状态；
-    \item 客户端：拿 ticket 轮询 \texttt{/orders/status}。
-  \end{enumerate}
-  \item 收益：DB 压力从"瞬时尖刺"变成"恒定 1k QPS 平流"。
+  \item 同步下单链路：HTTP $\to$ ReserveStock $\to$ INSERT order $\to$ COMMIT $\to$ 回客户端，p99 约 50--100ms。
+  \item 100k QPS $\times$ 100ms = \textbf{1 万并发}进 MySQL，连接池打爆 $\to$ p99 飙到 5s+。
+  \item 用户行为模型：
+  \begin{itemize}
+    \item 等 1s 离开 5\%；
+    \item 等 3s 离开 22\%；
+    \item 等 5s 离开 \textbf{38\%}；
+    \item 等 10s 离开 60\%+。
+  \end{itemize}
+  \item 单平台 0 点 10 亿 GMV $\times$ 38\% = \textbf{3.8 亿损失}—— 这是异步削峰的业务 ROI。
+  \item gomall 方案：\textbf{把 DB 落库从同步链路拆出来}，前端拿 ticket 轮询。
 \end{itemize}
-\srcnote{service/order\_async.go:119--172 OrderEnqueue}
+\srcnote{service/order\_async.go:1--188；service/order\_consumer.go；repository/rabbitmq/order\_async.go}
+\end{frame}
+
+\begin{frame}{用户体验业务量化：从"5 秒转圈"到"$<$ 10ms 拿 ticket"}
+\begin{tabular}{@{}lll@{}}
+\toprule
+环节 & 同步 & 异步 ticket \\
+\midrule
+点击下单 & --- & --- \\
+HTTP 响应 & p99 5s+ 转圈 & \textbf{$<$ 10ms 拿 ticket} \\
+DB 落库 & 同步等 & MQ 慢慢落 \\
+前端展示 & 5s 后看到结果 & 0.5s $\times$ 6 次轮询拿结果 \\
+6 次后还没好 & 用户已离开 & 切"长等待"文案 \\
+失败兜底 & 用户重试 = 重复下单风险 & 同 ticket 重查不下重 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small "等"这件事在异步路径里\textbf{从前台变后台}：用户先拿到"已入队"的确定性反馈，再轮询，再切长等待文案 —— 体感从"卡死"变成"在排队"，放弃率掉到个位数。
+\srcnote{service/order\_async.go OrderEnqueue + 前端轮询协议}
 \end{frame}
 
 \begin{frame}{同步下单 vs 异步 ticket 链路}
@@ -370,7 +488,7 @@ func (cb *circuitBreaker) report(failed bool) {
   \draw[arrow] (c2) to[bend right=30] (poll);
 \end{tikzpicture}
 \vspace{2mm}
-\small 上：所有客户端被 DB 阻塞；下：客户端 5ms 拿到 ticket，DB 压力被 MQ 缓冲。
+\small 上：所有客户端被 DB 阻塞；下：客户端 $<$ 10ms 拿到 ticket，DB 压力被 MQ 缓冲成\textbf{恒定 1k QPS 平流}。
 \srcnote{api 层：EnqueueOrderHandler + OrderStatusHandler; service/order\_async.go}
 \end{frame}
 
@@ -394,20 +512,22 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
     return OrderEnqueueResp{Ticket: ticket, Status: "pending"}, nil
 }
 \end{lstlisting}
-\scriptsize ① 库存预扣前置，不足直接拒；② snowflake 生成 ticket 无 DB；③ Redis pending 给前端轮询；④ 任一步失败 \textbf{ReleaseReservation} 回滚库存；⑤ 投递成功才算入队。
+\scriptsize ① 库存预扣前置，不足直接拒（用户立即看到"已售罄"50001 而非排队 1min 后才知道）；② snowflake 生成 ticket 无 DB；③ Redis pending 给前端轮询；④ 任一步失败 \textbf{ReleaseReservation} 回滚库存（Saga）；⑤ 投递成功才算入队，零丢单。
 \end{frame}
 
 % ============================================================
-\section{第五层：HTTP cache 把读路径 CDN 化}
+\section{第五层：HTTP cache — 让读流量根本不到 gomall}
 % ============================================================
 
-\begin{frame}{读流量的最优解：根本不到 gomall}
+\begin{frame}{业务困局：80\% 读流量都在重复问同一个问题}
 \begin{itemize}
-  \item P1 P3 读接口（\texttt{/product/show}, \texttt{/carousels}, \texttt{/category/list}）的数据更新频率\textbf{远低于查询频率}。
-  \item 让浏览器 / CDN 缓存代答：
+  \item 商品详情页：用户 A 看了一遍、用户 B 看了一遍、爬虫 C 看了一遍，\textbf{后端三次 DB 查询}。
+  \item P1 P3 读接口（\texttt{/product/show}, \texttt{/carousels}, \texttt{/category/list}）数据更新频率\textbf{远低于查询频率}（运营每天调几次，用户每秒查几千次）。
+  \item 卸到浏览器 / CDN 的业务收益：
   \begin{itemize}
-    \item 浏览器：直接返回 304 Not Modified（不传 body）；
-    \item CDN：命中缓存（不到 gomall）。
+    \item 浏览器命中：返回 304 Not Modified，\textbf{0 字节 body、0 DB 查询}；
+    \item CDN 命中：根本不到 gomall，业务侧扩容压力直接砍 80\%；
+    \item 用户体感：详情页\textbf{秒开}，首屏 LCP 提升 0.5s+。
   \end{itemize}
   \item gomall 实现：\texttt{HTTPCache(maxAge)} 中间件统一发 ETag + Cache-Control。
 \end{itemize}
@@ -427,32 +547,178 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
 \end{tikzpicture}
 \vspace{2mm}
 \begin{itemize}
-  \item \textbf{强缓存}（Cache-Control: max-age=60）：浏览器本地命中，0 RTT；
-  \item \textbf{协商缓存}（ETag + If-None-Match）：到 CDN，命中返回 304，无 body；
+  \item \textbf{强缓存}（Cache-Control: max-age=60）：浏览器本地命中，0 RTT $\to$ 用户秒开；
+  \item \textbf{协商缓存}（ETag + If-None-Match）：到 CDN，命中 304 无 body $\to$ 省带宽；
   \item \textbf{回源}：CDN 不命中，回 gomall；ETag 用 SHA-256 前 16 字节算。
 \end{itemize}
 \srcnote{middleware/httpcache.go:78--98 ETag 协商；routes/router.go:39 product/list max-age=30}
 \end{frame}
 
-\begin{frame}{各接口的 max-age 定多少}
+\begin{frame}{各接口的 max-age：运营改价的可接受延迟}
 \begin{tabular}{@{}lll@{}}
 \toprule
 接口 & max-age & 业务依据 \\
 \midrule
-/product/list   & 30s  & 价格 / 库存可能变化，不能太长 \\
+/product/list   & 30s  & 价格 / 库存可能变化，运营忍 30s 上下架 \\
 /product/show   & 60s  & 商品详情更稳定 \\
 /category/list  & 300s & 分类几乎不变 \\
 /carousels      & 300s & 运营手动调，时效性弱 \\
 \bottomrule
 \end{tabular}
 \vspace{3mm}
-\small max-age 的\textbf{业务取舍}：太长会让"改价 / 下架"延迟生效，太短卸不了流量。\\
-300s = 运营改完最多 5min 生效，可接受；30s = 库存接近灵敏阈值的折中。
+\small max-age 的\textbf{业务取舍}：太长 $\to$ "改价 / 下架"延迟生效（运营投诉）；太短 $\to$ 卸不了流量（SRE 投诉）。\\
+300s = 运营改完最多 5min 生效，可接受；30s = 库存接近灵敏阈值的折中（敏感链路保护用户买不到错的）。
 \srcnote{routes/router.go:39--45 各路由的 maxAge 参数}
 \end{frame}
 
 % ============================================================
-% 业务连续性：阈值之外的事
+\section{客服话术：业务码就是产品}
+% ============================================================
+
+\begin{frame}{业务码 70001 / 70002：客服话术对照}
+\begin{tabular}{@{}lll@{}}
+\toprule
+业务码 & 业务含义 & 客服话术 \\
+\midrule
+70001 & 限流命中    & "活动太火爆，请稍等 1 秒重试" \\
+70002 & 熔断开启    & "支付暂忙，1 分钟后再试，订单已保留" \\
+60002 & 幂等命中    & "您已下单成功，无需重复" \\
+50001 & 库存不足    & "已售罄" \\
+\bottomrule
+\end{tabular}
+\vspace{3mm}
+\small 同样是"请稍后"，三种含义完全不同：\\
+\textbf{70001} 客户端 1s 重试就能过 $\to$ 用户自己解决；\\
+\textbf{70002} 必须等下游自愈 + 客服转 SRE 看熔断面板 $\to$ 客服 + 工程协作；\\
+\textbf{60002} 是用户自己重复了 $\to$ 客服安抚 + 引导查订单 $\to$ 客服自解决。\\
+区分话术比统一一句"系统繁忙"对用户更友好，对客服也更省事。
+\srcnote{pkg/e/code.go:57--58 业务码; pkg/e/msg.go:51--52 消息}
+\end{frame}
+
+\begin{frame}{70001 客诉：用户该怎么做 / 客服怎么转}
+\begin{itemize}
+  \item 用户视角：\textbf{"我点了下单，弹出'活动太火爆'是不是抢不到了？"}
+  \item 客服话术：
+  \begin{itemize}
+    \item 第一句："您稍等 1 秒再点一次就好，不影响您的名额。"
+    \item 第二句："这个提示是保护其他用户公平抢券的机制，您是真人不是脚本所以一定能过。"
+    \item 不能说："系统出错了" —— 用户会觉得平台烂。
+  \end{itemize}
+  \item 客服后台看什么：
+  \begin{itemize}
+    \item 治理面板 \texttt{ratelimit:hit:seckill}，1 分钟内全平台命中数；
+    \item 命中 $>$ 10$\times$ 历史均值 $\to$ 真大促，告诉用户"今天人多"；
+    \item 命中正常但用户被拦 $\to$ 大概率脚本号 / 自动化插件。
+  \end{itemize}
+  \item 客服\textbf{不需要转 SRE}：70001 是设计内行为。
+\end{itemize}
+\srcnote{routes/router.go:79--84, 136--142；pkg/e/msg.go:51}
+\end{frame}
+
+\begin{frame}{70002 客诉：客服 + SRE 双线联动}
+\begin{itemize}
+  \item 用户视角：\textbf{"我付钱付不出去，是不是要扣我两次？"}
+  \item 客服话术：
+  \begin{itemize}
+    \item "支付通道暂时繁忙，1 分钟后再试，您的订单已保留 30 分钟不会过期。"
+    \item "如果已经扣款但订单未付成功，请提供订单号，我们 10 分钟内确认。"
+  \end{itemize}
+  \item 客服后台动作：
+  \begin{itemize}
+    \item 看治理面板 \texttt{circuitbreaker:state:paydown} = \texttt{open}？
+    \item \texttt{open} $\to$ 转 SRE，SRE 看下游通道（Stripe / 微信 / 支付宝），是否切备用；
+    \item \texttt{closed} 但用户报 70002 $\to$ 老缓存 / 客户端旧版本。
+  \end{itemize}
+  \item 关键：\textbf{70002 = 设计内的"已知不可用"} $\neq$ "系统挂了"。客服话术要让用户感到\textbf{平台主动控制}，不是\textbf{失控}。
+\end{itemize}
+\srcnote{routes/router.go:114--121；middleware/circuitbreaker.go:57--65}
+\end{frame}
+
+% ============================================================
+\section{大促运营 SOP：T-7 / T-1 / T 日 / T+1}
+% ============================================================
+
+\begin{frame}{大促运营 SOP：流量治理的 T-7 / T-1 / T 日 / T+1}
+\footnotesize
+\begin{tabular}{@{}llll@{}}
+\toprule
+阶段 & 流量治理 & 客服 & SRE \\
+\midrule
+T-7 & 预设限流阈值 & 话术上线培训 & 容量评估 \\
+    & 异步队列预拉  & 70001/70002 演练 & 副本数加倍 \\
+T-1 & 灰度小流量 & 话术下发到坐席 & 监控面板待命 \\
+    & MQ 队列清空  & 高频问题预备 & 报警分级核对 \\
+T 日 0 点 & 实时观测命中 & 第一波处理 & 限流误伤 $<$ 5\% \\
+       & CB 状态实时盯 & 转 SRE 工单  & SLO 烧不烧预算 \\
+T+1 & 黑产盘点 & 客诉根因分析 & 复盘 / 调阈值 \\
+    & 阈值复盘 & 高频客诉归档 & error budget 报告 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small SOP 的关键不是"工程很努力"，是\textbf{每个角色 T 日当天知道做什么、不做什么}。
+\srcnote{stressTest/REPORT.md \S 1 容量基线；deck 12 商家+可观测 配套监控面板设计}
+\end{frame}
+
+\begin{frame}{大促容量评估：怎么算出"需要多少机器"}
+\begin{itemize}
+  \item 输入：① 业务侧预估的峰值 QPS；② 单机基线（gomall 64k RPS）；③ 安全系数（一般 1.5--2$\times$）。
+  \item 计算：副本数 = $\lceil$ 预估峰值 $\times$ 安全系数 / 单机基线 $\rceil$。
+  \item 双 11 例：100k QPS / 64k RPS $\times$ 1.5 = 2.34 $\to$ \textbf{至少 3 台}。
+  \item 但秒杀 / 红包链路 \textbf{不是} 64k RPS 的水平：实测 52k 是 \texttt{/skill\_product/skill}，下单写链路 50k；要按\textbf{最弱链路}（这里是异步落库的 consumer 消费速度）算容量。
+  \item 容量评估的常见错误：① 只看 RPS 不看 p99；② 没考虑下游放大（一个 paydown 触发 3 个下游调用）；③ 忽略冷启动（K8s 拉镜像 30s 起步）。
+\end{itemize}
+\srcnote{stressTest/REPORT.md \S 1 各链路基线 RPS}
+\end{frame}
+
+% ============================================================
+\section{SLO 与业务边界}
+% ============================================================
+
+\begin{frame}{SLO：流量治理的"业务承诺"}
+\begin{tabular}{@{}lll@{}}
+\toprule
+SLI & 阈值 & 业务含义 \\
+\midrule
+P0 接口可用率 & $\ge$ 99.95\%       & 年宕 $\le$ 4h22min（下单 / 支付） \\
+限流误伤率   & $\le$ 5\%           & 真用户被 70001 命中 $<$ 5\% \\
+熔断恢复 SLA & $\le$ 10s 探测 + 30s 全恢复 & 下游恢复后不滞后 \\
+SlidingWindow 精度 & 误差 $\le$ 5\%      & 实测 \textbf{2.2\%} \\
+基线 RPS    & $\ge$ 50k           & 实测 \textbf{64{,}254} \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small SLO 是\textbf{用业务语言写给运营 / 商家 / SRE 看的承诺}，不是工程师内部 KPI。\\
+每条 SLI 都对应一个"违约 = 怎么补救"的 runbook。
+\srcnote{README.md SLO 表；stressTest/REPORT.md \S 1, \S 5 实测数字}
+\end{frame}
+
+\begin{frame}{error budget：用数字管"什么时候停发版"}
+\begin{itemize}
+  \item P0 SLO $=$ 99.95\% $\to$ 月度\textbf{宕机预算 $\approx$ 21min}。
+  \item 烧 1/3（7min）减发版；烧 2/3（14min）冻结非紧急；全烧光 $\to$ 下月转"稳定性 only"。
+  \item 预算用 SLI 推：限流命中率 / 熔断打开时间 / 5xx 比例累加成"不可用时间"。
+\end{itemize}
+\keypoint{流量治理不是\textbf{一个机制}，是\textbf{五个机制按业务等级组合}。\\
+每个阈值都要能用业务语言解释清楚。}
+\srcnote{Google SRE error budget 原则；stressTest/REPORT.md 链路稳定性数据}
+\end{frame}
+
+\begin{frame}{业务边界：流量治理不做什么}
+\begin{itemize}
+  \item \textbf{不做自适应限流}（Sentinel BBR）：阈值要能用业务语言算清楚，黑盒不接受；
+  \item \textbf{不做按地域限流}：现阶段单区域，未做 GeoIP 维度切分；
+  \item \textbf{不做黑产指纹库}：设备指纹 / 行为模型由独立风控团队（外部 L4）做；
+  \item \textbf{不做 WAF / DDoS 防护}：L1 网络层由云厂商 Anti-DDoS 兜底；
+  \item \textbf{不做商家自助调阈值}：merchant role 还在路线图，目前阈值平台配；
+  \item \textbf{不做 risk score}：撞库 / 羊毛识别由风控团队接 70003 业务码（扩展位）。
+\end{itemize}
+\vspace{1mm}
+\small 诚实列边界 $>$ 假装全能。\textbf{gomall 自己负责 L2 (IP) + L3 (User) + 写路径削峰}，挡住绝大部分业务异常流量。
+\srcnote{README.md 业务边界节；pkg/e/code.go 70003 扩展位}
+\end{frame}
+
+% ============================================================
+\section{多层叠加 / 级联熔断 / 全链路压测}
 % ============================================================
 
 \begin{frame}{多层流控漏斗：DDoS $\to$ IP $\to$ 用户 $\to$ 业务}
@@ -471,34 +737,6 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
   \item L1 / L4 通常由云厂商和独立风控团队提供，不自己造。
 \end{itemize}
 \srcnote{routes/router.go:22 (L2); :136--142 (L3)}
-\end{frame}
-
-\begin{frame}{业务码 70001 / 70002：客服话术对照}
-\begin{tabular}{@{}lll@{}}
-\toprule
-业务码 & 业务含义 & 客服话术 \\
-\midrule
-70001 & 限流命中    & "活动太火爆，请稍后重试" \\
-70002 & 熔断开启    & "支付暂忙，1 分钟后再试" \\
-60002 & 幂等命中    & "您已下单成功，无需重复" \\
-50001 & 库存不足    & "已售罄" \\
-\bottomrule
-\end{tabular}
-\vspace{3mm}
-\small 同样是"请稍后"，70001 客户端重试就能过、70002 必须等下游自愈、60002 是用户自己重复了。\\
-区分话术比统一一句"系统繁忙"对用户更友好，对客服也更省事。
-\srcnote{pkg/e/code.go:57--58 业务码; pkg/e/msg.go:51--52 消息}
-\end{frame}
-
-\begin{frame}{error budget：用数字管"什么时候停发版"}
-\begin{itemize}
-  \item P0 SLO=99.95\% $\to$ 月度\textbf{宕机预算 $\approx$ 21min}。
-  \item 烧 1/3（7min）减发版；烧 2/3（14min）冻结非紧急；全烧光 $\to$ 下月转"稳定性 only"。
-  \item 预算用 SLI 推：限流命中率 / 熔断打开时间 / 5xx 比例累加成"不可用时间"。
-\end{itemize}
-\keypoint{流量治理不是\textbf{一个机制}，是\textbf{五个机制按业务等级组合}。\\
-每个阈值都要能用业务语言解释清楚。}
-\srcnote{Google SRE error budget 原则；stressTest/REPORT.md 链路稳定性数据}
 \end{frame}
 
 \begin{frame}{服务调服务调服务：三层熔断的级联防护}
@@ -520,8 +758,8 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
 \vspace{1mm}
 \begin{itemize}
   \item CB-C 守第三方：单家挂掉只断单家，其余通道照走。
-  \item CB-B 守"支付聚合服务"整体：三家全挂时止血，避免订单服务自身被拖。
-  \item CB-A 守"订单服务"整体：极端场景下退化到只读，让用户至少能看到订单列表。
+  \item CB-B 守"支付聚合服务"整体：三家全挂时止血。
+  \item CB-A 守"订单服务"整体：极端场景退化只读，让用户至少能看到订单列表。
 \end{itemize}
 \srcnote{middleware/circuitbreaker.go:44--136 单实例 CB; routes/router.go:114--119 仅 CB-A 接入}
 \end{frame}
@@ -535,103 +773,6 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
   \item gomall 当前只挂了 CB-A（paydown），CB-B / CB-C 是把单实例 CB 复制到下游服务上的扩展模式。
 \end{itemize}
 \srcnote{middleware/circuitbreaker.go:69 失败判定 = 5xx 或 c.Errors; 兜底路径需要在 handler 内吞掉 5xx 改成 200+stale}
-\end{frame}
-
-\begin{frame}{压测的两难：不压不知道、压坏怕影响真用户}
-\begin{itemize}
-  \item 线下压测的天花板：本地依赖、数据规模、缓存命中率都跟线上不一样，结果偏乐观。
-  \item 真在线上压：每条链路写进 \texttt{order} / \texttt{stock} 表会污染真实业务数据。
-  \item 全链路压测平台的本质：在\textbf{同一套线上代码}里区分"压测流量 vs 真流量"，让前者落进\textbf{影子库 / 影子表 / 影子 MQ}。
-  \item 关键技术：\textbf{流量染色}（traffic coloring）—— 染色标识跟着 trace 一路透传到 DAO 层，DAO 看到色就切表。
-\end{itemize}
-\srcnote{阿里 / 字节公开过的全链路压测方案；gomall 当前未实现，本节为扩展设计}
-\end{frame}
-
-\begin{frame}{全链路压测：影子库 / 影子 MQ / 流量染色}
-\begin{tikzpicture}[node distance=4mm and 10mm]
-  \node[node-box] (k6) {k6 压测端};
-  \node[node-box,node-warn,right=of k6] (gw) {网关\\注入 X-Test=1};
-  \node[node-box,right=of gw] (svc) {gomall\\透传染色};
-  \node[node-box,node-ok,below=4mm of svc] (db) {真 DB\\order};
-  \node[node-box,node-warn,below=12mm of svc] (sdb) {影子 DB\\order\_shadow};
-  \node[node-box,right=of svc] (mq) {RabbitMQ};
-  \node[node-box,node-warn,below=12mm of mq] (smq) {影子队列\\order.async\_shadow};
-  \draw[arrow] (k6) -- (gw);
-  \draw[arrow] (gw) -- (svc);
-  \draw[arrow] (svc) -- (db);
-  \draw[arrow-async,bend right=15] (svc) to (sdb);
-  \draw[arrow] (svc) -- (mq);
-  \draw[arrow-async,bend right=15] (mq) to (smq);
-\end{tikzpicture}
-\vspace{1mm}
-\begin{itemize}
-  \item DAO 看 ctx 里的 \texttt{X-Test} 决定 \texttt{order} vs \texttt{order\_shadow}；
-  \item MQ 按 routing-key 分流，consumer 只消费\textbf{对应色}的队列；
-  \item Redis 用 key 前缀 \texttt{shadow:} 隔离；缓存命中率与真链路解耦。
-\end{itemize}
-\srcnote{扩展设计：gomall DAO 层（dao/*.go）+ middleware/coloring.go（待新增）}
-\end{frame}
-
-\begin{frame}[fragile]{流量染色中间件：ctx 透传一行入侵}
-\begin{lstlisting}[language=Go,firstnumber=1,basicstyle=\ttfamily\tiny,
-  caption={\srcnote{设计稿：middleware/coloring.go}}]
-const ColorKey = "x-traffic-color"
-
-func TrafficColoring() gin.HandlerFunc {
-    return func(c *gin.Context) {
-        color := c.GetHeader("X-Test")     // 1) 取染色标识
-        if color == "" { color = "prod" }
-        ctx := context.WithValue(c.Request.Context(), ColorKey, color)
-        c.Request = c.Request.WithContext(ctx) // 2) 写回 ctx
-        c.Next()                           // 3) 后续 DAO 从 ctx 读
-    }
-}
-
-// DAO 切表（示例）
-func tableOrder(ctx context.Context) string {
-    if v, _ := ctx.Value(middleware.ColorKey).(string); v == "test" {
-        return "order_shadow"              // 4) 影子表
-    }
-    return "order"
-}
-\end{lstlisting}
-\scriptsize ① 染色只在入口注入一次；② ctx 是 trace 天然载体，trace 框架已经在带；③ DAO 看 ctx 决定表名，零侵入业务代码；④ 缺点：所有 DAO 都要改一行；好处：可以做到\textbf{产线压测无副作用}。
-\end{frame}
-
-\begin{frame}{红蓝灰发布：按 IP / 按 userID / 按比例的流量切}
-\begin{tikzpicture}[node distance=8mm and 16mm,every node/.style={font=\small}]
-  \node[node-state,node-state-normal] (start) {新版本上线};
-  \node[node-state,node-state-transition,below right=of start] (blue) {蓝：内部 IP\\10 人};
-  \node[node-state,node-state-transition,below=of blue] (gray1) {灰 1\%\\userID hash};
-  \node[node-state,node-state-transition,below=of gray1] (gray10) {灰 10\%};
-  \node[node-state,node-state-alert,below=of gray10] (red) {红：50\%\\对照组};
-  \node[node-state,node-state-normal,right=18mm of red] (full) {全量 100\%};
-  \draw[arrow] (start) -- (blue);
-  \draw[arrow] (blue) -- node[right,font=\tiny]{告警 0} (gray1);
-  \draw[arrow] (gray1) -- node[right,font=\tiny]{核心指标 OK} (gray10);
-  \draw[arrow] (gray10) -- node[right,font=\tiny]{24h 观察} (red);
-  \draw[arrow] (red) -- node[above,font=\tiny]{A/B 显著} (full);
-  \draw[arrow-bad,bend right=20] (gray1.west) to node[left,font=\tiny]{回滚} (start.west);
-\end{tikzpicture}
-\srcnote{切流策略由网关层执行；gomall 当前单实例没接，本节为扩展设计}
-\end{frame}
-
-\begin{frame}{三种切流维度的业务取舍}
-\begin{tabular}{@{}lll@{}}
-\toprule
-切流维度 & 业务含义 & 适用场景 \\
-\midrule
-按 IP / 内部 段 & "公司同事先用"        & 蓝绿、冒烟、QA 验收 \\
-按 userID hash  & "同一用户一定看同一版" & 灰度、A/B、新人引导 \\
-按比例随机      & "整体 X\% 流量"      & 性能压力、稳定性验证 \\
-按地域 / 设备   & "先在某区域 / 设备试"  & 区域化运营、客户端兼容 \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-\begin{itemize}
-  \item 同一用户切到不同版本 $\to$ 购物车 / 订单 / 优惠券容易出现"看到一半的数据"，要么按 userID hash，要么版本兼容。
-  \item 按比例随机适合"无状态读路径"（首页、商品详情）；写路径要按 userID 锁定。
-\end{itemize}
 \end{frame}
 
 \begin{frame}{网关层选型：Kong / APISIX / Nginx Ingress / 自研}
@@ -685,7 +826,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 \end{tikzpicture}
 \vspace{1mm}
 \begin{itemize}
-  \item 读路径（商品 / 推荐 / 评价）：cache stale > 默认值 > 拒绝。用户能看到旧数据胜过白屏。
+  \item 读路径（商品 / 推荐 / 评价）：cache stale $>$ 默认值 $>$ 拒绝。用户能看到旧数据胜过白屏。
   \item 写路径（支付 / 下单 / 扣库存）：\textbf{宁可拒，不要默认值}，否则资金 / 库存对不上账。
   \item 兜底数据来自 HTTPCache 中间件留下的 ETag 体，TTL 内可用。
 \end{itemize}
@@ -699,12 +840,10 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 码 & 含义 & 客户端 & 监控位 & 客服话术 \\
 \midrule
 20000 & 成功         & 正常        & 业务 KPI    & --                        \\
-40001 & 参数非法     & 不重试      & 调用方告警  & "请检查输入"              \\
-40101 & 未登录       & 跳登录      & 不告警      & "请先登录"                \\
-40301 & 无权限       & 不重试      & 不告警      & "无权限"                  \\
+30001 & token 错误   & 跳登录      & 不告警      & "请重新登录"              \\
+30002 & token 过期   & 静默续期    & 不告警      & --                        \\
+30005 & 权限不足     & 不重试      & 不告警      & "无权限"                  \\
 50001 & 库存不足     & 不重试      & 业务面板    & "已售罄"                  \\
-50002 & 网络超时     & 重试+幂等   & SRE 告警    & "网络繁忙、请稍后"        \\
-60001 & 幂等冲突     & 拉结果      & 业务面板    & "请稍后查询"              \\
 60002 & 幂等命中     & 读结果      & 不告警      & "您已成功，无需重复"      \\
 70001 & 限流命中     & 1s 重试     & 治理面板    & "活动太火、请稍后"        \\
 70002 & 熔断开启     & 指数退避    & SRE 告警    & "支付暂忙、1 分钟后再试"  \\
@@ -712,81 +851,50 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 \bottomrule
 \end{tabular}
 \vspace{1mm}
-\srcnote{pkg/e/code.go:57--58 / msg.go:51--52；70003 为扩展位}
-\end{frame}
-
-\begin{frame}{大促容量评估：怎么算出"需要多少机器"}
-\begin{itemize}
-  \item 输入：① 业务侧预估的峰值 QPS；② 单机基线（gomall 64k RPS）；③ 安全系数（一般 1.5--2$\times$）。
-  \item 计算：副本数 = $\lceil$ 预估峰值 $\times$ 安全系数 / 单机基线 $\rceil$。
-  \item 双 11 例：100k QPS / 64k RPS $\times$ 1.5 = 2.34 $\to$ \textbf{至少 3 台}。
-  \item 但秒杀 / 红包链路 \textbf{不是} 64k RPS 的水平：实测 52k 是 \texttt{/skill\_product/skill}，下单写链路 50k；要按\textbf{最弱链路}（这里是异步落库的 consumer 消费速度）算容量。
-  \item 容量评估的常见错误：① 只看 RPS 不看 p99；② 没考虑下游放大（一个 paydown 触发 3 个下游调用）；③ 忽略冷启动（K8s 拉镜像 30s 起步）。
-\end{itemize}
-\srcnote{stressTest/REPORT.md \S 1 各链路基线 RPS}
-\end{frame}
-
-\begin{frame}{HPA 自动扩缩容：怎么定 metric 与冷却时间}
-\begin{itemize}
-  \item CPU-based HPA 是最朴素的：CPU > 70\% 扩、< 30\% 缩。问题：扩容前 30s 已经把请求拒了。
-  \item 自定义 metric HPA：用 QPS / 队列堆积量 / 连接数作为触发条件，比 CPU 提前 1--2min 感知。
-  \item gomall 异步下单的天然信号：MQ 队列堆积 > 10k $\to$ 扩 consumer。
-  \item 关键：\textbf{冷却时间}（cooldown）—— 缩容窗口必须长于扩容（10min vs 1min），避免抖动来回拉。
-  \item \textbf{预热与缓冲池}：新副本起来后先放 5\% 流量预热（JIT、连接池、缓存预填），10s 后切到 100\%，避免冷启动 p99 暴涨。
-\end{itemize}
-\srcnote{扩展设计；K8s HPA + Custom Metrics API；RabbitMQ queue depth 作为 metric}
+\srcnote{pkg/e/code.go:23, 35--39, 49, 54, 57--58；70003 为扩展位}
 \end{frame}
 
 % ============================================================
 \appendix
 % ============================================================
 
-\begin{frame}{面试 Q\&A (1/4)}
-\textbf{Q1}：100 RPS / 200 burst 这两个数字怎么定？\\
-\hspace{4mm}\small A：基线 64k RPS / 单 IP 用不到 1/600，100 留给爬虫脚本做兜底；burst 200 容纳一次首屏并发 100+，不会误伤真用户。
+\begin{frame}{面试 Q\&A (上)}
+\textbf{Q1}：为什么 P0 下单不挂用户限流？\\
+\hspace{4mm}\small A：README 写明的"宁可下游慢、不能上游 429"。下单看到 429 用户立刻关 app、订单丢且怪平台；等 5 秒虽然差但订单还在。P0 靠异步削峰 + 缓存 + 库存预扣扛峰值，限流只挂 IP 兜底。
 
 \vspace{2mm}
-\textbf{Q2}：为什么秒杀用 SlidingWindow 不用 TokenBucket？\\
-\hspace{4mm}\small A：① 必须按用户而不是 IP，否则 NAT 出口全员共享；② 必须分布式精确，多实例下用 Redis 共享状态；③ ZSet 比 fixed-window 没有窗口边界可以利用。
+\textbf{Q2}：阈值 3/s/user 是怎么定的？\\
+\hspace{4mm}\small A：① 真人最快点击 300--500ms / 次 $\to$ 1s 最多 2--3 次，留 50\% 余量定 3；② 第 4 次开始 70001 截断脚本；③ 必须按 userID 不是 IP（NAT 出口共享 IP），多实例下用 Redis 共享状态。代码 \texttt{routes/router.go:136--142}。
 
 \vspace{2mm}
 \textbf{Q3}：CircuitBreaker 5/10s/3 三个数字有什么讲究？\\
-\hspace{4mm}\small A：5 = 容忍偶发抖动不一抖就跳；10s = 给下游一次完整告警+自愈周期；3 = HalfOpen 探测够小，避免再次打死下游。
+\hspace{4mm}\small A：5 = 容忍偶发抖动不一抖就跳；10s = 给下游一次完整告警 + 自愈周期；3 = HalfOpen 探测够小，避免再次打死下游。三个数字都对应一个业务事故场景，不是工程师拍的。
 \end{frame}
 
-\begin{frame}{面试 Q\&A (2/4)}
-\textbf{Q4}：异步下单是不是会丢单？\\
-\hspace{4mm}\small A：不会。库存先 Reserve（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。代码位置 \texttt{service/order\_async.go:119--172}。
+\begin{frame}{面试 Q\&A (中)}
+\textbf{Q4}：异步下单会不会丢单？怎么向运营解释 SLO？\\
+\hspace{4mm}\small A：不会。库存先 ReserveStock（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。代码 \texttt{service/order\_async.go:119--172}。运营 SLO：99.95\% 可用 = 年宕 4h22min，异步路径 p95 入队 $<$ 10ms、轮询 $<$ 3s 拿结果。
 
 \vspace{2mm}
-\textbf{Q5}：为什么熔断返回 200 不返回 503？\\
-\hspace{4mm}\small A：app 端老网关不能优雅处理 5xx；统一走业务码（70002）= 客户端只用维护一套 status switch；监控不要按 4xx/5xx 算错误率，必须看 status。代码位置 \texttt{middleware/circuitbreaker.go:57--65}。
+\textbf{Q5}：为什么熔断返回 200 不返回 503？客服怎么用？\\
+\hspace{4mm}\small A：app 端老网关不能优雅处理 5xx；统一业务码 70002 = 客户端只用维护一套 status switch、客服直接对照话术表。监控不要按 4xx/5xx 算错误率，必须看 status。代码 \texttt{middleware/circuitbreaker.go:57--65}；客服话术 \texttt{pkg/e/msg.go:52}。
 
 \vspace{2mm}
-\textbf{Q6}：HTTP cache 的 max-age 怎么定？\\
-\hspace{4mm}\small A：取决于"改价 / 下架"的最大可接受延迟。商品详情 60s，分类 / 轮播 300s，列表 30s（库存敏感）。代码位置 \texttt{routes/router.go:39--45}。
+\textbf{Q6}：黑产薅券 ROI 怎么算 SlidingWindow 的收益？\\
+\hspace{4mm}\small A：10 万张券，100 个脚本号 $\times$ 1 千次 = 100 万次抢，不拦 $\to$ 9.9 万张被脚本拿走、真人 1\%。挂 SlidingWindow 3/s/user $\to$ 脚本第 4 次 70001、78 万次被拦、真人名额一张没少。压测实测误差 \textbf{2.2\%}（\texttt{stressTest/REPORT.md \S 5}）。
 \end{frame}
 
-\begin{frame}{面试 Q\&A (3/4)}
+\begin{frame}{面试 Q\&A (下)}
 \textbf{Q7}：多层熔断会不会"探测雪崩"？怎么办？\\
-\hspace{4mm}\small A：会。外层 CB 的 OpenTimeout 要长于内层（30s vs 10s）错开 HalfOpen 探测窗口；同时兜底路径不应计入失败计数，否则 cache 过期会让外层跟着 Open。代码位置 \texttt{middleware/circuitbreaker.go:69 失败判定}。
+\hspace{4mm}\small A：会。外层 CB 的 OpenTimeout 要长于内层（30s vs 10s）错开 HalfOpen 探测窗口；同时兜底路径不应计入失败计数，否则 cache 过期会让外层跟着 Open。代码 \texttt{middleware/circuitbreaker.go:69 失败判定}。
 
 \vspace{2mm}
 \textbf{Q8}：全链路压测怎么避免污染真实数据？\\
-\hspace{4mm}\small A：流量染色：网关层注入 \texttt{X-Test} header $\to$ 透传到 ctx $\to$ DAO 看 ctx 切 \texttt{order\_shadow} 表；MQ 用独立 routing-key 走影子队列；Redis 用 \texttt{shadow:} 前缀隔离。代码位置 \texttt{middleware/coloring.go（扩展）}。
+\hspace{4mm}\small A：流量染色：网关层注入 \texttt{X-Test} header $\to$ 透传到 ctx $\to$ DAO 看 ctx 切 \texttt{order\_shadow} 表；MQ 用独立 routing-key 走影子队列；Redis 用 \texttt{shadow:} 前缀隔离。设计稿 \texttt{middleware/coloring.go}（gomall 当前未接，扩展位）。
 
 \vspace{2mm}
-\textbf{Q9}：灰度发布按什么维度切流最合理？\\
-\hspace{4mm}\small A：① 内部 IP 段——蓝绿冒烟；② userID hash——保证"同一用户看同一版"，避免购物车看到一半的数据；③ 按比例随机——只适合无状态读路径。写路径必须按 userID 锁定。
-\end{frame}
-
-\begin{frame}{面试 Q\&A (4/4)}
-\textbf{Q10}：限流算法为什么不选自适应（Sentinel BBR）？\\
-\hspace{4mm}\small A：自适应是黑盒、冷启动 5--10min 才稳；秒杀 3/秒/用户 这种阈值用业务语言能算清楚，没必要让运维去看 BBR 曲线判断。代码位置 \texttt{repository/cache/ratelimit.go:18--34}。
-
-\vspace{2mm}
-\textbf{Q11}：HPA 用什么 metric 比 CPU 更合适？\\
-\hspace{4mm}\small A：异步下单链路用 \textbf{MQ 队列堆积}：堆积 > 10k 扩 consumer，比等 CPU 飙高快 1--2min；同步链路看 inflight 请求数 / p99 延迟；cooldown 缩容窗口要长于扩容（10min vs 1min）避免抖动。
+\textbf{Q9}：限流算法为什么不选自适应（Sentinel BBR）？\\
+\hspace{4mm}\small A：自适应是黑盒、冷启动 5--10min 才稳；秒杀 3/秒/用户 这种阈值用业务语言能算清楚，运营 / 客服都看得懂，没必要让运维去看 BBR 曲线判断。\textbf{业务上能解释}比\textbf{工程上更聪明}更重要。代码 \texttt{repository/cache/ratelimit.go:18--34}。
 \end{frame}
 
 \begin{frame}{代码位置一览}
@@ -798,10 +906,11 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
   \item[CircuitBreaker] \srcnote{middleware/circuitbreaker.go:44--136}
   \item[HTTPCache] \srcnote{middleware/httpcache.go:47--100}
   \item[OrderEnqueue] \srcnote{service/order\_async.go:119--172}
-  \item[业务码] \srcnote{pkg/e/code.go:57--58 / msg.go:51--52}
+  \item[业务码] \srcnote{pkg/e/code.go:23, 35--39, 49, 54, 57--58 / msg.go:51--52}
   \item[压测报告] \srcnote{stressTest/REPORT.md \S 1, \S 5}
+  \item[README SLO 与边界] \srcnote{README.md 业务承诺节 / 业务边界节}
 \end{description}
-\keypoint{配套技术 deck：05-ratelimit-circuit-breaker.tex（机制视角）}
+\keypoint{业务 70\% / 代码 30\%：阈值都能用业务语言解释；代码都能在 file:line 翻到。}
 \end{frame}
 
 \end{document}
