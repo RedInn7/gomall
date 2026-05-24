@@ -1,0 +1,715 @@
+\input{preamble}
+
+\title{预售定金 —— GMV 前置 + 商家现金流 + 定金不退的法律承诺}
+\subtitle{两段式支付：定金锁库存 / 尾款转发货 / 失效期没收 — gomall v2.3 业务侧 deck}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{业务定位：为什么要做预售}
+% ============================================================
+
+\begin{frame}{预售在电商业务全景中的位置}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.style={font=\scriptsize}]
+  \node[node-box] (cart)  {加购选地址\\deck 04};
+  \node[node-box,right=of cart] (order) {普通下单\\deck 04+07};
+  \node[node-box,right=of order] (pay)  {一次性支付\\deck 05};
+  \node[node-box,below=of order,node-warn] (pre)  {\textbf{预售下单}\\本 deck};
+  \node[node-box,right=of pre,node-warn] (dep)    {付定金\\锁库存};
+  \node[node-box,right=of dep,node-warn] (fin)    {付尾款\\转发货};
+  \node[node-box,right=of fin] (ship) {商家发货\\deck 09};
+  \draw[arrow] (cart)  -- (order);
+  \draw[arrow] (order) -- (pay);
+  \draw[arrow] (pay)   -- (ship);
+  \draw[arrow] (pre)   -- (dep);
+  \draw[arrow] (dep)   -- (fin);
+  \draw[arrow] (fin)   -- (ship);
+  \draw[arrow-async] (cart) -- (pre);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}\small
+  \item 预售是\textbf{一次性支付链路}的\textbf{并行分支}：商品上架时由商家决定是否开预售。
+  \item 上游：预售配置（\texttt{product\_preorder} 表）由商家后台 / 运营创建。
+  \item 下游：尾款支付后回到 \texttt{WaitShip}，与一次性下单合流，履约链路复用 deck 09。
+\end{itemize}
+\srcnote{routes/preorder\_routes.go 路由四件套；service/preorder.go::PayDeposit/PayFinal 主入口}
+\end{frame}
+
+\begin{frame}{业务诉求：为什么要拆"定金 + 尾款"}
+\begin{itemize}\small
+  \item \textbf{C 端}：心理门槛降低。一笔 2000 元商品付 200 元定金 vs 一次性 2000 元，转化率行业平均\textbf{抬升 30\%-45\%}（双 11 / 618 历年数据）。
+  \item \textbf{商家}：\textbf{凭定金销量做备货决策}。预售期内 \texttt{deposit\_paid} 单数 = 准买家数 $\times$ 历史转化率（70\%-90\%），凭这个数下次性原料 / 工厂订单，库存周转 RTM 缩短 20\%。
+  \item \textbf{平台}：\textbf{GMV 前置}。原本 11.11 当天爆发的 GMV 提前到 10.20-11.10 平摊，下单链路负载从 10x 平均 → 3x 平均。
+  \item \textbf{合规}：\textbf{定金不退}有法律依据 — 《民法典》第 587 条"定金罚则"，付定方解约不得请求返还定金。
+\end{itemize}
+\keypoint{预售不是"延迟扣款"，是\textbf{把购买决策拆成两步}：买不买（付定金）+ 真要不（付尾款）。}
+\srcnote{README \S 业务承诺 SLO 表；docs/blog/15-preorder.md 路线图}
+\end{frame}
+
+\begin{frame}{五角色眼中的同一笔预售单}
+\small
+\begin{tabular}{@{}lp{8.5cm}@{}}
+\toprule
+角色 & 这笔预售单最焦虑的事 \\
+\midrule
+C 端用户 & "锁价了吗 / 我能不付尾款吗 / 定金能不能退" \\
+商家     & "预售单量多少 / 我该下多少货 / 退率怎么算" \\
+运营     & "GMV 前置比例 / 转化率 (deposit→final) / 失效率" \\
+客服     & 三大投诉：\textbf{定金不退} / \textbf{忘付尾款} / \textbf{尾款付了又想退} \\
+SRE      & cron 没收链路有没有延迟 / outbox 是不是发了双份 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}\small
+  \item 每个角色对应一个或多个业务码（82001-82004），客服话术对照表见 §6。
+  \item 本 deck 后面每帧标注\textbf{它在回答哪个角色的哪个问题}。
+\end{itemize}
+\srcnote{pkg/e/code.go 82001-82004；pkg/e/msg.go 客服话术中文}
+\end{frame}
+
+\begin{frame}{业务边界：本 deck \textbf{不做} 什么}
+\begin{itemize}\small
+  \item \textbf{不做分期付款}：定金 + 尾款是\textbf{两次完整扣款}，不是 12 期 / 24 期。分期需对接持牌金融，独立路线图。
+  \item \textbf{不做多档定金阶梯}：每件商品\textbf{一个定金 + 一个尾款}。"付 200 抵 300 / 付 500 抵 800"这种花式定金是营销侧（路线图）。
+  \item \textbf{不做定金返券}：用户付完定金不再发\textbf{无门槛券} / \textbf{满减券}抵尾款。返券会侵蚀财务边界。
+  \item \textbf{不做预售退差价}：预售期内商品降价后\textbf{不补差价}。运营如要补，走人工兜底 + 售后退款。
+  \item \textbf{不做预售 SKU 维度}：当前\textbf{一个 product\_id 一条预售配置}。同一商品不同颜色 / 尺寸需共用配置（路线图）。
+  \item \textbf{不做预售排队 / 限购}：尾款支付不限速；秒杀型预售由 deck 08 营销链路单独承接。
+\end{itemize}
+\keypoint{诚实划边界 = 给商家 / 客服 / 法务一个交代。MVP 阶段聚焦"两段扣款 + 状态机推进 + 定金不退"三件事。}
+\srcnote{docs/architecture/feature-matrix.md 路线图分级表}
+\end{frame}
+
+% ============================================================
+\section{三个时间窗口：状态机的业务表达}
+% ============================================================
+
+\begin{frame}{三窗口时间轴：每个窗口能做 / 不能做什么}
+\begin{tikzpicture}[node distance=3mm,every node/.style={font=\scriptsize}]
+  \draw[thick,->,draw=cMain] (0,0) -- (12,0);
+  \draw[thick] (1,-0.15) -- (1,0.15);
+  \node[above=2mm] at (1,0.15) {\textbf{DepositStart}};
+  \draw[thick] (5,-0.15) -- (5,0.15);
+  \node[above=2mm] at (5,0.15) {\textbf{DepositEnd}};
+  \draw[thick] (9,-0.15) -- (9,0.15);
+  \node[above=2mm] at (9,0.15) {\textbf{FinalEnd}};
+  \node[node-box,fill=cMain!12,minimum width=22mm] at (3,-1.5) {\textbf{定金期}\\付定金 OK\\全退 OK};
+  \node[node-box,fill=cAccent!15,minimum width=22mm] at (7,-1.5) {\textbf{尾款期}\\付尾款 OK\\不能取消};
+  \node[node-box,fill=cGray!15,minimum width=22mm] at (10.5,-1.5) {\textbf{失效期}\\cron 没收\\库存归还};
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}\small
+  \item \textbf{窗口 1（定金期）}：now 落在 DepositStartAt 与 DepositEndAt 之间，唯一允许 \texttt{PayDeposit} 与 \texttt{Cancel} 全退。
+  \item \textbf{窗口 2（尾款期）}：now 落在 DepositEndAt 与 FinalEndAt 之间，唯一允许 \texttt{PayFinal}；取消调用返回 \textbf{82004 定金不退}。
+  \item \textbf{窗口 3（失效期）}：now 大于等于 FinalEndAt，cron \texttt{ForfeitDepositsForUnpaidFinals} 触发，订单转 \texttt{Closed}，定金没收。
+\end{itemize}
+\srcnote{repository/db/model/preorder.go 字段定义；service/preorder.go::PayDeposit 窗口校验}
+\end{frame}
+
+\begin{frame}{状态机：order.type + preorder\_stage 双维度}
+\begin{tikzpicture}[node distance=6mm and 11mm]
+  \node[node-state,node-state-normal] (n0) {普通\\None};
+  \node[node-state,node-state-normal,right=of n0] (n1) {\textbf{定金已付}\\DepositPaid};
+  \node[node-state,node-state-normal,right=of n1] (n2) {\textbf{尾款已付}\\FinalPaid};
+  \node[node-state,node-state-alert,below=of n1] (n3) {\textbf{定金没收}\\Forfeited};
+  \node[node-state,node-state-transition,below=of n0] (n4) {取消\\None+Closed};
+  \draw[arrow] (n0) -- node[above,font=\tiny]{PayDeposit} (n1);
+  \draw[arrow] (n1) -- node[above,font=\tiny]{PayFinal} (n2);
+  \draw[arrow-bad] (n1) -- node[right,font=\tiny]{cron 没收} (n3);
+  \draw[arrow] (n1) -- node[below,font=\tiny]{定金期内 Cancel} (n4);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}\small
+  \item \textbf{order.type} 不变 = \texttt{WaitPay}，直到尾款支付才转 \texttt{WaitShip}；\textbf{旧消费者无需感知预售}。
+  \item \textbf{preorder\_stage} 是预售独立维度：\texttt{0/1/2/3}，与 \texttt{type} 形成正交。
+  \item \texttt{Forfeited} 是终态，没有出边；订单 \texttt{type} 同步推到 \texttt{Closed}。
+\end{itemize}
+\srcnote{repository/db/model/preorder.go \texttt{PreorderStageXxx} 四个常量；service/preorder.go::forfeitOne 推进逻辑}
+\end{frame}
+
+\begin{frame}{为什么 type 维持 WaitPay？兼容性决策}
+\begin{itemize}\small
+  \item \textbf{业务约束}：旧消费者（搜索增量索引 / GMV 报表 / 商家发货筛选）只读 \texttt{order.type}。
+  \item \textbf{方案 A（侵入式）}：新增 \texttt{OrderWaitDeposit} / \texttt{OrderWaitFinal} 状态码。
+  \item \textbf{方案 B（采用）}：\texttt{type} 保留 \texttt{WaitPay}，新增 \texttt{preorder\_stage} 字段做"子状态"。
+  \item 选 B 原因：
+    \begin{itemize}\footnotesize
+      \item 旧消费者零改动 — \texttt{WaitPay} 在他们眼里仍是"未付款"，预售订单不会被误推到 \texttt{已发货} 报表。
+      \item 状态机表 \texttt{orderStateTransitions} 不需要扩 4 个新键，避免 deck 09 17 例转换测试全推倒重来。
+      \item 风险点：\textbf{付定金后用户能不能再普通支付}？答：单条订单 \texttt{paydown} 接口要看 \texttt{preorder\_stage}，不为 0 时拒绝（路线图加防御）。
+    \end{itemize}
+\end{itemize}
+\srcnote{consts/order.go 7 态机；service/order\_state.go::orderStateTransitions}
+\end{frame}
+
+\begin{frame}[fragile]{数据模型：product\_preorder 与 order 字段扩展}
+\begin{lstlisting}[language=Go]
+type ProductPreorder struct {
+    gorm.Model
+    ProductID      uint      // 唯一索引：一个商品仅一条预售配置
+    DepositCents   int64     // 定金（分）
+    FinalCents     int64     // 尾款（分）
+    DepositStartAt time.Time // 定金期开始
+    DepositEndAt   time.Time // 定金期结束 / 尾款期开始
+    FinalEndAt     time.Time // 尾款期结束，之后 cron 没收
+    ShipAt         time.Time // 预计发货时间，仅展示
+}
+
+// Order 表扩展：
+//   PreorderStage int        非预售=0 / 已付定金=1 / 已付尾款=2 / 没收=3
+//   DepositPaidAt *time.Time 定金到账时间
+//   FinalPaidAt   *time.Time 尾款到账时间
+\end{lstlisting}
+\vspace{1mm}
+\begin{itemize}\small
+  \item \texttt{DepositCents + FinalCents} 在 \texttt{order.money} 字段累计，与现有 \texttt{Money} 口径一致。
+  \item 三个时间窗口字段是\textbf{业务真相}的单一来源，前端 / 客服界面都从 \texttt{ShowPreorder} 读。
+\end{itemize}
+\srcnote{repository/db/model/preorder.go:18--26；repository/db/model/order.go PreorderStage 字段}
+\end{frame}
+
+% ============================================================
+\section{核心代码：30\% 的代码 70\% 的业务}
+% ============================================================
+
+\begin{frame}[fragile]{PayDeposit 的 4 步原子操作}
+\begin{lstlisting}[language=Go]
+// service/preorder.go::PayDeposit
+// 1) 时间窗校验：now in [DepositStartAt, DepositEndAt)
+if now.Before(pp.DepositStartAt) || !now.Before(pp.DepositEndAt) {
+    return nil, newCodedError(e.ErrPreorderNotInDepositWindow)
+}
+// 2) Redis 预扣库存 (available -> reserved)，复用 deck 07 两桶 Lua
+if err := cache.ReserveStock(ctx, req.ProductID, 1); err != nil {
+    return nil, err
+}
+// 3) 单一事务内：建订单 + 扣定金 + 推 stage + 写 outbox
+err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+    dao.NewOrderDaoByDB(tx).CreateOrder(order)
+    debitUser(tx, u.Id, req.BossID, req.Key, pp.DepositCents)
+    dao.NewPreorderDaoByDB(tx).MarkDepositPaid(tx, order.ID, now)
+    return dao.NewOutboxDaoByDB(tx).Insert(
+        "order", "PreorderDepositPaid", "preorder.deposit.paid", ...)
+})
+// 4) 事务失败 → 释放 reserved (Saga 补偿)
+if err != nil { cache.ReleaseReservation(ctx, req.ProductID, 1) }
+\end{lstlisting}
+\srcnote{service/preorder.go::PayDeposit 完整 70 行；repository/cache/inventory.go::ReserveStock Lua}
+\end{frame}
+
+\begin{frame}[fragile]{PayFinal：尾款扣款 + 真扣库存 + 转 WaitShip}
+\begin{lstlisting}[language=Go]
+// service/preorder.go::PayFinal
+// 1) 业务校验
+if order.PreorderStage != model.PreorderStageDepositPaid {
+    return nil, newCodedError(e.ErrPreorderDepositNotPaid)   // 82003
+}
+if now.Before(pp.DepositEndAt) || !now.Before(pp.FinalEndAt) {
+    return nil, newCodedError(e.ErrPreorderNotInFinalWindow) // 82002
+}
+// 2) 单一事务内 4 件事：扣尾款 / 扣 product.Num / 推 stage+type / outbox
+err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
+    debitUser(tx, u.Id, order.BossID, req.Key, pp.FinalCents)
+    // product.Num -= order.Num  (沿用 service/payment.go 口径)
+    productDao.UpdateProduct(...)
+    dao.NewPreorderDaoByDB(tx).MarkFinalPaid(tx, order.ID, now)
+    return outboxDao.Insert("order", "PreorderFinalPaid", ...)
+})
+// 3) 事务成功后清 Redis reserved；失败不回滚 DB（DB 是业务真相）
+cache.CommitReservation(ctx, order.ProductID, int64(order.Num))
+\end{lstlisting}
+\srcnote{service/preorder.go::PayFinal；service/payment.go::PayDown 同口径 AES 扣款}
+\end{frame}
+
+\begin{frame}[fragile]{cron 没收：单一不可靠靠两层兜底}
+\begin{lstlisting}[language=Go]
+// service/preorder.go::ForfeitDepositsForUnpaidFinals
+// 每小时跑：扫所有 final_end_at 已过但 stage 仍停在 DepositPaid 的订单
+ids, _ := ppDao.ListUnpaidFinalBefore(nowFn(), 200)
+for _, id := range ids {
+    s.forfeitOne(ctx, id)  // 单笔失败不影响其它
+}
+
+// forfeitOne 单笔事务
+err := baseDao.DB.Transaction(func(tx *gorm.DB) error {
+    // 条件 UPDATE 兜底幂等：stage=1 AND type=WaitPay
+    ok, _ := dao.NewPreorderDaoByDB(tx).ForfeitDeposit(tx, order.ID)
+    if !ok { return nil } // 状态已变（用户卡点付款）→ 跳过
+    return outbox.Insert("order", "PreorderForfeited", ...)
+})
+// 事务成功 → 释放 Redis reserved 库存归还
+cache.ReleaseReservation(ctx, productID, int64(num))
+\end{lstlisting}
+\vspace{0.5mm}
+\srcnote{service/preorder.go::ForfeitDepositsForUnpaidFinals；repository/db/dao/preorder.go::ListUnpaidFinalBefore JOIN}
+\end{frame}
+
+\begin{frame}{DAO 层：条件 UPDATE = 状态机 + 幂等}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.style={font=\scriptsize}]
+  \node[node-box] (in)   {上游调用};
+  \node[node-box,right=of in] (sql)  {SQL: \\ \texttt{WHERE preorder\_stage=1}\\\texttt{AND type=WaitPay}};
+  \node[node-box,right=of sql,node-ok] (ok)   {RowsAffected=1\\$\to$ 真正落 stage 推进};
+  \node[node-box,below=of ok,node-warn] (no)  {RowsAffected=0\\$\to$ 状态已变, 跳过};
+  \draw[arrow] (in)  -- (sql);
+  \draw[arrow] (sql) -- (ok);
+  \draw[arrow-async] (sql) -- (no);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}\small
+  \item 一条 SQL 同时\textbf{校验状态 + 写新状态}，避免读后写竞态。
+  \item 上层 \texttt{ok bool} 兜底业务码：\texttt{ok=false} 时一般是"重复触发 / 状态已变"，cron 场景直接 \texttt{return nil} 幂等。
+  \item 与 deck 09 \texttt{ShipOrder} / \texttt{ConfirmReceive} 完全同口径，新人接入零学习成本。
+\end{itemize}
+\srcnote{repository/db/dao/preorder.go::MarkDepositPaid/MarkFinalPaid/ForfeitDeposit；deck 09 同口径}
+\end{frame}
+
+\begin{frame}{Outbox 四事件：业务全景的真实事件流}
+{\footnotesize
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+事件 & 触发 & 下游消费者 \\
+\midrule
+\texttt{preorder.deposit.paid} & PayDeposit 成功 & 商家工作台备货预估 / 商家短信推送 / 数据宽表 \\
+\texttt{preorder.final.paid}   & PayFinal 成功   & 商家发货工作台 / 钱包入账 / 索引补建 \\
+\texttt{preorder.forfeited}    & cron 没收成功   & 用户推送"定金不退" / 商家退货补贴 / 财务计入平台收益 \\
+\texttt{preorder.cancelled}    & 定金期内取消    & 钱包退款 / 商家备货扣减 / 数据漏斗 \\
+\bottomrule
+\end{tabular}}
+\vspace{2mm}
+\begin{itemize}\small
+  \item 全部走 \textbf{Transactional Outbox}（deck 11），与业务 tx 同提交，至少一次语义。
+  \item \texttt{routing\_key} 命名层级化：\texttt{preorder.\{action\}}，方便 RMQ topic 订阅过滤。
+  \item 失效期没收的"定金归属"由钱包 / 财务下游决定（平台收益 / 商家滞销补贴 / 两边分账），业务侧只发事件。
+\end{itemize}
+\srcnote{service/events/events.go::PreorderXxx 四个 struct；service/outbox/publisher.go 投递}
+\end{frame}
+
+% ============================================================
+\section{业务承诺：定金不退的法律边界}
+% ============================================================
+
+\begin{frame}{定金不退：业务承诺 + 法律依据}
+\begin{itemize}\small
+  \item \textbf{《民法典》第 587 条（定金罚则）}：给付定金的一方不履行债务的，无权要求返还定金。
+  \item \textbf{平台承诺}：用户在首次进入预售页时必须显式确认《预售须知》，包含：
+    \begin{itemize}\footnotesize
+      \item 定金支付即视为承诺购买
+      \item 尾款窗口结束未支付，定金不予退还
+      \item 商品发货后退款按"已收货"流程执行（deck 09 退款链路）
+    \end{itemize}
+  \item \textbf{合规要求}：监管要求在用户支付定金\textbf{前}必须告知"定金不退"，且字号不得小于其它条款（不能藏在折叠区）。
+  \item \textbf{业务码 82004} \texttt{ErrPreorderForfeitedDeposit} 出现在：
+    \begin{itemize}\footnotesize
+      \item 预售结束后用户尝试取消 → 返回 82004
+      \item 尾款期内用户尝试取消 → 返回 82004
+      \item cron 没收后用户查询订单 → 客服界面显示 82004 + 中文话术
+    \end{itemize}
+\end{itemize}
+\keypoint{业务承诺写得越清楚，客诉转化为"按规则赔付"的比例越高 — 这是\textbf{客服效率指标}。}
+\srcnote{pkg/e/code.go:78 ErrPreorderForfeitedDeposit；pkg/e/msg.go 82004 中文话术}
+\end{frame}
+
+\begin{frame}{合规帧：用户支付定金前必看 5 行字}
+\begin{tcolorbox}[colback=cWarn!10,colframe=cWarn,boxrule=0.5pt]
+\textbf{《gomall 预售须知》（用户必读）}
+\begin{enumerate}\footnotesize
+  \item 本商品为预售商品，定金 \textbf{XX 元} + 尾款 \textbf{XX 元} = 总价 \textbf{XX 元}。
+  \item \textbf{支付定金后视为承诺购买}，请在尾款窗口（\textbf{YYYY-MM-DD HH:MM} 至 \textbf{YYYY-MM-DD HH:MM}）内完成尾款支付。
+  \item \textbf{尾款窗口结束未支付，定金不予退还}（依据《民法典》第 587 条）。
+  \item 定金期内可全额退款；尾款支付后退款按平台《售后规则》处理。
+  \item 预计发货时间为 \textbf{YYYY-MM-DD}，以实际发货为准。
+\end{enumerate}
+\end{tcolorbox}
+\vspace{1mm}
+\begin{itemize}\small
+  \item 该弹窗由前端在用户点击"立即付定金"按钮时强制弹出，\textbf{勾选同意才放开支付}。
+  \item gomall 后端通过 \texttt{ShowPreorder} 返回的 \texttt{deposit\_cents / final\_cents / now\_at / phase} 给前端拼这个文案，避免客户端时钟偏移误判。
+\end{itemize}
+\srcnote{types/preorder.go::PreorderShowResp 字段；前端实现路线图 docs/architecture/feature-matrix.md}
+\end{frame}
+
+% ============================================================
+\section{五角色视角：业务全景}
+% ============================================================
+
+\begin{frame}{C 端用户视角：3 个时间窗口看到什么}
+{\footnotesize
+\begin{tabular}{@{}lp{4cm}p{3cm}p{3.5cm}@{}}
+\toprule
+窗口 & 订单页文案 & 可操作 & 客服解释 \\
+\midrule
+定金期 & "已付定金，待支付尾款于 11.11 0:00" + 倒计时 & 取消（全退） & 80002 解释退款时效 \\
+尾款期 & "待支付尾款 XX 元" + 大红按钮 & 立即支付 / 不能取消 & 82004 解释定金不退 \\
+失效期 & "因未支付尾款，订单已关闭" + 灰色 & 无操作 & 82004 + 是否补救 \\
+\bottomrule
+\end{tabular}}
+\vspace{2mm}
+\begin{itemize}\small
+  \item \textbf{C 端最大焦虑}：忘付尾款 → 定金没了。解决：尾款期开始前 \textbf{24h / 4h / 1h 三次 push 提醒}。
+  \item \textbf{锁价心理}：用户付 200 元定金的核心动机是"现在锁住 2000 元这个价"，营销文案要强化"双 11 当天补尾款 = 现在的价"。
+  \item \textbf{用户故事}：付定金后想退 — 定金期可全退；尾款期"我先看看其它家" → 不退；失效期忘付 → 定金没了。
+\end{itemize}
+\srcnote{service/preorder.go::CancelPreorderInDepositWindow 取消路径；events.PreorderCancelled 通知钱包}
+\end{frame}
+
+\begin{frame}{商家视角：备货决策的业务化}
+\begin{itemize}\small
+  \item \textbf{原决策方式}：商家凭经验下\textbf{固定备货量}（e.g.\ 凭去年同期 + 30\%）。库存周转 30 天，超量风险 15\%-25\%。
+  \item \textbf{预售改进}：商家在定金期\textbf{每天看 \texttt{deposit\_paid} 计数}，定金期结束前 1-2 天\textbf{下次性下单工厂}。
+  \item \textbf{真实决策}：假设定金期共 \textbf{1234 单付定金}，历史转化率（deposit $\to$ final）\textbf{75\%}：
+    \begin{itemize}\footnotesize
+      \item 凭定金销量预估：1234 $\times$ 0.75 = \textbf{925 单尾款支付}
+      \item 加 10\% 安全冗余：\textbf{1020 件备货}
+      \item 库存周转从 30 天缩到 \textbf{7-10 天}（尾款支付集中 + 发货高峰短）
+    \end{itemize}
+  \item \textbf{商家工作台数据点}（路线图）：\texttt{deposit\_paid\_count} / \texttt{final\_paid\_count} / \texttt{forfeited\_count} / \texttt{conversion\_rate}。
+  \item \textbf{商家心理账户}：定金提前到账 + 尾款 11.11 到账，\textbf{现金流改善 7-15 天}，对中小商家是真金白银。
+\end{itemize}
+\srcnote{events.PreorderDepositPaid 给商家工作台；events.PreorderForfeited 给定金归属决策}
+\end{frame}
+
+\begin{frame}{运营视角：GMV 前置 + 转化漏斗}
+\begin{itemize}\small
+  \item \textbf{GMV 前置比例}：原本 11.11 当天 100\% 爆发 → 预售期 \textbf{30\%-40\%} GMV 提前落账（定金 + 尾款都算 GMV）。
+  \item \textbf{转化漏斗}（双 11 行业平均）：
+    \begin{itemize}\footnotesize
+      \item 预售页 PV $\to$ 付定金：\textbf{2\%-5\%}（取决于商品热度）
+      \item 付定金 $\to$ 付尾款（成单）：\textbf{70\%-90\%}（爆款上限）
+      \item 付定金 $\to$ 失效（没收）：\textbf{5\%-15\%}（劣品 / 价格回落）
+      \item 付定金 $\to$ 定金期取消：\textbf{1\%-5\%}（用户改主意）
+    \end{itemize}
+  \item \textbf{运营报表}（路线图）：每个商品的"预售健康度 = 转化率 - 失效率 - 取消率"，作为下次能否开预售的核心指标。
+  \item \textbf{异常告警}：单商品失效率 > 30\% 触发运营 P2 复盘（是不是商品质量预期落差 / 价格虚高）。
+\end{itemize}
+\srcnote{events.Preorder* 四事件全量落数据宽表；docs/architecture/feature-matrix.md \S 运营报表路线图}
+\end{frame}
+
+\begin{frame}{客服视角：三大投诉与 SOP}
+{\footnotesize
+\begin{tabular}{@{}lp{5.5cm}p{4.5cm}@{}}
+\toprule
+投诉场景 & 客服 SOP & 用到的业务码 \\
+\midrule
+\textbf{为什么定金不退} & 引用《预售须知》§3 + 法律依据；引导走"补付尾款"流程而非退款 & \textbf{82004} ErrPreorderForfeitedDeposit \\
+\textbf{我忘付尾款了能补救吗} & 失效期内\textbf{原则上不补救}；爆款 / VIP 用户可走人工兜底 + 单独议价 & 82001 + 82004 \\
+\textbf{尾款付了我又想退} & 转 deck 09 \textbf{已付未发}退款流程；退款金额 = 定金 + 尾款（全额） & 走 \texttt{OrderRefunding} 链路 \\
+\textbf{付定金后我能改尺寸吗} & \textbf{当前版本不支持} SKU 切换，引导取消（定金期内） + 重下单 & 82001 if 不在定金期 \\
+\textbf{预售商品到货后坏了} & 转 deck 09 \textbf{已收货售后}流程，与一次性下单完全等价 & — \\
+\bottomrule
+\end{tabular}}
+\vspace{2mm}
+\begin{itemize}\small
+  \item 客服界面对每个 82xxx 业务码\textbf{预置中文话术 + 法律条款链接}，\textbf{平均回复时长 < 2 分钟}。
+  \item \textbf{硬指标}：客服一通电话内必须给出"定金能 / 不能 / 怎么 退"的明确答案，不能拖到工单。
+\end{itemize}
+\srcnote{pkg/e/msg.go 82001-82004 中文话术；deck 09 退款流程}
+\end{frame}
+
+\begin{frame}{SRE 视角：cron 没收的可观测性}
+\begin{itemize}\small
+  \item \textbf{cron 触发延迟 SLO}：\texttt{ForfeitDepositsForUnpaidFinals} 触发延迟 $\leq$ \textbf{1 小时}（每小时 1 次）。
+  \item \textbf{监控指标}：
+    \begin{itemize}\footnotesize
+      \item \texttt{preorder\_forfeit\_lag\_minutes} = \texttt{now - max(final\_end\_at)} 中仍 \texttt{stage=1} 的订单。$>$ 60min 触发 P2。
+      \item \texttt{preorder\_outbox\_publish\_latency\_p99} \texttt{deposit.paid} 事件投递 p99，与 deck 11 outbox 共用。
+      \item \texttt{preorder\_forfeit\_dead\_count} outbox 走 dead 的 forfeited 事件数，$>$ 0 触发值班。
+    \end{itemize}
+  \item \textbf{真实故障假设}：
+    \begin{itemize}\footnotesize
+      \item cron 进程崩 / 进程未起 → 失效订单滞留 \texttt{stage=1}（用户能"补付"窗口实际拖长） → 监控滞后 60min 报警。
+      \item outbox 事件丢 → 商家不知道哪些定金被没收 → 工作台 \texttt{deposit\_paid} 计数虚高 → 错下货。
+      \item 数据库时钟漂移 → \texttt{final\_end\_at} 判定不准 → \textbf{服务端时钟必须 NTP 强制同步}。
+    \end{itemize}
+\end{itemize}
+\srcnote{service/preorder.go::nowFn 时钟函数指针；service/preorder.go::forfeitOne 单笔事务}
+\end{frame}
+
+% ============================================================
+\section{业务码与客服话术对照}
+% ============================================================
+
+\begin{frame}{82001-82004 业务码对照表}
+{\footnotesize
+\begin{tabular}{@{}llp{5.5cm}p{3cm}@{}}
+\toprule
+业务码 & 常量 & 触发场景 & 客服话术 \\
+\midrule
+82001 & ErrPreorderNotInDepositWindow & 定金期外尝试付定金 / 取消 & "当前不在预售定金期，无法支付定金" \\
+82002 & ErrPreorderNotInFinalWindow   & 尾款期外尝试付尾款       & "当前不在尾款支付窗口" \\
+82003 & ErrPreorderDepositNotPaid     & 跳过定金直接付尾款       & "尚未支付定金，无法支付尾款" \\
+82004 & ErrPreorderForfeitedDeposit   & 预售结束后取消 / 没收     & "预售已结束，根据预售须知定金不予退还" \\
+\bottomrule
+\end{tabular}}
+\vspace{2mm}
+\begin{itemize}\small
+  \item \textbf{业务码命名规则}：8 段位 = 业务侧（不是技术错误），第 2-3 位是功能模块（20=预售），后 2 位是子场景。
+  \item 与其它业务码不冲突：60xxx 幂等 / 70xxx 限流熔断 / 80xxx 满减 / 81xxx 拼团 / 82xxx 预售。
+  \item 业务码透出方式：\texttt{service.CodeOf(err)} 提取，\texttt{api/v1/preorder.go::respondPreorderErr} 标准化返回。
+\end{itemize}
+\srcnote{pkg/e/code.go:75--80 82xxx 段；api/v1/preorder.go::respondPreorderErr 业务码透出}
+\end{frame}
+
+\begin{frame}[fragile]{业务码客服话术（中文版）}
+\begin{lstlisting}[language=Go]
+// pkg/e/msg.go
+ErrPreorderNotInDepositWindow: "当前不在预售定金期，无法支付定金",
+ErrPreorderNotInFinalWindow:   "当前不在尾款支付窗口，无法支付尾款",
+ErrPreorderDepositNotPaid:     "尚未支付定金，无法支付尾款",
+ErrPreorderForfeitedDeposit:   "预售已结束，根据预售须知定金不予退还",
+\end{lstlisting}
+\vspace{1mm}
+\begin{itemize}\small
+  \item 客服一线话术与业务码\textbf{一一对应}，避免一线自由发挥说错话。
+  \item \textbf{诚实}：82004 必须明确告知"\textbf{不予退还}"四个字 — 模糊话术（"请等待处理"）反而引发更多次电话。
+  \item 客服后台日均统计每个业务码出现次数 → 反推产品 / 运营优化方向：
+    \begin{itemize}\footnotesize
+      \item 82001 多 → 用户分不清窗口期，加日历提醒
+      \item 82004 多 → 失效率高，复盘商品价格 / 营销定位
+    \end{itemize}
+\end{itemize}
+\srcnote{pkg/e/msg.go 完整 4 条；客服系统对接路线图 docs/architecture/feature-matrix.md}
+\end{frame}
+
+% ============================================================
+\section{SLO 与压测数据}
+% ============================================================
+
+\begin{frame}{SLO：每个接口的业务承诺}
+{\footnotesize
+\begin{tabular}{@{}llrr@{}}
+\toprule
+接口 & 业务等级 & p99 延迟 & 可用率 \\
+\midrule
+\texttt{POST /preorder/:productID/deposit} & P0 交易 & < 200ms & 99.95\% \\
+\texttt{POST /preorder/:orderID/final}     & P0 交易 & < 500ms & 99.95\% \\
+\texttt{POST /preorder/:orderID/cancel}    & P1 售后 & < 1s   & 99.9\%  \\
+\texttt{GET  /preorder/:productID}         & P2 信息 & < 100ms & 99.9\%  \\
+\midrule
+cron \texttt{ForfeitDepositsForUnpaidFinals} & — & 触发延迟 $\leq$ 1h & — \\
+outbox \texttt{preorder.*} 事件投递 p99 & — & $\leq$ 1s & — \\
+\bottomrule
+\end{tabular}}
+\vspace{2mm}
+\begin{itemize}\small
+  \item \textbf{定金接口 < 200ms}：链路 = Redis Lua reserve（5ms） + DB Tx 写订单 + AES 扣款（30-50ms） + outbox 写（5ms）。
+  \item \textbf{尾款接口 < 500ms}：多一次 product.Num 更新 + 状态机推进 SQL，留余量 200ms 防 GC / 网络抖动。
+  \item \textbf{cron 1h}：尾款期一般是数天 - 周，没收延迟 1h 业务可接受；缩短到分钟级需独立 cron 进程，路线图阶段。
+\end{itemize}
+\srcnote{stressTest/REPORT.md \texttt{/orders/create} 基线 50K RPS / p99 2.33ms 复用为参考}
+\end{frame}
+
+\begin{frame}{压测参考：复用一次性下单的基线数据}
+\begin{itemize}\small
+  \item \textbf{基线}：\texttt{/ping} \textbf{64,254 RPS / p95 3.51ms}（裸 gin 链路）— \texttt{stressTest/REPORT.md} §1
+  \item \textbf{/orders/create}（幂等 + 库存 + outbox）：\textbf{50,319 RPS / p95 2.33ms}，755,033 次重试 1 笔订单
+  \item \textbf{/coupon/claim}（Redis Lua）：\textbf{51,362 RPS / p95 3.52ms}，500 抢 100 张零超发
+  \item 预售\texttt{/preorder/:productID/deposit} 链路结构等同 \texttt{orders/create + 1 次 AES 扣款}：
+    \begin{itemize}\footnotesize
+      \item 预估 RPS：\textbf{40K-45K}（多一次 user UpdateMoney）
+      \item 预估 p95：\textbf{4-5ms}
+      \item 预估 p99：\textbf{< 50ms}（远低于 SLO 200ms）
+    \end{itemize}
+  \item \textbf{cron 没收链路}：单批 200 条 / 每小时 1 次。失效订单 200 条以内的商家 cron 单次 < \textbf{500ms}。
+  \item \textbf{Redis reserved 桶占用}：每笔定金占 1 件，全平台 100 万预售单 = 100 万 Redis key（< 50MB），可忽略。
+\end{itemize}
+\srcnote{stressTest/REPORT.md §1 基线；service/payment.go::PayDown AES 链路实测复用}
+\end{frame}
+
+\begin{frame}{真实数字：双 11 历年预售规模参考}
+\begin{itemize}\small
+  \item 行业历史数据（业务侧公开报告）：
+    \begin{itemize}\footnotesize
+      \item 2023 双 11 预售期 \textbf{10.20-11.10} GMV 占大促总 GMV \textbf{38\%}
+      \item 预售单平均定金占比 \textbf{8\%-15\%}（200 元商品定金 20-30 元）
+      \item 单日定金接口 QPS 峰值 \textbf{50-80K}（开预售 0 点和接近定金期末两个高峰）
+      \item 尾款支付 0 点 QPS 峰值 \textbf{200-400K}（远高于定金）
+    \end{itemize}
+  \item \textbf{对 gomall 的启示}：
+    \begin{itemize}\footnotesize
+      \item 定金链路当前 SLO 余量充足（45K RPS 容量 vs 80K 峰值需求）→ 异步削峰路径（deck 10）需要扩到 preorder
+      \item 尾款链路峰值远超基线 → \textbf{需要类似 \texttt{/orders/enqueue} 的异步路径}（路线图）
+      \item Redis reserved 桶在双 11 前 1-2 天会涨到日常 50-100 倍，要给 Redis 扩容预留容量
+    \end{itemize}
+\end{itemize}
+\srcnote{stressTest/REPORT.md；deck 10 异步削峰章节；service/order\_async.go 异步路径复用方向}
+\end{frame}
+
+% ============================================================
+\section{失败路径与 Saga 补偿}
+% ============================================================
+
+\begin{frame}{Saga 视角：4 个故障路径的兜底}
+{\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+失败点 & 表现 & 兜底动作 \\
+\midrule
+PayDeposit Tx 失败 & 扣定金 / 建单失败 & defer \texttt{ReleaseReservation} 释放 Redis reserved \\
+PayDeposit 后 Redis 挂 & 事务已成功，cache 失败 & 日志告警 + 巡检脚本兜底重建 reserved 桶 \\
+PayFinal Tx 失败 & 扣尾款 / 状态机推进失败 & 事务自动回滚；reserved 仍占（等下次 PayFinal 或 cron 没收） \\
+forfeit cron 部分失败 & 某条订单 outbox 写入失败 & 单笔失败不影响其它；下一轮 cron 重试 \\
+\bottomrule
+\end{tabular}}
+\vspace{1mm}
+\begin{itemize}\small
+  \item \textbf{补偿原则}：DB 是\textbf{业务真相}，cache 是性能侧。Cache 失败不回滚 DB（与 deck 11 \texttt{ProductUpdate} 双删策略同口径）。
+  \item \textbf{至少一次语义}：outbox 投递可能重发，下游消费者必须\textbf{幂等}（路线图：钱包消费 \texttt{preorder.*} 时按 \texttt{order\_id} 去重）。
+  \item \textbf{cron 单笔幂等}：\texttt{ForfeitDeposit} SQL \texttt{WHERE stage=1 AND type=WaitPay} 兜底，重复触发 \texttt{RowsAffected=0} 无副作用。
+\end{itemize}
+\srcnote{service/preorder.go::PayDeposit 失败路径释放；service/order\_cancel.go 同口径 release}
+\end{frame}
+
+\begin{frame}{真实事故假设：用户卡点付款 vs cron 没收的竞态}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.style={font=\scriptsize}]
+  \node[node-box] (t0) {T0:\\final\_end\_at - 1s\\用户点付尾款};
+  \node[node-box,right=of t0] (t1) {T1:\\cron 触发\\扫到该订单};
+  \node[node-box,right=of t1,node-warn] (t2) {T2: 两者同时进 Tx};
+  \node[node-box,below=of t1,node-ok] (win)  {SQL \texttt{WHERE stage=1}\\先到先得};
+  \node[node-box,right=of win,node-bad]  (lose) {后到者 RowsAffected=0\\静默放弃};
+  \draw[arrow] (t0) -- (t2);
+  \draw[arrow] (t1) -- (t2);
+  \draw[arrow] (t2) -- (win);
+  \draw[arrow-async] (win) -- (lose);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}\small
+  \item \textbf{竞态场景}：用户在 final\_end\_at - 1s 点付尾款，正好 cron 也在同一秒触发。
+  \item \textbf{解决}：两者都走 \texttt{WHERE preorder\_stage=1 AND type=WaitPay} 条件 UPDATE，\textbf{数据库行锁兜底}。
+    \begin{itemize}\footnotesize
+      \item 用户付尾款先 commit → stage 2 → cron \texttt{ForfeitDeposit} \texttt{RowsAffected=0} → \texttt{forfeitOne return nil}
+      \item cron 先 commit → stage 3 → 用户 \texttt{MarkFinalPaid} \texttt{RowsAffected=0} → 返回"订单状态已变更"
+    \end{itemize}
+  \item \textbf{业务结论}：\textbf{先到先得，绝不双扣}。用户兜底场景应在前端引导"提前 5min 内不再开放支付"以避免边缘 case。
+\end{itemize}
+\srcnote{repository/db/dao/preorder.go::MarkFinalPaid/ForfeitDeposit 双向条件 UPDATE 兜底}
+\end{frame}
+
+\begin{frame}{业务全景：4 个 outbox 事件接到哪}
+\begin{tikzpicture}[node distance=4mm and 10mm,every node/.style={font=\scriptsize}]
+  \node[node-box] (svc) {preorder service};
+  \node[node-box,right=of svc] (outbox) {outbox\_event 表};
+  \node[node-box,right=of outbox] (pub) {publisher\\1s 轮询};
+  \node[node-box,right=of pub] (mq) {RabbitMQ\\domain.events};
+  \node[node-box,above=of mq,node-ok] (wallet) {钱包服务\\入账 / 退款};
+  \node[node-box,below=of mq,node-warn] (merchant) {商家工作台\\备货 / 发货};
+  \node[node-box,right=of mq] (data) {数据宽表\\转化漏斗 / 报表};
+  \draw[arrow] (svc) -- (outbox);
+  \draw[arrow-async] (outbox) -- (pub);
+  \draw[arrow] (pub) -- (mq);
+  \draw[arrow] (mq) -- (wallet);
+  \draw[arrow] (mq) -- (merchant);
+  \draw[arrow] (mq) -- (data);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}\small
+  \item \textbf{钱包消费 \texttt{preorder.deposit.paid}}：用户钱包扣 X 元、商家钱包加 X 元（与 AES 扣款冗余记账）。
+  \item \textbf{商家工作台消费 \texttt{preorder.final.paid}}：进入待发货 tab；\texttt{forfeited} 进入"没收订单"统计 tab。
+  \item \textbf{数据宽表消费所有 4 个事件}：算转化漏斗 / 失效率 / 客单价。
+  \item \textbf{至少一次}：消费者按 \texttt{order\_id + event\_type} 做幂等键，重复消息直接 \texttt{ON CONFLICT DO NOTHING}。
+\end{itemize}
+\srcnote{service/outbox/publisher.go 投递；events/events.go::Preorder* 四个事件}
+\end{frame}
+
+% ============================================================
+\section{业务边界与路线图}
+% ============================================================
+
+\begin{frame}{路线图：本期之后做什么}
+{\footnotesize
+\begin{tabular}{@{}p{4cm}p{4cm}p{4cm}@{}}
+\toprule
+能力 & 业务收益 & 实现路径 \\
+\midrule
+SKU 维度预售 & 同款不同色 / 尺寸独立配置 & 预售配置加 sku\_id 列；migration + DAO 改造 \\
+分期付款 & 大额商品（家电 / 奢侈品）分 12 期 & 对接持牌金融，独立 service \\
+定金阶梯 & "付 200 抵 300 / 付 500 抵 800" & PreorderTier 表 + 抵扣引擎 \\
+预售 + 优惠券叠加 & 拉新券 / 满减券抵尾款 & deck 08 满减引擎集成 \\
+尾款异步路径 & 11.11 0 点峰值削峰 & 复用 service/order\_async.go 路径 \\
+没收资金归属 & 平台 / 商家 / 两边分账 & wallet 服务消费 forfeited 事件 \\
+预售商品自动上架 & 定金期前自动 OnSale=true & cron 巡检 + ProductChanged 事件 \\
+\bottomrule
+\end{tabular}}
+\vspace{1mm}
+\begin{itemize}\small
+  \item 当前版本聚焦"两段扣款 + 状态机推进 + 定金不退"三件事，其它是路线图阶段。
+\end{itemize}
+\srcnote{docs/architecture/feature-matrix.md 路线图分级表；deck 08 满减引擎}
+\end{frame}
+
+\begin{frame}{诚实自爆：当前实现的取舍点}
+\begin{itemize}\small
+  \item \textbf{1 单 1 件硬约束}：当前 PayDeposit 强制 \texttt{Num=1}，多件下单需走普通链路。理由：预售场景下用户决策粒度天然是"单件商品"，多件并发付款会引入 SKU + 库存配对复杂度。
+  \item \textbf{cron 表达式}：本 deck 未引入 preorder cron（路线图阶段加 \texttt{initialize/cron.go} 的 \texttt{ForfeitDepositsForUnpaidFinals} 调用）。当前\textbf{未自动触发}，需手动调用 service 入口测试。
+  \item \textbf{没收资金归属未定}：\texttt{PayDeposit} 时定金已划给商家，\texttt{Forfeited} 事件只标状态、不动钱包。"定金应归平台还是商家还是分账"留给 wallet 服务消费 \texttt{preorder.forfeited} 时决定。
+  \item \textbf{AddressID 可选}：定金期内允许不填地址，尾款支付前补地址。当前\textbf{未强制校验补全}，路线图加防御。
+  \item \textbf{时钟函数指针}：\texttt{nowFn} 用 var 而非 \texttt{context.Context} 携带，方便测试替换但生产侧没必要切。改成 ctx 透传是更优雅的路线图改造。
+\end{itemize}
+\srcnote{service/preorder.go::PayDeposit Num=1；service/preorder.go::nowFn 测试钩子}
+\end{frame}
+
+% ============================================================
+\appendix
+% ============================================================
+
+\begin{frame}{面试 Q\&A（上）}
+\textbf{Q1}：为什么用 \texttt{preorder\_stage} 字段而不是扩 \texttt{order.type} 状态？\\
+\hspace{4mm}\small A：旧消费者只读 \texttt{type}，扩 \texttt{type} 要改一票下游；\texttt{stage} 做正交子状态，对旧消费者透明 — 见 deck 09 17 例状态转换测试零改动。\srcnote{repository/db/model/order.go:24}
+
+\vspace{2mm}
+\textbf{Q2}：定金期内取消，怎么保证"定金真的退回"？\\
+\hspace{4mm}\small A：\texttt{CancelPreorderInDepositWindow} 在事务内调 \texttt{refundUser}（与 \texttt{debitUser} 反向 AES），同事务写 outbox \texttt{preorder.cancelled} 给钱包二次记账，双保险。\srcnote{service/preorder.go::CancelPreorderInDepositWindow}
+
+\vspace{2mm}
+\textbf{Q3}：用户在 \texttt{final\_end\_at - 1s} 付尾款，cron 同时触发，谁赢？\\
+\hspace{4mm}\small A：先 commit 者赢 — 双方走条件 UPDATE \texttt{WHERE stage=1 AND type=WaitPay}，数据库行锁兜底。后到者 \texttt{RowsAffected=0}，业务上自然降级（用户付款 → 用户报错 / cron → 静默跳过）。\srcnote{repository/db/dao/preorder.go::MarkFinalPaid/ForfeitDeposit}
+
+\vspace{2mm}
+\textbf{Q4}：定金 + 尾款是\textbf{两次扣款} vs \textbf{冻结 + 扣款}，为什么选两次？\\
+\hspace{4mm}\small A：冻结需要支付通道（支付宝 / 微信）支持"预授权"接口，gomall 当前\textbf{不真接}第三方支付，AES 模拟扣款。两次扣款链路更简单、更与现有 \texttt{PayDown} 一致。生产接通预授权后再切。\srcnote{README \S 业务边界 不真接第三方支付}
+\end{frame}
+
+\begin{frame}{面试 Q\&A（下）}
+\textbf{Q5}：cron 1 小时一次是不是太慢？\\
+\hspace{4mm}\small A：尾款期一般是 1-7 天，1h 没收延迟业务可接受。缩到 1min 需要独立 cron 进程 + 防扫表压力，对业务\textbf{无明显收益}。SLO 写 1h 是诚实边界。\srcnote{deck 09 cron 双保险关单同口径}
+
+\vspace{2mm}
+\textbf{Q6}：商家凭定金销量备货，转化率 75\% 是怎么算出来的？\\
+\hspace{4mm}\small A：是\textbf{历史经验值}（双 11 行业平均 70\%-90\%）。gomall 当前没有真实历史数据，路线图阶段先按 75\% 给商家做"建议下单量"，3-5 期之后用商家自己的历史 \texttt{conversion\_rate} 替换。\srcnote{events.PreorderDepositPaid 给商家工作台}
+
+\vspace{2mm}
+\textbf{Q7}：定金不退是不是侵犯消费者权益？\\
+\hspace{4mm}\small A：法律明确支持（《民法典》第 587 条定金罚则）。\textbf{合规要点}：必须在用户支付定金\textbf{前}明确告知，字号不得小于其它条款。gomall 通过 \texttt{ShowPreorder} 返回的字段强制前端拼《预售须知》弹窗。\srcnote{types/preorder.go::PreorderShowResp 字段给前端}
+
+\vspace{2mm}
+\textbf{Q8}：定金已经划给商家了，cron 没收时为什么不再扣商家？\\
+\hspace{4mm}\small A：业务上\textbf{没收的"归属"是独立决策}。当前版本只标 \texttt{preorder\_stage=Forfeited} + 发事件，钱包 / 财务下游决定"归商家 / 归平台 / 分账"。这是\textbf{业务争议点}，故意不写死。\srcnote{events.PreorderForfeited Deposit 字段；下游消费路线图}
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}\footnotesize
+  \item[预售配置表]\srcnote{repository/db/model/preorder.go:18--26}
+  \item[Order 字段扩展（PreorderStage / DepositPaidAt / FinalPaidAt）]\srcnote{repository/db/model/order.go}
+  \item[DAO（GetPreorder / Mark* / Forfeit / List*）]\srcnote{repository/db/dao/preorder.go}
+  \item[PayDeposit 主入口（窗口 + Reserve + Tx + outbox）]\srcnote{service/preorder.go::PayDeposit}
+  \item[PayFinal 主入口（扣尾款 + 真扣库存 + 状态机）]\srcnote{service/preorder.go::PayFinal}
+  \item[CancelInDepositWindow（全退路径）]\srcnote{service/preorder.go::CancelPreorderInDepositWindow}
+  \item[ForfeitDepositsForUnpaidFinals（cron 入口）]\srcnote{service/preorder.go::ForfeitDepositsForUnpaidFinals}
+  \item[ShowPreorder（公开查询）]\srcnote{service/preorder.go::ShowPreorder}
+  \item[HTTP handler 四件套]\srcnote{api/v1/preorder.go}
+  \item[路由注册]\srcnote{routes/preorder\_routes.go}
+  \item[业务码 82001-82004]\srcnote{pkg/e/code.go：78--83; pkg/e/msg.go}
+  \item[outbox 事件 struct]\srcnote{service/events/events.go::PreorderXxx 四个 struct}
+  \item[单测覆盖 8 例]\srcnote{service/preorder\_test.go}
+\end{description}
+\keypoint{配套：deck 04 下单 / deck 05 支付 / deck 07 库存 / deck 09 订单生命周期 / deck 11 outbox 与一致性。}
+\end{frame}
+
+\end{document}

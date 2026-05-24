@@ -15,6 +15,7 @@ import (
 //	WaitReceive → Completed(确认收货 / 7d 自动) / Refunding(发起退货)
 //	Completed   → Refunding(售后期内申请)
 //	Refunding   → Refunded(同意退款) / Completed(驳回回到完成)
+//	WaitGroup   → WaitShip(凑齐 N 人成团) / Closed(24h 超时散团)
 //
 // Closed / Refunded 是终态，无出边。
 var orderStateTransitions = map[uint][]uint{
@@ -23,6 +24,7 @@ var orderStateTransitions = map[uint][]uint{
 	consts.OrderWaitReceive: {consts.OrderCompleted, consts.OrderRefunding},
 	consts.OrderCompleted:   {consts.OrderRefunding},
 	consts.OrderRefunding:   {consts.OrderRefunded, consts.OrderCompleted},
+	consts.OrderWaitGroup:   {consts.OrderWaitShip, consts.OrderClosed},
 }
 
 // ErrInvalidOrderStateTransition 表示当前订单状态不允许迁移到目标状态。

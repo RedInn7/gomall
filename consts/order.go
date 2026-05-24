@@ -2,7 +2,7 @@ package consts
 
 // 订单状态机。
 // 数值兼容：1/2/3 保留原义（待付 / 已付 / 已关闭，存量数据不动）；4-7 为补齐
-// 业界 7 态后的新增节点。
+// 业界 7 态后的新增节点；8 为拼团成员订单等待成团的过渡态。
 const (
 	_                = iota // 0 占位，避免业务侧把 0 当成合法状态
 	OrderWaitPay            // 1 待付款
@@ -12,6 +12,7 @@ const (
 	OrderCompleted          // 5 已完成（用户确认收货 / 7d 自动）
 	OrderRefunding          // 6 退款中
 	OrderRefunded           // 7 已退款
+	OrderWaitGroup          // 8 拼团中（成员订单凑齐 N 人前的过渡态）
 )
 
 // 旧别名，标 Deprecated 保留兼容；新代码请使用 OrderXxx 命名。
@@ -46,6 +47,7 @@ var OrderStateMap = map[uint]string{
 	OrderCompleted:   "已完成",
 	OrderRefunding:   "退款中",
 	OrderRefunded:    "已退款",
+	OrderWaitGroup:   "拼团中",
 }
 
 // OrderTypeMap 旧前端字典保留兼容。

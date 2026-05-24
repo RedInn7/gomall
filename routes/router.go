@@ -162,6 +162,12 @@ func NewRouter() *gin.Engine {
 				admin.POST("users/promote", api.AdminPromoteUserHandler())
 				admin.POST("search/backfill", api.AdminBackfillProductIndexHandler())
 			}
+
+			// 新业务域：满减 / 拼团 / 预售。三组拆到独立 routes/*_routes.go
+			// 是为了降 merge conflict + 让每个 feature 能单独构造 router 跑 E2E
+			RegisterPromoRoutes(v1, authed, admin)
+			RegisterGroupbuyRoutes(v1, authed)
+			RegisterPreorderRoutes(v1, authed)
 		}
 	}
 	return r

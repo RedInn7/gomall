@@ -14,6 +14,9 @@ func migrate() (err error) {
 			&model.SkillProduct2MQ{},
 			&model.CouponBatch{}, &model.UserCoupon{},
 			&model.RedPacket{}, &model.RedPacketClaim{},
+			&model.PromoRule{},
+			&model.GroupbuyGroup{}, &model.GroupbuyMember{},
+			&model.ProductPreorder{},
 		)
 
 	return

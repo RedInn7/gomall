@@ -1,0 +1,669 @@
+\input{preamble}
+
+\title{拼团 / 团购}
+\subtitle{社交裂变 vs 商家库存利用率 —— gomall v2 业务侧}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{业务困局：为什么拼团是一个独立业务线}
+% ============================================================
+
+\begin{frame}{拼团不是促销活动，是一种履约前置的销售模型}
+\begin{itemize}
+  \item 普通下单：用户决策 \textbf{→} 单人付款 \textbf{→} 商家发货。每一笔订单都是\textbf{孤立事件}。
+  \item 拼团下单：用户决策 \textbf{→} 多人凑齐 \textbf{→} 一起发货。订单之间\textbf{绑成一组}，要么集体推进、要么集体退款。
+  \item 业务关键：拼团把\textbf{用户社交关系}变成商家\textbf{库存利用率的杠杆} —— 商家用更低的价格换确定性销量。
+  \item 5 角色看到 5 件不同的事，这就是为什么团购必须是独立 deck。
+\end{itemize}
+\srcnote{service/groupbuy.go::CreateGroup / JoinGroup / MarkGroupSuccess / ExpireGroup 四个入口}
+\end{frame}
+
+\begin{frame}{拼团的 5 角色视图}
+\scriptsize
+\begin{tabular}{@{}lp{0.34\linewidth}p{0.42\linewidth}@{}}
+\toprule
+角色 & 拼团对他意味着什么 & 他最怕看到什么 \\
+\midrule
+C 端用户   & 价格更低 + 拉好友的社交奖励          & 凑不齐人 / 钱被锁 / 退款慢 \\
+商家       & 用折扣换\textbf{确定性销量}与提前备货 & 拼团价低 + 散团率高 = 库存空转 \\
+运营       & GMV 杠杆 —— 1 个团长拉来 N-1 个新客    & 黑产刷团把库存洗掉但不真付 \\
+客服       & 散团时\textbf{每用户都来问退款}       & 没有标准 SOP 解释 "为什么团没拼成" \\
+SRE        & 散团是 Saga，必须库存归还 + 订单关闭   & 散团漏退 = 库存泄漏 + 用户投诉 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \textbf{核心矛盾}：低价的代价是\textbf{延后收单}（24h）+ \textbf{Saga 散团成本}。本 deck 每一帧都会回答："这个设计满足了谁，牺牲了谁。"
+\srcnote{README 业务全景 5 角色表；本 deck 业务码 81001-81004 客服话术 pkg/e/msg.go:58-61}
+\end{frame}
+
+\begin{frame}{业务承诺：拼团接口的 SLO}
+\begin{tabular}{@{}llll@{}}
+\toprule
+接口 & 等级 & 可用率 & p99 延迟 \\
+\midrule
+\texttt{/groupbuy/:id} (展示) & P1     & 99.9\%  & < 200ms \\
+\texttt{/groupbuy/create}     & P0 ↓ 1 & 99.95\% & < 300ms \\
+\texttt{/groupbuy/:id/join}   & P0 ↓ 1 & 99.95\% & \textbf{< 100ms} \\
+散团 cron (24h ± 5min)        & P1     & 99.9\%  & N/A \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item \texttt{join} 是裂变流量的爆点（分享链接病毒式传播）—— p99 必须低于 100ms，不然分享体验崩。
+  \item 散团 cron 兜底 SLA \textbf{24h ± 5min} —— 客服话术里给"1-3 工作日退款"，留出运营缓冲。
+  \item 对照实测：\texttt{/orders/create} 50K RPS / p95 2.33ms，\texttt{/groupbuy/join} 因为多了 \texttt{groupbuy\_group} 行 UPDATE，p95 预估 4-6ms，仍在 SLO 内。
+\end{itemize}
+\srcnote{stressTest/REPORT.md 第 4 节 orders/create 数字；README SLO 表 P0/P1 等级}
+\end{frame}
+
+\begin{frame}{业务边界：拼团这次做什么、不做什么}
+\begin{tikzpicture}[node distance=4mm and 6mm]
+  \node[node-box,node-ok]   (in1) {N 人成团 (固定)};
+  \node[node-box,node-ok,right=of in1] (in2) {24h 截单线};
+  \node[node-box,node-ok,right=of in2] (in3) {散团库存归还};
+  \node[node-box,node-ok,right=of in3] (in4) {分享落地页};
+
+  \node[node-box,node-bad,below=of in1] (out1) {多商品组合团};
+  \node[node-box,node-bad,right=of out1] (out2) {砍价 (变价)};
+  \node[node-box,node-bad,right=of out2] (out3) {团购返利};
+  \node[node-box,node-bad,right=of out3] (out4) {老带新奖励};
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{做 (绿)}：单 SKU 固定人数团 / 24h 散团 / 库存 Saga / 公开分享落地页。
+  \item \textbf{不做 (红)}：多 SKU 组合团（业务复杂度爆炸）、变价砍价（钱包系统未对齐）、返利与老带新奖励（钱包未落地）。
+  \item 业务诚实：等钱包服务上线再迭代，本期 MVP 聚焦"拼团核心闭环"。
+\end{itemize}
+\srcnote{api/v1/groupbuy.go 仅有 3 个 handler；README 业务边界一节列出"未做清单"}
+\end{frame}
+
+% ============================================================
+\section{业务流程：从发起到散团的 4 个节点}
+% ============================================================
+
+\begin{frame}{业务侧主流程：1 个团长 + N-1 个团员的协同时序}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.style={font=\scriptsize}]
+  \node[node-box,fill=cMain!12] (s1) {\textbf{1. 发起}\\团长选品 + 设 N + 价};
+  \node[node-box,right=of s1,fill=cMain!12] (s2) {\textbf{2. 加入}\\成员扫链接};
+  \node[node-box,right=of s2,fill=cMain!12] (s3) {\textbf{3. 凑齐 N}\\$current=target$};
+  \node[node-box,right=of s3,node-ok] (s4a) {\textbf{4a. 成团}\\WaitGroup→WaitShip};
+  \node[node-box,below=8mm of s3,node-bad] (s4b) {\textbf{4b. 散团}\\WaitGroup→Closed};
+  \draw[arrow] (s1) -- (s2);
+  \draw[arrow] (s2) -- (s3);
+  \draw[arrow] (s3) -- (s4a);
+  \draw[arrow-bad] (s3) -- node[right,font=\tiny]{24h 超时} (s4b);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 4a 成团：所有成员订单进 WaitShip，库存 reserved $\to$ sold（真扣）。商家工作台开始看到"待发货"。
+  \item 4b 散团：所有成员订单进 Closed，库存 reserved $\to$ available（归还）。钱包按 outbox 退款。
+  \item 整个流程的"原子单位"是\textbf{一组订单}而非"一笔订单"，这就是为什么必须新增 WaitGroup 过渡态。
+\end{itemize}
+\srcnote{consts/order.go:15 OrderWaitGroup=8；service/order\_state.go:27 WaitGroup → WaitShip / Closed}
+\end{frame}
+
+\begin{frame}{为什么需要 WaitGroup 过渡态：3 态够不够}
+\begin{itemize}
+  \item 反例 1：把成员订单直接放 \texttt{WaitPay} —— 但用户已经付款了（拼团是先扣预扣 + 锁价），不该再显示"待付款"。
+  \item 反例 2：把成员订单放 \texttt{WaitShip} —— 商家工作台会立刻看到这笔单，开始备货；散团时商家已经发货 = 资损。
+  \item 反例 3：用 \texttt{WaitPay + 子字段 group\_id} —— 字段越加越脏，状态机失去单一职责。
+  \item 正解：新增 \texttt{WaitGroup(8)}，明确语义"钱已锁、货未真扣、商家不发货"，与旧 7 态\textbf{完全正交}。
+\end{itemize}
+\keypoint{业务侧的状态划分 = \textbf{角色间需要协同的最小事件}。3 + group\_id 是把字段当状态用，必爆。}
+\srcnote{consts/order.go:15 OrderWaitGroup 注释；service/order\_state.go:20-28 转换表新增的两条出边}
+\end{frame}
+
+\begin{frame}[fragile]{节点 1 · 团长发起：业务诉求 + 关键代码}
+\begin{itemize}
+  \item 业务侧：团长选 1 个商品、设成团人数 N、设拼团价（低于正价）、设 TTL（默认 24h）。
+  \item 系统侧：建团 + 团长订单 + 1 份预扣库存 + outbox 同事务原子提交。
+  \item 失败兜底：tx 回滚 → 释放刚扣的 reserved（Saga），不会留下"团没建但库存被锁"的脏数据。
+\end{itemize}
+\begin{lstlisting}[language=Go,caption={CreateGroup 关键路径 service/groupbuy.go}]
+if err := cache.ReserveStock(ctx, productID, 1); err != nil {
+    return nil, err  // 库存不足直接拒，不进 DB
+}
+err := dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+    if e := dao.NewGroupbuyDaoByDB(tx).CreateGroup(g); e != nil { return e }
+    if e := dao.NewOrderDaoByDB(tx).CreateOrder(leaderOrder); e != nil { return e }
+    // 写 member 行 + outbox(groupbuy.created)
+    return dao.NewOutboxDaoByDB(tx).Insert(...)
+})
+if err != nil {
+    cache.ReleaseReservation(ctx, productID, 1) // Saga 兜底
+    return nil, err
+}
+\end{lstlisting}
+\srcnote{service/groupbuy.go::CreateGroup 100-160；与 service/order.go::OrderCreate 同一模式}
+\end{frame}
+
+\begin{frame}[fragile]{节点 2 · 成员加入：单 SQL 抢名额 + uniqueIndex 兜底}
+\begin{itemize}
+  \item 业务侧：用户扫团长分享链接 \texttt{GET /groupbuy/:id} → 看落地页 → \texttt{POST /groupbuy/:id/join}。
+  \item 并发争用点：N 个用户同时点"加入"，谁抢到第 N 个名额？—— \textbf{单条 UPDATE} 用 WHERE 兜底。
+  \item RowsAffected=0 = 团满 / 超时 / 关 三种情况之一，service 再读一次状态决定返哪个业务码（81001 / 81002 / 81004）。
+\end{itemize}
+\begin{lstlisting}[language=Go,caption={JoinGroupAtomic 单 SQL repository/db/dao/groupbuy.go}]
+res := d.DB.Model(&model.GroupbuyGroup{}).
+    Where("id=? AND status=? AND current_count<target_count AND expire_at>?",
+        groupID, model.GroupbuyStatusOpen, time.Now()).
+    UpdateColumn("current_count", gorm.Expr("current_count + 1"))
+if res.RowsAffected == 0 {
+    return ErrGroupbuyFull // service 层再细分 full / expired / closed
+}
+return d.DB.Create(member).Error // uniqueIndex(group_id,user_id) 兜底重复加入
+\end{lstlisting}
+\srcnote{repository/db/dao/groupbuy.go::JoinGroupAtomic 62-79；uniqueIndex 见 model/groupbuy.go:43}
+\end{frame}
+
+\begin{frame}{节点 3 · 凑齐成团：reserved $\to$ sold 的 Saga 时序}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.style={font=\scriptsize}]
+  \node[node-box,fill=cMain!12] (j1) {JoinGroup 第 N 人};
+  \node[node-box,right=of j1] (j2) {tx: count+=1};
+  \node[node-box,right=of j2] (j3) {count==target?};
+  \node[node-box,right=of j3,node-ok] (j4) {MarkGroupSuccess};
+  \node[node-box,below=8mm of j3] (j5) {tx: UPDATE order\\WaitGroup→WaitShip};
+  \node[node-box,right=of j5,node-ok] (j6) {reserved-=N\\(每人 1)};
+  \draw[arrow] (j1) -- (j2);
+  \draw[arrow] (j2) -- (j3);
+  \draw[arrow] (j3) -- node[above,font=\tiny]{yes} (j4);
+  \draw[arrow] (j4) |- (j5);
+  \draw[arrow] (j5) -- (j6);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 成团触发在 \textbf{第 N 个人 join 后}，调 \texttt{MarkGroupSuccess} —— 失败也只是日志，cron 兜底（路线图）。
+  \item 库存：所有成员的 reserved 一次性 commit（real 扣减）；这一步在 tx 外，至少一次语义，重跑无副作用。
+  \item 业务诚实：MarkGroupSuccess 失败时\textbf{库存仍是 reserved 状态}，下次 cron 拉超时团时会重试 commit。
+\end{itemize}
+\srcnote{service/groupbuy.go::MarkGroupSuccess；repository/cache/inventory.go::CommitReservation}
+\end{frame}
+
+\begin{frame}[fragile]{节点 4 · 24h 散团：协同式 Saga 一气呵成}
+\begin{itemize}
+  \item 触发口径：cron 5min 扫一次 \texttt{ExpireOpenGroupsBefore(now)}，把超过 24h 仍 open 的团逐个 \texttt{ExpireGroup}。
+  \item 散团操作（tx 内）：MarkGroupExpired + 所有成员订单 \texttt{WaitGroup → Closed} + member.status=refunded + outbox。
+  \item 库存（tx 外）：每位成员 \texttt{ReleaseReservation(1)}，把 reserved 退回 available。
+  \item 客服话术：\textbf{"该团已超时未成团，款项将于 1-3 工作日原路退回"} —— pkg/e/msg.go 业务码 81002。
+\end{itemize}
+\begin{lstlisting}[language=Go,caption={ExpireGroup Saga 散团 service/groupbuy.go}]
+err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+    ok, e := dao.NewGroupbuyDaoByDB(tx).MarkGroupExpired(groupID)
+    if !ok { return nil } // 幂等 no-op
+    for _, m := range members {
+        tx.Model(&model.Order{}).Where("id=? AND type=?",
+            m.OrderID, consts.OrderWaitGroup).
+            Update("type", consts.OrderClosed)
+    }
+    return dao.NewOutboxDaoByDB(tx).Insert(...)
+})
+for range members {
+    cache.ReleaseReservation(ctx, g.ProductID, 1) // 归还库存
+}
+\end{lstlisting}
+\srcnote{service/groupbuy.go::ExpireGroup；repository/db/dao/groupbuy.go::MarkGroupExpired \& ExpireOpenGroupsBefore}
+\end{frame}
+
+% ============================================================
+\section{库存博弈：reserved 桶在团购中的关键作用}
+% ============================================================
+
+\begin{frame}{库存两桶模型在拼团里的承载}
+\begin{tikzpicture}[node distance=5mm and 15mm,every node/.style={font=\scriptsize}]
+  \node[node-box,fill=cOK!12]      (avail) {available\\\tiny 还能下单};
+  \node[node-box,fill=cWarn!18,right=of avail] (res)   {reserved\\\tiny 已锁未真扣};
+  \node[node-box,fill=cGray!18,right=of res] (sold)  {sold\\\tiny 已确认消耗};
+
+  \node[font=\tiny,below=2mm of avail,align=center] (a1) {ReserveStock(1)\\每人 join 扣 1};
+  \node[font=\tiny,below=2mm of res,align=center] (a2) {Commit：成团\\Release：散团};
+  \node[font=\tiny,below=2mm of sold,align=center] (a3) {真扣到 sold\\商家发货依据};
+
+  \draw[arrow]      (avail) -- node[above,font=\tiny]{reserve} (res);
+  \draw[arrow-bad]  (res) -- node[above,font=\tiny]{release} (avail);
+  \draw[arrow]      (res) -- node[above,font=\tiny]{commit} (sold);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 拼团\textbf{不重写库存 Lua}，复用 \texttt{reserveScript / commitScript / releaseScript} 三段已经验证的脚本。
+  \item 每个 join 单独 reserve 1 份，成团一次性 commit N 份，散团一次性 release N 份 —— 操作粒度一致。
+  \item 业务收益：库存口径在普通下单 / 异步下单 / 秒杀 / 拼团 / 红包退款上\textbf{全部一致}，监控对账只看一张表。
+\end{itemize}
+\srcnote{repository/cache/inventory.go:30-66 三段 Lua；service/groupbuy.go::CreateGroup / JoinGroup / ExpireGroup 复用入口}
+\end{frame}
+
+\begin{frame}{真实数字：reserved 桶为什么能扛拼团峰值}
+\begin{itemize}
+  \item 实测 \texttt{/coupon/claim} 通过 Redis Lua \textbf{500 抢 100 张零超发}，Lua max 136ms vs DB \texttt{SELECT FOR UPDATE} max 453ms（3.3× 优势）。
+  \item 拼团 join 的库存路径就是这同一把 Lua，单团内并发数远小于券抢，p99 预估 < 50ms。
+  \item \textbf{基线 \texttt{/ping} 64K RPS / p95 3.5ms}：拼团相关接口预计 30K-40K RPS（加 1 个 group UPDATE + 1 个订单 INSERT + 1 个 outbox INSERT 共 3 张表）。
+\end{itemize}
+\keypoint{库存层为什么不为拼团加新 script：每多一份脚本 = 多一份 fork bug 风险，业务\textbf{越少特殊化越稳}。}
+\srcnote{stressTest/REPORT.md 第 5 节 coupon 抢券；第 1 节 ping 基线；repository/cache/inventory.go 三段 Lua}
+\end{frame}
+
+\begin{frame}{帧：散团 vs 成团的库存数学差异}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+场景    & available 起点 & 团人数 N & reserved 中间值 & 终态 \\
+\midrule
+成团成功 & 100             & 3        & 3               & available=100, sold=3 \\
+散团 (3 中 2)  & 100      & 3        & 2               & available=100, sold=0 \\
+满团 + 失败 commit & 100  & 3        & 3 → \textbf{3} & 等下次 cron 重 commit \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item 散团的真实代价不是退款（钱包做），而是\textbf{库存在 reserved 桶里被冻结 24h}，期间这部分库存无法卖给其他用户。
+  \item 商家定价取舍：拼团价定得低 → 散团率高 → 库存空转高 → 商家亏。所以业内拼团商品都是\textbf{低毛利长尾 SKU}，散团代价低。
+\end{itemize}
+\srcnote{repository/cache/inventory.go:79-95 ReserveStock 返回 -1/-2 错误码；service/groupbuy.go::MarkGroupSuccess 末尾的 CommitReservation}
+\end{frame}
+
+% ============================================================
+\section{角色 1：C 端裂变与商家库存利用率}
+% ============================================================
+
+\begin{frame}{C 端视角：发起 / 加入 / 看团 三个动作}
+\begin{itemize}
+  \item \textbf{发起}（已登录）：选品 → 设 N → 设价 → 立刻锁定 1 份库存。团长承担"凑不到人就退"的小成本。
+  \item \textbf{加入}（已登录）：扫链接 → 看落地页 → 点"加入" → 立刻锁 1 份库存 + 锁价。
+  \item \textbf{看团}（\emph{免登录}）：分享链接公开可看，未登录用户可以看到"还差 2 人" + 倒计时 → 引导注册。
+  \item 业务杠杆：免登录看团是裂变的关键 —— 团长把链接转 5 个群，每个群有 30 人看，转化率 0.5\% = 0.75 人加入，1 个团长能凑齐 3 人团的概率 ~80\%。
+\end{itemize}
+\srcnote{routes/groupbuy\_routes.go:24 GET /groupbuy/:id 挂在 public 组；POST 都挂 authed 组}
+\end{frame}
+
+\begin{frame}{商家视角：拼团对库存利用率的真实改变}
+\begin{itemize}
+  \item 普通销售：日销 100 件 / 库存 1000 件 / 周转 10 天 / 滞销 SKU 占库存 30\%。
+  \item 拼团销售：日销 100 件正价 + 50 件拼团价（散团率 30\%）→ 日均真销 100 + 35 = 135 件 / 周转 7.4 天。
+  \item 商家诉求："我愿意 8 折卖给拼团用户，前提是\textbf{不能给我超卖}，也不能让正价用户看到 8 折后说'你贵了'"。
+  \item gomall 兜底：拼团价存在 \texttt{groupbuy\_group.price\_cents}，不影响商品主表 \texttt{product.discount\_price}，正价漏斗不受污染。
+\end{itemize}
+\srcnote{model/groupbuy.go:33 PriceCents 字段；与 model/product.go 中 discount\_price 不交叉}
+\end{frame}
+
+\begin{frame}{社交裂变 vs 库存利用率：两边怎么平衡}
+\begin{tikzpicture}[node distance=5mm and 14mm,every node/.style={font=\scriptsize}]
+  \node[node-box,node-warn] (left)  {C 端\\社交裂变\\想要：N 大 + 折扣深};
+  \node[node-box,node-warn,right=of left] (right) {商家\\库存利用率\\想要：N 小 + 折扣浅};
+  \node[node-box,node-ok,below=of $(left.south)!0.5!(right.south)$] (mid) {gomall 默认\\N=3, 折扣 8 折\\TTL 24h};
+  \draw[arrow] (left) -- (mid);
+  \draw[arrow] (right) -- (mid);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item N 越大 → 用户越爱裂变（拉到 5 个朋友 vs 拉到 2 个）；但散团率指数上升（拉不齐的概率高）。
+  \item 折扣越深 → 用户越想拉 → 但商家毛利越低；行业经验：8 折是甜点，5 折就要怀疑商家清库存。
+  \item gomall 把这两个参数都开放给\textbf{运营 / 商家自助}决定，不写死，code 只保证状态机一致。
+\end{itemize}
+\srcnote{api/v1/groupbuy.go::GroupbuyCreateReq.TargetCount / PriceCents 由商家入参；不在 service 写死}
+\end{frame}
+
+% ============================================================
+\section{角色 2：客服 SOP 与业务码对照}
+% ============================================================
+
+\begin{frame}{客服 SOP：散团那一刻用户冲过来怎么应对}
+\begin{itemize}
+  \item 真实场景：拼团 24h 截止线刚到，500 个团里 30\% 散团 = 150 个团 = \textbf{至少 300 个客服来询}。
+  \item 客服怕的不是量大，是\textbf{每个回答都需要解释一遍} —— gomall 用业务码 + 标准话术拉齐口径。
+  \item 用户最关心 3 件事：(1) 钱去哪了 (2) 多久到账 (3) 我能不能立刻重新发起。
+\end{itemize}
+\begin{tabular}{@{}llp{0.45\linewidth}@{}}
+\toprule
+业务码 & 触发场景 & 客服标准回复（pkg/e/msg.go） \\
+\midrule
+81001 & 用户点加入时团已满 & "该团已满员，请发起新团或加入其他团" \\
+81002 & 散团 / 用户回看历史团 & "该团已超时未成团，款项将于 1-3 工作日原路退回" \\
+81003 & 同一用户点两次"加入" & "您已加入过该团，不能重复参团" \\
+81004 & 团被运营 / 风控关停 & "该团已关闭" \\
+\bottomrule
+\end{tabular}
+\srcnote{pkg/e/code.go:65-69 业务码定义；pkg/e/msg.go:58-61 客服话术}
+\end{frame}
+
+\begin{frame}{客服话术映射 = 业务码的真正使命}
+\begin{itemize}
+  \item 错误码不是给开发看的，是\textbf{客服系统的 SOP 入口}：客服 IM 弹窗会按 code 直接命中话术。
+  \item gomall 的 8xxxx 段：80001-80003 满减、81001-81004 拼团、82001-82004 预售。每一段都对应一个独立业务域。
+  \item \textbf{业务诚实}：81002 说"1-3 工作日退款"是\textbf{用户承诺}，不是技术承诺 —— 真打款由 wallet 服务消费 \texttt{groupbuy.expired} 事件，wallet 落地是路线图。
+\end{itemize}
+\keypoint{业务码 + 客服话术 + 退款 SLA = 客服 / 用户 / 钱包三方约定的\textbf{协议}，技术只是搬运工。}
+\srcnote{pkg/e/code.go:65-69；pkg/e/msg.go:58-61；service/events/events.go::GroupbuyExpired 是钱包消费入口}
+\end{frame}
+
+\begin{frame}[fragile]{帧：错误码翻译路径（handler → service → DB）}
+\begin{lstlisting}[language=Go,caption={api/v1/groupbuy.go::groupbuyErrorResponse}]
+func groupbuyErrorResponse(c *gin.Context, err error) *ctl.TrackedErrorResponse {
+    switch {
+    case errors.Is(err, service.ErrGroupbuyFull):
+        return ctl.RespError(c, err, "团已满员", e.ErrGroupbuyFull)
+    case errors.Is(err, service.ErrGroupbuyExpired):
+        return ctl.RespError(c, err, "团已超时", e.ErrGroupbuyExpired)
+    case errors.Is(err, service.ErrGroupbuyDuplicateJoin):
+        return ctl.RespError(c, err, "重复加入", e.ErrGroupbuyDuplicateJoin)
+    case errors.Is(err, service.ErrGroupbuyClosed):
+        return ctl.RespError(c, err, "团已关闭", e.ErrGroupbuyClosed)
+    }
+    return ErrorResponse(c, err)
+}
+\end{lstlisting}
+\begin{itemize}
+  \item handler 不写"团满"判断逻辑 —— 那是 service 的事；handler 只负责\textbf{把 sentinel error 翻成业务码 + 短文案}。
+  \item 客服系统拉 code → 命中 \texttt{pkg/e/msg.go::MsgFlags[81001]} → 自动展开成"该团已满员，请发起新团或加入其他团"。
+\end{itemize}
+\srcnote{api/v1/groupbuy.go::groupbuyErrorResponse；service/groupbuy.go::Err* sentinel errors}
+\end{frame}
+
+% ============================================================
+\section{角色 3：黑产场景与 gomall 怎么挡}
+% ============================================================
+
+\begin{frame}{黑产视角：拼团有哪些薅羊毛玩法}
+\begin{itemize}
+  \item 玩法 1：\textbf{脚本党刷团}。批量注册账号 → 都加入同一个团 → 拼团价拿货 → 货到立刻转卖。
+  \item 玩法 2：\textbf{同账号多团}。一个真人多次发起团 / 加入团，把折扣额度刷满。
+  \item 玩法 3：\textbf{团长虚假退团}。团长发起后立刻取消，目的把库存"占着锁着"让正常用户看到"已售罄"。
+  \item 玩法 4：\textbf{钓鱼链接}。仿冒分享落地页，把支付跳转到外部页面骗用户输密码。
+\end{itemize}
+\srcnote{业务侧威胁建模；本帧后续 3 帧讲 gomall 当前如何挡 \& 哪些是路线图}
+\end{frame}
+
+\begin{frame}{脚本党刷团：分布式滑动窗口 + IP 黑名单}
+\begin{itemize}
+  \item gomall 当前：\textbf{TokenBucket} 全局 100 RPS / 200 burst 挡基础脚本（routes/router.go:22）。
+  \item gomall 当前：\textbf{SlidingWindow} 按 user\_id 维度限流，秒杀已挂（用户 1s 内 3 次）—— 拼团 join 同理可挂。
+  \item 路线图：跨账号设备指纹 / IP 黑名单 / 风控 stage（与 wallet 服务联动）。
+  \item 业务诚实：脚本党\textbf{第 1 层挡可挡 80\%}，剩下 20\% 高手玩家靠数据风控 + 售后追溯 —— 不靠 service 层。
+\end{itemize}
+\srcnote{middleware/ratelimit.go::TokenBucket / SlidingWindow；routes/router.go:22 全局令牌桶}
+\end{frame}
+
+\begin{frame}{同账号多团 / 虚假退团：DB 层 uniqueIndex + 状态机兜底}
+\begin{itemize}
+  \item 同账号在\textbf{同一团}内重复加入：DB \texttt{uniqueIndex(group\_id, user\_id)} 抓死，业务码 81003。
+  \item 同账号在\textbf{不同团}发起：本期不限制（业务允许），但运营后台可以看 \texttt{leader\_id} 分布预警。
+  \item 团长虚假退团：\texttt{ExpireGroup} 不区分"用户主动"vs"超时"—— 都走同一个 Saga 路径，库存归还、订单 Closed。
+  \item 业务边界：本期\textbf{不允许团长主动散团}（API 不暴露），杜绝团长恶意散团骗库存。
+\end{itemize}
+\srcnote{model/groupbuy.go:43 uniqueIndex；api/v1/groupbuy.go 只暴露 create / join / show 三个动作，无 cancel}
+\end{frame}
+
+\begin{frame}[fragile]{帧：JoinGroupAtomic 是怎么挡满团 + 超时 + 重复加入的}
+\begin{lstlisting}[language=Go,caption={单 SQL 三防 repository/db/dao/groupbuy.go}]
+res := d.DB.Model(&model.GroupbuyGroup{}).
+    Where("id=? AND status=? AND current_count<target_count AND expire_at>?",
+        groupID, model.GroupbuyStatusOpen, time.Now()).
+    UpdateColumn("current_count", gorm.Expr("current_count + 1"))
+if res.RowsAffected == 0 {
+    return ErrGroupbuyFull // service 层再细分 full / expired / closed
+}
+return d.DB.Create(member).Error // uniqueIndex 兜底重复加入
+\end{lstlisting}
+\begin{itemize}
+  \item 这一条 SQL = 三防一体：满员（\texttt{current\_count<target}）+ 超时（\texttt{expire\_at>NOW()}）+ 状态（\texttt{status=0}）。
+  \item 写 member 行的 \texttt{Create} 触发 \texttt{uniqueIndex(group\_id, user\_id)} unique constraint，第二次 join 直接 DB 报错。
+  \item 不需要先 SELECT 再 UPDATE 的两步竞态：原子 UPDATE 是\textbf{最朴素也最稳的反作弊}。
+\end{itemize}
+\srcnote{repository/db/dao/groupbuy.go::JoinGroupAtomic 62-79；model/groupbuy.go:43 uniqueIndex 定义}
+\end{frame}
+
+% ============================================================
+\section{角色 4：SRE 视角 —— Saga 散团的可观测性}
+% ============================================================
+
+\begin{frame}{SRE 关注：散团链路出问题怎么发现}
+\begin{itemize}
+  \item 散团是 Saga 链路：\textbf{DB tx 推状态} + \textbf{Redis 释放库存} + \textbf{outbox 写事件} + \textbf{下游钱包消费退款}。
+  \item 任一步失败的影响：
+  \begin{itemize}
+    \item DB tx 失败 → 团仍 open，cron 下次扫到重试，自动恢复。
+    \item Redis 释放失败 → 库存泄漏（reserved 桶有但 group 已 expired），需要对账 cron 兜底。
+    \item outbox 写入在 tx 内 = 不会出现"散了但下游没消息"。
+    \item 下游消费失败 → outbox publisher 指数退避重试，dead 后人工捞。
+  \end{itemize}
+\end{itemize}
+\srcnote{service/groupbuy.go::ExpireGroup 末尾的 ReleaseReservation 在 tx 外；service/outbox/publisher.go 重试机制}
+\end{frame}
+
+\begin{frame}{SRE 监控指标清单}
+\begin{tabular}{@{}llp{0.4\linewidth}@{}}
+\toprule
+指标 & 期望值 & 异常含义 \\
+\midrule
+散团率 & < 40\% & 商家定价太高 / TTL 太短，运营介入 \\
+散团 cron 滞后 & < 5min & cron 5min 触发，超 5min = 任务堆积 \\
+reserved 桶单团均值 & = $N - $ 当前 count & 桶里有但 group 已 expired = 泄漏 \\
+outbox \texttt{groupbuy.expired} dead 数 & = 0 & 下游钱包消费一直失败 \\
+join p99 & < 100ms & 超出 = group 表 hot row 锁等待 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{Hot row 风险}：一个爆款团（N=100）会让 \texttt{groupbuy\_group} 这一行 UPDATE 持续锁，p99 暴涨。
+  \item 缓解：\textbf{N 上限做到 10}（业务设定），10 人以内单行 UPDATE 锁等待可接受。
+\end{itemize}
+\srcnote{service/groupbuy.go 整套散团链路；与 service/outbox/publisher.go 共用一套指标}
+\end{frame}
+
+\begin{frame}[fragile]{帧：Outbox 在拼团里的 4 个事件路由}
+\begin{lstlisting}[language=Go,caption={service/events/events.go 拼团事件 4 件套}]
+type GroupbuyCreated struct { GroupID uint; ProductID uint; ... }
+type GroupbuyJoined  struct { GroupID uint; UserID uint; OrderID int64; ... }
+type GroupbuySuccess struct { GroupID uint; MemberIDs []uint; OrderIDs []int64 }
+type GroupbuyExpired struct { GroupID uint; Reason string; OrderIDs []int64 }
+\end{lstlisting}
+\begin{itemize}
+  \item \texttt{groupbuy.created}：通知服务推送"团已发起，快邀好友"。
+  \item \texttt{groupbuy.joined}：通知服务推送"还差 N-1 人成团"。
+  \item \texttt{groupbuy.success}：\textbf{钱包入账} + 商家工作台显示"待发货" + 通知 push"成团啦"。
+  \item \texttt{groupbuy.expired}：钱包退款 + 通知 push"已退款" + 数据系统打"散团率"指标。
+\end{itemize}
+\srcnote{service/events/events.go::GroupbuyCreated/Joined/Success/Expired；service/groupbuy.go 4 处 outbox Insert}
+\end{frame}
+
+\begin{frame}[fragile]{帧：cron 散团兜底（路线图）}
+\begin{lstlisting}[language=Go,caption={拟在 initialize/cron.go 加入的散团兜底}]
+_, err = c.AddFunc("0 */5 * * * *", func() {
+    defer func() {
+        if r := recover(); r != nil {
+            util.LogrusObj.Errorf("Groupbuy Cron Panic: %v", r)
+        }
+    }()
+    gbDao := dao.NewGroupbuyDao(context.Background())
+    ids, _ := gbDao.ExpireOpenGroupsBefore(time.Now(), 100)
+    for _, id := range ids {
+        service.GetGroupbuySrv().ExpireGroup(context.Background(), id)
+    }
+})
+\end{lstlisting}
+\begin{itemize}
+  \item 与 \texttt{RunOrderTimeoutCheck} / \texttt{RunAutoConfirmReceive} 同模式，按 \textbf{cron + 幂等 SQL} 双兜底。
+  \item 本期 service / DAO 已就绪（\texttt{ExpireOpenGroupsBefore}），cron 注册留到 initialize 入口扩展，避免一次改太大。
+\end{itemize}
+\srcnote{repository/db/dao/groupbuy.go::ExpireOpenGroupsBefore；initialize/cron.go 是注册入口（本期 untouched）}
+\end{frame}
+
+% ============================================================
+\section{代码全景与测试}
+% ============================================================
+
+\begin{frame}{文件清单：拼团域横切多少层}
+\begin{tabular}{@{}lp{0.55\linewidth}@{}}
+\toprule
+层 & 文件 \\
+\midrule
+consts        & consts/order.go:15 OrderWaitGroup=8 \\
+e             & pkg/e/code.go:65-69 + pkg/e/msg.go:58-61 \\
+model         & repository/db/model/groupbuy.go \\
+migrate       & repository/db/dao/migrate.go:18 \\
+dao           & repository/db/dao/groupbuy.go \\
+service       & service/groupbuy.go \\
+events        & service/events/events.go::Groupbuy* \\
+state-machine & service/order\_state.go:27 WaitGroup 出边 \\
+api handler   & api/v1/groupbuy.go \\
+route         & routes/groupbuy\_routes.go \\
+test          & service/groupbuy\_test.go \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 横切 11 个层 = 完整业务域，与红包 / 优惠券 / 秒杀同等地位。
+\srcnote{本帧每一行都是真实文件路径，可在仓库 grep 验证}
+\end{frame}
+
+\begin{frame}{测试覆盖：什么单测可以跑，什么留给集成}
+\begin{itemize}
+  \item \textbf{单测覆盖（service/groupbuy\_test.go）}：
+  \begin{itemize}
+    \item 状态机 WaitGroup 出入边的合法 / 非法（4 条规则）
+    \item 业务码 81001-81004 都挂客服话术
+    \item CreateGroup 入参校验（targetCount < 2 / price <= 0 拒）
+    \item Join / Expire 在 DB 未初始化时不 panic
+  \end{itemize}
+  \item \textbf{集成测试}（需 docker-compose 起 MySQL + Redis）：
+  \begin{itemize}
+    \item 团长发起 → 2 个成员加入 → 凑齐 3 人 → 订单转 WaitShip
+    \item 24h 超时散团 → 所有订单 Closed + 库存归还
+    \item 满团再加返 81001 / 重复 join 返 81003
+    \item 并发 50VU 同时 join 一个 N=3 团 → 只放 3 个进、其余 81001
+  \end{itemize}
+\end{itemize}
+\srcnote{service/groupbuy\_test.go 单测；docs/architecture/feature-matrix.md 路线图把集成跑通}
+\end{frame}
+
+\begin{frame}[fragile]{帧：状态机自检脚本（防回退保护）}
+\begin{lstlisting}[language=Go,caption={service/groupbuy\_test.go 状态机检查}]
+func TestGroupbuy_StateMachine_WaitGroupOut(t *testing.T) {
+    if !CanTransition(consts.OrderWaitGroup, consts.OrderWaitShip) {
+        t.Fatal("WaitGroup -> WaitShip 必须合法（凑齐 N 人成团）")
+    }
+    if !CanTransition(consts.OrderWaitGroup, consts.OrderClosed) {
+        t.Fatal("WaitGroup -> Closed 必须合法（24h 散团）")
+    }
+}
+\end{lstlisting}
+\begin{itemize}
+  \item 这一帧是\textbf{防回退的护栏}：未来谁误删 \texttt{WaitGroup} 转换条目，CI 会立刻红。
+  \item 9 条原有 \texttt{TestOrderState\_*} 测试同时跑通 → 拼团接入不破坏老链路。
+\end{itemize}
+\srcnote{service/groupbuy\_test.go::TestGroupbuy\_StateMachine\_*；service/order\_state\_test.go 原 9 条}
+\end{frame}
+
+\begin{frame}{业务边界与路线图}
+\begin{itemize}
+  \item \textbf{本期完成}：状态机 / DAO / service / handler / events / 单测，core 闭环就绪。
+  \item \textbf{路线图（按优先级）}：
+  \begin{enumerate}
+    \item cron 散团兜底注册到 \texttt{initialize/cron.go}（5 行）
+    \item join 接口挂 \texttt{SlidingWindow} 限流挡脚本（与秒杀同模式）
+    \item 商家自助看板"我的拼团活动 / 散团率"（依赖 merchant 角色）
+    \item 钱包真退款（依赖 wallet 服务）—— 当前只到 outbox \texttt{groupbuy.expired}
+    \item 反作弊：跨账号设备指纹 / 团长 IP 黑名单
+  \end{enumerate}
+  \item 不做（明确边界）：多 SKU 组合团 / 砍价 / 团购返利 / 老带新奖励。
+\end{itemize}
+\srcnote{docs/architecture/feature-matrix.md 未做清单更新位置（路线图）}
+\end{frame}
+
+% ============================================================
+\section{Q\&A}
+% ============================================================
+
+\begin{frame}{Q\&A（上）}
+\small
+\textbf{Q1}：拼团价比正价低，会不会被薅羊毛？\\
+\hspace{4mm}\small A：\texttt{groupbuy\_group.price\_cents} 是\textbf{活动维度}的价，不污染 \texttt{product.discount\_price}。商家自主设拼团价上下限。\\
+\hspace{4mm}\srcnote{model/groupbuy.go:33 PriceCents；model/product.go 主表 discount\_price 不变}
+
+\vspace{1mm}
+\textbf{Q2}：N 人团里第 N 人加入失败，前 N-1 人怎么办？\\
+\hspace{4mm}\small A：前 N-1 人仍 WaitGroup，cron 散团 SLA 24h 兜底。第 N 人前端 81001 重试或换团。\\
+\hspace{4mm}\srcnote{service/groupbuy.go::JoinGroup 末尾 isSuccess=false 分支不影响其他成员}
+
+\vspace{1mm}
+\textbf{Q3}：拼团商品支付环节走法币 vs Web3 有区别吗？\\
+\hspace{4mm}\small A：本期拼团默认\textbf{加入即扣}（与法币 paydown 不同步）。Web3 路径未对齐，路线图。\\
+\hspace{4mm}\srcnote{service/groupbuy.go::JoinGroup 在 tx 内立刻 reserveStock，不依赖 paydown 流程}
+
+\vspace{1mm}
+\textbf{Q4}：成团瞬间 N 个成员订单一起转 WaitShip，商家工作台会一次性涌入 N 单吗？\\
+\hspace{4mm}\small A：会。MarkGroupSuccess 在单 tx 内推 N 条 UPDATE，商家工作台用 \texttt{type=WaitShip} 列表筛选，N 条同秒到。\\
+\hspace{4mm}\srcnote{service/groupbuy.go::MarkGroupSuccess tx 内 for-range members 推 UPDATE}
+
+\vspace{1mm}
+\textbf{Q5}：用户 join 团但还没付款？\\
+\hspace{4mm}\small A：拼团的设计是\textbf{加入即锁价 + 锁库存}，不留"WaitPay"过渡。这是与普通下单最大的差异。\\
+\hspace{4mm}\srcnote{service/groupbuy.go::JoinGroup leaderOrder.Type=OrderWaitGroup，不是 OrderWaitPay}
+
+\vspace{1mm}
+\textbf{Q6}：散团事件 \texttt{groupbuy.expired} 的退款时效？\\
+\hspace{4mm}\small A：状态机瞬时切到 Closed；真打款 1-3 工作日由 wallet 消费事件落地，业务承诺 81002 客服话术对齐。\\
+\hspace{4mm}\srcnote{service/events/events.go::GroupbuyExpired；pkg/e/msg.go:59 客服话术}
+\end{frame}
+
+\begin{frame}{Q\&A（下）}
+\small
+\textbf{Q7}：MarkGroupSuccess 失败了怎么办？团一直挂着？\\
+\hspace{4mm}\small A：cron 路线图加 \texttt{ExpireOpenGroupsBefore} 的反向 \texttt{MarkGroupSuccessIfFull} 兜底；当前 join 内重试一次。\\
+\hspace{4mm}\srcnote{service/groupbuy.go::JoinGroup 末尾 mark 失败只记录日志；DAO MarkGroupSuccessIfFull 幂等}
+
+\vspace{1mm}
+\textbf{Q8}：N 个并发 join 同时进，会不会超 N 个人？\\
+\hspace{4mm}\small A：不会。\texttt{JoinGroupAtomic} 单 SQL \texttt{WHERE current\_count<target\_count} 原子保证最多 N 行 RowsAffected=1。\\
+\hspace{4mm}\srcnote{repository/db/dao/groupbuy.go::JoinGroupAtomic；与库存两桶 Lua 同思路}
+
+\vspace{1mm}
+\textbf{Q9}：分享落地页免登录是不是有数据泄露风险？\\
+\hspace{4mm}\small A：\texttt{ListMembers} 只返成员 UserID，不带敏感字段（姓名 / 地址 / 手机）。前端按 UserID 拉昵称就够。\\
+\hspace{4mm}\srcnote{model/groupbuy.go::GroupbuyMember 仅 ID / UserID / OrderID / Status}
+
+\vspace{1mm}
+\textbf{Q10}：与红包 / 秒杀的代码体例为什么不同？\\
+\hspace{4mm}\small A：红包 / 秒杀写 Lua（高并发 + 资金敏感）；拼团状态机更复杂 + 并发量不及秒杀，所以走 DB UPDATE 原子。\\
+\hspace{4mm}\srcnote{repository/cache/redpacket.go vs repository/db/dao/groupbuy.go 两种武器对比}
+
+\vspace{1mm}
+\textbf{Q11}：业务码 81xxx 段后续怎么扩？\\
+\hspace{4mm}\small A：81005-81099 留给后续拼团子能力（部分成团 / 团长换人 / 团内私聊）；与预售 82xxx / 满减 80xxx 段不冲突。\\
+\hspace{4mm}\srcnote{pkg/e/code.go:65-76 拼团 + 预售 + 满减三段并列}
+
+\vspace{1mm}
+\textbf{Q12}：deck 11 讲的 outbox 和本 deck 矛盾吗？\\
+\hspace{4mm}\small A：不矛盾。deck 11 讲 outbox 模式本身，本 deck 是\textbf{应用方}：每个拼团状态切换都走 outbox 解耦下游。\\
+\hspace{4mm}\srcnote{service/outbox/publisher.go；service/groupbuy.go 4 处 Insert outbox}
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}
+  \item[订单状态新增 WaitGroup=8]      \srcnote{consts/order.go:15}
+  \item[状态机 WaitGroup 出边]         \srcnote{service/order\_state.go:27}
+  \item[业务码 81001-81004]            \srcnote{pkg/e/code.go:65-69}
+  \item[客服话术]                      \srcnote{pkg/e/msg.go:58-61}
+  \item[Model GroupbuyGroup / Member] \srcnote{repository/db/model/groupbuy.go}
+  \item[migrate 注册]                  \srcnote{repository/db/dao/migrate.go:18}
+  \item[DAO 5 方法]                    \srcnote{repository/db/dao/groupbuy.go}
+  \item[JoinGroupAtomic 单 SQL]        \srcnote{repository/db/dao/groupbuy.go::JoinGroupAtomic}
+  \item[Service CreateGroup]           \srcnote{service/groupbuy.go::CreateGroup}
+  \item[Service JoinGroup]             \srcnote{service/groupbuy.go::JoinGroup}
+  \item[Service MarkGroupSuccess]      \srcnote{service/groupbuy.go::MarkGroupSuccess}
+  \item[Service ExpireGroup (Saga)]    \srcnote{service/groupbuy.go::ExpireGroup}
+  \item[事件 4 件套]                   \srcnote{service/events/events.go::Groupbuy*}
+  \item[API handler 3 个]              \srcnote{api/v1/groupbuy.go}
+  \item[Route 注册]                    \srcnote{routes/groupbuy\_routes.go}
+  \item[单测]                          \srcnote{service/groupbuy\_test.go}
+  \item[库存复用 Lua]                  \srcnote{repository/cache/inventory.go::Reserve/Commit/Release}
+  \item[Outbox Insert 模式]            \srcnote{repository/db/dao/outbox.go::Insert}
+\end{description}
+\end{frame}
+
+\end{document}

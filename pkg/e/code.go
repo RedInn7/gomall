@@ -56,4 +56,21 @@ const (
 	// 限流与熔断
 	ErrRateLimitExceeded = 70001
 	ErrCircuitOpen       = 70002
+
+	// 满减 / 阶梯折扣引擎
+	PromoRuleExpired       = 80001 // 规则已过期 / 未生效
+	PromoRuleNotApplicable = 80002 // 购物车未达门槛 / 范围不匹配
+	PromoBudgetExhausted   = 80003 // 平台当日预算用尽
+
+	// 拼团 / 团购
+	ErrGroupbuyFull          = 81001 // 团已满员
+	ErrGroupbuyExpired       = 81002 // 团已超时
+	ErrGroupbuyDuplicateJoin = 81003 // 同一用户重复加入
+	ErrGroupbuyClosed        = 81004 // 团已关闭 (成团 / 散团 / 人工关)
+
+	// 预售 / 两段式支付
+	ErrPreorderNotInDepositWindow = 82001 // 不在定金期，付定金 / 取消全退被拒
+	ErrPreorderNotInFinalWindow   = 82002 // 不在尾款期，付尾款被拒
+	ErrPreorderDepositNotPaid     = 82003 // 尾款必须先付定金
+	ErrPreorderForfeitedDeposit   = 82004 // 定金已扣（业务承诺：预售结束后不退）
 )

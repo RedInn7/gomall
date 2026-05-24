@@ -1,0 +1,591 @@
+\input{preamble}
+
+\title{满减 / 阶梯折扣引擎 —— 平台 ROI 与用户感知的取舍}
+\subtitle{从五角色视角看一次客诉、一笔补贴、一份运营预算}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% ============================================================
+\section{为什么单独抽一个引擎：与优惠券的本质区别}
+% ============================================================
+
+\begin{frame}{优惠券和满减是两套独立工具，常被误当同一类}
+\begin{itemize}
+  \item \textbf{优惠券}：用户主动\textbf{领取} $\to$ 落到个人券包 $\to$ 下单时\textbf{用户选}。属于"个人资产"。
+  \item \textbf{满减}：平台 / 商家挂出的\textbf{活动规则} $\to$ 结算时引擎\textbf{自动算}最优。属于"场域属性"。
+  \item \textbf{业务后果差很大}：
+  \begin{itemize}
+    \item 优惠券需要面对"羊毛党批量领取"$\to$ Lua 限领 + 风控
+    \item 满减不需要"领"，但需要面对"运营预算花光"$\to$ 当日 DailyBudget 兜底
+  \end{itemize}
+  \item \textbf{叠加规则}：本期 gomall 约定\textbf{先满减、后券}。引擎只负责前半段；券抵扣由 \texttt{service/coupon.go} 在下游算。
+  \item \textbf{业务取舍}：一笔订单只能用\textbf{一条}满减规则（不叠加多条满减），避免"用户拿三条阶梯都减"的羊毛漏洞。
+\end{itemize}
+\srcnote{repository/db/model/promo.go:9--13 与 Coupon 的边界注释；service/coupon.go:1--110 不变}
+\end{frame}
+
+\begin{frame}{5 角色对满减的不同诉求}
+\begin{tikzpicture}[node distance=3mm and 7mm,every node/.append style={align=center,font=\scriptsize,text width=28mm,minimum height=14mm}]
+  \node[node-box,node-state-normal]                  (c)   {\textbf{C 端用户}\\"我能减多少？"\\不关心规则细节};
+  \node[node-box,node-state-transition,right=of c]   (m)   {\textbf{商家}\\"我的店搞了满减\\能多带多少单"};
+  \node[node-box,node-state-alert,right=of m]        (o)   {\textbf{运营 / 平台}\\"今天预算 5 万\\烧完该降级吗"};
+  \node[node-box,node-state-transition,below=of c]   (cs)  {\textbf{客服}\\"用户问为什么\\我满 200 没减"};
+  \node[node-box,node-state-transition,below=of m]   (s)   {\textbf{SRE}\\"calculate p99 < 50ms\\apply p99 < 100ms"};
+\end{tikzpicture}
+\vspace{2mm}
+\small 同一套规则表，5 个角色看到的"成功"定义截然不同。本 deck 每一帧都同步回答这 5 个角色看到了什么。
+\srcnote{repository/db/model/promo.go:32--46 PromoRule 字段表 + status / DailyBudget 字段服务于不同角色}
+\end{frame}
+
+\begin{frame}{业务承诺 SLO：calculate 是高频读、apply 是低频写}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+接口 & 业务场景 & QPS 画像 & p99 目标 & 失败时的兜底 \\
+\midrule
+calculate & 加购悬浮 / 结算页加载 & 1k--5k & 50ms & 退化显示原价（前端容错）\\
+apply (tx) & 下单事务内扣预算 & 50--500 & 100ms & 80003 提示，订单整体回滚 \\
+release (tx) & 关单 / 退款退预算 & 10--100 & 200ms & 落 outbox，离线对账兜底 \\
+admin 列表 & 运营后台 & 1--10 & 1s & 无需 SLO \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small \textbf{为什么 calculate 必须更紧}：用户每次切购物车、改地址都会触发；如果慢，整个结算页都被拖。
+\textbf{为什么 apply 可以宽 100ms}：apply 是订单事务的一段，已经被订单 SLO（< 500ms）兜住；自身 100ms 留给 DailyBudget 单 SQL 兜底。
+\srcnote{service/promo.go:163--195 CalculateBestDiscount 的注释里写明 SLO；README SLO P0/P1 章节同口径}
+\end{frame}
+
+% ============================================================
+\section{业务困局：满 200 减 25 vs 满 100 减 10，给用户哪一条}
+% ============================================================
+
+\begin{frame}{阶梯门槛真实困局}
+运营在后台同时配了三条：
+\begin{itemize}
+  \item 满 100 减 10
+  \item 满 200 减 25
+  \item 满 300 减 40
+\end{itemize}
+用户购物车 250 元，三条门槛中前两条都满足。给用户哪一条？
+\vspace{2mm}
+\begin{itemize}
+  \item \textbf{业内主流}：取"减得最多"的那条 —— \textbf{满 200 减 25}。
+  \item \textbf{为什么不是 满 100 减 10}：用户预期"我应该拿到更多优惠"，给少了等于"被坑"，舆情风险。
+  \item \textbf{平台代价}：补贴成本从 10 变成 25 —— 但这是为了\textbf{用户感知}支付的钱，运营预算阶段就已经算过。
+  \item \textbf{为什么不是 满 300 减 40}：用户购物车没到 300，凑不齐就拿不到。这条留给"再加 50 元就能多省 15"的凑单暗示，是\textbf{加购引导}的弹药。
+\end{itemize}
+\srcnote{service/promo.go:65--75 PickBestPromoRule 注释里写明业务取舍}
+\end{frame}
+
+\begin{frame}{用户最优 vs 平台最优 —— 一个 70 块钱的取舍}
+\begin{tikzpicture}[node distance=4mm and 8mm,every node/.append style={align=center,font=\scriptsize,text width=30mm,minimum height=16mm}]
+  \node[node-box,node-state-normal]                  (cart) {\textbf{购物车}\\原价 250 元};
+  \node[node-box,node-state-transition,right=of cart] (r1)  {满 100 减 10\\$\to$ 用户付 240};
+  \node[node-box,node-ok,below=of r1]                 (r2)  {满 200 减 25 \\\textbf{(被选中)}\\$\to$ 用户付 225};
+  \node[node-box,node-state-transition,below=of r2]   (r3)  {满 300 减 40\\门槛未达 / 跳过};
+  \draw[arrow] (cart) -- (r1);
+  \draw[arrow,thick,draw=cAccent] (cart) -- (r2);
+  \draw[arrow-async] (cart) -- (r3);
+\end{tikzpicture}
+\vspace{2mm}
+\small 三条规则同时存在的真实业务函数是：
+\begin{itemize}
+  \item \textbf{满 100 减 10}：拉新转化阀（低门槛、低补贴）
+  \item \textbf{满 200 减 25}：客单价拉升阀（中门槛、中补贴）
+  \item \textbf{满 300 减 40}：凑单引导阀（高门槛、高补贴，常常拿不到）
+\end{itemize}
+三条同时存在 = 三个销售漏斗段同时被覆盖。引擎只是\textbf{自动选最优那条}。
+\srcnote{service/promo\_test.go:33--52 TestPromo\_StepThresholdPicksHighestDiscount 单测验证该业务取舍}
+\end{frame}
+
+\begin{frame}{满减 vs 满折扣 —— 同价位下哪个更狠}
+\begin{itemize}
+  \item 同时挂两条都门槛"满 200"：
+  \begin{itemize}
+    \item 满 200 减 25
+    \item 满 200 打 9 折
+  \end{itemize}
+  \item 购物车 200 元：减 25 元 vs 减 20 元（200 × 10\%）$\to$ 选\textbf{满减}。
+  \item 购物车 500 元：减 25 元 vs 减 50 元（500 × 10\%）$\to$ 选\textbf{满折扣}。
+  \item \textbf{业务含义}：满折扣是"客单价越高越甜"的杠杆，满减是"刚过门槛就立享"的钩子。两者性质完全不同，运营会有意同时挂。
+  \item \textbf{引擎职责}：不替运营做"选择题"，只在"哪条减得多"上做\textbf{执行题}。规则之间的合理性由运营负责。
+\end{itemize}
+\srcnote{service/promo.go:116--134 computeDiscountOnBase 同时覆盖两种类型；service/promo\_test.go:55--92 两条测试分别验证选择方向}
+\end{frame}
+
+\begin{frame}{满折扣的代价：bps 取整带来的"1 分钱"问题}
+\begin{itemize}
+  \item \textbf{折扣 bps}：9000 = 9 折（即折后金额是原价的 90\%）。
+  \item 算式：\texttt{discount = base * (10000 - bps) / 10000}（向下取整）
+  \item 极端边界：购物车 199 元（19900 分），9 折 = 减 1990 分 = 19.9 元，刚好整除。
+  \item 但 \textbf{200.01 元}（20001 分）9 折 = 减 2000 分 = 20 元（向下取整丢 0.001 分）。\textbf{平台多保 1 分钱，用户少减 1 分钱}。
+  \item \textbf{业务上的解释}：永远\textbf{向下取整保平台}。绝不允许向上取，否则一年累积下来是百万级资损。
+  \item \textbf{客服话术口径}：用户算的折扣金额比系统多 1 分钱 $\to$ "系统按整分精度展示，最终以结算价为准" $\to$ 客服可解释。
+\end{itemize}
+\srcnote{service/promo.go:116--134 computeDiscountOnBase 实现向下取整；repository/db/model/promo.go:16--30 bps 常量定义}
+\end{frame}
+
+% ============================================================
+\section{规则范围三档：全场 / 类目 / 商品 —— 谁能挂、谁该挂}
+% ============================================================
+
+\begin{frame}{规则范围三档与业务责任分配}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Scope & 业务含义 & 谁能挂 & 典型预算量级 \\
+\midrule
+全场 (1) & 平台周年庆 / 618 / 双 11 & 平台运营 & 100万--1000万 / 天 \\
+类目 (2) & 图书满 100 / 数码满 500 & 类目运营 & 10万--100万 / 天 \\
+商品 (3) & 单 SKU 清仓 / 新品破冰 & 商家自助 & 1万--10万 / 天 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 三档对应\textbf{三个不同的钱袋}：平台周年庆烧的是平台预算（市场费用线），类目活动烧的是品类预算（招商运营线），商品级是商家自己\textbf{补贴自己的货}。
+\textbf{合规约束}：金额一律落在 DailyBudget 里走当日预算控制 —— 不允许"无限制让商家烧补贴"，否则容易触发反不正当竞争。
+\srcnote{repository/db/model/promo.go:21--23 Scope 三档常量；repository/db/dao/promo.go:78--105 ListActiveForCart 按 scope OR 拼条件}
+\end{frame}
+
+\begin{frame}{类目级规则：购物车里只有这个类目的金额才算门槛}
+真实场景：购物车 \{图书 120 + 数码 30\} = 150 元。
+\begin{itemize}
+  \item 错的做法：用 \textbf{150 元}对照"图书满 100 减 15"$\to$ 用户买 1 本图书 + 1 件 30 元的数码袜子，就能薅"图书"羊毛。
+  \item 对的做法：用 \textbf{只算图书的子集合计 120 元}对照门槛 100 $\to$ 命中减 15。数码 30 不参与。
+  \item \textbf{引擎实现}：\texttt{applicableSubtotal} 在每条规则上单独筛子集 $\to$ 子集合计 $\to$ 门槛对比。
+  \item \textbf{业务后果}：把"凑单"这件事限制在\textbf{品类内}，杜绝跨品类薅羊毛。
+\end{itemize}
+\srcnote{service/promo.go:89--98 applicableSubtotal；service/promo\_test.go:104--129 TestPromo\_CategoryScopeOnlyAppliesToCategory 验证}
+\end{frame}
+
+\begin{frame}{规则匹配流程图}
+\begin{tikzpicture}[node distance=5mm and 6mm,every node/.append style={font=\scriptsize}]
+  \node[node-box,node-state-normal] (cart) {购物车快照\\(items[])};
+  \node[node-box,node-state-transition,right=of cart] (db) {DAO 拉规则\\WHERE active + scope 命中};
+  \node[node-box,node-state-transition,right=of db]   (loop){逐条规则\\算子集 + 算减免};
+  \node[node-box,node-ok,right=of loop]                (best){挑减得最多那条};
+  \node[node-box,node-state-transition,below=of best]  (resp){返回 RuleID / DiscountCents\\原价 - 减免 = 实付};
+  \draw[arrow] (cart) -- (db);
+  \draw[arrow] (db) -- (loop);
+  \draw[arrow] (loop) -- (best);
+  \draw[arrow] (best) -- (resp);
+\end{tikzpicture}
+\vspace{2mm}
+\small 整个 calculate 链路只读一次 DB（\texttt{ListActiveForCart} 一次性把 scope=全场 OR 命中类目 OR 命中商品 全部拉齐），后面纯内存循环。
+\srcnote{repository/db/dao/promo.go:78--105 ListActiveForCart；service/promo.go:163--195 CalculateBestDiscount}
+\end{frame}
+
+\begin{frame}[fragile]{核心计算逻辑：30 行 PickBestPromoRule}
+\begin{lstlisting}[language=Go,firstnumber=69,
+  caption={\srcnote{service/promo.go:69--88 PickBestPromoRule}}]
+func PickBestPromoRule(items []CartItem, rules []*model.PromoRule) (*model.PromoRule, int64) {
+    var best *model.PromoRule
+    var bestDiscount int64
+    for _, r := range rules {
+        base := applicableSubtotal(items, r)
+        if base < r.ThresholdCents {
+            continue
+        }
+        d := computeDiscountOnBase(base, r)
+        if d <= 0 {
+            continue
+        }
+        if d > bestDiscount {
+            best = r
+            bestDiscount = d
+        }
+    }
+    return best, bestDiscount
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{PickBestPromoRule 逐行讲解}
+\begin{itemize}
+  \item \textbf{第 4 行 for}：每条规则单独评估，不剪枝 —— 规则数量级 < 100，全场循环开销可忽略。
+  \item \textbf{第 5 行 applicableSubtotal}：按 scope 算"作用范围内的金额"。全场=总额；类目=子集合；商品=单行小计。
+  \item \textbf{第 6--8 行}：未达门槛直接 continue。门槛是规则的\textbf{业务硬约束}。
+  \item \textbf{第 9 行 computeDiscountOnBase}：在已通过门槛校验的 base 上算减免。
+  \item \textbf{第 10--12 行}：理论上不会出现 d<=0，但配置错误（如 bps>=10000）会让 d=0，跳过。\textbf{保前端不显示负折扣}。
+  \item \textbf{第 13--16 行 取最大}：业务取舍 —— 选用户能减得最多的。运营如果想"给少不给多"，那就别同时挂多条规则。
+\end{itemize}
+\srcnote{service/promo.go:69--88 PickBestPromoRule 的注释里完整写明该业务取舍}
+\end{frame}
+
+% ============================================================
+\section{DailyBudget：运营如何控成本 + 烧完降级}
+% ============================================================
+
+\begin{frame}{DailyBudget 是把"营销预算"和"系统兜底"绑在同一张表里}
+\begin{itemize}
+  \item \textbf{字段}：\texttt{DailyBudgetCents}（当日预算）+ \texttt{ConsumedToday}（当日已消耗）
+  \item \textbf{业务诉求}：财务部门每月给营销 100 万预算，运营拆成 30 天 $\to$ 每天 3.3 万 / 规则 $\to$ 落到 \texttt{DailyBudgetCents=3300000}。
+  \item \textbf{系统兜底}：超过预算的订单\textbf{不再享受满减}，返回业务码 \textbf{80003 PromoBudgetExhausted}。前端展示"今日满减名额已抢完"。
+  \item \textbf{0 = 不限}：DailyBudget=0 表示无上限，给"不烧钱"的规则用（如 1 折促销但实际门槛 9999 元，几乎不会命中）。
+  \item \textbf{重置}：每日 0 点 cron 把 ConsumedToday 归零。本期\textbf{留路线图}，引擎本身不依赖 cron 工作。
+\end{itemize}
+\srcnote{repository/db/model/promo.go:38--40 字段定义；repository/db/dao/promo.go:110--128 AtomicConsumeBudget 单条 UPDATE 带 RowsAffected 兜底}
+\end{frame}
+
+\begin{frame}[fragile]{AtomicConsumeBudget：单条 SQL + RowsAffected 兜底}
+\begin{lstlisting}[language=Go,firstnumber=110,
+  caption={\srcnote{repository/db/dao/promo.go:110--128 AtomicConsumeBudget}}]
+func (d *PromoDao) AtomicConsumeBudget(tx *gorm.DB, ruleID uint, amount int64) error {
+    if amount <= 0 {
+        return nil
+    }
+    res := tx.Model(&model.PromoRule{}).
+        Where("id = ? AND status = ? AND (daily_budget_cents = 0 OR consumed_today + ? <= daily_budget_cents)",
+            ruleID, model.PromoStatusActive, amount).
+        UpdateColumn("consumed_today", gorm.Expr("consumed_today + ?", amount))
+    if res.Error != nil {
+        return res.Error
+    }
+    if res.RowsAffected == 0 {
+        return ErrPromoBudgetExhausted
+    }
+    return nil
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{为什么是一条 SQL 而不是先 SELECT 再 UPDATE}
+\begin{itemize}
+  \item \textbf{两步法}的问题：A 事务 SELECT 看到 \texttt{consumed=950}，B 事务也看到 \texttt{950}，两边都通过门槛 $\to$ 都 UPDATE 成功 $\to$ 实际 \texttt{consumed=1100} > budget=1000，\textbf{超发资损}。
+  \item \textbf{一条 SQL} 把"判断 + 更新"压在 InnoDB 行锁的同一持有期内，物理上不可能竞态。
+  \item \textbf{RowsAffected=0} 是关键信号 —— 不是"DB 出错"，而是"业务条件不成立"。引擎据此转 80003。
+  \item \textbf{压测验证}：本地 MySQL 跑 \texttt{TestPromo\_AtomicConsumeBudget\_Exhaust}，三次连续消费 1000 / 1000 / 500 分（预算 1500 分），第二次返回 ErrPromoBudgetExhausted，第三次刚好打满，第四次 1 分都不行 —— 4 个断言全 PASS。
+  \item \textbf{真实数字对照}：与 \texttt{stressTest/REPORT.md} 中 Redis Lua 抢券 \textbf{500 抢 100 零超发}（max 136ms）思路同源 —— "判断+写入原子化"是高并发资金类操作的通用套路，无论介质是 Redis 还是 InnoDB。
+\end{itemize}
+\srcnote{repository/db/dao/promo\_test.go:13--52 TestPromo\_AtomicConsumeBudget\_Exhaust；stressTest/REPORT.md "Redis Lua vs DB 锁" 章节}
+\end{frame}
+
+\begin{frame}{运营怎么用 DailyBudget：三档预算策略}
+\begin{tikzpicture}[node distance=4mm and 6mm,every node/.append style={align=center,font=\scriptsize,text width=32mm,minimum height=18mm}]
+  \node[node-box,node-state-normal]                  (lo)  {\textbf{保守档}\\10 万 / 天\\烧完早，留客诉印象\\"今天没抢到，明天再来"};
+  \node[node-box,node-state-transition,right=of lo]  (md)  {\textbf{标准档}\\50 万 / 天\\匀到下午 16:00 烧完\\覆盖下班高峰};
+  \node[node-box,node-state-alert,right=of md]       (hi)  {\textbf{冲刺档}\\200 万 / 天\\双 11 / 618 不设上限\\等同 DailyBudget=0};
+\end{tikzpicture}
+\vspace{2mm}
+\small 三档对应不同业务节奏：日常活动用保守档稳住成本；大促节点用冲刺档不设限。\textbf{烧完不是失败，是设计}。
+\srcnote{repository/db/dao/promo.go:127 RowsAffected=0 时返回 ErrPromoBudgetExhausted；pkg/e/code.go:60--63 80001--80003 业务码段}
+\end{frame}
+
+% ============================================================
+\section{下单 → 关单 全链路：apply / release 的事务故事}
+% ============================================================
+
+\begin{frame}{ApplyDiscountInTx：嵌在下单事务里}
+\begin{tikzpicture}[node distance=4mm and 7mm,every node/.append style={align=center,font=\scriptsize,text width=24mm,minimum height=14mm}]
+  \node[node-box,node-state-normal]                  (calc){前端调 calculate\\拿到 RuleID + 减免};
+  \node[node-box,node-state-transition,right=of calc] (sub) {点提交订单\\携带 RuleID};
+  \node[node-box,node-state-transition,right=of sub]  (tx)  {订单事务开始};
+  \node[node-box,node-state-transition,below=of tx]   (ins) {INSERT order\\(Money 已扣减)};
+  \node[node-box,node-state-transition,below=of ins]  (cons){promo.AtomicConsumeBudget\\扣 DailyBudget};
+  \node[node-box,node-ok,below=of cons]               (out) {outbox 写\\promo.applied 事件};
+  \draw[arrow] (calc) -- (sub);
+  \draw[arrow] (sub) -- (tx);
+  \draw[arrow] (tx) -- (ins);
+  \draw[arrow] (ins) -- (cons);
+  \draw[arrow] (cons) -- (out);
+\end{tikzpicture}
+\vspace{2mm}
+\small calculate 是"展示"，apply 是"落库"。展示可以反复刷新（高频读），落库只在用户点提交时一次（低频写）。\textbf{二者不共享缓存，避免"看到 25 元、实际只减了 15 元"的不一致投诉}。
+\srcnote{service/promo.go:239--260 ApplyDiscountInTx 嵌入业务事务；service/order.go:68 同模式调 outbox.Insert}
+\end{frame}
+
+\begin{frame}[fragile]{ApplyDiscountInTx：14 行的事务嵌入}
+\begin{lstlisting}[language=Go,firstnumber=239,
+  caption={\srcnote{service/promo.go:239--260 ApplyDiscountInTx}}]
+func (s *PromoSrv) ApplyDiscountInTx(tx *gorm.DB, orderID, ruleID uint, discountCents int64) error {
+    if ruleID == 0 || discountCents <= 0 {
+        return nil
+    }
+    if err := dao.NewPromoDaoByDB(tx).AtomicConsumeBudget(tx, ruleID, discountCents); err != nil {
+        return err
+    }
+    return dao.NewOutboxDaoByDB(tx).Insert(
+        "promo", "PromoApplied", "promo.applied", orderID,
+        events.PromoApplied{
+            OrderID:       orderID,
+            RuleID:        ruleID,
+            DiscountCents: discountCents,
+        },
+    )
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{ApplyDiscountInTx 逐行讲解}
+\begin{itemize}
+  \item \textbf{第 1 行签名 tx \*gorm.DB}：调用方持有事务句柄。这是 outbox 模式的标准入口 —— 业务写 + outbox 写要在\textbf{同一事务}。
+  \item \textbf{第 2--4 行守门}：ruleID=0（没适用规则）或 discountCents=0（理论不应发生）时直接 nil，不写预算、不写 outbox。
+  \item \textbf{第 5--7 行扣预算}：失败的可能性有两种 —— DB 错误（5xx）或预算耗尽（80003）。两者都向上 return，整个订单事务回滚。
+  \item \textbf{第 8--14 行写 outbox}：事件类型 \texttt{PromoApplied}，下游订阅者：财务系统（统计补贴成本）、商家看板（活动效果）、风控（异常高频命中）。
+  \item \textbf{为什么写 outbox 不是直接发 MQ}：与订单事务原子。MQ 失败、outbox 写成功 = 后台 publisher 重试；outbox 写失败、订单事务失败 = 整个回滚 —— 双写问题被天然消解。
+\end{itemize}
+\srcnote{service/promo.go:239--260；service/outbox/publisher.go:65--85 publisher 异步发布 outbox 行}
+\end{frame}
+
+\begin{frame}{ReleaseDiscount：关单 / 退款时退还预算}
+\begin{itemize}
+  \item \textbf{时机}：关单（用户主动关 / 超时自动关）或退款审批通过。
+  \item \textbf{业务约束}：不要求规则\textbf{仍在 active} —— 即便运营已经把规则停用了，已发生的订单退款仍要退还预算，否则 \texttt{ConsumedToday} 会错算。
+  \item \textbf{兜底}：\texttt{WHERE consumed\_today >= ?} —— 不允许减成负数。即便 ConsumedToday 已被 cron 重置归零，RowsAffected=0 也不返回错误（视为"今天的预算已经过期，无需归还"）。
+  \item \textbf{outbox 事件}：\texttt{promo.released} 携带 reason = cancel / refund / manual，下游统计补贴回收来源。
+  \item \textbf{业务诚实}：\textbf{cancel 退还百分百}（用户从未享受过补贴），\textbf{refund 全单退则全退、部分退按比例}（实现细节本期暂未对接退款服务，留接口）。
+\end{itemize}
+\srcnote{service/promo.go:261--284 ReleaseDiscount；repository/db/dao/promo.go:130--140 RestoreBudget WHERE 兜底}
+\end{frame}
+
+\begin{frame}{Release 链路示意}
+\begin{tikzpicture}[node distance=4mm and 7mm,every node/.append style={align=center,font=\scriptsize,text width=24mm,minimum height=14mm}]
+  \node[node-box,node-state-normal] (close) {订单关单\\(超时 / 用户主动)};
+  \node[node-box,node-state-transition,right=of close] (rsv) {service.ReleaseDiscount};
+  \node[node-box,node-state-transition,right=of rsv]   (tx)  {新事务};
+  \node[node-box,node-state-transition,below=of tx]    (rest){RestoreBudget\\consumed -= amount};
+  \node[node-box,node-ok,below=of rest]                (ev)  {outbox\\promo.released};
+  \draw[arrow] (close) -- (rsv);
+  \draw[arrow] (rsv) -- (tx);
+  \draw[arrow] (tx) -- (rest);
+  \draw[arrow] (rest) -- (ev);
+\end{tikzpicture}
+\vspace{2mm}
+\small \textbf{为什么 release 起新事务而不是嵌入关单事务}：关单流程已经有 outbox 事件 \texttt{order.cancelled} 在写，promo.released 是\textbf{次级事件}，独立事务更利于失败隔离 —— promo 退预算失败不影响关单本身。
+\srcnote{service/promo.go:261--284；service/order\_cancel.go:31--55 关单事务为参考}
+\end{frame}
+
+% ============================================================
+\section{客服话术：用户说"满了 200 没给我减"怎么回}
+% ============================================================
+
+\begin{frame}{客户问"为什么我满了 200 没减 25"—— 四种可能}
+\scriptsize
+\begin{tabular}{@{}lll@{}}
+\toprule
+业务码 & 真因 & 客服话术 \\
+\midrule
+80001 & 规则已过期 / 未开始 & "您看到的活动是 X 月 X 日生效，今天活动已结束。" \\
+80002 & 不在适用范围 & "这条满减是\textbf{图书类目}的，您购物车里图书只有 80 元，未达 100 门槛。" \\
+80003 & 预算用尽 & "今天该满减活动名额已抢完，欢迎明天 0 点再来。" \\
+N/A   & 您还没到 200 & "您当前购物车 198 元，再加 2 元就能享受满 200 减 25。" \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 业务码 80001/80002/80003 与现有 70001/70002/60002（限流 / 熔断 / 幂等）口径一致。\textbf{客服 SOP 培训只需要拿这张表 + 复述句式}。
+\srcnote{pkg/e/code.go:60--63 业务码 80001--80003；pkg/e/msg.go:54--56 客服话术原句}
+\end{frame}
+
+\begin{frame}[fragile]{业务码与提示语：3 行配置一致性}
+\begin{lstlisting}[language=Go,firstnumber=60,
+  caption={\srcnote{pkg/e/code.go:60--63 + pkg/e/msg.go:54--56 业务码 + 客服话术同步}}]
+// pkg/e/code.go
+PromoRuleExpired       = 80001 // 规则已过期 / 未生效
+PromoRuleNotApplicable = 80002 // 购物车未达门槛 / 范围不匹配
+PromoBudgetExhausted   = 80003 // 平台当日预算用尽
+
+// pkg/e/msg.go
+PromoRuleExpired:       "满减活动已结束或未开始",
+PromoRuleNotApplicable: "当前购物车未满足满减门槛或不在适用范围",
+PromoBudgetExhausted:   "本场满减活动当日预算已用完，欢迎下次再来",
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{客服真实事故脚本（演练材料）}
+\begin{itemize}
+  \item \textbf{用户}："我刚才看着是减 25 啊，怎么下了单只减了 10？"
+  \item \textbf{客服第 1 步}：让用户把订单号给我，traceId 贴出来。
+  \item \textbf{客服第 2 步}：ELK 检索 traceId，找到 \texttt{service.GetPromoSrv().CalculateBestDiscount} 的入参 / 出参；
+  \item \textbf{客服第 3 步}：对比 calculate 出参（RuleID=2，25 元）与 order 表 \texttt{Money} 字段（实付差 10 元）。
+  \item \textbf{常见真因}：用户在 calculate 展示后\textbf{修改了购物车}（删了一行商品），重新提交时引擎按新购物车算了不同的 RuleID。\textbf{这不是 bug，是预期}。
+  \item \textbf{客服话术}："您结算前购物车有调整，引擎按最新的购物车重新算了最优满减。如果想保留 25 元那条，请确保购物车不要低于 200。"
+  \item \textbf{改进路线图}：calculate 返回时缓存一个 \texttt{promo\_token}，下单提交带回；引擎校验 token + 购物车哈希一致才落该 RuleID。本期未做。
+\end{itemize}
+\srcnote{service/promo.go:163--195 calculate 是无状态读；service/promo.go:239--260 apply 重新算 = 用户感知不一致}
+\end{frame}
+
+% ============================================================
+\section{业务边界：不做什么}
+% ============================================================
+
+\begin{frame}{不做清单 —— 诚实标出本引擎的边界}
+\begin{itemize}
+  \item \textbf{不做用户领券}：那是 \texttt{service/coupon.go} 的职责。两套系统通过下单链路串起来。
+  \item \textbf{不做跨店满减}：本期 PromoRule.BossID 字段都没有 $\to$ 类目 / 商品级实际只对单店有效。"满 X 减 Y 任意店"留路线图。
+  \item \textbf{不做支付通道折扣}（如"支付宝立减 5"）：那是支付通道侧的事，gomall 不与第三方支付通道议价。
+  \item \textbf{不做会员价}：本期没有 VIP 等级表。Plus / 黑金会员价单独建模，不挂在 promo 里（避免规则爆炸）。
+  \item \textbf{不做规则编辑历史}：admin 改了 DiscountCents 直接覆盖，没有 audit log。\textbf{真实事故场景下需要补 audit\_log 表追责}，路线图。
+  \item \textbf{不做 A/B 测试位}：哪条规则在哪个流量桶展示，留给前端 A/B 框架。引擎只回答"这个购物车最优是哪条"。
+\end{itemize}
+\srcnote{repository/db/model/promo.go:9--13 与 Coupon 边界注释；README "业务边界（不做什么）" 章节同口径}
+\end{frame}
+
+% ============================================================
+\section{运营 / 商家 / 客服 路线图（不在本期实现）}
+% ============================================================
+
+\begin{frame}{满减引擎的下一步：补 admin UI 与商家自助}
+\begin{itemize}
+  \item \textbf{已落地}：规则 CRUD（创建 / 列表 / 停用）、calculate / apply / release、80001--80003 业务码。
+  \item \textbf{路线图 P1}：商家自助挂\textbf{商品级}满减（Scope=3 + BossID 校验），与 \texttt{merchant.Group} 一起做。
+  \item \textbf{路线图 P1}：admin UI 看板 —— 每条规则今日补贴金额 / 命中订单数 / ROI。\textbf{数据已经在 outbox 里}，离线 ETL 跑就行。
+  \item \textbf{路线图 P2}：DailyBudget 0 点重置 cron + 重置事件 \texttt{promo.budget\_reset}，与 \texttt{initialize/cron.go} 一致风格。
+  \item \textbf{路线图 P2}：promo\_token —— calculate 时颁发，apply 校验，杜绝"用户改购物车导致前后不一致"。
+  \item \textbf{路线图 P3}：与 Coupon 的叠加规则在 \texttt{service/order.go} 算式层固化，单测覆盖"先满减、后券"5--10 个 case。
+\end{itemize}
+\srcnote{docs/slides/12-merchant-ops.tex merchant.Group 草案；initialize/cron.go 引用风格}
+\end{frame}
+
+% ============================================================
+\section{压测画像：与现有营销三剑客同坐标系}
+% ============================================================
+
+\begin{frame}{与现有营销三剑客的 RPS 对照}
+\begin{tabular}{@{}lrll@{}}
+\toprule
+接口 & RPS & p95 & 备注 \\
+\midrule
+优惠券领取（Redis Lua）   & 51,362 & 3.52ms & PR \#50 实测 \\
+秒杀 + 滑动窗口           & 52,082 & 1.24ms & PR \#49 实测，30VU 通过 46 / 期望 45 \\
+幂等下单（同 key 50VU 15s）& 50,319 & 2.33ms & 755,033 请求 $\to$ 1 笔订单 \\
+\textbf{promo.calculate}（路线图）& \textbf{目标 50k+} & \textbf{目标 < 50ms} & 一次 DB + 内存循环 \\
+\textbf{promo.apply (tx)}（路线图）& \textbf{目标 10k+} & \textbf{目标 < 100ms} & 受订单事务 SLO 兜底 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small calculate 由于只读、单 DB 查询，RPS 应当接近秒杀 / 优惠券档位 50k+。apply 受订单事务 SLO < 500ms 整体兜住，自身目标 100ms。两个目标都在 stressTest 数据规模（order 6M 行 / product 956K 行）下可达。
+\srcnote{stressTest/REPORT.md "各链路压测结果"；README 真实压测数据章节}
+\end{frame}
+
+\begin{frame}{真实数字之二：DAO 单测的并发安全验证}
+\begin{itemize}
+  \item \textbf{测试}：\texttt{repository/db/dao/promo\_test.go::TestPromo\_AtomicConsumeBudget\_Exhaust}
+  \item \textbf{场景}：DailyBudget=1500 分，连续 4 次 AtomicConsumeBudget(1000, 1000, 500, 1) 应当 PASS / FAIL / PASS / FAIL
+  \item \textbf{实测}：4 个断言全 PASS，耗时\textbf{0.29s}（含 MySQL InnoDB 事务开销）
+  \item \textbf{对照}：单条 UPDATE + RowsAffected 兜底 = 与 \texttt{stressTest/REPORT.md} 中 Redis Lua 抢券 "500 抢 100 零超发" 同源思路。
+  \item \textbf{差异}：Lua max 136ms vs InnoDB 单 UPDATE 约 1--5ms（轻负载下 InnoDB 反而更快），高竞争下 Lua 大幅领先。当前满减并发量级（500--1000 单/s）远低于秒杀级别，InnoDB 即可。
+  \item \textbf{压测路线图}：补 promo\_calculate.js / promo\_apply.js 两份 k6 脚本，500VU × 30s 验证 RPS 与 RowsAffected=0 出现频次。
+\end{itemize}
+\srcnote{repository/db/dao/promo\_test.go:13--52 真实测试；stressTest/REPORT.md "优惠券 - Redis Lua vs DB 锁" 对照}
+\end{frame}
+
+% ============================================================
+\section{与 Outbox / Saga 体系的集成}
+% ============================================================
+
+\begin{frame}{promo 在 outbox 体系里的位置}
+\begin{tikzpicture}[node distance=4mm and 6mm,every node/.append style={align=center,font=\scriptsize,text width=22mm,minimum height=12mm}]
+  \node[node-box,node-state-normal] (apply) {service.\\ApplyDiscountInTx};
+  \node[node-box,node-state-transition,right=of apply] (ob) {outbox\_event\\(promo.applied)};
+  \node[node-box,node-state-transition,right=of ob]    (pub){outbox.Publisher\\每秒拉一批};
+  \node[node-box,node-state-transition,right=of pub]   (mq) {RabbitMQ\\domain.events};
+  \node[node-box,node-ok,below=of mq]                  (fin){财务系统\\每条规则补贴成本};
+  \node[node-box,node-ok,left=of fin]                  (bb) {商家看板\\活动效果分析};
+  \node[node-box,node-ok,left=of bb]                   (rf) {风控\\异常高频命中};
+  \draw[arrow] (apply) -- (ob);
+  \draw[arrow] (ob) -- (pub);
+  \draw[arrow] (pub) -- (mq);
+  \draw[arrow] (mq) -- (fin);
+  \draw[arrow-async] (mq) -- (bb);
+  \draw[arrow-async] (mq) -- (rf);
+\end{tikzpicture}
+\vspace{2mm}
+\small 一条 \texttt{promo.applied} 事件喂三个下游消费者。三者订阅同一 routing key，互不影响 —— 这就是 outbox 模式的"事件单源 + 多订阅"红利。
+\srcnote{service/outbox/publisher.go:65--85 publisher 主循环；service/events/events.go:130--145 PromoApplied / PromoReleased payload}
+\end{frame}
+
+\begin{frame}{为什么不直接调下游 HTTP / RPC：双写问题}
+\begin{itemize}
+  \item \textbf{反例}：apply 成功后直接 \texttt{http.Post(finance, payload)} $\to$ 财务系统挂了 5 秒，下单事务也被卡 5 秒 $\to$ 用户看 5 秒转圈 $\to$ 放弃。
+  \item \textbf{反例 \#2}：先写 DB 再发 HTTP，DB 成功 / HTTP 失败 = 财务漏一条补贴，月底对账时凭空多出 25 元缺口。
+  \item \textbf{outbox 解法}：写 outbox 是 DB 同一事务，要么一起成、要么一起回滚。后台 publisher 异步发 MQ，失败重试，至少一次语义 + 下游必须幂等。
+  \item \textbf{对应 deck 11}："Outbox 与一致性"对此有完整论证，本 deck 不重复 —— 只指明 promo.applied / promo.released 沿用了同一套基础设施。
+\end{itemize}
+\srcnote{docs/slides/11-consistency.tex "双写问题" 章节；service/promo.go:255 outbox.Insert 调用}
+\end{frame}
+
+% ============================================================
+\section{真实事故假想：predictable failure modes}
+% ============================================================
+
+\begin{frame}{假想故障 1：客服收到大量 "我满了没减" 投诉}
+\begin{itemize}
+  \item \textbf{症状}：大促当天 10 点，客服 1 小时内收到 200+ 条 "满 200 没减 25" 投诉。
+  \item \textbf{排查 5 步}：
+  \begin{enumerate}
+    \item ELK 检索 \texttt{traceId} + \texttt{"promo.applied"} —— 看实际 apply 了哪条规则
+    \item 检查 \texttt{promo\_rule} 表 \texttt{status=2 (stopped)} 数量 —— 是否运营误关
+    \item 检查 \texttt{consumed\_today} 是否已 $\geq$ \texttt{daily\_budget\_cents} —— 是否预算耗尽
+    \item 检查 calculate 入参 vs apply 入参的购物车快照 hash —— 是否用户改了购物车
+    \item 检查 \texttt{promo.applied} 事件量 vs \texttt{promo.released} 事件量 —— 是否退款风暴
+  \end{enumerate}
+  \item \textbf{大概率真因}：DailyBudget 设小了 —— 运营在配置后台填 \texttt{1500000}（1.5 万元）当 \texttt{15000000}（15 万元）写少一个 0。
+  \item \textbf{修复 SOP}：\texttt{PATCH /admin/promo/rules/:id} 改大 budget（本期接口已就位），无需停活动。
+\end{itemize}
+\srcnote{repository/db/dao/promo.go:141 Stop 接口；api/v1/promo.go:43--85 AdminCreate / AdminStop handler}
+\end{frame}
+
+\begin{frame}{假想故障 2：财务对账每月差几百块}
+\begin{itemize}
+  \item \textbf{症状}：财务每月跑对账，promo 补贴明细总比 DB \texttt{ConsumedToday} 累计少 200--500 元。
+  \item \textbf{常见真因}：cron 每日 0 点 reset 之前的最后一秒，有订单进来 apply $\to$ \texttt{ConsumedToday} +25 $\to$ 0 点重置归零 $\to$ 这笔补贴没有被任何"日报"记录。
+  \item \textbf{解法}：财务对账\textbf{以 outbox 事件为准}，不以 \texttt{ConsumedToday} 为准。\texttt{ConsumedToday} 是\textbf{当日限额执行用}，不是\textbf{对账依据}。
+  \item \textbf{为什么 outbox 是金本位}：每条 promo.applied 都是一条不可篡改的事件，order\_id / rule\_id / discount\_cents 全有。月底跑 \texttt{SUM(discount\_cents) WHERE rule\_id=X AND created\_at BETWEEN ...} 即可。
+  \item \textbf{业务诚实}：\texttt{ConsumedToday} 是\textbf{运营视角的"今天用了多少"}，outbox 是\textbf{财务视角的"我们补贴了多少"}。两个视角不强一致 —— 这是设计，不是 bug。
+\end{itemize}
+\srcnote{service/promo.go:239--260 写 outbox；service/outbox/publisher.go:65--85 至少一次语义}
+\end{frame}
+
+% ============================================================
+\section{Q\&A 与代码位置一览}
+% ============================================================
+
+\begin{frame}{Q\&A（上）—— 业务侧高频问题}
+\begin{itemize}
+  \item \textbf{Q1}：满减能不能与优惠券叠加？\textbf{A}：能。规则是先满减、后券，由 \texttt{service/order.go} 算式层固化。本期引擎只算前半段。
+  \item \textbf{Q2}：一笔订单能不能用两条满减？\textbf{A}：不能。\texttt{PickBestPromoRule} 只返回一条 —— 防止多条阶梯被同时享受。
+  \item \textbf{Q3}：用户加购到 199 元，前端要不要主动提示"再加 1 元享受满 200 减 25"？\textbf{A}：要。前端可以调 calculate 拿到\textbf{最接近的下一档}规则（本期接口未直接返回，路线图）。
+  \item \textbf{Q4}：商家能不能给\textbf{特定用户}做满减？\textbf{A}：不能。引擎当前没有"用户白名单"维度。如果商家想做 VIP 专享满减，应该走优惠券（VIP 自动发券）。
+  \item \textbf{Q5}：规则一旦激活，能改 Threshold / Discount 吗？\textbf{A}：可以改，但\textbf{不影响已 apply 的订单}。已 apply 的金额已经写进 outbox 和 order 表。改后只影响新单。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Q\&A（下）—— 技术侧高频问题}
+\begin{itemize}
+  \item \textbf{Q6}：为什么金额一律用 int64 分？\textbf{A}：浮点累计误差。1.10 + 1.20 在 float64 下不等于 2.30。订单 / 财务 / 退款全链路用分，杜绝精度问题。
+  \item \textbf{Q7}：calculate 不签 token，下单时购物车变了怎么办？\textbf{A}：当前是 apply 时\textbf{重新算一次}，可能选到不同的 RuleID。客服话术已经覆盖该场景。promo\_token 路线图见前文。
+  \item \textbf{Q8}：DailyBudget 用尽后用户能不能看到"今日 0 点再来"？\textbf{A}：业务码 80003 + msg.go 已写"本场满减活动当日预算已用完，欢迎下次再来"。前端拿业务码翻译即可。
+  \item \textbf{Q9}：promo.applied 事件丢了怎么办？\textbf{A}：outbox publisher 有指数退避重试，超 MaxAttempts=10 次标记 dead 后报警。运营手动补单。
+  \item \textbf{Q10}：规则量级到多少时需要加索引？\textbf{A}：当前 \texttt{scope / scope\_ref\_id / status / start\_at / end\_at} 都有索引。规则总数 > 10k 时考虑\texttt{(status, scope, scope\_ref\_id)} 复合索引。
+\end{itemize}
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\scriptsize
+\begin{tabular}{@{}ll@{}}
+\toprule
+模块 & 位置 \\
+\midrule
+模型（PromoRule + 常量） & \texttt{repository/db/model/promo.go} \\
+DAO（CRUD + 预算扣减 / 退还） & \texttt{repository/db/dao/promo.go} \\
+DAO 单测（预算耗尽 / 退还 / 范围查询） & \texttt{repository/db/dao/promo\_test.go} \\
+Service（最优算法 + 事务嵌入 + outbox） & \texttt{service/promo.go} \\
+Service 单测（阶梯 / 满折扣 vs 满减 / 范围） & \texttt{service/promo\_test.go} \\
+Service 事件 payload & \texttt{service/events/events.go::PromoApplied / PromoReleased} \\
+API handler（公开 + admin） & \texttt{api/v1/promo.go} \\
+路由注册（公开 / authed / admin 三组） & \texttt{routes/promo\_routes.go} \\
+业务码与提示语 & \texttt{pkg/e/code.go:60--63} + \texttt{pkg/e/msg.go:54--56} \\
+Migration & \texttt{repository/db/dao/migrate.go} \\
+DTO & \texttt{types/promo.go} \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 全部新增文件 9 个 + 修改 4 个。引擎自身\textbf{无新增第三方依赖}，与 outbox / 业务码体系完全复用。
+\end{frame}
+
+\end{document}

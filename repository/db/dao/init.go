@@ -68,5 +68,16 @@ func InitMySQL() {
 
 func NewDBClient(ctx context.Context) *gorm.DB {
 	db := _db
+	if db == nil {
+		return nil
+	}
 	return db.WithContext(ctx)
+}
+
+// SetTestDB 仅用于单测：替换全局 _db，返回原值。
+// 生产入口不应调用，避免误把测试 DB 接进真实流量。
+func SetTestDB(db *gorm.DB) *gorm.DB {
+	prev := _db
+	_db = db
+	return prev
 }

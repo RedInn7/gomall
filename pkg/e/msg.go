@@ -50,6 +50,20 @@ var MsgFlags = map[int]string{
 
 	ErrRateLimitExceeded: "请求频率超限，请稍后重试",
 	ErrCircuitOpen:       "下游服务熔断中，暂时不可用",
+
+	PromoRuleExpired:       "满减活动已结束或未开始",
+	PromoRuleNotApplicable: "当前购物车未满足满减门槛或不在适用范围",
+	PromoBudgetExhausted:   "本场满减活动当日预算已用完，欢迎下次再来",
+
+	ErrGroupbuyFull:          "该团已满员，请发起新团或加入其他团",
+	ErrGroupbuyExpired:       "该团已超时未成团，款项将于 1-3 工作日原路退回",
+	ErrGroupbuyDuplicateJoin: "您已加入过该团，不能重复参团",
+	ErrGroupbuyClosed:        "该团已关闭",
+
+	ErrPreorderNotInDepositWindow: "当前不在预售定金期，无法支付定金",
+	ErrPreorderNotInFinalWindow:   "当前不在尾款支付窗口，无法支付尾款",
+	ErrPreorderDepositNotPaid:     "尚未支付定金，无法支付尾款",
+	ErrPreorderForfeitedDeposit:   "预售已结束，根据预售须知定金不予退还",
 }
 
 // GetMsg 获取状态码对应信息
