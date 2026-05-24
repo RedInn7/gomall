@@ -241,7 +241,7 @@ func GenSnowflakeID() int64 {
   \node[node-box,right=of u,node-warn]     (c) {下单\\reserved += n};
   \node[node-box,right=of c,node-warn]     (w) {等待支付\\30 min 窗口};
   \node[node-box,right=of w,node-ok]       (p) {支付成功\\reserved $\to$ sold};
-  \node[node-box,below=of w,node-alert]    (t) {超时未付\\reserved $\to$ available};
+  \node[node-box,below=of w,node-warn]     (t) {超时未付\\reserved $\to$ available};
   \draw[arrow] (u) -- (c);
   \draw[arrow] (c) -- (w);
   \draw[arrow] (w) -- (p);

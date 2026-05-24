@@ -316,9 +316,9 @@ avg 延迟          & 0.82ms   & 0.83ms  \\
   \node[node-box,right=of u] (api) {API};
   \node[node-box,right=of api,node-warn] (sw) {SlidingWindow};
   \node[node-box,right=of sw,node-ok] (lua) {库存\\Lua};
-  \node[node-box,below=of api,node-alert] (cs1) {话术 A\\70001 限流};
-  \node[node-box,below=of sw,node-alert] (cs2) {话术 B\\已抢光};
-  \node[node-box,below=of lua,node-alert] (cs3) {话术 C\\已领过};
+  \node[node-box,below=of api,node-warn] (cs1) {话术 A\\70001 限流};
+  \node[node-box,below=of sw,node-warn]  (cs2) {话术 B\\已抢光};
+  \node[node-box,below=of lua,node-warn] (cs3) {话术 C\\已领过};
   \draw[arrow-bad] (sw) -- node[right,font=\tiny]{70001} (cs1.east);
   \draw[arrow-bad] (lua.south) -- node[right,font=\tiny]{stock=0} (cs2.north);
   \draw[arrow-bad] (lua) -- node[right,font=\tiny]{owned>=N} (cs3.north);
