@@ -231,7 +231,7 @@ err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 % ============================================================
 
 \begin{frame}{默认参数：每个数值背后是业务约束}
-\begin{tabular}{@{}llp{4.6cm}@{}}
+\begin{tabular}{@{}p{2.4cm}p{1.4cm}p{6.8cm}@{}}
 \toprule
 参数 & 默认值 & 业务依据 \\
 \midrule
@@ -240,13 +240,14 @@ err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 \texttt{MaxAttempts}  & \textbf{10}   & 1+2+4+8+16+32+64+128+256+300 $\approx$ 13.5 min 累计窗口，盖一次中等故障 \\
 \bottomrule
 \end{tabular}
-\vspace{2mm}
-\small \textbf{业务可解释口径}：
+
+\vspace{1mm}
+{\small \textbf{业务可解释口径}：
 \begin{itemize}
   \item PollInterval=1s = 用户/商家/搜索的"用户感知一致性"上限。
   \item BatchSize=100 = 不让 outbox 自己拖慢业务写入。
   \item MaxAttempts=10 = 10 次失败后人工兜底，避免无限重试打死下游。
-\end{itemize}
+\end{itemize}}
 \srcnote{service/outbox/publisher.go:14--32 \texttt{PublisherConfig.withDefaults}；repository/db/model/outbox.go:14 \texttt{OutboxDefaultMaxAttempts=10}}
 \end{frame}
 
@@ -350,6 +351,9 @@ func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string
 \bottomrule
 \end{tabular}
 \vspace{2mm}
+
+\begin{center}
+\resizebox{0.95\textwidth}{!}{%
 \begin{tikzpicture}[node distance=2mm and 5mm,font=\scriptsize,
     every node/.append style={minimum width=14mm,minimum height=7mm}]
   \node[node-box] (o) {Order};
@@ -363,7 +367,8 @@ func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string
   \draw[arrow] (ob)  -- (mq);
   \draw[arrow-async] (mq) -- (pay);
   \draw[arrow-async] (mq) -- (es);
-\end{tikzpicture}
+\end{tikzpicture}}
+\end{center}
 \vspace{1mm}
 \small 每一步消费上一步事件、产出下一步事件，无总指挥。\\
 对 gomall 的 5 步链路是最省心的选择 —— 加新下游 = 新加一个消费者，不改主链路。
@@ -371,7 +376,7 @@ func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string
 \end{frame}
 
 \begin{frame}{Saga 失败：CancelUnpaidOrder 就是一次补偿}
-\begin{tikzpicture}[node distance=10mm and 14mm,font=\scriptsize]
+\noindent\begin{tikzpicture}[node distance=10mm and 14mm,font=\scriptsize]
   \node[node-box] (cre)  {1.CreateOrder\\(reserved += n)};
   \node[node-box,right=of cre,node-warn] (wait) {2.等待支付\\(15min 内)};
   \node[node-box,right=of wait,node-bad] (timeout) {3.超时未付};
@@ -383,14 +388,14 @@ func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string
   \draw[arrow-alert] (timeout) -- (cancel);
   \draw[arrow] (cancel) -- (rel);
   \draw[arrow] (rel) -- (ob);
-\end{tikzpicture}
+\end{tikzpicture}\par
 \vspace{2mm}
-\small \textbf{业务承诺}：
+{\small \textbf{业务承诺}：
 \begin{itemize}
   \item \textbf{Saga 补偿 $\leq$ 5 min}：超时关单 + 库存回填全链路 5 分钟内闭合。
   \item \textbf{库存不变量}：\texttt{available + reserved + sold = total} 始终成立。
   \item \textbf{先 DB tx 后 cache}：DB 关单 + outbox 一起 commit 后才释放 Redis 占用，失败可重放。
-\end{itemize}
+\end{itemize}}
 \srcnote{service/order\_cancel.go:14--63 完整闭包}
 \end{frame}
 
@@ -436,7 +441,7 @@ func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string
 \end{frame}
 
 \begin{frame}{改价生效窗口：三方期望对齐}
-\begin{tabular}{@{}lp{2.6cm}p{2.8cm}p{3.0cm}@{}}
+\begin{tabular}{@{}p{1.6cm}p{3.0cm}p{3.6cm}p{2.2cm}@{}}
 \toprule
 角色 & 期望窗口 & gomall 实际 & 满足 \\
 \midrule
@@ -445,8 +450,9 @@ C 端用户  & 改价后 $\leq 5$ 分钟看到新价 & $\leq 1$ s（延迟双删
 运营平台  & 全网用户在大促开始秒级同步   & $\leq 1$ s + ES outbox 增量索引 & \checkmark \\
 \bottomrule
 \end{tabular}
-\vspace{2mm}
-\small \textbf{业务承诺}：缓存延迟双删 $\leq 1$ s 内全部生效（实测 500 ms 抹掉所有 race）。
+
+\vspace{1mm}
+{\small \textbf{业务承诺}：缓存延迟双删 $\leq 1$ s 内全部生效（实测 500 ms 抹掉所有 race）。}
 \srcnote{repository/cache/product.go:14--17 常量定义}
 \end{frame}
 
@@ -554,6 +560,8 @@ func DoubleDeleteAsync(id uint, interval time.Duration) {
 \end{frame}
 
 \begin{frame}{Outbox 解决"丢失"，幂等解决"重复"}
+\begin{center}
+\resizebox{0.95\textwidth}{!}{%
 \begin{tikzpicture}[node distance=8mm and 12mm,font=\scriptsize]
   \node[node-box] (a) {应用};
   \node[node-box,right=of a] (db)  {DB + outbox};
@@ -564,9 +572,10 @@ func DoubleDeleteAsync(id uint, interval time.Duration) {
   \draw[arrow] (db) -- (mq);
   \draw[arrow-async] (mq) -- (idem);
   \draw[arrow] (idem) -- (down);
-  \draw[arrow,bend right=25] (mq.south) to
-       node[below,font=\tiny\color{cWarn}]{重复投递 (网络 / publisher 重启)} (idem.south);
-\end{tikzpicture}
+  \draw[arrow,bend right=40] (mq.south) to
+       node[below=4pt,font=\tiny\color{cWarn},pos=0.5]{重复投递 (网络 / publisher 重启)} (idem.south);
+\end{tikzpicture}}
+\end{center}
 \vspace{2mm}
 \small 投递语义：\textbf{at-least-once} —— 至少一次。\\
 \textbf{at-least-once + 业务幂等键} = 业务侧 exactly-once。
@@ -635,17 +644,17 @@ func DoubleDeleteAsync(id uint, interval time.Duration) {
 \end{frame}
 
 \begin{frame}{修复后的启动顺序（业务因果）}
-\begin{tikzpicture}[node distance=5mm and 6mm,font=\scriptsize,
-    every node/.append style={minimum width=22mm,minimum height=7mm}]
+\noindent\begin{tikzpicture}[node distance=5mm and 5mm,font=\scriptsize,
+    every node/.append style={minimum width=24mm,minimum height=8mm,text width=24mm,align=center}]
   \node[node-box] (cfg)  {1.InitConfig};
-  \node[node-box,right=of cfg,node-warn] (log) {2.InitLog\\(必须在 recover 之前)};
+  \node[node-box,right=of cfg,node-warn] (log) {2.InitLog\\\textit{recover 之前}};
   \node[node-box,right=of log] (db)   {3.InitMySQL};
   \node[node-box,below=of cfg] (cache){4.InitCache};
   \node[node-box,right=of cache] (sf) {5.Snowflake};
   \node[node-box,right=of sf] (cron)  {6.InitCron};
   \node[node-box,below=of cache] (inv){7.InitInventory};
   \node[node-box,right=of inv] (rmq)  {8.tryInitRabbitMQ};
-  \node[node-box,right=of rmq] (pub)  {9.InitOutboxPublisher};
+  \node[node-box,right=of rmq] (pub)  {9.OutboxPublisher};
   \draw[arrow] (cfg) -- (log);
   \draw[arrow] (log) -- (db);
   \draw[arrow] (db) -- (cache);
@@ -654,9 +663,9 @@ func DoubleDeleteAsync(id uint, interval time.Duration) {
   \draw[arrow] (cron) -- (inv);
   \draw[arrow] (inv) -- (rmq);
   \draw[arrow] (rmq) -- (pub);
-\end{tikzpicture}
+\end{tikzpicture}\par
 \vspace{2mm}
-\small 关键约束：\textbf{InitLog 必须在 InitMySQL / RMQ 之前}，因为后续所有 \texttt{tryInit*} 的 \texttt{recover} 都依赖 \texttt{LogrusObj}。
+{\small 关键约束：\textbf{InitLog 必须在 InitMySQL / RMQ 之前}，因为后续所有 \texttt{tryInit*} 的 \texttt{recover} 都依赖 \texttt{LogrusObj}。}
 \srcnote{cmd/main.go:29--47 完整初始化序列}
 \end{frame}
 
@@ -682,7 +691,7 @@ func DoubleDeleteAsync(id uint, interval time.Duration) {
 % ============================================================
 
 \begin{frame}{三档一致性窗口：写在 SLO 里}
-\begin{tabular}{@{}lp{2.6cm}p{4.4cm}p{3.0cm}@{}}
+\noindent\begin{tabular}{@{}lp{2.4cm}p{4.2cm}p{2.8cm}@{}}
 \toprule
 档位 & 窗口上限 & 业务场景 & gomall 落点 \\
 \midrule
@@ -690,16 +699,16 @@ func DoubleDeleteAsync(id uint, interval time.Duration) {
 近实时一致     & 1 s 内         & 用户感知"操作完成 = 立刻可见" & Outbox publish + ES 索引 \\
 最终一致       & 5 min 内       & 跨服务对账、数仓同步         & 死信复盘、cron 巡检 \\
 \bottomrule
-\end{tabular}
+\end{tabular}\par
 \vspace{2mm}
-\small \textbf{对外业务承诺}：
+{\small \textbf{对外业务承诺}：
 \begin{itemize}
   \item 用户下单后 \textbf{$\leq 1$ s} 在订单列表看到（近实时档）。
   \item 商品改价后 \textbf{$\leq 1$ s} 商品详情显示新价（双删窗口）。
   \item 库存与订单的对账差异 \textbf{$\leq 5$ min} 闭合（夜间 cron）。
   \item Outbox sent rate \textbf{$\geq 99.99\%$}（每万条事件最多 1 条进 dead）。
   \item Saga 补偿 \textbf{$\leq 5$ min} 全链路闭合。
-\end{itemize}
+\end{itemize}}
 \srcnote{README.md \S 业务承诺（SLO）；service/outbox/publisher.go:23 PollInterval=1s}
 \end{frame}
 

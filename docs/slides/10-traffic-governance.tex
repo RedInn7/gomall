@@ -343,14 +343,14 @@ return {1, count + 1}
 \end{frame}
 
 \begin{frame}{CircuitBreaker 三态机}
-\begin{tikzpicture}[node distance=8mm and 16mm]
+\begin{tikzpicture}[node distance=18mm and 30mm]
   \node[node-state,node-state-normal] (closed) {Closed};
   \node[node-state,node-state-alert,right=of closed] (open) {Open};
   \node[node-state,node-state-transition,below=of open] (half) {HalfOpen};
   \draw[arrow-alert] (closed) -- node[above,font=\tiny]{连续 5 次失败} (open);
-  \draw[arrow] (open) -- node[right,font=\tiny]{10s 后} (half);
-  \draw[arrow] (half) to[bend right=30] node[below,font=\tiny]{3 个都成功} (closed);
-  \draw[arrow-alert] (half) to[bend left=20] node[right,font=\tiny]{任一失败} (open);
+  \draw[arrow] (open.south west) to[bend right=20] node[left=2pt,font=\tiny,pos=0.5]{10s 后试探} (half.north west);
+  \draw[arrow] (half) to[bend right=35] node[below,font=\tiny,pos=0.5]{3 个都成功} (closed);
+  \draw[arrow-alert] (half.north east) to[bend right=20] node[right=2pt,font=\tiny,pos=0.5]{任一失败} (open.south east);
 \end{tikzpicture}
 \vspace{1mm}
 \small \textbf{Closed}：放行所有，连续 5 次失败 $\to$ Open。
@@ -555,7 +555,7 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
 \end{frame}
 
 \begin{frame}{各接口的 max-age：运营改价的可接受延迟}
-\begin{tabular}{@{}lll@{}}
+\begin{tabular}{@{}p{2.6cm}p{1.6cm}p{6.6cm}@{}}
 \toprule
 接口 & max-age & 业务依据 \\
 \midrule
@@ -565,8 +565,8 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
 /carousels      & 300s & 运营手动调，时效性弱 \\
 \bottomrule
 \end{tabular}
-\vspace{3mm}
-\small max-age 的\textbf{业务取舍}：太长 $\to$ "改价 / 下架"延迟生效（运营投诉）；太短 $\to$ 卸不了流量（SRE 投诉）。\\
+\vspace{2mm}\\
+\small \textbf{max-age 的业务取舍}：太长 $\to$ "改价 / 下架"延迟生效（运营投诉）；太短 $\to$ 卸不了流量（SRE 投诉）。
 300s = 运营改完最多 5min 生效，可接受；30s = 库存接近灵敏阈值的折中（敏感链路保护用户买不到错的）。
 \srcnote{routes/router.go:39--45 各路由的 maxAge 参数}
 \end{frame}
@@ -640,7 +640,7 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
 
 \begin{frame}{大促运营 SOP：流量治理的 T-7 / T-1 / T 日 / T+1}
 \footnotesize
-\begin{tabular}{@{}llll@{}}
+\begin{tabular}{@{}p{1.4cm}p{2.6cm}p{2.8cm}p{3.0cm}@{}}
 \toprule
 阶段 & 流量治理 & 客服 & SRE \\
 \midrule
@@ -654,7 +654,7 @@ T+1 & 黑产盘点 & 客诉根因分析 & 复盘 / 调阈值 \\
     & 阈值复盘 & 高频客诉归档 & error budget 报告 \\
 \bottomrule
 \end{tabular}
-\vspace{2mm}
+\vspace{2mm}\\
 \small SOP 的关键不是"工程很努力"，是\textbf{每个角色 T 日当天知道做什么、不做什么}。
 \srcnote{stressTest/REPORT.md \S 1 容量基线；deck 12 商家+可观测 配套监控面板设计}
 \end{frame}
@@ -793,7 +793,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 \end{frame}
 
 \begin{frame}{五种主流限流算法：各自的业务边界}
-\begin{tabular}{@{}lll@{}}
+\noindent\begin{tabular}{@{}lll@{}}
 \toprule
 算法 & 适合场景 & 局限 \\
 \midrule
@@ -804,20 +804,20 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 漏桶 leaky-bucket       & 强制平滑           & 突发延迟    \\
 自适应 Sentinel BBR     & 容量自动反推       & 调参复杂 / 黑盒 \\
 \bottomrule
-\end{tabular}
+\end{tabular}\par
 \vspace{2mm}
-\small gomall 选\textbf{滑动窗口 ZSet}（sliding-log 变种）跑秒杀，因为业务上要\textbf{精确反黑产}；选\textbf{令牌桶}跑全局，因为允许首屏突发。
+{\small gomall 选\textbf{滑动窗口 ZSet}（sliding-log 变种）跑秒杀，因为业务上要\textbf{精确反黑产}；选\textbf{令牌桶}跑全局，因为允许首屏突发。}
 \srcnote{middleware/ratelimit.go:22--49 token-bucket; repository/cache/ratelimit.go:18--34 sliding-log}
 \end{frame}
 
 \begin{frame}{熔断打开后：兜底数据让"不可用"变"降级可用"}
-\begin{tikzpicture}[node distance=6mm and 12mm]
+\begin{tikzpicture}[node distance=4mm and 10mm,every node/.append style={font=\scriptsize}]
   \node[node-box] (req) {请求};
   \node[node-box,node-warn,right=of req] (cb) {CB Open?};
   \node[node-box,node-ok,right=of cb] (live) {下游实时};
-  \node[node-box,node-warn,below=of live] (stale) {cache stale\\$<$ 5min};
-  \node[node-box,node-warn,below=of stale] (def) {默认值\\(零、空数组)};
-  \node[node-box,node-bad,below=of def] (rej) {拒绝\\70002};
+  \node[node-box,node-warn,below=of live] (stale) {cache stale $<$ 5min};
+  \node[node-box,node-warn,below=of stale] (def) {默认值 (零、空数组)};
+  \node[node-box,node-bad,below=of def] (rej) {拒绝 70002};
   \draw[arrow] (req) -- (cb);
   \draw[arrow] (cb) -- node[above,font=\tiny]{no} (live);
   \draw[arrow-bad] (cb) -- node[right,font=\tiny]{yes} (stale);

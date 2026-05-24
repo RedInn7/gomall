@@ -165,7 +165,9 @@ authed 链路 RPS         & $\geq$ 50k（P1 读）   & 实测 58k / p95 5ms \\
 \end{frame}
 
 \begin{frame}{注册 / 登录 / 颁发 token 的时序}
-\begin{tikzpicture}[node distance=8mm and 14mm]
+\begin{center}
+\resizebox{0.88\textwidth}{!}{%
+\begin{tikzpicture}[node distance=10mm and 16mm]
   \node[node-box] (cli)  {Client};
   \node[node-box,right=of cli] (api) {/user/register};
   \node[node-box,right=of api] (svc) {UserSrv};
@@ -179,7 +181,9 @@ authed 链路 RPS         & $\geq$ 50k（P1 读）   & 实测 58k / p95 5ms \\
   \draw[arrow] (cli2) -- (lg);
   \draw[arrow] (lg)  -- (tk);
   \draw[arrow,dashed] (db) -- (lg);
-\end{tikzpicture}
+\end{tikzpicture}}
+\end{center}
+\vspace{2mm}
 \srcnote{routes/router.go:34--35 路由；service/user.go:38--82 注册；:85--121 登录；repository/db/model/user.go:28 PassWordCost=12}
 \end{frame}
 
@@ -238,7 +242,8 @@ bcrypt cost=14     & \textasciitilde 150k 美元 & \textasciitilde 80 天 \\
 \end{frame}
 
 \begin{frame}{refresh 10d / 7d / 30d 三选一：复购漏斗 vs 安全风险}
-\begin{tabular}{@{}lp{3.4cm}p{3.4cm}@{}}
+\footnotesize
+\begin{tabular}{@{}lp{3.6cm}p{3.6cm}@{}}
 \toprule
 refresh 取值 & 业务收益 & 安全代价 \\
 \midrule
@@ -248,7 +253,7 @@ refresh 取值 & 业务收益 & 安全代价 \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
-\begin{itemize}
+\begin{itemize}\footnotesize
   \item gomall 选 10d 是\textbf{业务行为画像决定的}：电商用户两周内打开 app 概率 $>$ 85\%。
   \item 30d 看似友好，实际放大\textbf{被偷账号挂闲鱼"包登录" 黑产}：被盗号 24h 内不修改资料，老主人完全感知不到。
   \item 10d 是合规线（很多支付牌照要求 token 长度 $\leq$ 14d）。
@@ -318,7 +323,8 @@ c.Request = c.Request.WithContext(
 \bottomrule
 \end{tabular}
 \vspace{2mm}
-\small 鉴权链路开销 \(\approx 1 - 58406/64254 = 9.1\%\)，敢挂 authed 全组。HS256 纯 CPU 无 IO。
+
+{\small 鉴权链路开销 \(\approx 1 - 58406/64254 = 9.1\%\)，敢挂 authed 全组。HS256 纯 CPU 无 IO。}
 \begin{itemize}
   \item 当前\textbf{不维护 token 黑名单}：登出 = 客户端丢 token，服务端不主动作废。
   \item 后果：被偷设备最多多用 24h；改密码后老 access 仍能用 24h。
@@ -489,8 +495,10 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
 \end{frame}
 
 \begin{frame}{admin bootstrap "占用"的运维 SOP（客服 + SRE 协同）}
+\footnotesize
 \textbf{情境}：运维 B 在 prod 上第二次调 \texttt{/admin/bootstrap}，得到错误"系统已存在 admin"。
-\begin{tabular}{@{}p{2.5cm}p{8cm}@{}}
+\begin{center}
+\begin{tabular}{@{}p{2.6cm}p{7.6cm}@{}}
 \toprule
 角色 & 该做什么 \\
 \midrule
@@ -501,6 +509,7 @@ SRE 操作    & 查 admin\_audit（路线图）或 \texttt{SELECT id, name FROM 
 真实事故钩子 & 若首位 admin 离职 \(\to\) 走数据库直改 role（堡垒机审计），不再走 bootstrap \\
 \bottomrule
 \end{tabular}
+\end{center}
 \vspace{2mm}
 \begin{itemize}
   \item bootstrap"自锁"的意义：\textbf{排除"调两遍把别人覆盖掉"的灾难}。
@@ -530,13 +539,16 @@ admin          & admin 子组   & + RequireRole       & 提权 / 后台 \\
 \end{frame}
 
 \begin{frame}{merchant group 的路线图：路由 + DAO 双层}
-\begin{tikzpicture}[node distance=7mm and 12mm]
+\begin{center}
+\resizebox{0.85\textwidth}{!}{%
+\begin{tikzpicture}[node distance=10mm and 22mm]
   \node[node-box,node-ok]   (u)   {C 端 user\\authed};
-  \node[node-box,node-warn] (m)   {merchant\\新 group};
-  \node[node-box,node-bad]  (a)   {admin\\sub-group};
+  \node[node-box,node-warn,right=of u] (m)   {merchant\\新 group};
+  \node[node-box,node-bad,right=of m]  (a)   {admin\\sub-group};
   \draw[arrow]       (u) -- node[above,font=\tiny]{RequireRole(merchant)} (m);
   \draw[arrow-alert] (m) -- node[above,font=\tiny]{RequireRole(admin)} (a);
-\end{tikzpicture}
+\end{tikzpicture}}
+\end{center}
 \vspace{2mm}
 \begin{enumerate}
   \item authed 内增设 \texttt{merchant := authed.Group("/merchant")}，挂 \texttt{RequireRole("merchant","admin")}。

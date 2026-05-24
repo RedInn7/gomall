@@ -1,6 +1,6 @@
 \input{preamble}
 
-\title{购物车 → 下单核心}
+\title{购物车 $\to$ 下单核心}
 \subtitle{gomall 加购 / 地址 / 雪花订单号 / 库存预扣 / DB+outbox 事务}
 \author{gomall · 业务侧 deck}
 \date{}
@@ -32,7 +32,8 @@
 \end{frame}
 
 \begin{frame}{下单漏斗：每一步都在流失}
-\begin{tikzpicture}[node distance=4mm and 8mm]
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[node distance=4mm and 6mm,font=\scriptsize]
   \node[node-box]                              (a) {商品详情\\100\%};
   \node[node-box,right=of a,node-ok]           (b) {加购\\35\%};
   \node[node-box,right=of b,node-ok]           (c) {选地址\\28\%};
@@ -44,19 +45,20 @@
   \draw[arrow] (c) -- (d);
   \draw[arrow] (d) -- (e);
   \draw[arrow] (e) -- (f);
-\end{tikzpicture}
+\end{tikzpicture}}
 \vspace{2mm}
 \begin{tabular}{@{}lll@{}}
 \toprule
 流失点 & 业务原因 & gomall 兜底 \\
 \midrule
-加购→选地址 & 没地址 / 海外不支持 & 默认地址 + 地址簿 \\
-选地址→确认 & 价格变 / 优惠失效 & 后端重算 money（不信前端）\\
-确认→下单   & 库存被别人抢空     & Redis 双桶 + 50001 文案 \\
-下单→支付   & 转圈 > 3s         & p99 < 500ms / 异步排队 \\
+加购$\to$选地址 & 没地址 / 海外不支持 & 默认地址 + 地址簿 \\
+选地址$\to$确认 & 价格变 / 优惠失效 & 后端重算 money（不信前端）\\
+确认$\to$下单   & 库存被别人抢空     & Redis 双桶 + 50001 文案 \\
+下单$\to$支付   & 转圈 > 3s         & p99 < 500ms / 异步排队 \\
 \bottomrule
 \end{tabular}
-\srcnote{对照行业漏斗经验值 + gomall README \S 业务承诺；service/order.go:40--102 下单入口}
+\par\smallskip
+{\centering\srcnote{对照行业漏斗经验值 + gomall README \S 业务承诺；service/order.go:40--102 下单入口}\par}
 \end{frame}
 
 \begin{frame}{下单不是一次点击，是一条业务链}
@@ -111,7 +113,7 @@ num         & 件数      & "已超过单次购买上限 N 件" \\
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
-  \item \texttt{ErrorProductMoreCart=20008}：重复加购同款 → 明确业务码，客服一查就知。
+  \item \texttt{ErrorProductMoreCart=20008}：重复加购同款 $\to$ 明确业务码，客服一查就知。
   \item 这是为什么 \texttt{CartCreate} 先 \texttt{GetProductById} 再 \texttt{CreateCart} —— 校验商品仍在售。
   \item 购物车不是技术装饰，是\textbf{凑单 / 比价 / 留存}的中转 = 商家拉复购的关键页。
 \end{itemize}
@@ -127,7 +129,7 @@ num         & 件数      & "已超过单次购买上限 N 件" \\
 \end{itemize}
 \vspace{2mm}
 \textbf{业务硬约束（gomall 现状）}：\texttt{Address} 只保留 \texttt{name / phone / address} 三字段，\\
-合并省事但订单一旦发起就该\textbf{冻结地址快照}，否则用户改地址簿 → 历史订单收货地址被同步改 = 客服恶梦。
+合并省事但订单一旦发起就该\textbf{冻结地址快照}，否则用户改地址簿 $\to$ 历史订单收货地址被同步改 = 客服恶梦。
 \srcnote{service/address.go:34--46 当前最小模型；repository/db/model/order.go AddressID 引用关系（待加 snapshot 字段）}
 \end{frame}
 
@@ -148,7 +150,7 @@ UUID v4            & 完全随机、无序        & 索引页频繁分裂 \\
 \vspace{3mm}
 \small \textbf{业务三连问}：
 \begin{itemize}
-  \item 竞争对手凌晨爬一遍订单号 \texttt{id+1} → 算出我们当日单量 → 友商情报泄露。
+  \item 竞争对手凌晨爬一遍订单号 \texttt{id+1} $\to$ 算出我们当日单量 $\to$ 友商情报泄露。
   \item 订单号要塞进 \textbf{短信 / 客服系统 / 退款单}，太长用户读不出来（雪花 19 位刚好）。
   \item 索引页要顺序写，UUID 把 B+ 树搅得到处分裂 = 写放大 + 内存抖动。
 \end{itemize}
@@ -169,8 +171,8 @@ UUID v4            & 完全随机、无序        & 索引页频繁分裂 \\
 \bottomrule
 \end{tabular}
 \vspace{3mm}
-\small 客服日常话术："您报一下订单号" → 看前几位毫秒戳 → 反算下单时刻 → 立刻匹配那一刻的库存 / 限流 / 网络日志 → 30s 内定位问题。\\
-对账场景：商家按"昨天的订单号区间"拉一遍 → 不用 SELECT \dots WHERE created\_at，直接 \texttt{order\_num BETWEEN}，索引走得飞快。
+\small 客服日常话术："您报一下订单号" $\to$ 看前几位毫秒戳 $\to$ 反算下单时刻 $\to$ 立刻匹配那一刻的库存 / 限流 / 网络日志 $\to$ 30s 内定位问题。\\
+对账场景：商家按"昨天的订单号区间"拉一遍 $\to$ 不用 SELECT \dots WHERE created\_at，直接 \texttt{order\_num BETWEEN}，索引走得飞快。
 \srcnote{pkg/utils/snowflake/snowflake.go:11 epoch = 2024-01-01；README.md \S 技术覆盖·雪花算法订单号}
 \end{frame}
 
@@ -236,17 +238,18 @@ func GenSnowflakeID() int64 {
 % ============================================================
 
 \begin{frame}{30 分钟未付窗口：商家 vs 用户的拉扯}
-\begin{tikzpicture}[node distance=8mm and 12mm]
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[node distance=14mm and 16mm,font=\scriptsize]
   \node[node-box]                          (u) {用户加购};
   \node[node-box,right=of u,node-warn]     (c) {下单\\reserved += n};
   \node[node-box,right=of c,node-warn]     (w) {等待支付\\30 min 窗口};
   \node[node-box,right=of w,node-ok]       (p) {支付成功\\reserved $\to$ sold};
-  \node[node-box,below=of w,node-warn]     (t) {超时未付\\reserved $\to$ available};
+  \node[node-box,below=of c,node-warn]     (t) {超时未付\\reserved $\to$ available};
   \draw[arrow] (u) -- (c);
   \draw[arrow] (c) -- (w);
   \draw[arrow] (w) -- (p);
-  \draw[arrow-alert] (w) -- (t);
-\end{tikzpicture}
+  \draw[arrow-alert] (w.south) -- (t.east);
+\end{tikzpicture}}
 \vspace{2mm}
 \begin{tabular}{@{}p{0.45\linewidth}p{0.45\linewidth}@{}}
 \toprule
@@ -265,7 +268,7 @@ func GenSnowflakeID() int64 {
 \begin{frame}{为什么不"下单即真扣"}
 \begin{itemize}
   \item \textbf{方案 A：下单立即扣 sold} —— 用户取消 / 未支付 = 库存白损失，得回滚 sold 表 = 状态机更复杂。
-  \item \textbf{方案 B：支付时才扣（不预扣）} —— 用户 A 拍下 → 用户 B 同时拍下 → 两人都付钱 → 超卖。
+  \item \textbf{方案 B：支付时才扣（不预扣）} —— 用户 A 拍下 $\to$ 用户 B 同时拍下 $\to$ 两人都付钱 $\to$ 超卖。
   \item \textbf{方案 C：gomall 选 = reserve 预扣 + commit 真扣两阶段}：
     \begin{itemize}
       \item 下单：\texttt{available -= n; reserved += n} —— 锁住但未消耗
@@ -275,7 +278,7 @@ func GenSnowflakeID() int64 {
 \end{itemize}
 \vspace{2mm}
 \small \textbf{业务不变量}：\texttt{available + reserved + sold $\equiv$ 初始水位}，\\
-任何一刻巡检脚本读三个桶相加 = 商品总库存 → 不平就告警。
+任何一刻巡检脚本读三个桶相加 = 商品总库存 $\to$ 不平就告警。
 \srcnote{repository/cache/inventory.go:77--125 reserve/commit/release 三脚 Lua}
 \end{frame}
 
@@ -295,7 +298,7 @@ func GenSnowflakeID() int64 {
 \begin{itemize}
   \item \textbf{第 1 步}：Redis Lua 原子 reserve，失败 = \texttt{ErrStockInsufficient} 直接拒，不进 DB。
   \item \textbf{第 2 步}：同一 \texttt{gorm.Transaction} 写订单 + 写 outbox，二选一不行。
-  \item \textbf{第 3 步}：投递延迟队列，超时未付款自动取消 → reserved 退回 available。
+  \item \textbf{第 3 步}：投递延迟队列，超时未付款自动取消 $\to$ reserved 退回 available。
 \end{itemize}
 \srcnote{service/order.go:40--102 全函数；service/order.go:64--78 同事务写 order + outbox}
 \end{frame}
@@ -336,7 +339,7 @@ if err != nil {
 \begin{itemize}
   \item \textbf{Redis 不能加入 MySQL 事务}：跨存储两阶段提交业内基本不做，复杂度收益不划算。
   \item \textbf{reserve 失败必须早退}：库存不足 = 业务上 100\% 不可能成功，不该让 DB 也写一条又回滚。
-  \item \textbf{tx 失败要补偿 release}：reserve 成功但 DB 失败 → 必须把扣的库存放回 available，否则\textbf{虚假占用}让其他用户也下不了单。
+  \item \textbf{tx 失败要补偿 release}：reserve 成功但 DB 失败 $\to$ 必须把扣的库存放回 available，否则\textbf{虚假占用}让其他用户也下不了单。
   \item \textbf{补偿不是事务的一部分}：即便 \texttt{ReleaseReservation} 也失败，DB 已 rollback，库存差额由对账兜底（\texttt{GetStockSnapshot} 巡检）。
 \end{itemize}
 \srcnote{repository/cache/inventory.go:78--125 reserve / commit / release 三脚}
@@ -346,8 +349,8 @@ if err != nil {
 \begin{itemize}
   \item 写订单 + 发 MQ 如果\textbf{拆成两步}：
   \begin{itemize}
-    \item 写订单成功、发 MQ 前进程挂了 → \textbf{下游永远收不到 OrderCreated} → 不发货 → 客诉。
-    \item 反过来：先发 MQ 再写 DB，DB 失败 → \textbf{幻影订单事件} → 发了不存在的货 → 商家亏。
+    \item 写订单成功、发 MQ 前进程挂了 $\to$ \textbf{下游永远收不到 OrderCreated} $\to$ 不发货 $\to$ 客诉。
+    \item 反过来：先发 MQ 再写 DB，DB 失败 $\to$ \textbf{幻影订单事件} $\to$ 发了不存在的货 $\to$ 商家亏。
   \end{itemize}
   \item \textbf{outbox 表充当桥梁}：写订单和写 outbox 用同一 \texttt{INSERT} 事务，要么都成功要么都没有。
   \item \textbf{异步 publisher} 扫 \texttt{status=pending} 的 outbox 行，发 MQ，发完更新成 \texttt{sent}。
@@ -357,18 +360,19 @@ if err != nil {
 \end{frame}
 
 \begin{frame}{outbox 事件投递时序}
-\begin{tikzpicture}[node distance=9mm and 14mm]
-  \node[node-box] (api) {API Goroutine};
-  \node[node-box,below=of api,node-warn] (tx)  {DB tx\\INSERT order\\INSERT outbox(pending)};
-  \node[node-box,right=of tx] (pub) {Publisher\\(扫 pending)};
-  \node[node-box,right=of pub,node-ok] (mq) {RabbitMQ};
+\resizebox{0.92\textwidth}{0.5\textheight}{%
+\begin{tikzpicture}[node distance=10mm and 16mm,font=\scriptsize]
+  \node[node-box,minimum width=26mm] (api) {API Goroutine};
+  \node[node-box,below=of api,node-warn,minimum width=32mm] (tx)  {DB tx\\INSERT order\\INSERT outbox(pending)};
+  \node[node-box,right=of tx,minimum width=26mm] (pub) {Publisher\\(扫 pending)};
+  \node[node-box,right=of pub,node-ok,minimum width=22mm] (mq) {RabbitMQ};
   \draw[arrow] (api) -- (tx);
-  \draw[arrow-async] (tx) -- node[above,font=\tiny]{异步} (pub);
-  \draw[arrow] (pub) -- (mq);
-  \draw[arrow,bend left=18] (mq) to node[below,font=\tiny]{ack $\to$ MarkSent} (pub);
-\end{tikzpicture}
-\vspace{2mm}
-\small \textbf{业务侧好处}：API 返回时只承担一次 DB 写代价，用户感知延迟 < 5ms；MQ 发布失败由 publisher 重试，\textbf{不阻塞下单链路} = 不会因为 RMQ 抖一下整个下单挂掉。
+  \draw[arrow-async] (tx) -- node[above,font=\tiny,sloped]{异步扫表} (pub);
+  \draw[arrow,transform canvas={yshift=2mm}] (pub) -- node[above,font=\tiny]{publish} (mq);
+  \draw[arrow,transform canvas={yshift=-2mm}] (mq) -- node[below,font=\tiny]{ack $\to$ MarkSent} (pub);
+\end{tikzpicture}}
+\par\smallskip
+{\small \textbf{业务侧好处}：API 返回时只承担一次 DB 写代价，用户感知延迟 < 5ms；MQ 发布失败由 publisher 重试，\textbf{不阻塞下单链路} = 不会因为 RMQ 抖一下整个下单挂掉。}
 \srcnote{repository/db/dao/outbox.go:44--78 FetchBatch + MarkSent + MarkFailed}
 \end{frame}
 
@@ -378,7 +382,7 @@ if err != nil {
 
 \begin{frame}{重复下单：用户狂点的真实场景}
 \begin{itemize}
-  \item \textbf{网络抖一下}：用户点"提交" → 转圈 → 没反应 → 再点一下 → 再点 → 连点 5 下。
+  \item \textbf{网络抖一下}：用户点"提交" $\to$ 转圈 $\to$ 没反应 $\to$ 再点一下 $\to$ 再点 $\to$ 连点 5 下。
   \item \textbf{双 11 客户端重试风暴}：APP 看到请求超时自动重试 3 次，1 次点击 = 4 次请求。
   \item \textbf{支付页双开}：用户在两个 tab 同时下单同一商品。
   \item \textbf{脚本党}：写脚本批量重试薅活动 —— 同一 token 打满请求。
@@ -386,9 +390,9 @@ if err != nil {
 \vspace{2mm}
 \textbf{没有幂等会发生什么}：
 \begin{itemize}
-  \item 用户被\textbf{重复扣款} → 客服爆单 → 退款 → 信任崩塌。
-  \item 库存被多次扣减 → 真实库存 = 5 但 reserved = 25 → 后来者全被拒。
-  \item 商家看到 5 笔重复订单 → 不知道发不发货。
+  \item 用户被\textbf{重复扣款} $\to$ 客服爆单 $\to$ 退款 $\to$ 信任崩塌。
+  \item 库存被多次扣减 $\to$ 真实库存 = 5 但 reserved = 25 $\to$ 后来者全被拒。
+  \item 商家看到 5 笔重复订单 $\to$ 不知道发不发货。
 \end{itemize}
 \srcnote{middleware/idempotency.go:35--112 Idempotency 中间件}
 \end{frame}
@@ -441,10 +445,10 @@ case 3:  // 处理中，让客户端等
 
 \begin{frame}{逐行讲：三态对应三种客户体验}
 \begin{description}\setlength{\itemsep}{0.5mm}
-  \item[\texttt{state=0}] token 过期 / 没传 → 让客户端\textbf{重新生成 key 再来} —— 防止陈年 token 重放攻击。
-  \item[\texttt{state=2}] 已经成功过了 → \textbf{回放上次的 JSON} —— 用户看到的还是那笔订单号、同样的 money，体验上"我就下了一次"。
-  \item[\texttt{state=3}] 还在处理中 → 返回 60002，前端\textbf{灰掉按钮}+ 500ms 后重试 —— 阻断"看似没反应就狂点"。
-  \item[\texttt{state=1}] 抢到锁，真正下单 → \texttt{responseRecorder} 拷贝响应体 → 写回 done 态 → 下次重放就走 case 2。
+  \item[\texttt{state=0}] token 过期 / 没传 $\to$ 让客户端\textbf{重新生成 key 再来} —— 防止陈年 token 重放攻击。
+  \item[\texttt{state=2}] 已经成功过了 $\to$ \textbf{回放上次的 JSON} —— 用户看到的还是那笔订单号、同样的 money，体验上"我就下了一次"。
+  \item[\texttt{state=3}] 还在处理中 $\to$ 返回 60002，前端\textbf{灰掉按钮}+ 500ms 后重试 —— 阻断"看似没反应就狂点"。
+  \item[\texttt{state=1}] 抢到锁，真正下单 $\to$ \texttt{responseRecorder} 拷贝响应体 $\to$ 写回 done 态 $\to$ 下次重放就走 case 2。
 \end{description}
 \srcnote{middleware/idempotency.go:96--110 responseRecorder + CommitIdempotencyResult}
 \end{frame}
@@ -465,7 +469,7 @@ case 3:  // 处理中，让客户端等
 \small \textbf{业务意义}：同一 \texttt{Idempotency-Key} 重放 \textbf{75 万次}，DB 只多 1 行。\\
 "重复下单防护"成本接近 0 —— 60002 直接读 Redis done 态。\\
 order 表 6M 行 / 653 MB 不影响延迟 —— 不查表就不付代价。
-\srcnote{stressTest/REPORT.md \S 4 幂等中间件 755{,}033 次 → 1 笔订单}
+\srcnote{stressTest/REPORT.md \S 4 幂等中间件 755{,}033 次 $\to$ 1 笔订单}
 \end{frame}
 
 % ============================================================
@@ -483,7 +487,7 @@ order 表 6M 行 / 653 MB 不影响延迟 —— 不查表就不付代价。
 \end{tabular}
 \vspace{3mm}
 \begin{itemize}
-  \item \textbf{同步}：用户等响应的同时 DB 在写；DB 抖动 → 全部超时 → 转圈 → 流失。
+  \item \textbf{同步}：用户等响应的同时 DB 在写；DB 抖动 $\to$ 全部超时 $\to$ 转圈 $\to$ 流失。
   \item \textbf{异步}：MQ 顶住瞬时压力，consumer 平滑落库；代价 = 用户多一次轮询。
   \item \textbf{业务承诺}：P0 接口（下单 / 支付）\textbf{不挂限流}，靠异步削峰扛峰值（README SLO 行）。
 \end{itemize}
@@ -491,7 +495,8 @@ order 表 6M 行 / 653 MB 不影响延迟 —— 不查表就不付代价。
 \end{frame}
 
 \begin{frame}{同步 vs 异步：链路对比}
-\begin{tikzpicture}[node distance=8mm and 14mm]
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[node distance=8mm and 14mm,font=\scriptsize]
   \node[node-box] (c1) {Client};
   \node[node-box,right=of c1,node-warn] (s1) {API};
   \node[node-box,right=of s1,node-warn] (d1) {DB tx + outbox};
@@ -499,16 +504,16 @@ order 表 6M 行 / 653 MB 不影响延迟 —— 不查表就不付代价。
   \draw[arrow] (s1) -- (d1);
   \node[font=\tiny,below=1mm of s1] {/orders/create};
 
-  \node[node-box,below=12mm of c1] (c2) {Client};
+  \node[node-box,below=22mm of c1] (c2) {Client};
   \node[node-box,right=of c2,node-warn] (s2) {API};
   \node[node-box,right=of s2,node-ok]   (q2) {Redis ticket\\+ MQ};
   \node[node-box,right=of q2,node-ok]   (w2) {Consumer\\$\to$ DB tx + outbox};
   \draw[arrow] (c2) -- (s2);
   \draw[arrow] (s2) -- (q2);
   \draw[arrow-async] (q2) -- (w2);
-  \draw[arrow,bend left=22] (c2.south) to node[below,font=\tiny]{poll status} (q2.south);
-  \node[font=\tiny,below=1mm of s2] {/orders/enqueue + /orders/status};
-\end{tikzpicture}
+  \draw[arrow] (c2.south) to[out=-30,in=-150] node[below,font=\tiny]{poll status} (q2.south);
+  \node[font=\tiny,above=1mm of s2] {/orders/enqueue + /orders/status};
+\end{tikzpicture}}
 \srcnote{service/order\_async.go:119--172 enqueue；:175--188 status}
 \end{frame}
 
@@ -549,13 +554,15 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context,
 \end{frame}
 
 \begin{frame}{ticket 状态机}
-\begin{tikzpicture}[node distance=10mm and 18mm]
+\centering
+\resizebox{0.78\textwidth}{0.42\textheight}{%
+\begin{tikzpicture}[node distance=10mm and 20mm,font=\scriptsize]
   \node[node-state,node-state-normal]              (p) {pending};
   \node[node-state,node-state-transition,above right=of p] (o) {ok\\+OrderNum};
   \node[node-state,node-state-alert,below right=of p]      (f) {failed\\+reason};
-  \draw[arrow]       (p) -- node[above,font=\tiny]{consumer 落库}    (o);
-  \draw[arrow-alert] (p) -- node[below,font=\tiny]{publish/ddl 失败} (f);
-\end{tikzpicture}
+  \draw[arrow]       (p.north east) -- node[above=2pt,font=\tiny,sloped]{consumer 落库}    (o.west);
+  \draw[arrow-alert] (p.south east) -- node[below=2pt,font=\tiny,sloped]{publish/db 失败} (f.west);
+\end{tikzpicture}}
 \vspace{2mm}
 \begin{itemize}
   \item \textbf{pending}：API 已收单，consumer 未落库 —— 前端转圈但带文案"高峰排队中"。
@@ -574,9 +581,9 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context,
 \vspace{2mm}
 任何一个不变量被破坏，巡检脚本应当告警：
 \begin{itemize}
-  \item Redis 双桶不平 → 库存对账脚本（\texttt{GetStockSnapshot}）→ \textbf{客服报"我有 5 件但显示售罄"时第一时间查}。
-  \item 订单与 outbox 数量不一致 → 直接 SQL JOIN 抽查 → \textbf{商家报"看不到这单"时第一时间查}。
-  \item ticket=ok 但订单不存在 → consumer 写回路径异常 → \textbf{用户报"拍下了但订单页空"时第一时间查}。
+  \item Redis 双桶不平 $\to$ 库存对账脚本（\texttt{GetStockSnapshot}）$\to$ \textbf{客服报"我有 5 件但显示售罄"时第一时间查}。
+  \item 订单与 outbox 数量不一致 $\to$ 直接 SQL JOIN 抽查 $\to$ \textbf{商家报"看不到这单"时第一时间查}。
+  \item ticket=ok 但订单不存在 $\to$ consumer 写回路径异常 $\to$ \textbf{用户报"拍下了但订单页空"时第一时间查}。
 \end{itemize}
 \srcnote{repository/cache/inventory.go:128--138 GetStockSnapshot 巡检入口}
 \end{frame}
@@ -733,7 +740,7 @@ publisher 重试超限 & outbox 标 dead   & 客服联系商家手动补发货 \
 \vspace{1mm}
 
 \textbf{Q5}：755K 次请求 = 1 笔订单的业务价值？\\
-\hspace{4mm}A：用户网络抖 / 双 11 客户端重试风暴 / 脚本党 → 不会重复扣款、不会重复占库存、商家不会看到 5 笔幽灵订单。
+\hspace{4mm}A：用户网络抖 / 双 11 客户端重试风暴 / 脚本党 $\to$ 不会重复扣款、不会重复占库存、商家不会看到 5 笔幽灵订单。
 \end{frame}
 
 \begin{frame}{面试 Q\&A（2/2）}
