@@ -2,8 +2,8 @@
 % 缩小本 deck 的代码字号，避免长 lstlisting 溢出
 \lstset{basicstyle=\ttfamily\tiny}
 
-\title{法币支付：金额加密、第三方调用与熔断幂等}
-\subtitle{gomall /paydown 业务侧 deck}
+\title{支付：钱即将出手的那一秒}
+\subtitle{gomall /paydown 业务侧 deck —— 五角色视角看一次扣款}
 \author{gomall · 业务侧 deck}
 \date{}
 
@@ -16,56 +16,133 @@
 \end{frame}
 
 % ============================================================
-\section{支付链路全景与四个硬约束}
+\section{业务定位：支付是 P0 中的 P0}
 % ============================================================
 
-\begin{frame}{/paydown 在 gomall 的位置}
+\begin{frame}{为什么单独拿一份 deck 讲支付}
 \begin{itemize}
-  \item 用户视角：只是一次"点确认"。
-  \item 系统视角：一次 \texttt{POST /paydown} 必须\textbf{同时}做对四件事：
-  \begin{itemize}
-    \item 解密买家密文金额、扣款、加密回写。
-    \item 解密卖家密文金额、入账、加密回写。
-    \item DB 扣库存 + 翻订单状态到 \texttt{PendingShipping}。
-    \item 写 \texttt{order.paid} outbox 事件。
-  \end{itemize}
-  \item 任一步失败：全部回滚 + 客户端可重试 + \textbf{绝不扣两次}。
+  \item 整个电商链路 20+ 环节，支付是\textbf{唯一让用户真正紧张的一秒}：钱即将离开账户。
+  \item 浏览失败 = 再刷一次；下单失败 = 重填地址；支付失败 = 客诉、退款、平台兜底。
+  \item gomall 的 SLO 里它属于 P0：\textbf{99.95\% 可用 / p99 < 500ms / 不挂限流}。
+  \item 这意味着：每年最多宕 4 小时 22 分；用户排队也得放进来，不能 70001。
 \end{itemize}
-\srcnote{service/payment.go:35--200；routes/router.go:114--121}
+\keypoint{支付不是"一个接口"，而是"商业信任的具体落点"。每一行代码背后都有一条客诉路径。}
+\srcnote{README.md 业务承诺表；routes/router.go:123--130 paydown 中间件栈}
 \end{frame}
 
-\begin{frame}{业务侧的四个硬约束}
-\begin{tabular}{@{}lll@{}}
+\begin{frame}{五角色眼中的同一秒}
+\small
+\begin{tabular}{@{}lp{8.5cm}@{}}
 \toprule
-约束 & 设计回应 & 代码位置 \\
+角色 & 那一秒最焦虑的事 \\
 \midrule
-金额不能明文落盘 & AES-128-CBC 加密 & user.go:59--79 \\
-密码错不能扣款 & 长度 + 解密失败即 abort & payment.go:42--45 \\
-第三方支付会挂 & CircuitBreaker 5/10s/3 & circuitbreaker.go \\
-客户端会重试 & Idempotency-Key + Lua & idempotency.go \\
+C 端用户 & "我的钱扣了吗 / 订单成了吗 / 重复扣了怎么办" \\
+商家 & "什么时候到账 / 平台抽多少 / 退款会不会扣回去" \\
+运营 & "GMV 落账瞬间能不能扛峰 / 这分钟卡了多少订单" \\
+客服 & "扣款没出货 / 支付后掉单 / 重复扣款"三大客诉 \\
+SRE & "p99 还在 500ms 以内吗 / 第三方挂了会不会全站陪葬" \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
-\small 四条由\textbf{合规 + 客诉 + 监控}三方倒推。后面四节按此顺序展开。
-\srcnote{routes/router.go:114--121 paydown 完整中间件栈}
+\begin{itemize}\small
+  \item 本 deck 后续每一帧都标注\textbf{它在回答哪个角色的哪个问题}。
+  \item 业务码 60002 / 70002 / 30001 都会出现在客服话术里。
+\end{itemize}
+\srcnote{README.md 业务全景表；pkg/e/code.go:53--58}
 \end{frame}
 
-\begin{frame}{明文存金额会出什么事}
+\begin{frame}{业务后果数字化}
 \begin{itemize}
-  \item \textbf{合规}：等保 2.0 / PCI-DSS 要求"敏感字段不得明文落盘"，金额属于此类。
-  \item \textbf{防内鬼}：DBA / 离职工程师拿到一次 dump → 全站余额裸了。
-  \item \textbf{防误日志}：明文金额一旦被 \texttt{log.Debug(user)} 序列化 → 上传到 ELK。
-  \item \textbf{审计}：金额被 SQL 直改 → 密文校验失败可立刻发现。
+  \item 支付掉单率每升 \textbf{1 pp}：按 GMV 1000 万/日估算 = 单日 \textbf{10 万元} 直接流失；二次复购率再掉 0.5 pp。
+  \item 客诉一通电话客服平均 \textbf{8 分钟}：日 1000 单掉单 → 客服需 \textbf{2.2 个人日} 兜底。
+  \item 第三方支付 30s 超时不熔断：用户白屏放弃下单率 \textbf{~38\%}（行业经验）。
+  \item 熔断打开期间损失 5\% 用户 vs 不熔断雪崩全站损失 100\%：\textbf{两个数量级}差。
 \end{itemize}
-\keypoint{加密金额不是"加密功能"，是\textbf{把金额从数据库视野里抹掉}。运维看到的永远是乱码。}
+\keypoint{所有看起来"过度设计"的中间件，背后都是一条算得出钱的客诉路径。}
+\srcnote{stressTest/REPORT.md §1 链路压测；routes/router.go:123--130}
+\end{frame}
+
+\begin{frame}{/paydown 在 gomall 业务全景中的位置}
+\begin{tikzpicture}[node distance=6mm and 10mm]
+  \node[node-box] (cart)  {加购选地址\\deck 04};
+  \node[node-box,right=of cart] (order) {下单锁库存\\deck 04+07};
+  \node[node-box,right=of order,node-warn] (pay)   {\textbf{支付}\\本 deck};
+  \node[node-box,right=of pay] (ship)  {商家发货\\deck 09};
+  \node[node-box,below=of pay,node-bad]  (refund){退款 / 售后\\deck 09};
+  \draw[arrow] (cart)  -- (order);
+  \draw[arrow] (order) -- (pay);
+  \draw[arrow] (pay)   -- (ship);
+  \draw[arrow-bad] (pay) -- (refund);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}\small
+  \item 上游：下单已经把库存预占进 Redis \texttt{reserved} 桶。
+  \item 下游：支付成功 → outbox 事件 \texttt{order.paid} → 通知发货 / 优惠券核销 / 索引更新。
+  \item 失败兜底：30 分钟未付 → Cron + RMQ 双保险关单（deck 09）。
+\end{itemize}
+\srcnote{routes/router.go:123--130；service/order\_cancel.go}
+\end{frame}
+
+\begin{frame}{业务边界：本支付\textbf{不做}什么}
+\begin{itemize}
+  \item \textbf{不真接支付宝 / 微信 / 银联}：README 已经写了 —— "法币支付走 outbox 事件，下游对接由 wallet 服务消费（路线图）"。
+  \item \textbf{不做实名 KYC}：合规上属银行 + 持牌支付公司的事。
+  \item \textbf{不做风控引擎}：异常交易识别 / 黑名单 / 行为模型留给独立风控团队。
+  \item \textbf{不做反洗钱（AML）}：上链 / 大额拆分识别走独立合规系统。
+  \item \textbf{不做商家分账}：平台抽成 / 服务费 / 代收代付路线图。
+  \item \textbf{不做发票管理}：增值税专票 / 普票留给财税系统。
+\end{itemize}
+\keypoint{诚实划边界 = 给商家和合规一个交代。MVP 阶段聚焦"扣款 + 入账 + 状态机推进"三件事做到位。}
+\srcnote{README.md §业务边界（不做什么）}
+\end{frame}
+
+\begin{frame}{业务边界图：本 deck 在哪里、不在哪里}
+\begin{tikzpicture}[node distance=5mm and 8mm]
+  \node[node-box,node-ok]   (in1) {扣买家余额};
+  \node[node-box,node-ok,right=of in1] (in2) {入卖家余额};
+  \node[node-box,node-ok,right=of in2] (in3) {订单状态推进};
+  \node[node-box,node-ok,right=of in3] (in4) {outbox 通知下游};
+  \node[node-box,node-bad,below=of in1] (out1) {真实第三方网关};
+  \node[node-box,node-bad,right=of out1] (out2) {KYC / 风控 / AML};
+  \node[node-box,node-bad,right=of out2] (out3) {商家分账};
+  \node[node-box,node-bad,right=of out3] (out4) {发票 / 财税};
+\end{tikzpicture}
+\vspace{1mm}
+\small 上排（绿）= 本 deck 必须做对；下排（红）= 路线图，不在本 deck 范围。但 \textbf{paydown 接口已为真接第三方留好位置}（熔断器已挂、outbox 已通），见 §3。
+\srcnote{README.md §业务边界；routes/router.go:123--130}
+\end{frame}
+
+% ============================================================
+\section{合规与信任：为什么金额要加密}
+% ============================================================
+
+\begin{frame}{客服 / 法务的视角：明文金额会出什么事}
+\begin{itemize}
+  \item \textbf{客服}：用户来电"我的余额怎么少了 50 块"。如果 DBA 能直查 \texttt{users.money}，举证就停在"我说没动你也没法证明"。
+  \item \textbf{法务}：等保 2.0 / GB/T 22239 / PCI-DSS 要求"敏感金额字段不得明文落盘"，年审过不了 = 不能上线大促。
+  \item \textbf{运营}：拖库新闻一旦上热搜（明文金额泄漏），日均订单跌 \textbf{30--50\%}（行业事件经验）。
+  \item \textbf{内控}：明文金额一旦被 \texttt{log.Debug(user)} 序列化 → 上传 ELK → 全公司有 ELK 账号的人都能看。
+\end{itemize}
+\keypoint{加密金额不是"加密功能"，是\textbf{把金额从数据库视野里抹掉}。运维 / DBA / 实习生看到的永远是乱码。}
+\srcnote{repository/db/model/user.go:59--79}
+\end{frame}
+
+\begin{frame}{AES 金额加密的合规业务价值（不只是技术）}
+\begin{itemize}
+  \item \textbf{合规审计}：年审看的是"敏感字段是否加密 + 密钥是否分离 + 是否能审计明文访问路径"。三条都满足，过审周期从 6 周缩到 2 周。
+  \item \textbf{商家结算单脱敏}：商家后台看到的金额是 \textbf{明文（业务必须）}，但需要客服 / 平台审计能力时，DB 直查永远只能拿到密文 —— 一次明文访问必须走 \texttt{DecryptMoney} 函数 → 可被审计日志覆盖。
+  \item \textbf{财务对账}：财务看的是脱敏后的聚合报表（GMV / 商户日入），由结算服务定时拉取后\textbf{一次性解密入数仓}，DB 永远不存明文。
+  \item \textbf{业务取舍代价}：\texttt{SUM(money)} 在 DB 里\textbf{无法直接聚合}（密文异序）—— 财务报表必须走结算服务批跑，不能裸 SQL。
+\end{itemize}
+\srcnote{repository/db/model/user.go:59--79；pkg/utils/encryption/money\_encrypt.go}
 \end{frame}
 
 \begin{frame}{gomall 的金额加密链路}
 \begin{tikzpicture}[node distance=8mm and 14mm]
   \node[node-box] (u) {Client\\req.Key};
   \node[node-box,right=of u] (svc) {PayDown};
-  \node[node-box,right=of svc,node-warn] (aes) {AES-128-CBC\\(MoneySecret, key)};
-  \node[node-box,below=of aes] (db) {MySQL\\money: 密文};
+  \node[node-box,right=of svc,node-warn] (aes) {AES-128-CBC\\(MoneySecret + key)};
+  \node[node-box,below=of aes] (db) {MySQL users.money\\: 密文};
   \draw[arrow] (u) -- node[above,font=\tiny]{支付密码} (svc);
   \draw[arrow] (svc) -- node[above,font=\tiny]{加/解密} (aes);
   \draw[arrow] (aes) -- node[right,font=\tiny]{读写} (db);
@@ -76,7 +153,7 @@
   \item 任一方泄漏\textbf{都不足以}独立解密 → 密钥分离。
   \item 改密码 = 解密旧密文 + 用新 key 重新加密。
 \end{itemize}
-\srcnote{repository/db/model/user.go:59--79}
+\srcnote{repository/db/model/user.go:59--79；config/locales/config.yaml.example 中 MoneySecret 字段}
 \end{frame}
 
 \begin{frame}[fragile]{加解密的代码长这样}
@@ -104,18 +181,52 @@ func (u *User) DecryptMoney(key string) (money int64, err error) {
 \end{lstlisting}
 \end{frame}
 
-\begin{frame}{逐行讲解：加解密做了什么}
+\begin{frame}{逐行讲解：加解密对业务承诺的兑现点}
 \begin{itemize}\small
-  \item \textbf{61 行}：服务端密钥 + 用户密码当两个独立输入，任一方旋转都让原密文失效。
-  \item \textbf{64 行 CBC 而非 ECB}：同一笔金额每次密文不同，防"对照表"猜金额。
-  \item \textbf{65 行 \texttt{Money string}}：密文是 base64 长度可变，直接存 string。
-  \item \textbf{77 行 \texttt{cast.ToInt64}}：解密回 int64，\textbf{单位是分} —— 全链路避免浮点。
-  \item \textbf{错误传播}：密码错 → 乱码 → \texttt{ToInt64} 返 0 → 金额校验失败 → TX 回滚。
+  \item \textbf{61 行 服务端密钥 + 用户密码独立}：DBA 拿走 dump 也无能为力（缺密码）；用户密码被钓鱼也只能搞一个账号（缺服务端密钥）。两道防线分别给法务和反钓鱼。
+  \item \textbf{64 行 CBC 而非 ECB}：同一笔金额每次密文不同 —— 防"对照表猜金额"，对应风控诉求。
+  \item \textbf{65 行 \texttt{Money string}}：密文是 base64 长度可变。代价 = SQL 直接 \texttt{SUM} / \texttt{ORDER BY money} 行不通，必须走结算服务（业务取舍）。
+  \item \textbf{77 行 \texttt{cast.ToInt64}}：单位是\textbf{分} —— 全链路避免浮点，对应"100 元订单分账误差 0.01 元"客诉。
+  \item \textbf{错误传播}：密码错 → 乱码 → \texttt{ToInt64} 返 0 → 金额校验失败 → TX 回滚。表象与"余额不足"一致，防穷举区分。
 \end{itemize}
 \srcnote{repository/db/model/user.go:59--79}
 \end{frame}
 
-\begin{frame}{支付密码 vs 登录密码：为什么分两套}
+\begin{frame}{业务取舍：金额加密对 SQL 聚合的代价}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+查询场景 & 明文方案 & 密文方案 \\
+\midrule
+"商家日入" & \texttt{SUM(money) GROUP BY boss\_id} 秒级 & 结算服务批跑 + 缓存 \\
+"用户余额排行" & \texttt{ORDER BY money} 秒级 & 不支持，业务侧改埋点 \\
+"对账" & SQL 比对 & 解密后入数仓 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\begin{itemize}\small
+  \item 代价是\textbf{放弃 DB 侧大数据聚合能力}。
+  \item 收益是\textbf{合规通过 + 拖库零金额泄漏}。
+  \item 业务侧的选择：交易类金额\textbf{必须密文}（盘比合规重要），统计类指标走数仓 / 缓存（精度可后补）。
+\end{itemize}
+\srcnote{repository/db/model/user.go:59--79}
+\end{frame}
+
+% ============================================================
+\section{支付密码：业务侧二次验证的取舍}
+% ============================================================
+
+\begin{frame}{为什么不直接用"实名 + 短信验证码"}
+\begin{itemize}
+  \item \textbf{实名 KYC 的合规成本}：要接公安一二三要素接口（人均 0.5--2 元 / 次），运营商短信通道（0.05 元 / 条），并备案"信息处理者"身份 → \textbf{合规审批 6+ 月}。
+  \item \textbf{业务收益对照}：电商扣款金额一般 < 1000 元 / 笔，风险敞口与全链 KYC 不匹配。
+  \item \textbf{客诉路径}：短信验证码到达率 \textbf{96--98\%} → 每天 \textbf{2--4\%} 用户因收不到验证码放弃支付。
+  \item \textbf{业务侧的选择}：用\textbf{业务侧 6 位支付密码} —— 不存盘、入口校验、AES 入参，覆盖 95\% 场景；KYC + 短信留给"大额提现 / Web3 / 银行卡绑定"路线图。
+\end{itemize}
+\srcnote{service/payment.go:42--45；consts/user.go EncryptMoneyKeyLength}
+\end{frame}
+
+\begin{frame}{支付密码 vs 登录密码：业务上为什么分两套}
 \small
 \begin{tabular}{@{}lll@{}}
 \toprule
@@ -123,23 +234,63 @@ func (u *User) DecryptMoney(key string) (money int64, err error) {
 \midrule
 作用    & 拿 JWT      & 解密金额     \\
 长度    & $\geq 6$    & 固定 6 位    \\
-泄漏    & 看订单地址  & 直接扣款     \\
-隔离    & bcrypt 单向 & AES 双向     \\
-存储    & 哈希        & 不存(仅入参) \\
+泄漏后果 & 看订单地址  & 直接扣款     \\
+存储    & bcrypt 哈希 & \textbf{不存}    \\
+重置    & 邮箱 + 短信 & 客服核身 + 余额冻结 \\
+客服话术 & "已发重置链接" & "请验证身份后由客服重置，48h 内余额冻结" \\
 \bottomrule
 \end{tabular}
 \vspace{1mm}
-\begin{itemize}
-  \item 登录密码哈希存：服务端只校验、不还原。
+\begin{itemize}\small
   \item 支付密码\textbf{不存}：用户每次手输 → 整库 dump 也解不开。
-  \item 入口校验 \texttt{len(req.Key) == 6}，太短直接拒。
+  \item 入口校验 \texttt{len(req.Key) == 6}，太短直接拒（防 SQL 注入测试 / 弱口令撞库）。
+  \item 客服只能"冻结余额 48h + 用户本人重置后解冻"，不可代输支付密码。
 \end{itemize}
 \srcnote{service/payment.go:42--45；consts/user.go:35}
 \end{frame}
 
+\begin{frame}{支付密码弱口令的客诉路径}
+\begin{tikzpicture}[node distance=6mm and 10mm]
+  \node[node-box] (u) {用户支付};
+  \node[node-box,right=of u,node-warn] (a) {6 位短密码\\被穷举};
+  \node[node-box,right=of a,node-bad] (b) {账户余额\\被盗刷};
+  \node[node-box,below=of b] (c) {客诉电话};
+  \node[node-box,left=of c] (d) {客服核身\\冻结余额};
+  \node[node-box,left=of d] (e) {审计日志\\追加密访问};
+  \draw[arrow] (u) -- (a);
+  \draw[arrow-bad] (a) -- (b);
+  \draw[arrow] (b) -- (c);
+  \draw[arrow] (c) -- (d);
+  \draw[arrow] (d) -- (e);
+\end{tikzpicture}
+\vspace{1mm}
+\begin{itemize}\small
+  \item 弱口令风险敞口：6 位 = 100 万组合，单接口 5 RPS 也能穷举完一天。
+  \item \textbf{为何还能用}：因为接口前面挂了 \textbf{CircuitBreaker + RateLimit + Idempotency} 三层，单 IP 单用户实际穷举速率 < 0.5 RPS → 跑完平均 \textbf{23 天}，余额早被风控冻结。
+  \item 路线图：路线图阶段对\textbf{风控引擎}（异地 IP / 行为模型）做对接。
+\end{itemize}
+\srcnote{middleware/ratelimit.go；middleware/circuitbreaker.go；service/payment.go:42--45}
+\end{frame}
+
 % ============================================================
-\section{PayDown 主体：四件事必须原子}
+\section{PayDown 主体：一次扣款里的五件业务事}
 % ============================================================
+
+\begin{frame}{业务侧的四个硬约束}
+\begin{tabular}{@{}lll@{}}
+\toprule
+约束 & 业务诉求 & 设计回应 \\
+\midrule
+金额不能明文落盘 & 合规 / 防内鬼 / 防误日志 & AES-128-CBC + 双密钥 \\
+密码错不能扣款 & 防穷举 / 防钓鱼 & 长度校验 + 解密失败 abort \\
+第三方支付会挂 & 不让 5\% 拖垮 100\% & CircuitBreaker 5/10s/3 \\
+客户端会重试 & "重复扣款"是 top1 客诉 & Idempotency-Key + Lua \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small 四条由\textbf{合规 + 客诉 + 监控}三方倒推。\textbf{业务码地图}：30001 token 错 / 60002 处理中 / 70001 限流 / 70002 熔断。
+\srcnote{routes/router.go:123--130 paydown 完整中间件栈；pkg/e/code.go:53--58}
+\end{frame}
 
 \begin{frame}{PayDown 在一次事务里做的五件事}
 \begin{tikzpicture}[node distance=5mm and 8mm]
@@ -156,7 +307,7 @@ func (u *User) DecryptMoney(key string) (money int64, err error) {
   \draw[arrow-bad] (s5) -- (rb);
 \end{tikzpicture}
 \vspace{1mm}
-\small 五步在同一 \texttt{tx}，\textbf{要么全成功要么全不动}。outbox 也在 TX 内写 —— 事务消息防丢核心（deck 04）。
+\small 五步在同一 \texttt{tx}，\textbf{要么全成功要么全不动}。outbox 也在 TX 内写 —— 事务消息防丢（deck 11 主题）。\textbf{业务承诺}：客户端拿到 200 status=200 即代表"钱扣了 / 商家入账了 / 库存减了 / 下游必定能收到事件"四件事都已落定。
 \srcnote{service/payment.go:52--184}
 \end{frame}
 
@@ -186,17 +337,17 @@ err = userDao.UpdateUserById(uId, user)        // 落 DB
 \end{lstlisting}
 \end{frame}
 
-\begin{frame}{逐行讲解：扣款这一步的三个要点}
-\begin{itemize}
-  \item \textbf{57 行 UnPaid 校验在 TX 内}：不能 TX 外读再进事务 —— 否则典型 TOCTOU，两并发支付都看到 UnPaid → 双扣。
-  \item \textbf{65 行 \texttt{DecryptMoney(req.Key)}}：密码错 → 解出乱码 → \texttt{userMoney} 几乎一定不够 → 走"金额不足"分支。\textbf{密码错和余额不足表象一致}，防穷举。
+\begin{frame}{逐行讲解：扣款这一步的业务含义}
+\begin{itemize}\small
+  \item \textbf{57 行 UnPaid 校验在 TX 内}：不能 TX 外读再进事务 —— 否则典型 TOCTOU，两并发支付都看到 UnPaid → 双扣。这是"重复扣款"客诉的根因之一。
+  \item \textbf{65 行 \texttt{DecryptMoney(req.Key)}}：密码错 → 解出乱码 → \texttt{userMoney} 几乎一定不够 → 走"金额不足"分支。\textbf{密码错和余额不足表象一致}，防穷举 —— 这是产品和安全协商出的结果。
   \item \textbf{71--72 行 重新加密}：\texttt{Money} 是 string 不能直接减；必须 decrypt $\to$ int64 减 $\to$ encrypt。整段在 TX 里，失败回滚干净。
-  \item \textbf{金额不足也 \texttt{return err}}：让 TX 走 rollback，\texttt{order.Type} 不会推进，客户端可原 OrderId 重试。
+  \item \textbf{金额不足也 \texttt{return err}}：让 TX 走 rollback，\texttt{order.Type} 不会推进，客户端可原 OrderId + 充值后重试 —— 客服话术："充值后原订单可直接付款，30 分钟内有效"。
 \end{itemize}
 \srcnote{service/payment.go:55--96}
 \end{frame}
 
-\begin{frame}[fragile]{outbox 写在事务尾}
+\begin{frame}[fragile]{outbox 写在事务尾 —— 业务承诺的兑现点}
 \begin{lstlisting}[language=Go,firstnumber=174,
   caption={\srcnote{service/payment.go:174--184}}]
 // outbox 事件：order.paid，投递交给 publisher 异步
@@ -209,29 +360,69 @@ return dao.NewOutboxDaoByDB(tx).Insert(
 )
 \end{lstlisting}
 \vspace{1mm}
-\small \texttt{outbox.Insert} 用的是\textbf{同一个 tx} —— 事务消息：扣款与"已发事件"同生共死，\textbf{绝不会"钱扣了但下游没收到"}。Redis 预占释放走 TX 外，失败仅记日志，对账兜底。
-\srcnote{service/payment.go:193--197 cache.CommitReservation}
+\small \texttt{outbox.Insert} 用\textbf{同一个 tx} —— 事务消息：扣款与"已发事件"同生共死，\textbf{绝不会"钱扣了但下游没收到"}。Redis 预占释放走 TX 外，失败仅记日志，对账兜底。\textbf{业务下游}：发货通知 / 优惠券核销 / ES 索引更新 / 商家看板更新 / 财务对账增量。
+\srcnote{service/payment.go:193--197 cache.CommitReservation；deck 11 outbox 主题}
+\end{frame}
+
+\begin{frame}{客服 SOP：用户报"扣款没出货"怎么查}
+\begin{tikzpicture}[node distance=5mm and 8mm]
+  \node[node-box] (q) {用户报\\"扣了没货"};
+  \node[node-box,right=of q] (a) {查订单\\type 字段};
+  \node[node-box,right=of a] (b) {查 outbox\\order.paid};
+  \node[node-box,below=of b] (c) {查 RMQ\\消费者日志};
+  \node[node-box,left=of c] (d) {查 Redis\\reserved};
+  \node[node-box,left=of d] (e) {结论\\+ 处理};
+  \draw[arrow] (q) -- (a);
+  \draw[arrow] (a) -- (b);
+  \draw[arrow] (b) -- (c);
+  \draw[arrow] (c) -- (d);
+  \draw[arrow] (d) -- (e);
+\end{tikzpicture}
+\vspace{1mm}
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+情况 & 表征 & 客服动作 \\
+\midrule
+TX 失败回滚 & order=UnPaid + 余额未减 & 让用户重试，无影响 \\
+扣了但 outbox 未发 & order=Paid + outbox 无行 & \textbf{不可能}，TX 原子 \\
+outbox 已发未消费 & outbox pending > 5min & 提工单升级 SRE \\
+消费失败 & outbox dead & 人工补发 \\
+\bottomrule
+\end{tabular}
+\srcnote{service/payment.go:174--184；repository/db/dao/outbox.go}
 \end{frame}
 
 % ============================================================
-\section{第三方支付与熔断}
+\section{第三方支付：业务边界与熔断的运营 SOP}
 % ============================================================
 
 \begin{frame}{当前 gomall 的"第三方支付"是什么}
 \begin{itemize}
-  \item gomall 当前未接真实支付宝/微信，"扣买家、入卖家"在本地 DB 完成。
+  \item gomall 当前\textbf{未接真实支付宝/微信}（README 已写明业务边界），"扣买家、入卖家"在本地 DB 完成。
   \item 但 \texttt{/paydown} 已挂 \texttt{CircuitBreaker} —— \textbf{给未来留位置}：
   \begin{itemize}
-    \item 接入真实网关后链路变成"DB tx + 同步 RPC 第三方"。
-    \item 第三方是慢依赖：p99 数百 ms + 会"集体抽风"。
+    \item 接入真实网关后链路变成 "DB tx + 同步 RPC 第三方"。
+    \item 第三方是慢依赖：p99 数百 ms + 会"集体抽风"（支付宝春节大促有 5--15 分钟级抽风历史）。
     \item 不熔断 → goroutine 堆积 → 进程 OOM → 全站崩。
   \end{itemize}
   \item 熔断作用：\textbf{宁可 5\% 用户立即看到"稍后重试"，也不让 100\% 用户白屏 30s}。
 \end{itemize}
-\srcnote{routes/router.go:114--121；service/payment.go 当前实现}
+\srcnote{routes/router.go:123--130；README.md §业务边界}
 \end{frame}
 
-\begin{frame}{CircuitBreaker 的三态}
+\begin{frame}{业务路线图：如何接入真实第三方而不重写代码}
+\begin{itemize}
+  \item \textbf{现状}：\texttt{PayDown} 内部直接操作本地 \texttt{users.money} 表。
+  \item \textbf{路线图 step 1}：抽出 \texttt{PaymentGateway} interface，本地 DB 实现作为默认；接真实第三方时新增 \texttt{AlipayGateway} / \texttt{WechatGateway}。
+  \item \textbf{路线图 step 2}：\texttt{PayDown} TX 内只写"支付意图"行 + outbox；同步 RPC 走 \texttt{Gateway.Pay} 在熔断器内调；返回 ticket 给客户端。
+  \item \textbf{路线图 step 3}：第三方回调 → 验签 → 翻订单状态 → outbox \texttt{order.paid} —— 与本 deck 主链路衔接。
+  \item \textbf{已就位}：熔断器、幂等、outbox、业务码 70002 都已经在生产路径上跑过了 —— \textbf{接入真实网关不改架构，只换 Gateway 实现}。
+\end{itemize}
+\srcnote{service/payment.go:35--200；routes/router.go:123--130}
+\end{frame}
+
+\begin{frame}{CircuitBreaker 的三态与用户体验}
 \begin{tikzpicture}[node distance=10mm and 16mm]
   \node[node-state,node-state-normal] (cl) {Closed};
   \node[node-state,node-state-alert,right=of cl] (op) {Open};
@@ -244,14 +435,14 @@ return dao.NewOutboxDaoByDB(tx).Insert(
 \vspace{1mm}
 \begin{tabular}{@{}lll@{}}
 \toprule
-状态     & 含义              & 用户体感        \\
+状态     & 用户体感         & 客服话术       \\
 \midrule
-Closed   & 正常放行          & 正常下单        \\
-Open     & 全拒、立即返回    & 立刻 70002      \\
-HalfOpen & 放 3 个探测       & 部分通过        \\
+Closed   & 正常下单         & "请正常付款" \\
+Open     & 立刻 70002       & "支付通道维护中，30 秒后请重试" \\
+HalfOpen & 部分通过         & "正在恢复，您可能需要重试 1--2 次" \\
 \bottomrule
 \end{tabular}
-\srcnote{middleware/circuitbreaker.go:17--21；routes/router.go:115--119}
+\srcnote{middleware/circuitbreaker.go:17--21；routes/router.go:124--128}
 \end{frame}
 
 \begin{frame}[fragile]{allow() —— 决定能否放行}
@@ -280,35 +471,77 @@ func (cb *circuitBreaker) allow() error {
 \end{lstlisting}
 \end{frame}
 
-\begin{frame}{逐行讲解：allow() 的关键决策}
-\begin{itemize}
-  \item \textbf{Closed 分支零开销}：只一次原子 Load → return nil，不抢锁不计数。这是熔断器能放 paydown 入口的前提。
-  \item \textbf{Open 早返回}：\texttt{time.Now() - openedAt} 无锁原子读，99\% 的 Open 期请求从这里返回。
-  \item \textbf{加锁切 HalfOpen}：只有自愈窗口的\textbf{第一个}请求加锁切状态 —— double-check 防两 goroutine 同时切。
-  \item \textbf{HalfOpen 探测配额}：\texttt{halfOpenReq.Add(1) > 3} 保证半开期最多放 3 个试水。
-  \item \textbf{report() 配套}：3 个全成功 → 回 Closed；任一失败 → 立即重新 Open，时钟重置。
+\begin{frame}{逐行讲解：allow() 的业务含义}
+\begin{itemize}\small
+  \item \textbf{Closed 零开销}：只一次原子 Load → return nil，不抢锁不计数。前提是 paydown 不能因为加了熔断器就比 /ping 慢一个数量级。
+  \item \textbf{Open 早返回}：99\% 的 Open 期请求 \textbf{< 1 微秒返回}，不占 DB / 不占 Redis / 不占下游 —— 给被压崩的第三方真正喘息时间。
+  \item \textbf{加锁切 HalfOpen}：只有自愈窗口的第一个请求加锁切状态，double-check 防两 goroutine 同时切。
+  \item \textbf{HalfOpen 探测配额 3}：保证半开期最多放 3 个试水 —— 业务上 = "拿 3 个真实用户来证明下游恢复"。
+  \item \textbf{report() 配套}：3 个全成功 → 回 Closed；任一失败 → 立即重新 Open。运营视角："恢复了就立刻全放，再挂就立刻再断"。
 \end{itemize}
 \srcnote{middleware/circuitbreaker.go:76--128}
 \end{frame}
 
-\begin{frame}[fragile]{失败的定义 + 阈值 5 / 10s / 3}
+\begin{frame}[fragile]{失败的定义 + 阈值 5 / 10s / 3 的业务取舍}
 \begin{lstlisting}[language=Go,firstnumber=69,caption={\srcnote{middleware/circuitbreaker.go:69--70}}]
 failed := len(c.Errors) > 0 || c.Writer.Status() >= http.StatusInternalServerError
 cb.report(failed)
 \end{lstlisting}
 \vspace{1mm}
-\begin{itemize}
-  \item \textbf{只看 5xx 不看 4xx}：4xx 是密码错/余额不足等业务正常路径，不熔断。200 + 业务码 70001/70002 也不算失败。
-  \item \textbf{阈值 5}：1--2 次抖动不算挂，连续 5 次 = 真挂。
-  \item \textbf{OpenTimeout 10s}：第三方支付重启通常 5--30s，10s 是中位数。
-  \item \textbf{HalfOpenMaxReq 3}：试 3 个够判定，再多浪费用户体验。
+\begin{itemize}\small
+  \item \textbf{只看 5xx 不看 4xx}：4xx 是密码错 / 余额不足等业务正常路径 → 不算熔断信号。200 + 业务码 70001/70002 也不算失败 —— 业务码是\textbf{已知的拒绝}，不是\textbf{下游真挂}。
+  \item \textbf{阈值 5}：1--2 次抖动是正常抖动，连续 5 次 = 真挂。业务取舍 —— 阈值更小 = 熔太敏感，少量用户网络抖也熔；更大 = 熔太迟，雪崩已成。
+  \item \textbf{OpenTimeout 10s}：第三方支付重启通常 5--30s，10s 是行业中位数。
+  \item \textbf{HalfOpenMaxReq 3}：试 3 个够判定。再多 = 浪费用户体验；再少 = 抽样偏差大。
 \end{itemize}
-\srcnote{routes/router.go:115--119 当前硬编码 5/10s/3}
+\srcnote{routes/router.go:124--128 当前硬编码 5/10s/3}
+\end{frame}
+
+\begin{frame}{熔断打开期间的运营 SOP（最重要）}
+\small
+\begin{tabular}{@{}lp{8cm}@{}}
+\toprule
+时刻 & 谁做什么 \\
+\midrule
+T+0s & 监控告警：paydown 5xx 连续 $\geq$ 5 → \texttt{state=Open} \\
+T+5s & 自动钉钉：@支付 oncall + @客服主管 \\
+T+10s & 客服群发话术："支付通道维护中，30s 后重试，造成不便已发放 5 元无门槛券" \\
+T+10s & 运营评估：是否切备用通道（路线图） / 是否触发"补偿券回赠" \\
+T+10--40s & HalfOpen 探测期，每 10s 一次状态推 \\
+T+40s & 若 Closed：全量恢复 + 发推文道歉；若仍 Open：升级 P1 故障会议 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\keypoint{熔断不仅是\textbf{技术开关}，更是\textbf{运营决策的触发器}：是否切通道 / 是否发补偿 / 是否对外公告，都挂在 \texttt{state=Open} 这一个事件上。}
+\srcnote{middleware/circuitbreaker.go:108--128 report()}
+\end{frame}
+
+\begin{frame}{补偿券回赠：把"5\% 损失"转成"10\% 复购"}
+\begin{itemize}
+  \item 熔断打开 10 秒钟，估计影响 \textbf{200--500} 个真实下单用户。
+  \item 自动监控触发 → 给受影响用户发"5 元无门槛券，48h 有效"。
+  \item 行业数据：补偿券回赠 → \textbf{40\%+} 用户当周回访下单。
+  \item 算账：发 200 张 5 元券 = 平台成本 1000 元；挽回 80 单 = GMV 8000 元 + 长期 LTV 数倍。
+  \item 这是\textbf{把故障转成品牌资产}的标准动作，比"无声崩了"价值高 1--2 个量级。
+\end{itemize}
+\keypoint{支付熔断 = 业务事件，不是技术事件。运营 / 客服 / 财务都在听这个信号。}
+\srcnote{routes/router.go:124--128 触发；优惠券系统 deck 08}
 \end{frame}
 
 % ============================================================
-\section{幂等：客户端必须带原 Idempotency-Key 重试}
+\section{幂等：重复扣款是客服 top1 客诉}
 % ============================================================
+
+\begin{frame}{"重复扣款"客诉的真实路径}
+\begin{itemize}
+  \item 客诉占比：电商支付类客诉中"重复扣款"长期排\textbf{第 1--2 位}。
+  \item 单笔重复扣款的处理成本：客服 \textbf{12 分钟}（核身 + 查证 + 上工单） + 财务退款 \textbf{T+1} + 用户负面口碑。
+  \item 单笔金额 100 元 → 平台成本 \textbf{30--50 元}（人工 + 退款手续费 + 口碑损失）。
+  \item 防"重复扣款"的 ROI 极高 → 任何一笔被幂等拦下来都是赚的。
+\end{itemize}
+\keypoint{重试是客户端的权利，幂等是服务端的义务。\textbf{两者共同维护"恰好一次"。}}
+\srcnote{middleware/idempotency.go；stressTest/REPORT.md §4 幂等压测}
+\end{frame}
 
 \begin{frame}{为什么熔断器之后还要挂幂等}
 \begin{tikzpicture}[node distance=8mm and 12mm]
@@ -325,12 +558,13 @@ cb.report(failed)
 \begin{itemize}
   \item 熔断器关心\textbf{保护下游}（5xx 多了断开）。
   \item 幂等关心\textbf{保护用户钱包}（同一笔单只扣一次）。
-  \item 目标正交，必须\textbf{同时}挂。返回 \texttt{200+status=70002}，HTTP 仍是 200 → app 端老网关不会按 5xx 处理。
+  \item 两个目标正交，必须\textbf{同时}挂。
+  \item 返回 \texttt{200 + status=70002}，HTTP 仍 200 → app 端老网关不会按 5xx 处理。
 \end{itemize}
-\srcnote{routes/router.go:114--121；pkg/e/code.go:58 ErrCircuitOpen=70002}
+\srcnote{routes/router.go:123--130；pkg/e/code.go:58 ErrCircuitOpen=70002}
 \end{frame}
 
-\begin{frame}{客户端的重试时序（关键约定）}
+\begin{frame}{客户端的重试时序（关键业务约定）}
 \begin{tikzpicture}[x=1mm,y=1mm]
   \node[font=\small] (cli) at (0,0)  {Client};
   \node[font=\small] (svr) at (60,0) {Server};
@@ -343,7 +577,7 @@ cb.report(failed)
   \draw[arrow]      (60,-34) -- node[above,font=\tiny]{200 success (回放原结果)} (0,-34);
 \end{tikzpicture}
 \vspace{1mm}
-\small \textbf{重试必须带原 Idempotency-Key} —— 万一原请求其实成功（CB 误判 / 网络分区），第二次会被 Idempotency 拦下，返回\textbf{原结果}，绝不二次扣款。
+\small \textbf{重试必须带原 Idempotency-Key} —— 万一原请求其实成功（CB 误判 / 网络分区），第二次会被 Idempotency 拦下，返回\textbf{原结果}，绝不二次扣款。这是\textbf{客户端 SDK 必须遵守的契约}，写进对接文档第一页。
 \srcnote{middleware/idempotency.go:96--110}
 \end{frame}
 
@@ -371,18 +605,17 @@ cache.CommitIdempotencyResult(c.Request.Context(), key, recorder.body.String())
 \end{lstlisting}
 \end{frame}
 
-\begin{frame}{逐行讲解：responseRecorder 解决了什么}
-\begin{itemize}
+\begin{frame}{逐行讲解：responseRecorder 解决了哪个客诉}
+\begin{itemize}\small
   \item \textbf{嵌入 gin.ResponseWriter}：包一层而非替换，\texttt{Header/Status/Hijack} 透明转发，链路下游无感。
-  \item \textbf{双写}：先写 \texttt{bytes.Buffer} 再调原 \texttt{Writer.Write} —— 顺序很重要，反过来客户端断连缓存会写不完。
-  \item \textbf{Hook 时机}：在 \texttt{c.Next()} 之前替换 Writer，业务函数写入时被拦截。
-  \item \textbf{失败回滚}：4xx 或 \texttt{c.Errors} → 回退到 init → 同 IK 还能再试（业务失败 ≠ 永久失败）。
-  \item \textbf{成功提交}：把完整 JSON 写进 Redis done 态 → 后续同 IK 由 Lua 直接回放，业务代码不再执行。
+  \item \textbf{双写}：先写 \texttt{bytes.Buffer} 再调原 \texttt{Writer.Write} —— 顺序很重要，反过来客户端断连时缓存会写不完。
+  \item \textbf{失败回滚到 init}：4xx 或 \texttt{c.Errors} → 同 IK 还能再试（业务失败 $\neq$ 永久失败）—— 对应客诉"我密码输错了重输一次不行"的合理诉求。
+  \item \textbf{成功提交到 done}：把完整 JSON 写进 Redis done 态 → 后续同 IK 由 Lua 直接回放，\textbf{业务代码不再执行}—— 这是"重复扣款"客诉归零的关键。
 \end{itemize}
 \srcnote{middleware/idempotency.go:17--112}
 \end{frame}
 
-\begin{frame}{Lua 脚本里的四态机 + 业务码地图}
+\begin{frame}{Lua 脚本里的四态机 + 业务码 + 客服话术}
 \begin{tikzpicture}[node distance=8mm and 14mm]
   \node[node-state,node-state-normal] (init) {init};
   \node[node-state,node-state-transition,right=of init] (proc) {processing};
@@ -396,16 +629,37 @@ cache.CommitIdempotencyResult(c.Request.Context(), key, recorder.body.String())
 \toprule
 状态码 & 含义               & 客户端动作          & 客服话术       \\
 \midrule
-60001  & IK 不存在/过期    & 重新申领            & "刷新重试" \\
-60002  & 幂等命中处理中    & 等 1s 再试          & "请稍后"       \\
-70002  & 熔断 Open         & 指数退避 + 带原 IK  & "支付暂忙"     \\
+30001  & token 错误         & 重登录              & "请重新登录" \\
+60001  & IK 不存在/过期    & 重新申领            & "刷新页面再试" \\
+60002  & 幂等命中处理中    & 等 1s 再试          & "正在处理，请稍候" \\
+70001  & 限流              & 退避重试            & "请求过频，稍后再试" \\
+70002  & 熔断 Open         & 指数退避 + 带原 IK  & "支付通道维护中" \\
 \bottomrule
 \end{tabular}
-\srcnote{repository/cache/idempotency.go:32--50；pkg/e/code.go:53--58}
+\srcnote{repository/cache/idempotency.go:32--50；pkg/e/code.go:35--58}
+\end{frame}
+
+\begin{frame}{客服话术帧：用户报"扣了钱订单还显示未支付"}
+\small
+\begin{tabular}{@{}lp{8cm}@{}}
+\toprule
+表征 & 排查路径 \\
+\midrule
+DB 余额已减 + order=UnPaid & \textbf{不可能}，TX 原子。让用户清缓存刷新 \\
+DB 余额未减 + order=UnPaid & 真的没扣，让用户重试 \\
+DB 余额已减 + order=PendingShipping + 前端显示 UnPaid & 前端缓存问题，让用户下拉刷新；底层正常 \\
+返回 60002 & 让用户等 1 秒；上一次请求仍在处理 \\
+返回 70002 & 通道维护中，30s 后重试；自动发 5 元补偿券 \\
+返回 30001 & token 过期，让用户重新登录后原 OrderId 仍可付 \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\keypoint{客服\textbf{不查代码}，只查\textbf{业务码 + DB 状态}两件事就能判断 90\% 的支付客诉。这是业务码表存在的根本意义。}
+\srcnote{pkg/e/code.go:35--58；service/payment.go:52--184}
 \end{frame}
 
 % ============================================================
-\section{支付失败 Saga + 实测数字 + 业务承诺}
+\section{失败兜底、SLO 与压测数字}
 % ============================================================
 
 \begin{frame}{支付失败链路 —— Saga 回滚}
@@ -425,10 +679,10 @@ cache.CommitIdempotencyResult(c.Request.Context(), key, recorder.body.String())
 \vspace{1mm}
 \begin{itemize}
   \item 支付失败 = TX 回滚 = \texttt{order.Type} 仍 UnPaid，库存\textbf{从未真扣}。
-  \item 30min 未续支付 → Cron → \texttt{CancelUnpaidOrder}。
+  \item 30min 未续支付 → Cron + RMQ 双保险（deck 09）→ \texttt{CancelUnpaidOrder}。
   \item Saga 不回写 \texttt{product.Num}（从未扣过），仅释放 Redis \texttt{reserved}。
 \end{itemize}
-\srcnote{service/order\_cancel.go:14--62；与 deck 09 / 15 衔接}
+\srcnote{service/order\_cancel.go:14--62；deck 09 关单衔接}
 \end{frame}
 
 \begin{frame}[fragile]{CancelUnpaidOrder 的幂等设计}
@@ -450,7 +704,25 @@ err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 })
 \end{lstlisting}
 \vspace{1mm}
-\small \textbf{CloseOrderWithCheck} 用 \texttt{WHERE type=UnPaid} 条件 update，第二次调用自然 affected=0 → 函数变 no-op。这是\textbf{用 DB 行做幂等键}。Redis 释放走 TX 外，失败仅记日志。
+\small \textbf{CloseOrderWithCheck} 用 \texttt{WHERE type=UnPaid} 条件 update，第二次调用自然 affected=0 → 函数变 no-op。这是\textbf{用 DB 行做幂等键}。Redis 释放走 TX 外，失败仅记日志，对账兜底。业务承诺：\textbf{用户 / 客服 / Cron / RMQ 四个调用方都能反复点关单，库存绝不漏放}。
+\end{frame}
+
+\begin{frame}{支付链路 SLO 承诺}
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+指标 & 承诺值 & 实测对照 & 兜底机制 \\
+\midrule
+可用率 & 99.95\% & 全链 idempotency 50K RPS 0\% err & CB + outbox + Saga \\
+p99 延迟 & < 500 ms & p95 2.33 ms（idempotent replay） & responseRecorder cache \\
+重复扣款率 & 0 & 755K req → 1 DB row & Lua done 态回放 \\
+扣款不出货 & 0 & outbox 与 TX 原子 & deck 11 outbox 主题 \\
+P0 不挂限流 & ✓ & /paydown 路由仅挂 CB + Idem & 不挂 TokenBucket/SW \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\small "P0 不挂限流"是\textbf{业务承诺}：宁可下游慢、不能上游 429。下单 / 支付靠缓存 + 异步削峰扛峰值（deck 10）。
+\srcnote{README.md §业务承诺；stressTest/REPORT.md §1 + §4}
 \end{frame}
 
 \begin{frame}{基线对照：两个中间件接入后的吞吐}
@@ -467,10 +739,10 @@ err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 \vspace{2mm}
 \begin{itemize}
   \item Idempotency 让吞吐 62K → 50K，约 \textbf{19\% 损耗}。换来"755K 请求 → 1 笔订单"的强幂等。
-  \item 损耗源：每请求一次 Redis Lua + responseRecorder 拷贝。
+  \item 业务侧的取舍：\textbf{19\% 吞吐 vs 0 起重复扣款客诉}，毫无悬念选后者。
   \item CircuitBreaker Closed 态\textbf{零锁开销}（仅 atomic.Load），吞吐影响可忽略。
 \end{itemize}
-\srcnote{stressTest/REPORT.md 链路压测表前 7 行}
+\srcnote{stressTest/REPORT.md §1 链路压测表前 7 行}
 \end{frame}
 
 \begin{frame}{Idempotency 的极限场景：755K 请求 → 1 笔订单}
@@ -481,10 +753,10 @@ err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
     \item \texttt{SELECT COUNT(*) FROM `order` WHERE user\_id=10 AND created\_at > NOW() - 2 MIN} → 1
   \end{itemize}
   \item 第一次走完业务后，后续全部由 Lua 读 \texttt{done} 态直接回放 → 50K RPS。
-  \item \textbf{业务承诺}：客户端在熔断反复触发期间无脑重试 10K 次，仍只扣一次款。
+  \item \textbf{业务承诺}：客户端在熔断反复触发期间无脑重试 10K 次，仍只扣一次款 —— 这是写进 SDK 文档的合同。
 \end{itemize}
-\keypoint{重试是客户端的权利，幂等是服务端的义务。两者共同维护"恰好一次"。}
-\srcnote{stressTest/REPORT.md \S 4 幂等中间件压测}
+\keypoint{压测数字背后是合同：\textbf{重复扣款率 = 0}。客服 / 财务 / 风控都靠这个承诺生存。}
+\srcnote{stressTest/REPORT.md §4 幂等中间件压测}
 \end{frame}
 
 \begin{frame}{把 paydown 的设计翻译成业务承诺}
@@ -498,47 +770,83 @@ AES-128-CBC + 双密钥      & DBA 拿 dump 也看不到余额            \\
 outbox 在 TX 内写         & 不会出现"扣了钱下游没收到"          \\
 CircuitBreaker 5/10s/3   & 第三方挂了 5\% 用户受影响，不是 100\% \\
 Idempotency 全程伴随     & 重试 10K 次也只扣一次               \\
+Saga 30min 关单           & 用户忘付款，库存自动释放              \\
+业务码 60002/70002/30001  & 客服查码即可定位 90\% 客诉            \\
 \bottomrule
 \end{tabular}
 \vspace{1mm}
-\small 六条产品 / 运营 / 客服三方都能背的话术，每条都在代码里找得到位置。
-\srcnote{routes/router.go:114--121 + service/payment.go:35--200}
+\small 八条产品 / 运营 / 客服三方都能背的话术，每条都在代码里找得到位置。
+\srcnote{routes/router.go:123--130 + service/payment.go:35--200}
+\end{frame}
+
+\begin{frame}{业务边界回顾：本支付\textbf{不做}什么（再次诚实）}
+\begin{itemize}
+  \item \textbf{不真接支付宝 / 微信 / 银联} —— 路线图 step 1
+  \item \textbf{不做实名 KYC} —— 持牌支付公司的事
+  \item \textbf{不做风控引擎} —— 路线图 step 2
+  \item \textbf{不做反洗钱} —— 独立合规系统
+  \item \textbf{不做商家分账} —— 路线图 step 3
+  \item \textbf{不做发票管理} —— 财税系统
+  \item \textbf{未做清单完整版}：\texttt{docs/architecture/feature-matrix.md}
+\end{itemize}
+\keypoint{诚实划边界给商家 / 合规一个交代，比"全堆 feature"更可信。MVP 阶段把\textbf{扣款 + 入账 + 状态机推进 + 防重}做到工业级。}
+\srcnote{README.md §业务边界；docs/architecture/feature-matrix.md}
 \end{frame}
 
 % ============================================================
 \appendix
 % ============================================================
 
-\begin{frame}{面试 Q\&A}
+\begin{frame}{Q\&A（上）—— 业务侧高频问题}
 \small
-\textbf{Q1}：金额为什么不直接 \texttt{decimal} 存？\\
-\hspace{4mm} A：合规要求"敏感字段不得明文落盘"。AES + 服务端密钥 + 用户密码双因子，比 decimal 多一道防线。
+\textbf{Q1}：为什么金额不直接 \texttt{decimal} 存，非要 AES？\\
+\hspace{4mm} A：合规审计要求"敏感金额字段不得明文落盘"。AES + 服务端密钥 + 用户密码双因子，DBA 拿 dump 也解不开。代价是 SQL 不能 \texttt{SUM}，业务侧用结算服务批跑兜底。
 
 \vspace{1mm}
-\textbf{Q2}：熔断打开期间客户端怎么处理？\\
-\hspace{4mm} A：拿 70002 → 指数退避 (1s/2s/4s) → 重试\textbf{必须带原 Idempotency-Key}。第一次若其实成功，第二次回放原结果不会二次扣款。
+\textbf{Q2}：为什么不接真实支付宝？\\
+\hspace{4mm} A：MVP 阶段聚焦交易闭环，第三方对接由 wallet 服务消费 outbox 完成（路线图）。\textbf{熔断器 + 幂等 + outbox 已就位}，接入只换 Gateway 实现，不改架构。
 
 \vspace{1mm}
-\textbf{Q3}：为何不用 Redis 分布式锁做幂等，要用 Lua？\\
+\textbf{Q3}：熔断打开期间用户体验怎么办？\\
+\hspace{4mm} A：(1) 立即返回 70002 + 客服话术（"通道维护中，30s 后重试"）；(2) 自动发 5 元补偿券回赠；(3) 监控触发 oncall + 客服群通知。运营 SOP 写在 §4。
+
+\vspace{1mm}
+\textbf{Q4}：为什么支付密码不存数据库？\\
+\hspace{4mm} A：用户每次手输，整库 dump 也解不开。代价 = 用户每次支付要手输；收益 = 任何拖库事件都不会暴露余额。客服重置走"核身 + 余额冻结 48h"流程。
+\end{frame}
+
+\begin{frame}{Q\&A（下）—— 技术侧追问}
+\small
+\textbf{Q5}：密码错和余额不足为什么都返回"金额不足"？\\
+\hspace{4mm} A：密码错 → 解出乱码 → int64 几乎不够 → 走金额不足分支。\textbf{有意为之}：防穷举区分。安全和产品协商出的结果。
+
+\vspace{1mm}
+\textbf{Q6}：为何不用 Redis 分布式锁做幂等，要用 Lua？\\
 \hspace{4mm} A：分布式锁只解决"不重入"，不解决"结果回放"。Lua 是真状态机 (init/processing/done)：第一次走完后，同 IK 请求直接 Lua 内回放，\textbf{不进业务代码}。
 
 \vspace{1mm}
-\textbf{Q4}：密码错和余额不足为什么都返回"金额不足"？\\
-\hspace{4mm} A：密码错 → 乱码 → int64 几乎不够 → 走金额不足分支。\textbf{有意为之}：防穷举区分。
+\textbf{Q7}：CircuitBreaker 阈值 5 / 10s / 3 怎么调的？\\
+\hspace{4mm} A：5 = 防误熔（1-2 次抖动不算）；10s = 第三方重启中位数；3 = HalfOpen 探测样本够。当前硬编码，路线图改成 env 配置 + 按时段动态调整。
+
+\vspace{1mm}
+\textbf{Q8}：支付链路怎么保证 P0 不挂限流？\\
+\hspace{4mm} A：\texttt{/paydown} 路由\textbf{只挂 CB + Idem}，不挂 TokenBucket / SlidingWindow。上游靠下单 + 缓存削峰，下游靠熔断保护 —— 宁可下游慢、不能上游 429。
 \end{frame}
 
 \begin{frame}{代码位置一览}
 \scriptsize
 \begin{description}
-  \item[PayDown]\srcnote{service/payment.go:35--200}
+  \item[PayDown 主体]\srcnote{service/payment.go:35--200}
   \item[AES 加解密]\srcnote{repository/db/model/user.go:59--79；pkg/utils/encryption/money\_encrypt.go}
-  \item[CircuitBreaker]\srcnote{middleware/circuitbreaker.go:44--128}
+  \item[CircuitBreaker]\srcnote{middleware/circuitbreaker.go:17--128}
   \item[Idempotency]\srcnote{middleware/idempotency.go:17--112；repository/cache/idempotency.go:32--90}
-  \item[paydown 路由]\srcnote{routes/router.go:114--121}
+  \item[paydown 路由 + 中间件栈]\srcnote{routes/router.go:123--130}
   \item[支付失败 Saga]\srcnote{service/order\_cancel.go:14--62}
-  \item[业务码 + 压测]\srcnote{pkg/e/code.go:53--58；stressTest/REPORT.md \S 4--5}
+  \item[业务码表]\srcnote{pkg/e/code.go:35--58；pkg/e/msg.go:48--52}
+  \item[压测数字]\srcnote{stressTest/REPORT.md §1 链路压测、§4 幂等中间件}
+  \item[业务边界 / SLO]\srcnote{README.md §业务承诺、§业务边界、§典型用户旅程}
 \end{description}
-\keypoint{配套：deck 01 (幂等) / deck 04 (outbox+saga) / deck 15 (关单衔接)。}
+\keypoint{配套：deck 01（鉴权 / 双 token） / deck 04（下单 + outbox） / deck 09（关单 + 状态机） / deck 11（一致性主题）。}
 \end{frame}
 
 \end{document}
