@@ -54,6 +54,17 @@ internal/
 - [x] 叶子领域 8 个：`address carousel cart category`（批1）+ `money admin notice favorite`（批2）
 - [x] 带 cache 领域 3 个：`coupon redpacket skill`（批3，cache 留 repository/cache，cron 重接线）
 - [x] **hub `user`**（被 13 个文件引用）：全局 sed 改名 model.User/dao.NewUserDao→user.*，逐文件补 import、清无用 import；修局部变量 user 遮蔽包名
+- [x] **hub `product`**（被 21 个文件引用，最难，有 product↔search 环）：
+  - 先斩环：把 ProductSearch 编排 + 两个搜索 handler 迁到 service/search 包（product 不再 import search/es），只留 search→product 单向边
+  - 再迁 product 8 件套到 internal/product（agent 做受体改名等细活），全局 sed 改名 model.Product(Img)/dao.NewProduct*Dao/types.Product*→product.*
+  - 修 payment.go 局部变量 product 遮蔽包名（→prod）
+
+### 剩余（order 簇，互相耦合，建议顺序）
+1. `promo`（被 order/refund/order_cancel 的 GetPromoSrv 调用；自带 routes/promo_routes.go）——先迁，它只依赖 outbox
+2. `order` 核心（order + order_async/cancel/consumer/shipping/state/task 共 7 个 service 文件 + dao + model + types*2 + api*2），被 payment/refund/preorder/groupbuy/cancel 引用 model.Order/dao.NewOrderDao
+3. order 的下游：`payment`(payment+crypto)、`refund`、`preorder`(routes)、`groupbuy`(routes)
+4. `idempotency`（api handler，偏共享，考虑放 shared 或 order）
+5. 收尾：删空的 api/v1（连 common.go→已无 handler 用就删）、service、repository/db/{dao,model} 残壳；最后抽 outbox→internal/shared/outbox
 
 ### Hub 迁移办法（user 已用，product/order 照此）
 1. agent/手工先迁该域 5 件套到 internal/<hub>，de-prefix 自有符号。
