@@ -58,7 +58,7 @@
 \bottomrule
 \end{tabular}
 \par\smallskip
-{\centering\srcnote{对照行业漏斗经验值 + gomall README \S 业务承诺；service/order.go:40--102 下单入口}\par}
+{\centering\srcnote{对照行业漏斗经验值 + gomall README \S 业务承诺；internal/order/service.go:40--102 下单入口}\par}
 \end{frame}
 
 \begin{frame}{下单不是一次点击，是一条业务链}
@@ -93,7 +93,7 @@
 \vspace{2mm}
 \small \textbf{诚实声明}：MVP 阶段聚焦"普通用户买普通商品"的主干，避免业务范围漂移把核心链路稀释。\\
 礼品 / 拼团 / 预售 / 发票 / 海外见 \texttt{docs/architecture/feature-matrix.md} 路线图。
-\srcnote{README.md \S 业务边界（不做什么）；service/order.go:46--55 当前 Order 模型字段}
+\srcnote{README.md \S 业务边界（不做什么）；internal/order/service.go:46--55 当前 Order 模型字段}
 \end{frame}
 
 % ============================================================
@@ -117,7 +117,7 @@ num         & 件数      & "已超过单次购买上限 N 件" \\
   \item 这是为什么 \texttt{CartCreate} 先 \texttt{GetProductById} 再 \texttt{CreateCart} —— 校验商品仍在售。
   \item 购物车不是技术装饰，是\textbf{凑单 / 比价 / 留存}的中转 = 商家拉复购的关键页。
 \end{itemize}
-\srcnote{service/cart.go:36--49 + pkg/e/code.go:31--32 业务码 20007/20008}
+\srcnote{internal/cart/service.go:36--49 + pkg/e/code.go:31--32 业务码 20007/20008}
 \end{frame}
 
 \begin{frame}{地址簿：业务复杂度比想象的高}
@@ -130,7 +130,7 @@ num         & 件数      & "已超过单次购买上限 N 件" \\
 \vspace{2mm}
 \textbf{业务硬约束（gomall 现状）}：\texttt{Address} 只保留 \texttt{name / phone / address} 三字段，\\
 合并省事但订单一旦发起就该\textbf{冻结地址快照}，否则用户改地址簿 $\to$ 历史订单收货地址被同步改 = 客服恶梦。
-\srcnote{service/address.go:34--46 当前最小模型；repository/db/model/order.go AddressID 引用关系（待加 snapshot 字段）}
+\srcnote{internal/address/service.go:34--46 当前最小模型；internal/order/model.go AddressID 引用关系（待加 snapshot 字段）}
 \end{frame}
 
 % ============================================================
@@ -262,7 +262,7 @@ func GenSnowflakeID() int64 {
 \end{tabular}
 \vspace{1mm}
 \keypoint{业务取舍：用 30 min "短期锁仓"换"下单不超卖"的承诺 —— 客户体验 > 商家短期周转。}
-\srcnote{repository/cache/inventory.go:25--26 ErrStockInsufficient；service/order.go:88--92 15min TTL（注：与 30min 业务承诺待对齐）}
+\srcnote{repository/cache/inventory.go:25--26 ErrStockInsufficient；internal/order/service.go:88--92 15min TTL（注：与 30min 业务承诺待对齐）}
 \end{frame}
 
 \begin{frame}{为什么不"下单即真扣"}
@@ -300,13 +300,13 @@ func GenSnowflakeID() int64 {
   \item \textbf{第 2 步}：同一 \texttt{gorm.Transaction} 写订单 + 写 outbox，二选一不行。
   \item \textbf{第 3 步}：投递延迟队列，超时未付款自动取消 $\to$ reserved 退回 available。
 \end{itemize}
-\srcnote{service/order.go:40--102 全函数；service/order.go:64--78 同事务写 order + outbox}
+\srcnote{internal/order/service.go:40--102 全函数；internal/order/service.go:64--78 同事务写 order + outbox}
 \end{frame}
 
 \begin{frame}[fragile]{OrderCreate 主体三步}
 \begin{lstlisting}[language=Go,firstnumber=46,
-  caption={\srcnote{service/order.go:46--86}}]
-order := &model.Order{
+  caption={\srcnote{internal/order/service.go:46--86}}]
+order := &Order{
     UserID:    u.Id,
     ProductID: req.ProductID,
     Num:       int(req.Num),
@@ -320,10 +320,10 @@ if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
 
 // 2) 同事务写订单 + 写 outbox
 err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-    if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+    if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
         return e
     }
-    return dao.NewOutboxDaoByDB(tx).Insert(
+    return outbox.NewOutboxDaoByDB(tx).Insert(
         "order", "OrderCreated", "order.created", order.ID,
         events.OrderCreated{ OrderID: order.ID, OrderNum: order.OrderNum,
             UserID: u.Id, ProductID: req.ProductID, Num: int(req.Num) })
@@ -356,7 +356,7 @@ if err != nil {
   \item \textbf{异步 publisher} 扫 \texttt{status=pending} 的 outbox 行，发 MQ，发完更新成 \texttt{sent}。
   \item 这是 deck 11（Outbox 与一致性）在下单链路的落地。
 \end{itemize}
-\srcnote{repository/db/dao/outbox.go:26--41 Insert 同 tx；service/outbox/publisher.go 扫表 publisher}
+\srcnote{internal/shared/outbox/repo.go:26--41 Insert 同 tx；internal/shared/outbox/publisher.go 扫表 publisher}
 \end{frame}
 
 \begin{frame}{outbox 事件投递时序}
@@ -373,7 +373,7 @@ if err != nil {
 \end{tikzpicture}}
 \par\smallskip
 {\small \textbf{业务侧好处}：API 返回时只承担一次 DB 写代价，用户感知延迟 < 5ms；MQ 发布失败由 publisher 重试，\textbf{不阻塞下单链路} = 不会因为 RMQ 抖一下整个下单挂掉。}
-\srcnote{repository/db/dao/outbox.go:44--78 FetchBatch + MarkSent + MarkFailed}
+\srcnote{internal/shared/outbox/repo.go:44--78 FetchBatch + MarkSent + MarkFailed}
 \end{frame}
 
 % ============================================================
@@ -514,14 +514,14 @@ order 表 6M 行 / 653 MB 不影响延迟 —— 不查表就不付代价。
   \draw[arrow] (c2.south) to[out=-30,in=-150] node[below,font=\tiny]{poll status} (q2.south);
   \node[font=\tiny,above=1mm of s2] {/orders/enqueue + /orders/status};
 \end{tikzpicture}}
-\srcnote{service/order\_async.go:119--172 enqueue；:175--188 status}
+\srcnote{internal/order/async.go:119--172 enqueue；:175--188 status}
 \end{frame}
 
 \begin{frame}[fragile]{OrderEnqueue 核心 12 行}
 \begin{lstlisting}[language=Go,firstnumber=119,
-  caption={\srcnote{service/order\_async.go:119--150}}]
+  caption={\srcnote{internal/order/async.go:119--150}}]
 func (s *OrderSrv) OrderEnqueue(ctx context.Context,
-    req *types.OrderCreateReq) (resp interface{}, err error) {
+    req *OrderCreateReq) (resp interface{}, err error) {
 
     if err = cache.ReserveStock(ctx,
         req.ProductID, int64(req.Num)); err != nil {
@@ -550,7 +550,7 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context,
   \item \textbf{ticket $\ne$ 订单号}：consumer 落库后回写 \texttt{OrderTicketStatus.OrderNum}，前端读 status 时一并拿到。
   \item \textbf{失败也写 ticket}：投递失败回写 \texttt{status=failed, reason=publish failed}，\textbf{前端不用纠结超时还是真失败} —— 一定能给用户一个明确答复。
 \end{itemize}
-\srcnote{service/order\_async.go:23--52 常量与状态结构；:164--168 失败写 failed}
+\srcnote{internal/order/async.go:23--52 常量与状态结构；:164--168 失败写 failed}
 \end{frame}
 
 \begin{frame}{ticket 状态机}
@@ -569,7 +569,7 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context,
   \item \textbf{ok}：DB 行已写，可走支付 —— 前端跳转支付页。
   \item \textbf{failed}：MQ 发布失败 / consumer 自检不通过 —— 前端弹"系统繁忙，请稍后重试"。
 \end{itemize}
-\srcnote{service/order\_async.go:47--52 OrderTicketStatus 三状态}
+\srcnote{internal/order/async.go:47--52 OrderTicketStatus 三状态}
 \end{frame}
 
 \begin{frame}{对账：reserve / commit / release 不变量}
@@ -641,7 +641,7 @@ publisher 重试超限 & outbox 标 dead   & 客服联系商家手动补发货 \
 \vspace{3mm}
 \small \textbf{业务关键}：每一种失败都有\textbf{明确的归属者和兜底话术}，\\
 没有"既不属于 A 也不属于 B"的灰区 —— 客服永远能给用户一个明确答复。
-\srcnote{repository/db/dao/outbox.go:62--78 MarkFailed 退避策略；service/order.go:79--85 释放路径}
+\srcnote{internal/shared/outbox/repo.go:62--78 MarkFailed 退避策略；internal/order/service.go:79--85 释放路径}
 \end{frame}
 
 \begin{frame}{失败回滚状态机}
@@ -663,7 +663,7 @@ publisher 重试超限 & outbox 标 dead   & 客服联系商家手动补发货 \
   \item \textbf{Released}：库存退回，订单不存在 —— 客户端可重试。
   \item \textbf{Dead}：订单存在但下游没收到 —— 用户能看到订单详情，发货 / 通知断 = 人工接管。
 \end{itemize}
-\srcnote{repository/db/model/outbox.go OutboxStatusDead 终态；service/outbox/publisher.go 路径}
+\srcnote{internal/shared/outbox/model.go OutboxStatusDead 终态；internal/shared/outbox/publisher.go 路径}
 \end{frame}
 
 \begin{frame}{下单链路上的常见黑产手法}
@@ -767,15 +767,15 @@ publisher 重试超限 & outbox 标 dead   & 客服联系商家手动补发货 \
 
 \begin{frame}{代码位置一览}
 \begin{description}\setlength{\itemsep}{0.2mm}
-  \item[加购 / 地址]\srcnote{service/cart.go:29--103；service/address.go:27--127}
+  \item[加购 / 地址]\srcnote{internal/cart/service.go:29--103；internal/address/service.go:27--127}
   \item[雪花生成]\srcnote{pkg/utils/snowflake/snowflake.go:10--25}
-  \item[同步下单主体]\srcnote{service/order.go:40--102 OrderCreate}
+  \item[同步下单主体]\srcnote{internal/order/service.go:40--102 OrderCreate}
   \item[库存预扣/提交/释放]\srcnote{repository/cache/inventory.go:77--125 三脚 Lua}
-  \item[outbox 同事务写入 + 扫表]\srcnote{repository/db/dao/outbox.go:26--78 Insert/FetchBatch/MarkSent/MarkFailed}
-  \item[异步下单 + ticket 状态]\srcnote{service/order\_async.go:23--52 状态常量；:119--188 enqueue+status}
+  \item[outbox 同事务写入 + 扫表]\srcnote{internal/shared/outbox/repo.go:26--78 Insert/FetchBatch/MarkSent/MarkFailed}
+  \item[异步下单 + ticket 状态]\srcnote{internal/order/async.go:23--52 状态常量；:119--188 enqueue+status}
   \item[幂等中间件三态]\srcnote{middleware/idempotency.go:35--112}
   \item[业务码定义]\srcnote{pkg/e/code.go:23--58 20001/20008/60002/70001/70002}
-  \item[OrderCreated 事件 / publisher]\srcnote{service/events/order\_created.go；service/outbox/publisher.go}
+  \item[OrderCreated 事件 / publisher]\srcnote{service/events/order\_created.go；internal/shared/outbox/publisher.go}
   \item[路由]\srcnote{routes/router.go:92--111 orders + carts + addresses}
 \end{description}
 \vspace{1mm}

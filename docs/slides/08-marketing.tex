@@ -29,7 +29,7 @@
   \item 三条线共享一套底层武器：\textbf{Redis Lua 原子}、\textbf{滑动窗口反作弊}、\textbf{Saga 兜底}。
   \item 本 deck 关心两件事：(1) 每条线的业务取舍是什么 (2) 用同一套武器为什么能打三场不同的仗。
 \end{itemize}
-\srcnote{service/coupon.go, service/redpacket.go, service/skill\_goods.go 三个 service 入口}
+\srcnote{internal/coupon/service.go, internal/redpacket/service.go, internal/skill/service.go 三个 service 入口}
 \end{frame}
 
 \begin{frame}{营销活动的 5 角色视图}
@@ -108,7 +108,7 @@ SRE        & 流量峰值是平常 50×，集群扛得住吗 & 0 点限流误伤
   \item \textbf{为什么必须"先领后用"}：让用户产生"沉没成本错觉" —— 已经领了的券\textbf{不用就亏了}。
   \item \textbf{gomall 现状}：只做最基础的"批次 + 单人限领"，没做触达分层（运营平台路线图）。
 \end{itemize}
-\srcnote{model.CouponBatch.Type/Threshold/Amount 字段；service/coupon.go:30--57 CreateBatch}
+\srcnote{coupon.CouponBatch.Type/Threshold/Amount 字段；internal/coupon/service.go:30--57 CreateBatch}
 \end{frame}
 
 \begin{frame}{活动 ROI 业务化帧：100 万发券能换多少 GMV}
@@ -130,7 +130,7 @@ SRE        & 流量峰值是平常 50×，集群扛得住吗 & 0 点限流误伤
 \vspace{2mm}
 \small \textbf{运营怎么判合格}：核销率 20\% \& ROI > 5 算合格。低于 10\% 核销率 = 券面值太低/门槛太高，用户懒得用。\\
 \textbf{被黑产吃掉的代价}：如果 30\% 券进了脚本党的手里（领了不用 / 倒卖），\textbf{真实拉新打 7 折，核销率打 7 折，整个 ROI 直接腰斩}。这就是下文限流的钱字号意义。
-\srcnote{README 业务承诺 + service/coupon.go Claim 流程；ROI 算式为行业常识、gomall 未实装}
+\srcnote{README 业务承诺 + internal/coupon/service.go Claim 流程；ROI 算式为行业常识、gomall 未实装}
 \end{frame}
 
 \begin{frame}{coupon 接口的中间件链：业务诉求决定每一层}
@@ -227,7 +227,7 @@ avg 延迟          & 0.82ms   & 0.83ms  \\
   \item \textbf{业务取舍}：\textbf{秒杀必须有"抢不到"的人}。如果 100 台 iPhone 5 分钟才卖完，那不叫秒杀。\textbf{用户预期是"瞬间售罄"}，没抢到不是产品问题，是\textbf{运气问题}。
   \item \textbf{对应客服话术}：从来不说"系统繁忙"，永远说"\textbf{已被其他用户抢走，欢迎下次参与}"。
 \end{itemize}
-\srcnote{service/skill\_goods.go:122--134 SkillProduct；商品独立 model.SkillProduct 表}
+\srcnote{internal/skill/service.go:122--134 SkillProduct；商品独立 skill.SkillProduct 表}
 \end{frame}
 
 \begin{frame}{秒杀 vs 普通下单的根本差异：业务侧规则}
@@ -249,7 +249,7 @@ avg 延迟          & 0.82ms   & 0.83ms  \\
 
 \small \textbf{为什么秒杀不熔断}：熔断 = "所有人都买不到"，业务上等价于\textbf{活动作废} —— 比"部分用户买不到"严重 10 倍。\\
 \textbf{为什么秒杀不挂 Idempotency}：用户疯狂点击"再试一次"\textbf{就是业务预期}，幂等命中会让用户以为下单成功，反而误导。
-\srcnote{service/skill\_goods.go:122--134；routes/router.go:142--152 秒杀路由}
+\srcnote{internal/skill/service.go:122--134；routes/router.go:142--152 秒杀路由}
 \end{frame}
 
 \begin{frame}{SlidingWindow Lua 与"阈值 = 3"的业务依据}
@@ -349,7 +349,7 @@ avg 延迟          & 0.82ms   & 0.83ms  \\
   \item \textbf{业务关键点 2：总额必须精确}。100 元发出去就是 100 元，多 1 分平台亏、少 1 分用户投诉。
   \item \textbf{业务关键点 3：公平感}。\textbf{每份 ≥ 1 分} + 顺序打散 + 最后一份兜底 —— 这是用户口碑的生死线。
 \end{itemize}
-\srcnote{service/redpacket.go:42--103 Create + Claim 全流程}
+\srcnote{internal/redpacket/service.go:42--103 Create + Claim 全流程}
 \end{frame}
 
 \begin{frame}{公平性事故的真实代价：业务案例}
@@ -470,7 +470,7 @@ return tonumber(amt)                          -- 抢到金额
 \end{itemize}
 \textbf{业务承诺}：\textbf{发出去多少钱，必须回到用户钱包}。Saga 是这条业务承诺的代码兑现。\\
 \textbf{对应代码}：\texttt{rollbackRedPacketClaimScript}（两个动作放一个 Lua 原子单元）。
-\srcnote{repository/cache/redpacket.go:79--90 rollback；service/redpacket.go:155--162 调用点}
+\srcnote{repository/cache/redpacket.go:79--90 rollback；internal/redpacket/service.go:155--162 调用点}
 \end{frame}
 
 % ============================================================
@@ -784,12 +784,12 @@ SRE & Redis 库存\textbf{预热}（活动券 / 秒杀商品 / 红包预拆 SET 
 \vspace{2mm}
 \textbf{Q2}：100 万发券的 ROI 怎么算？\\
 \hspace{4mm}\small A：发券 $\to$ 领取率 60\% $\to$ 核销率 20\% $\to$ 带动 GMV。让利 12 万换 90 万 GMV，ROI = 7.5。黑产吃 30\% 流量 $\to$ ROI 跌到 3.0。\\
-\hspace{4mm}\small \textbf{代码}：\texttt{service/coupon.go:65--99 Claim}（gomall 暂未实装 ROI 仪表盘）。
+\hspace{4mm}\small \textbf{代码}：\texttt{internal/coupon/service.go:65--99 Claim}（gomall 暂未实装 ROI 仪表盘）。
 
 \vspace{2mm}
 \textbf{Q3}：抢红包 Lua 已经 LPOP 了，DB 落库失败怎么办？\\
 \hspace{4mm}\small A：Saga 回滚 —— \texttt{rollbackRedPacketClaimScript}，LPUSH 金额回队头 + HDEL 撤销 claimed 标记。\textbf{发出去多少必须回来}是业务承诺。\\
-\hspace{4mm}\small \textbf{代码}：\texttt{repository/cache/redpacket.go:79--90}、\texttt{service/redpacket.go:155--162}。
+\hspace{4mm}\small \textbf{代码}：\texttt{repository/cache/redpacket.go:79--90}、\texttt{internal/redpacket/service.go:155--162}。
 
 \vspace{2mm}
 \textbf{Q4}：秒杀为什么不挂熔断？\\
@@ -822,17 +822,17 @@ SRE & Redis 库存\textbf{预热}（活动券 / 秒杀商品 / 红包预拆 SET 
 \begin{description}\small
   \item[coupon Lua（原子扣减 + 单人限领）]\srcnote{repository/cache/coupon.go:30--44}
   \item[coupon 错误码翻译]\srcnote{repository/cache/coupon.go:46--75}
-  \item[coupon 业务层 Claim]\srcnote{service/coupon.go:65--99}
-  \item[coupon 库存预热（创建批次）]\srcnote{service/coupon.go:30--57}
+  \item[coupon 业务层 Claim]\srcnote{internal/coupon/service.go:65--99}
+  \item[coupon 库存预热（创建批次）]\srcnote{internal/coupon/service.go:30--57}
   \item[coupon 路由（无 SlidingWindow，业务取舍）]\srcnote{routes/router.go:70--73}
   \item[红包二倍均值法拆分]\srcnote{repository/cache/redpacket.go:98--142 SplitRedPacket}
   \item[红包预拆 RPUSH Lua]\srcnote{repository/cache/redpacket.go:34--43}
   \item[红包抢取 Lua（HEXISTS + LPOP + HSET）]\srcnote{repository/cache/redpacket.go:52--63}
   \item[红包 Saga 回滚 Lua]\srcnote{repository/cache/redpacket.go:79--90}
-  \item[红包 Service 调用 Saga 点]\srcnote{service/redpacket.go:155--162}
+  \item[红包 Service 调用 Saga 点]\srcnote{internal/redpacket/service.go:155--162}
   \item[红包过期回收]\srcnote{repository/cache/redpacket.go:65--77 ReleaseRedPacketLeft}
   \item[红包路由（SlidingWindow + Idempotency）]\srcnote{routes/router.go:79--85}
-  \item[秒杀业务]\srcnote{service/skill\_goods.go:122--134}
+  \item[秒杀业务]\srcnote{internal/skill/service.go:122--134}
   \item[秒杀路由（SlidingWindow 3/s/用户）]\srcnote{routes/router.go:142--152}
 \end{description}
 \end{frame}
@@ -845,7 +845,7 @@ SRE & Redis 库存\textbf{预热}（活动券 / 秒杀商品 / 红包预拆 SET 
   \item[Go error（红包 / 优惠券）]\srcnote{repository/cache/coupon.go:46--49；redpacket.go:22--26}
   \item[压测：秒杀 + 滑动窗口（46/45 误差 2.2\%）]\srcnote{stressTest/REPORT.md \S 5；seckill\_rate\_limit.js}
   \item[压测：优惠券 Redis Lua vs DB（51K / 50K RPS）]\srcnote{stressTest/REPORT.md 链路压测表 第 5--6 行}
-  \item[拼手气红包模型（gomall 已实现）]\srcnote{service/redpacket.go:42--103 Create + Claim}
+  \item[拼手气红包模型（gomall 已实现）]\srcnote{internal/redpacket/service.go:42--103 Create + Claim}
   \item[业务边界（未做项）]\srcnote{README "业务边界" + docs/architecture/feature-matrix.md}
 \end{description}
 \vspace{2mm}

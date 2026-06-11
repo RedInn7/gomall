@@ -237,7 +237,7 @@ ch.Consume("search.product.indexer", ...)
 `repository/cache/inventory_test.go` 的 `TestInventory_NoOversellUnderConcurrency`：500 个 goroutine 抢 100 件，**实测恰好 100 个成功**。
 
 ### Outbox 重试 + dead
-`repository/db/dao/outbox_test.go` 的 `TestOutbox_MarkFailedBackoff`：
+`internal/shared/outbox/repo_test.go` 的 `TestOutbox_MarkFailedBackoff`：
 - 失败一次 → attempts=1，next_retry_at 退到 1s 后
 - 立即再 FetchBatch → 这条不会被取出（退避中）
 - 失败超过阈值 → 状态变 dead，FetchBatch 永远不再取
@@ -290,14 +290,14 @@ SELECT status, COUNT(*) FROM outbox_event GROUP BY status;
 
 ## 代码位置
 
-- Outbox 模型：`repository/db/model/outbox.go`
-- Outbox DAO：`repository/db/dao/outbox.go`
-- Publisher：`service/outbox/publisher.go`
+- Outbox 模型：`internal/shared/outbox/model.go`
+- Outbox DAO：`internal/shared/outbox/repo.go`
+- Publisher：`internal/shared/outbox/publisher.go`
 - 库存 Lua：`repository/cache/inventory.go`
 - 库存 syncer：`service/inventory/syncer.go`
-- 订单流程：`service/order.go`、`service/payment.go`、`service/order_cancel.go`
+- 订单流程：`internal/order/service.go`、`internal/payment/service.go`、`internal/order/cancel.go`
 - ES 消费者：`service/search/indexer.go`
-- 单元测试：`repository/db/dao/outbox_test.go`、`repository/cache/inventory_test.go`
+- 单元测试：`internal/shared/outbox/repo_test.go`、`repository/cache/inventory_test.go`
 
 ## 写给自己
 
