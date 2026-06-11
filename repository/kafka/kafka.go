@@ -215,14 +215,14 @@ func Consumer(ctx context.Context, key, topic string, fn func(message *sarama.Co
 		go func(consumer sarama.PartitionConsumer) {
 			defer func() {
 				if err := recover(); err != nil {
-					log.LogrusObj.Error("消费kafka信息发生panic,err:%s", err)
+					log.LogrusObj.Errorf("消费kafka信息发生panic,err:%s", err)
 				}
 			}()
 
 			defer func() {
 				err := pc.Close()
 				if err != nil {
-					log.LogrusObj.Infoln("消费kafka信息发生panic,err:%s", err)
+					log.LogrusObj.Errorf("关闭kafka消费者失败,err:%s", err)
 				}
 			}()
 
@@ -245,7 +245,7 @@ func Consumer(ctx context.Context, key, topic string, fn func(message *sarama.Co
 
 func isConsumerDisabled(in *Kafka) bool {
 	if in.DisableConsumer {
-		log.LogrusObj.Infoln("kafka consumer disabled,key:%s", in.Key)
+		log.LogrusObj.Infof("kafka consumer disabled,key:%s", in.Key)
 	}
 
 	return in.DisableConsumer
