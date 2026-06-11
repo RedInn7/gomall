@@ -5,9 +5,9 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -42,7 +42,7 @@ func (s *RedPacketTaskService) RunRedPacketExpireCheck() {
 			if left <= 0 {
 				return nil
 			}
-			return dao.NewOutboxDaoByDB(tx).Insert(
+			return outbox.NewOutboxDaoByDB(tx).Insert(
 				"red_packet", "RedPacketExpired", "red_packet.expired", rp.ID,
 				events.RedPacketExpired{
 					RedPacketID: rp.ID,

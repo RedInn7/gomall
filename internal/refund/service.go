@@ -10,9 +10,9 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/promo"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -74,7 +74,7 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 		if !ok {
 			return orderpkg.ErrInvalidOrderStateTransition
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefunding", "order.refunding", order.ID,
 			events.OrderRefunding{
 				OrderID:  order.ID,
@@ -113,7 +113,7 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 		if !ok {
 			return orderpkg.ErrInvalidOrderStateTransition
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefunded", "order.refunded", order.ID,
 			events.OrderRefundedEvent{
 				OrderID:  order.ID,
@@ -165,7 +165,7 @@ func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason st
 		if !ok {
 			return orderpkg.ErrInvalidOrderStateTransition
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefundRejected", "order.refund_rejected", order.ID,
 			events.OrderRefundRejected{
 				OrderID:  order.ID,

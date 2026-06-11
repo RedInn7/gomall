@@ -10,12 +10,12 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	util "github.com/RedInn7/gomall/pkg/utils/upload"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 	"github.com/RedInn7/gomall/types"
 )
@@ -254,7 +254,7 @@ func (s *ProductSrv) ProductDelete(ctx context.Context, req *ProductDeleteReq) (
 
 // emitProductChanged 写一条 outbox 事件，由 publisher 异步投到 RMQ 然后被 search.indexer 消费
 func emitProductChanged(ctx context.Context, productID uint, op string) {
-	if err := dao.NewOutboxDao(ctx).Insert(
+	if err := outbox.NewOutboxDao(ctx).Insert(
 		"product", "ProductChanged", "product.changed", productID,
 		events.ProductChanged{ProductID: productID, Op: op},
 	); err != nil {

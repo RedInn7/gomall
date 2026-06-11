@@ -17,9 +17,9 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 const (
@@ -69,7 +69,7 @@ type outboxWriter interface {
 }
 
 var defaultOutbox = func(ctx context.Context) outboxWriter {
-	return dao.NewOutboxDao(ctx)
+	return outbox.NewOutboxDao(ctx)
 }
 
 // redisCmd 抽象 listener 用到的 redis 命令，单测里换成 miniredis 或内存替身

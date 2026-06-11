@@ -14,13 +14,13 @@ import (
 
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/promo"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 // initLogForTest 本地副本（原 service/log_test.go 未随域迁移），仅在本包声明一次。
@@ -52,7 +52,7 @@ func setupSQLiteForOrder(t *testing.T) (*gorm.DB, func()) {
 	}
 	if err := db.AutoMigrate(
 		&user.User{}, &Order{}, &product.Product{},
-		&promo.PromoRule{}, &model.OutboxEvent{},
+		&promo.PromoRule{}, &outbox.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
@@ -177,9 +177,9 @@ func TestOrderCreate_AppliesBestPromo(t *testing.T) {
 
 	// outbox 应该同时有 order.created 和 promo.applied
 	var orderEvt, promoEvt int64
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=? AND aggregate_id=?", "order.created", order.ID).Count(&orderEvt)
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=? AND aggregate_id=?", "promo.applied", order.ID).Count(&promoEvt)
 	if orderEvt != 1 || promoEvt != 1 {
 		t.Fatalf("outbox rows: order.created=%d (want 1), promo.applied=%d (want 1)", orderEvt, promoEvt)
@@ -225,7 +225,7 @@ func TestOrderCreate_NoApplicableRule(t *testing.T) {
 
 	// 没命中规则就不应该落 promo.applied 事件
 	var promoEvt int64
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=?", "promo.applied").Count(&promoEvt)
 	if promoEvt != 0 {
 		t.Fatalf("promo.applied outbox 不该出现，got %d", promoEvt)
@@ -332,7 +332,7 @@ func TestOrderCreate_BudgetExhaustedDowngrades(t *testing.T) {
 
 	// 预算耗尽不应该写 promo.applied 事件
 	var promoEvt int64
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=? AND aggregate_id=?", "promo.applied", order.ID).Count(&promoEvt)
 	if promoEvt != 0 {
 		t.Fatalf("预算耗尽不应写 promo.applied，got %d", promoEvt)

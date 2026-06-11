@@ -18,6 +18,7 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -25,7 +26,6 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 // 测试场景下需要 AES MoneySecret，否则 EncryptMoney / DecryptMoney 走空 key panic。
@@ -74,7 +74,7 @@ func setupSQLiteForPreorder(t *testing.T) (*gorm.DB, func()) {
 	}
 	if err := db.AutoMigrate(
 		&user.User{}, &order.Order{}, &product.Product{},
-		&ProductPreorder{}, &model.OutboxEvent{},
+		&ProductPreorder{}, &outbox.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestPreorder_PayDepositLocksStockAndAdvancesStage(t *testing.T) {
 
 	// outbox：preorder.deposit.paid 必须落表
 	var outboxCount int64
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=? AND aggregate_id=?", "preorder.deposit.paid", dbOrder.ID).
 		Count(&outboxCount)
 	if outboxCount != 1 {
@@ -342,7 +342,7 @@ func TestPreorder_PayFinalConsumesStockAndAdvancesState(t *testing.T) {
 
 	// outbox 多一条
 	var cnt int64
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=? AND aggregate_id=?", "preorder.final.paid", depResp.OrderID).
 		Count(&cnt)
 	if cnt != 1 {
@@ -396,7 +396,7 @@ func TestPreorder_FinalWindowExpiredCronForfeits(t *testing.T) {
 
 	// outbox：preorder.forfeited
 	var cnt int64
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=? AND aggregate_id=?", "preorder.forfeited", depResp.OrderID).
 		Count(&cnt)
 	if cnt != 1 {
@@ -408,7 +408,7 @@ func TestPreorder_FinalWindowExpiredCronForfeits(t *testing.T) {
 		t.Fatalf("forfeit second run: %v", err)
 	}
 	var cnt2 int64
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=? AND aggregate_id=?", "preorder.forfeited", depResp.OrderID).
 		Count(&cnt2)
 	if cnt2 != 1 {
@@ -455,7 +455,7 @@ func TestPreorder_CancelInDepositWindowRefundsAndReleases(t *testing.T) {
 
 	// outbox：preorder.cancelled
 	var cnt int64
-	db.Model(&model.OutboxEvent{}).
+	db.Model(&outbox.OutboxEvent{}).
 		Where("routing_key=? AND aggregate_id=?", "preorder.cancelled", depResp.OrderID).
 		Count(&cnt)
 	if cnt != 1 {

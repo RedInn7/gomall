@@ -14,11 +14,11 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	web3sig "github.com/RedInn7/gomall/pkg/web3/signature"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -127,7 +127,7 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *CryptoPaydown
 	walletAddr := web3sig.NormalizeAddress(req.WalletAddr)
 	totalAmount := order.Money * int64(order.Num)
 	err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "Web3PaymentPending", "web3.payment.pending", order.ID,
 			events.Web3PaymentPending{
 				OrderID:    order.ID,
