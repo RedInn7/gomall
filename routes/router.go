@@ -23,6 +23,7 @@ import (
 	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/middleware"
+	"github.com/RedInn7/gomall/service/search"
 )
 
 // NewRouter 路由配置
@@ -49,8 +50,8 @@ func NewRouter() *gin.Engine {
 		// 公开 GET 接口挂 HTTP cache：ETag + Cache-Control 卸载浏览器/CDN 流量
 		v1.GET("product/list", middleware.HTTPCache(30*time.Second), api.ListProductsHandler())
 		v1.GET("product/show", middleware.HTTPCache(60*time.Second), api.ShowProductHandler())
-		v1.POST("product/search", api.SearchProductsHandler())
-		v1.POST("product/semantic-search", api.SemanticSearchProductsHandler())                        // 语义检索: ES + Milvus 融合
+		v1.POST("product/search", search.SearchProductsHandler())
+		v1.POST("product/semantic-search", search.SemanticSearchProductsHandler())                     // 语义检索: ES + Milvus 融合
 		v1.GET("product/imgs/list", api.ListProductImgHandler())                                       // 商品图片
 		v1.GET("category/list", middleware.HTTPCache(300*time.Second), category.ListCategoryHandler()) // 商品分类
 		v1.GET("carousels", middleware.HTTPCache(300*time.Second), carousel.ListCarouselsHandler())    // 轮播图

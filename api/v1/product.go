@@ -133,31 +133,6 @@ func UpdateProductHandler() gin.HandlerFunc {
 	}
 }
 
-// SearchProductsHandler 搜索商品
-func SearchProductsHandler() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		var req types.ProductSearchReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
-			return
-		}
-		if req.PageSize == 0 {
-			req.PageSize = consts.BasePageSize
-		}
-
-		l := service.GetProductSrv()
-		resp, err := l.ProductSearch(ctx.Request.Context(), &req)
-		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
-			return
-		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
-	}
-}
-
 func ListProductImgHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		var req types.ListProductImgReq
