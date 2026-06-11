@@ -51,11 +51,20 @@ internal/
 
 - [x] Phase 1：抽 `internal/migrate`，dao 解除对 model 反向依赖（commit 70f3475）
 - [x] `internal/shared/response`（commit df73569）
-- [x] `address`（样板，commit df73569）
-- [ ] outbox → internal/shared/outbox
-- [ ] 其余 ~17 个领域
-- [ ] 删除空的 `api/v1`、`service`、`repository/db/{dao,model}`、`types/<domain>` 残壳
+- [x] 叶子领域 8 个：`address carousel cart category`（批1）+ `money admin notice favorite`（批2）
+- [ ] **outbox 放到最后**：各领域迁移期间继续以 `dao.NewOutboxDao`/`model.OutboxEvent` 限定引用；待 model/dao 清空后再抽到 internal/shared/outbox
+- [ ] 剩余领域（顺序敏感，会回touch已迁移领域）：
+  - 叶子但带 cache：`coupon`(cache/coupon.go)、`redpacket`(consumer+task+cache/redpacket.go)、`skill`(skill_goods，用 product)
+  - 中间：`promo`（被 order/refund 调用 + 自带 routes/promo_routes.go）
+  - hub（很多领域依赖，迁移时要 sed 改所有消费者）：`product`(+product_img,cache/product.go,语义检索)、`user`
+  - order 簇：`order`(7+ service 文件)、`payment`(+crypto)、`refund`、`preorder`(routes)、`groupbuy`(routes)
+- [ ] 删除空的 `api/v1`、`service`、`repository/db/{dao,model}`、`types/<domain>` 残壳；删 `api/v1/common.go`（迁完后所有 handler 都用 shared/response）
 - [ ] slide deck 路径引用同步（重构稳定后单独做）
+
+### 已踩坑补充
+- router.go 里有局部路由组变量与领域同名（如 `admin := authed.Group("/admin")`）→ 该领域包用别名引入（`adminapi`）。后续 `order/product/user/promo/preorder/groupbuy` 若也有同名路由组变量，同样处理。
+- cache 耦合领域（coupon/redpacket/product）注意 service↔cache 不要成环：cache 文件目前不 import model，迁移时让 cache 保持在 repository/cache 包并按需 import internal/<domain>，但领域 service 不要反过来被 cache 依赖成环。
+- 并行 agent 各自只动自己 internal/<domain>/ 五件套，**不碰 router.go / migrate.go**；由编排者统一改这两个组合根并跑 `go build ./...`。
 
 ## 备注 / 坑
 
