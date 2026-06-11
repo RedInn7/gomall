@@ -61,9 +61,20 @@ internal/
 
 ### 剩余（order 簇）
 1. [x] `promo` 完成
-2. [x] `order` 核心 + `preorder` 完成（一起做：dao/preorder.go 移出 package dao 解 dao→order 环；consumer 用 orderpkg 别名避局部 order 变量遮蔽；5 个 order 白盒测试迁入；refund_test/groupbuy_test 的 CanTransition 改引 order.*）
-3. [ ] 剩 `payment`(payment+payment_crypto+pay.go+paydown_crypto.go)、`refund`、`groupbuy`、`idempotency`——都已 import orderpkg/product/promo，迁起来直接
-4. [ ] 收尾：删空 api/v1(连 common.go)、service、repository/db/{dao,model} 残壳；抽 outbox→internal/shared/outbox；删 orderpkg 别名改回 order（消费者迁完后局部变量不再冲突时）
+2. [x] `order` 核心 + `preorder` 完成
+3. [x] `payment`/`refund`/`groupbuy`/`idempotency` 完成
+4. [x] 收尾：api/v1、service(领域)、repository/db/model 全部消解；outbox 抽到 internal/shared/outbox；repository/db/dao 退化为纯 DB 基座(init.go)
+
+## ✅ 迁移完成（2026-06-11）
+
+**全部 20 个领域包**落地 `internal/<domain>/`：address admin carousel cart category coupon favorite groupbuy idempotency money notice order payment preorder product promo redpacket refund skill user。
+共享：`internal/shared/{response,outbox}`、`internal/migrate`。`go build ./...` 绿、`internal/...` 测试通过（个别 preorder 测试受真实 Redis 库存键状态影响偶发，与重构逻辑无关，单测可稳定通过）。
+
+### 收尾说明 / 后续可选
+- **`orderpkg` 别名是有意保留**：payment/refund/groupbuy 内有局部变量 `order`，用别名 `orderpkg "internal/order"` 规避遮蔽；改回 `order` 需先重命名这些局部变量，非必须。
+- product 的搜索编排 + 两个搜索 handler 在 `service/search` 包（单向 search→product），未塞进 product 领域，避免环。
+- `repository/db/dao` 只剩 `init.go`（_db/NewDBClient/InitMySQL/SetTestDB）；`service/{search,web3,grpc,events,inventory}`、`repository/{es,milvus,kafka,rabbitmq}`、`consts/pkg/config/middleware` 作为横切/基础设施保持原位。
+- slide deck 的旧路径引用尚未同步（按既定计划：代码先行，slide 之后单独做）。
 2. `order` 核心（order + order_async/cancel/consumer/shipping/state/task 共 7 个 service 文件 + dao + model + types*2 + api*2），被 payment/refund/preorder/groupbuy/cancel 引用 model.Order/dao.NewOrderDao
 3. order 的下游：`payment`(payment+crypto)、`refund`、`preorder`(routes)、`groupbuy`(routes)
 4. `idempotency`（api handler，偏共享，考虑放 shared 或 order）
