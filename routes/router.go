@@ -12,9 +12,12 @@ import (
 	api "github.com/RedInn7/gomall/api/v1"
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/internal/address"
+	adminapi "github.com/RedInn7/gomall/internal/admin"
 	"github.com/RedInn7/gomall/internal/carousel"
 	"github.com/RedInn7/gomall/internal/cart"
 	"github.com/RedInn7/gomall/internal/category"
+	"github.com/RedInn7/gomall/internal/favorite"
+	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/middleware"
 )
 
@@ -43,8 +46,8 @@ func NewRouter() *gin.Engine {
 		v1.GET("product/list", middleware.HTTPCache(30*time.Second), api.ListProductsHandler())
 		v1.GET("product/show", middleware.HTTPCache(60*time.Second), api.ShowProductHandler())
 		v1.POST("product/search", api.SearchProductsHandler())
-		v1.POST("product/semantic-search", api.SemanticSearchProductsHandler())                   // 语义检索: ES + Milvus 融合
-		v1.GET("product/imgs/list", api.ListProductImgHandler())                                  // 商品图片
+		v1.POST("product/semantic-search", api.SemanticSearchProductsHandler())                        // 语义检索: ES + Milvus 融合
+		v1.GET("product/imgs/list", api.ListProductImgHandler())                                       // 商品图片
 		v1.GET("category/list", middleware.HTTPCache(300*time.Second), category.ListCategoryHandler()) // 商品分类
 		v1.GET("carousels", middleware.HTTPCache(300*time.Second), carousel.ListCarouselsHandler())    // 轮播图
 
@@ -66,9 +69,9 @@ func NewRouter() *gin.Engine {
 			authed.POST("product/update", api.UpdateProductHandler())
 			authed.POST("product/delete", api.DeleteProductHandler())
 			// 收藏夹
-			authed.GET("favorites/list", api.ListFavoritesHandler())
-			authed.POST("favorites/create", api.CreateFavoriteHandler())
-			authed.POST("favorites/delete", api.DeleteFavoriteHandler())
+			authed.GET("favorites/list", favorite.ListFavoritesHandler())
+			authed.POST("favorites/create", favorite.CreateFavoriteHandler())
+			authed.POST("favorites/delete", favorite.DeleteFavoriteHandler())
 
 			// 优惠券
 			authed.POST("coupon/batch", api.CreateCouponBatchHandler())
@@ -140,7 +143,7 @@ func NewRouter() *gin.Engine {
 				api.CryptoPaydownHandler())
 
 			// 显示金额
-			authed.POST("money", api.ShowMoneyHandler())
+			authed.POST("money", money.ShowMoneyHandler())
 
 			// 秒杀专场：分布式滑动窗口限流，单用户 1s 内最多 3 次
 			authed.POST("skill_product/init", api.InitSkillProductHandler())
@@ -156,15 +159,15 @@ func NewRouter() *gin.Engine {
 				api.SkillProductHandler())
 
 			// 初始 admin 引导（仅在系统无 admin 时可用）
-			authed.POST("admin/bootstrap", api.BootstrapAdminHandler())
+			authed.POST("admin/bootstrap", adminapi.BootstrapAdminHandler())
 
 			// 管理员后台
 			admin := authed.Group("/admin")
 			admin.Use(middleware.RequireRole("admin"))
 			{
-				admin.GET("users", api.AdminListUsersHandler())
-				admin.POST("users/promote", api.AdminPromoteUserHandler())
-				admin.POST("search/backfill", api.AdminBackfillProductIndexHandler())
+				admin.GET("users", adminapi.AdminListUsersHandler())
+				admin.POST("users/promote", adminapi.AdminPromoteUserHandler())
+				admin.POST("search/backfill", adminapi.AdminBackfillProductIndexHandler())
 			}
 
 			// 新业务域：满减 / 拼团 / 预售。三组拆到独立 routes/*_routes.go

@@ -1,4 +1,4 @@
-package service
+package money
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/types"
 )
 
 var MoneySrvIns *MoneySrv
@@ -25,7 +24,7 @@ func GetMoneySrv() *MoneySrv {
 }
 
 // MoneyShow 展示用户的金额
-func (s *MoneySrv) MoneyShow(ctx context.Context, req *types.MoneyShowReq) (resp interface{}, err error) {
+func (s *MoneySrv) MoneyShow(ctx context.Context, req *MoneyShowReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -41,7 +40,7 @@ func (s *MoneySrv) MoneyShow(ctx context.Context, req *types.MoneyShowReq) (resp
 		log.LogrusObj.Error(err)
 		return
 	}
-	resp = &types.MoneyShowResp{
+	resp = &MoneyShowResp{
 		UserID:    user.ID,
 		UserName:  user.UserName,
 		UserMoney: formatYuan(money),

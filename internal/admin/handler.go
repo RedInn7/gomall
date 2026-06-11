@@ -1,4 +1,4 @@
-package v1
+package admin
 
 import (
 	"net/http"
@@ -6,8 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
-	"github.com/RedInn7/gomall/service"
 	"github.com/RedInn7/gomall/service/search"
 )
 
@@ -15,9 +15,9 @@ func AdminListUsersHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-		resp, err := service.GetAdminSrv().ListAllUsers(c.Request.Context(), page, size)
+		resp, err := GetAdminSrv().ListAllUsers(c.Request.Context(), page, size)
 		if err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
 		c.JSON(http.StatusOK, ctl.RespSuccess(c, resp))
@@ -30,11 +30,11 @@ func AdminPromoteUserHandler() gin.HandlerFunc {
 			UserId uint `json:"user_id" form:"user_id" binding:"required"`
 		}
 		if err := c.ShouldBind(&req); err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
-		if err := service.GetAdminSrv().PromoteToAdmin(c.Request.Context(), req.UserId); err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+		if err := GetAdminSrv().PromoteToAdmin(c.Request.Context(), req.UserId); err != nil {
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
 		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"promoted": req.UserId}))
@@ -44,8 +44,8 @@ func AdminPromoteUserHandler() gin.HandlerFunc {
 // BootstrapAdminHandler 仅当系统无 admin 时可用
 func BootstrapAdminHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := service.GetAdminSrv().BootstrapPromoteSelf(c.Request.Context()); err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+		if err := GetAdminSrv().BootstrapPromoteSelf(c.Request.Context()); err != nil {
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
 		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"ok": true}))
@@ -58,7 +58,7 @@ func AdminBackfillProductIndexHandler() gin.HandlerFunc {
 		batch, _ := strconv.Atoi(c.DefaultQuery("batch", "200"))
 		n, err := search.BackfillFromDB(c.Request.Context(), batch)
 		if err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
 		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"indexed": n}))
