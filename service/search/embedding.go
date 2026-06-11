@@ -30,8 +30,8 @@ type embeddingRequest struct {
 }
 
 // embeddingResponse 兼容两种返回形态:
-//   1. {"data":[{"embedding":[...]}]} — OpenAI 风格
-//   2. {"embedding":[...]}            — 自建 BGE / Ollama 风格
+//  1. {"data":[{"embedding":[...]}]} — OpenAI 风格
+//  2. {"embedding":[...]}            — 自建 BGE / Ollama 风格
 type embeddingResponse struct {
 	Data []struct {
 		Embedding []float32 `json:"embedding"`

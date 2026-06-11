@@ -83,9 +83,9 @@ var defaultRedis = func() redisCmd { return cache.RedisClient }
 
 // PaymentConfirmed 是 listener 内部解码后的事件 payload，原样落到 outbox JSON 里。
 type PaymentConfirmed struct {
-	OrderID     string `json:"order_id"`     // 0x 开头的 bytes32 hex，与合约内 orderID 字段一致
-	Buyer       string `json:"buyer"`        // EOA 地址
-	Amount      string `json:"amount"`       // wei 数值，string 形式避免 JSON 精度损失
+	OrderID     string `json:"order_id"` // 0x 开头的 bytes32 hex，与合约内 orderID 字段一致
+	Buyer       string `json:"buyer"`    // EOA 地址
+	Amount      string `json:"amount"`   // wei 数值，string 形式避免 JSON 精度损失
 	TxHash      string `json:"tx_hash"`
 	LogIndex    uint   `json:"log_index"`
 	BlockNumber uint64 `json:"block_number"`
@@ -127,14 +127,14 @@ func startPaymentListener(ctx context.Context, opts listenerOpts) error {
 	topic := crypto.Keccak256Hash([]byte("PaymentConfirmed(bytes32,address,uint256)"))
 
 	l := &listener{
-		rpcURL:   rpcURL,
-		escrow:   common.HexToAddress(escrow),
-		abi:      parsedABI,
-		topic:    topic,
-		dial:     opts.dial,
-		outbox:   opts.outbox,
-		rdb:      opts.rdb,
-		backoff:  newBackoff(time.Second, time.Minute),
+		rpcURL:  rpcURL,
+		escrow:  common.HexToAddress(escrow),
+		abi:     parsedABI,
+		topic:   topic,
+		dial:    opts.dial,
+		outbox:  opts.outbox,
+		rdb:     opts.rdb,
+		backoff: newBackoff(time.Second, time.Minute),
 	}
 	go l.run(ctx)
 	util.LogrusObj.Infof("Web3 listener started escrow=%s", escrow)

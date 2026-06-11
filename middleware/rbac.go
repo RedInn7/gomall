@@ -8,10 +8,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 type roleCacheEntry struct {
@@ -20,7 +20,7 @@ type roleCacheEntry struct {
 }
 
 var (
-	roleCache   sync.Map
+	roleCache    sync.Map
 	roleCacheTTL = 30 * time.Second
 )
 
@@ -32,7 +32,7 @@ func lookupRole(ctx context.Context, userId uint) (string, error) {
 			return entry.role, nil
 		}
 	}
-	u, err := dao.NewUserDao(ctx).GetUserById(userId)
+	u, err := user.NewUserDao(ctx).GetUserById(userId)
 	if err != nil {
 		return "", err
 	}

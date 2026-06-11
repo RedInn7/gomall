@@ -1,4 +1,4 @@
-package model
+package user
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	re := conf.ConfigReader{FileName: "../../../config/locales/config.yaml"}
+	re := conf.ConfigReader{FileName: "../../config/locales/config.yaml"}
 	conf.InitConfigForTest(&re)
 	fmt.Println("Write tests on values: ", conf.Config)
 	m.Run()

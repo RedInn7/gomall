@@ -1,4 +1,4 @@
-package types
+package user
 
 type UserServiceReq struct {
 	NickName string `form:"nick_name" json:"nick_name"`

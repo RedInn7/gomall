@@ -21,6 +21,7 @@ import (
 	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	"github.com/RedInn7/gomall/internal/skill"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/middleware"
 )
 
@@ -41,8 +42,8 @@ func NewRouter() *gin.Engine {
 		})
 
 		// 用户操作
-		v1.POST("user/register", api.UserRegisterHandler())
-		v1.POST("user/login", api.UserLoginHandler())
+		v1.POST("user/register", user.UserRegisterHandler())
+		v1.POST("user/login", user.UserLoginHandler())
 
 		// 商品操作
 		// 公开 GET 接口挂 HTTP cache：ETag + Cache-Control 卸载浏览器/CDN 流量
@@ -59,13 +60,13 @@ func NewRouter() *gin.Engine {
 		{
 
 			// 用户操作
-			authed.POST("user/update", api.UserUpdateHandler())
-			authed.GET("user/show_info", api.ShowUserInfoHandler())
-			authed.POST("user/send_email", api.SendEmailHandler())
-			authed.GET("user/valid_email", api.ValidEmailHandler())
-			authed.POST("user/following", api.UserFollowingHandler())
-			authed.POST("user/unfollowing", api.UserUnFollowingHandler())
-			authed.POST("user/avatar", api.UploadAvatarHandler()) // 上传头像
+			authed.POST("user/update", user.UserUpdateHandler())
+			authed.GET("user/show_info", user.ShowUserInfoHandler())
+			authed.POST("user/send_email", user.SendEmailHandler())
+			authed.GET("user/valid_email", user.ValidEmailHandler())
+			authed.POST("user/following", user.UserFollowingHandler())
+			authed.POST("user/unfollowing", user.UserUnFollowingHandler())
+			authed.POST("user/avatar", user.UploadAvatarHandler()) // 上传头像
 
 			// 商品操作
 			authed.POST("product/create", api.CreateProductHandler())

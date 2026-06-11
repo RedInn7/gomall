@@ -7,6 +7,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
@@ -67,15 +68,15 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 		return
 	}
 
-	userDao := dao.NewUserDao(ctx)
-	user, err := userDao.GetUserById(u.Id)
-	util.LogrusObj.Infof("user: %+v\n", user)
+	userDao := user.NewUserDao(ctx)
+	curUser, err := userDao.GetUserById(u.Id)
+	util.LogrusObj.Infof("user: %+v\n", curUser)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
 	}
 
-	bossDao := dao.NewUserDaoByDB(userDao.DB)
+	bossDao := user.NewUserDaoByDB(userDao.DB)
 	boss, err := bossDao.GetUserById(req.BossId)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -90,7 +91,7 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 
 	favorite := &Favorite{
 		UserID:    u.Id,
-		User:      *user,
+		User:      *curUser,
 		ProductID: req.ProductId,
 		Product:   *product,
 		BossID:    req.BossId,
