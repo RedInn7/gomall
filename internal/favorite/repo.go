@@ -1,12 +1,11 @@
-package dao
+package favorite
 
 import (
 	"context"
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/repository/db/model"
-	"github.com/RedInn7/gomall/types"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 type FavoritesDao struct {
@@ -14,7 +13,7 @@ type FavoritesDao struct {
 }
 
 func NewFavoritesDao(ctx context.Context) *FavoritesDao {
-	return &FavoritesDao{NewDBClient(ctx)}
+	return &FavoritesDao{dao.NewDBClient(ctx)}
 }
 
 func NewFavoritesDaoByDB(db *gorm.DB) *FavoritesDao {
@@ -22,14 +21,14 @@ func NewFavoritesDaoByDB(db *gorm.DB) *FavoritesDao {
 }
 
 // ListFavoriteByUserId 通过 user_id 获取收藏夹列表
-func (dao *FavoritesDao) ListFavoriteByUserId(uId uint, pageSize, pageNum int) (r []*types.FavoriteListResp, total int64, err error) {
+func (d *FavoritesDao) ListFavoriteByUserId(uId uint, pageSize, pageNum int) (r []*FavoriteListResp, total int64, err error) {
 	// 总数
-	err = dao.DB.Model(&model.Favorite{}).Preload("User").
+	err = d.DB.Model(&Favorite{}).Preload("User").
 		Where("user_id=?", uId).Count(&total).Error
 	if err != nil {
 		return
 	}
-	err = dao.DB.Model(&model.Favorite{}).
+	err = d.DB.Model(&Favorite{}).
 		Joins("AS f LEFT JOIN user AS u on u.id = f.boss_id").
 		Joins("LEFT JOIN product AS p ON p.id = f.product_id").
 		Joins("LEFT JOIN category AS c ON c.id = p.category_id").
@@ -57,15 +56,15 @@ func (dao *FavoritesDao) ListFavoriteByUserId(uId uint, pageSize, pageNum int) (
 }
 
 // CreateFavorite 创建收藏夹
-func (dao *FavoritesDao) CreateFavorite(favorite *model.Favorite) (err error) {
-	err = dao.DB.Create(&favorite).Error
+func (d *FavoritesDao) CreateFavorite(favorite *Favorite) (err error) {
+	err = d.DB.Create(&favorite).Error
 	return
 }
 
 // FavoriteExistOrNot 判断是否存在
-func (dao *FavoritesDao) FavoriteExistOrNot(uId uint, pid uint) (exist bool, err error) {
+func (d *FavoritesDao) FavoriteExistOrNot(uId uint, pid uint) (exist bool, err error) {
 	var count int64
-	db := dao.DB.Model(&model.Favorite{}).
+	db := d.DB.Model(&Favorite{}).
 		Where("user_id=?", uId)
 	if pid != 0 {
 		db = db.Where("product_id=?", pid)
@@ -79,14 +78,14 @@ func (dao *FavoritesDao) FavoriteExistOrNot(uId uint, pid uint) (exist bool, err
 }
 
 // DeleteFavoriteById 删除收藏夹
-func (dao *FavoritesDao) DeleteFavoriteById(fId uint) error {
-	return dao.DB.Where("id=?", fId).Delete(&model.Favorite{}).Error
+func (d *FavoritesDao) DeleteFavoriteById(fId uint) error {
+	return d.DB.Where("id=?", fId).Delete(&Favorite{}).Error
 }
 
-func (dao *FavoritesDao) DeleteFavoriteByUserIdAndProductId(userId uint, productId uint) error {
-	db := dao.DB.Where("user_id=?", userId)
+func (d *FavoritesDao) DeleteFavoriteByUserIdAndProductId(userId uint, productId uint) error {
+	db := d.DB.Where("user_id=?", userId)
 	if productId != 0 {
 		db = db.Where("product_id=?", productId)
 	}
-	return db.Delete(&model.Favorite{}).Error
+	return db.Delete(&Favorite{}).Error
 }

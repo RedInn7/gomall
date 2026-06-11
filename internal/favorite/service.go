@@ -1,4 +1,4 @@
-package service
+package favorite
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -28,13 +27,13 @@ func GetFavoriteSrv() *FavoriteSrv {
 }
 
 // FavoriteList 商品收藏夹
-func (s *FavoriteSrv) FavoriteList(ctx context.Context, req *types.FavoritesServiceReq) (resp interface{}, err error) {
+func (s *FavoriteSrv) FavoriteList(ctx context.Context, req *FavoritesServiceReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	favorites, total, err := dao.NewFavoritesDao(ctx).ListFavoriteByUserId(u.Id, req.PageSize, req.PageNum)
+	favorites, total, err := NewFavoritesDao(ctx).ListFavoriteByUserId(u.Id, req.PageSize, req.PageNum)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
@@ -54,13 +53,13 @@ func (s *FavoriteSrv) FavoriteList(ctx context.Context, req *types.FavoritesServ
 }
 
 // FavoriteCreate 创建收藏夹
-func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *types.FavoriteCreateReq) (resp interface{}, err error) {
+func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	fDao := dao.NewFavoritesDao(ctx)
+	fDao := NewFavoritesDao(ctx)
 	exist, _ := fDao.FavoriteExistOrNot(u.Id, req.ProductId)
 	if exist {
 		err = errors.New("已经存在了")
@@ -89,7 +88,7 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *types.FavoriteCre
 		return
 	}
 
-	favorite := &model.Favorite{
+	favorite := &Favorite{
 		UserID:    u.Id,
 		User:      *user,
 		ProductID: req.ProductId,
@@ -107,8 +106,8 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *types.FavoriteCre
 }
 
 // FavoriteDelete 删除收藏夹
-func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *types.FavoriteDeleteReq) (resp interface{}, err error) {
-	favoriteDao := dao.NewFavoritesDao(ctx)
+func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *FavoriteDeleteReq) (resp interface{}, err error) {
+	favoriteDao := NewFavoritesDao(ctx)
 	var exist bool
 	exist, err = favoriteDao.FavoriteExistOrNot(req.Id, req.ProductId)
 	if err != nil {

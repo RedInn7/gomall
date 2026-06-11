@@ -1,33 +1,31 @@
-package v1
+package favorite
 
 import (
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/service"
-	"github.com/RedInn7/gomall/types"
-
-	"github.com/gin-gonic/gin"
 )
 
 // CreateFavoriteHandler 创建收藏
 func CreateFavoriteHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.FavoriteCreateReq
+		var req FavoriteCreateReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 
-		l := service.GetFavoriteSrv()
+		l := GetFavoriteSrv()
 		resp, err := l.FavoriteCreate(ctx.Request.Context(), &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
@@ -37,22 +35,21 @@ func CreateFavoriteHandler() gin.HandlerFunc {
 // ListFavoritesHandler 收藏夹详情接口
 func ListFavoritesHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.FavoritesServiceReq
+		var req FavoritesServiceReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		if req.PageSize == 0 {
 			req.PageSize = consts.BasePageSize
 		}
 
-		l := service.GetFavoriteSrv()
+		l := GetFavoriteSrv()
 		resp, err := l.FavoriteList(ctx.Request.Context(), &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
@@ -62,19 +59,18 @@ func ListFavoritesHandler() gin.HandlerFunc {
 // DeleteFavoriteHandler 删除收藏夹
 func DeleteFavoriteHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.FavoriteDeleteReq
+		var req FavoriteDeleteReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 
-		l := service.GetFavoriteSrv()
+		l := GetFavoriteSrv()
 		resp, err := l.FavoriteDelete(ctx.Request.Context(), &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))

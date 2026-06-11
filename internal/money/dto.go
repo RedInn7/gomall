@@ -1,4 +1,4 @@
-package types
+package money
 
 type MoneyShowReq struct {
 	Key string `json:"key" form:"key"`

@@ -1,4 +1,4 @@
-package model
+package admin
 
 import (
 	"github.com/jinzhu/gorm"
@@ -6,6 +6,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 type Admin struct {
@@ -17,7 +18,7 @@ type Admin struct {
 
 // SetPassword 设置密码
 func (admin *Admin) SetPassword(password string) error {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), PassWordCost)
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), model.PassWordCost)
 	if err != nil {
 		return err
 	}
