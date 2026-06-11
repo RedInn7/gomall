@@ -8,6 +8,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/initialize"
+	"github.com/RedInn7/gomall/internal/migrate"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	snowflake "github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -30,6 +31,9 @@ func loading() {
 	conf.InitConfig()
 	util.InitLog() // 必须在使用 LogrusObj 的初始化之前完成
 	dao.InitMySQL()
+	if err := migrate.Run(); err != nil {
+		panic(err)
+	}
 	cache.InitCache()
 	snowflake.InitSnowflake(1)
 	initialize.InitCron()
