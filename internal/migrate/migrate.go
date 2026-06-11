@@ -13,6 +13,7 @@ import (
 	"github.com/RedInn7/gomall/internal/notice"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	"github.com/RedInn7/gomall/internal/skill"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
 )
@@ -24,7 +25,7 @@ func Run() error {
 	db := dao.NewDBClient(context.Background())
 	return db.Set("gorm:table_options", "charset=utf8mb4").
 		AutoMigrate(
-			&model.User{}, &favorite.Favorite{},
+			&user.User{}, &favorite.Favorite{},
 			&model.Order{}, &admin.Admin{}, &address.Address{},
 			&cart.Cart{}, &category.Category{}, &carousel.Carousel{},
 			&notice.Notice{}, &model.Product{},

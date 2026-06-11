@@ -12,10 +12,10 @@ import (
 )
 
 // CancelUnpaidOrder 关闭未支付订单 (幂等)。
-//   1. CloseOrderWithCheck: 只对 UnPaid 状态的订单生效，二次调用直接 no-op
-//   2. 不再回写 product.Num：未支付订单从未真正扣减过 DB 库存，回写会虚高
-//   3. 释放 Redis reserved 预占 (退回 available)
-//   4. outbox 写 order.cancelled 事件
+//  1. CloseOrderWithCheck: 只对 UnPaid 状态的订单生效，二次调用直接 no-op
+//  2. 不再回写 product.Num：未支付订单从未真正扣减过 DB 库存，回写会虚高
+//  3. 释放 Redis reserved 预占 (退回 available)
+//  4. outbox 写 order.cancelled 事件
 func CancelUnpaidOrder(orderNum uint64) error {
 	ctx := context.Background()
 	baseDao := dao.NewOrderDao(ctx)

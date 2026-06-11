@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -24,9 +25,9 @@ import (
 
 // PreorderSrv 预售两段式支付。
 // 三个写动作（付定金 / 付尾款 / 取消）共享一组不变量：
-//   1) 时间窗口校验在事务之外，业务码直接 4xx
-//   2) 真正的余额扣减 + 库存动作 + 状态机推进 + outbox 写入在同一事务
-//   3) 失败路径走 Saga：cache 操作放在事务外，事务失败时回滚 cache
+//  1. 时间窗口校验在事务之外，业务码直接 4xx
+//  2. 真正的余额扣减 + 库存动作 + 状态机推进 + outbox 写入在同一事务
+//  3. 失败路径走 Saga：cache 操作放在事务外，事务失败时回滚 cache
 //
 // 业务承诺（README + 法律合规）：定金期外不退；尾款窗口期外按预售须知没收定金。
 // 上述承诺在用户首次进入预售页时必须由前端展示，82xxx 业务码用于客服话术。
@@ -466,7 +467,7 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64) 
 	if amountCents <= 0 {
 		return nil
 	}
-	userDao := dao.NewUserDaoByDB(tx)
+	userDao := user.NewUserDaoByDB(tx)
 	u, err := userDao.GetUserById(userID)
 	if err != nil {
 		return err
@@ -508,7 +509,7 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64)
 	if amountCents <= 0 {
 		return nil
 	}
-	userDao := dao.NewUserDaoByDB(tx)
+	userDao := user.NewUserDaoByDB(tx)
 	boss, err := userDao.GetUserById(bossID)
 	if err != nil {
 		return err

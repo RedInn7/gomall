@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 var MoneySrvIns *MoneySrv
@@ -30,7 +30,7 @@ func (s *MoneySrv) MoneyShow(ctx context.Context, req *MoneyShowReq) (resp inter
 		log.LogrusObj.Error(err)
 		return
 	}
-	user, err := dao.NewUserDao(ctx).GetUserById(u.Id)
+	user, err := user.NewUserDao(ctx).GetUserById(u.Id)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return

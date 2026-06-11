@@ -6,7 +6,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/internal/user"
 )
 
 type Admin struct {
@@ -18,7 +18,7 @@ type Admin struct {
 
 // SetPassword 设置密码
 func (admin *Admin) SetPassword(password string) error {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), model.PassWordCost)
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), user.PassWordCost)
 	if err != nil {
 		return err
 	}

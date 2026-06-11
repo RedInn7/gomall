@@ -14,6 +14,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -68,7 +69,7 @@ func setupSQLiteForPreorder(t *testing.T) (*gorm.DB, func()) {
 		t.Skipf("sqlite 不可用（CGO 关闭？）：%v", err)
 	}
 	if err := db.AutoMigrate(
-		&model.User{}, &model.Order{}, &model.Product{},
+		&user.User{}, &model.Order{}, &model.Product{},
 		&model.ProductPreorder{}, &model.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
@@ -117,12 +118,12 @@ func seedPreorder(t *testing.T, db *gorm.DB, depositWindow, finalWindow time.Dur
 	// 用户 + 商家：跳过 AES 直接给原文，单测里 user.Money 字段就是明文
 	// 与生产口径不一致，但本测试目标是状态机 + 库存，不是 AES 正确性，独立单测覆盖即可。
 	// 为了让 EncryptMoney/DecryptMoney 可逆，这里手动用一次 EncryptMoney 写入。
-	user := &model.User{UserName: "u-preorder", Money: "1000000"}
-	user.Money, _ = user.EncryptMoney(key)
-	if err := db.Create(user).Error; err != nil {
+	buyer := &user.User{UserName: "u-preorder", Money: "1000000"}
+	buyer.Money, _ = buyer.EncryptMoney(key)
+	if err := db.Create(buyer).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	boss := &model.User{UserName: "boss-preorder", Money: "100"}
+	boss := &user.User{UserName: "boss-preorder", Money: "100"}
 	boss.Money, _ = boss.EncryptMoney(key)
 	if err := db.Create(boss).Error; err != nil {
 		t.Fatalf("create boss: %v", err)
@@ -154,7 +155,7 @@ func seedPreorder(t *testing.T, db *gorm.DB, depositWindow, finalWindow time.Dur
 		t.Fatalf("init stock: %v", err)
 	}
 	return preorderFixture{
-		UserID:    user.ID,
+		UserID:    buyer.ID,
 		BossID:    boss.ID,
 		ProductID: product.ID,
 		Key:       key,
@@ -183,13 +184,13 @@ func TestPreorder_OutOfDepositWindowRejected(t *testing.T) {
 
 	// 定金期 -1h ~ -10min（已结束）
 	now := time.Now()
-	user := &model.User{UserName: "u-out", Money: "1000000"}
+	buyer := &user.User{UserName: "u-out", Money: "1000000"}
 	key := "abc123"
-	user.Money, _ = user.EncryptMoney(key)
-	if err := db.Create(user).Error; err != nil {
+	buyer.Money, _ = buyer.EncryptMoney(key)
+	if err := db.Create(buyer).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	boss := &model.User{UserName: "boss-out", Money: "0"}
+	boss := &user.User{UserName: "boss-out", Money: "0"}
 	boss.Money, _ = boss.EncryptMoney(key)
 	if err := db.Create(boss).Error; err != nil {
 		t.Fatalf("create boss: %v", err)
@@ -214,7 +215,7 @@ func TestPreorder_OutOfDepositWindowRejected(t *testing.T) {
 		t.Fatalf("init stock: %v", err)
 	}
 
-	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: user.ID})
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: buyer.ID})
 	_, err := GetPreorderSrv().PayDeposit(ctx, &types.PreorderDepositReq{
 		ProductID: product.ID, BossID: boss.ID, AddressID: 1, Key: key,
 	})
@@ -458,7 +459,7 @@ func TestPreorder_CancelInDepositWindowRefundsAndReleases(t *testing.T) {
 	}
 
 	// 用户余额已退回（明文写回 1000000 - 1000 + 1000 = 1000000）
-	var u model.User
+	var u user.User
 	if err := db.First(&u, fx.UserID).Error; err != nil {
 		t.Fatalf("load user: %v", err)
 	}

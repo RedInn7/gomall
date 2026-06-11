@@ -5,11 +5,10 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/middleware"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 var (
@@ -32,9 +31,9 @@ func (s *AdminSrv) ListAllUsers(ctx context.Context, page, pageSize int) (interf
 	if pageSize <= 0 || pageSize > 200 {
 		pageSize = 50
 	}
-	var users []*model.User
-	db := dao.NewUserDao(ctx).DB
-	err := db.Model(&model.User{}).
+	var users []*user.User
+	db := user.NewUserDao(ctx).DB
+	err := db.Model(&user.User{}).
 		Select("id, user_name, nick_name, email, status, role, created_at").
 		Offset((page - 1) * pageSize).
 		Limit(pageSize).
@@ -45,15 +44,15 @@ func (s *AdminSrv) ListAllUsers(ctx context.Context, page, pageSize int) (interf
 
 // PromoteToAdmin 把指定用户提升为 admin。仅 admin 可调用（路由层已限）。
 func (s *AdminSrv) PromoteToAdmin(ctx context.Context, targetUserId uint) error {
-	target, err := dao.NewUserDao(ctx).GetUserById(targetUserId)
+	target, err := user.NewUserDao(ctx).GetUserById(targetUserId)
 	if err != nil {
 		return err
 	}
 	if target == nil || target.ID == 0 {
 		return errors.New("目标用户不存在")
 	}
-	target.Role = model.RoleAdmin
-	if err := dao.NewUserDao(ctx).UpdateUserById(targetUserId, target); err != nil {
+	target.Role = user.RoleAdmin
+	if err := user.NewUserDao(ctx).UpdateUserById(targetUserId, target); err != nil {
 		return err
 	}
 	middleware.InvalidateRoleCache(targetUserId)
@@ -68,9 +67,9 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	db := dao.NewUserDao(ctx).DB
+	db := user.NewUserDao(ctx).DB
 	var count int64
-	if err := db.Model(&model.User{}).Where("role = ?", model.RoleAdmin).Count(&count).Error; err != nil {
+	if err := db.Model(&user.User{}).Where("role = ?", user.RoleAdmin).Count(&count).Error; err != nil {
 		return err
 	}
 	if count > 0 {

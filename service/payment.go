@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -71,7 +72,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 		paidNum = num
 		totalMoney := order.Money * int64(num)
 
-		userDao := dao.NewUserDaoByDB(tx)
+		userDao := user.NewUserDaoByDB(tx)
 		user, err := userDao.GetUserById(uId)
 		if err != nil {
 			log.LogrusObj.Error(err)

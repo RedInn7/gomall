@@ -10,6 +10,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	util "github.com/RedInn7/gomall/pkg/utils/upload"
@@ -36,9 +37,9 @@ func GetProductSrv() *ProductSrv {
 }
 
 // ProductShow Cache Aside 读取商品详情。
-//   1. 先读缓存，命中直接返回
-//   2. 未命中: SETNX 抢回源锁，单飞回源 DB
-//   3. 未抢到锁的请求短暂重试一次，仍未命中则直接回源（兜底）
+//  1. 先读缓存，命中直接返回
+//  2. 未命中: SETNX 抢回源锁，单飞回源 DB
+//  3. 未抢到锁的请求短暂重试一次，仍未命中则直接回源（兜底）
 func (s *ProductSrv) ProductShow(ctx context.Context, req *types.ProductShowReq) (resp interface{}, err error) {
 	cached := &types.ProductResp{}
 	if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
@@ -105,7 +106,7 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		return nil, err
 	}
 	uId := u.Id
-	boss, err := dao.NewUserDao(ctx).GetUserById(uId)
+	boss, err := user.NewUserDao(ctx).GetUserById(uId)
 	if err != nil {
 		log.LogrusObj.Error("获取卖家信息失败，err:", err)
 		return nil, err
@@ -265,9 +266,9 @@ func emitProductChanged(ctx context.Context, productID uint, op string) {
 }
 
 // ProductUpdate 更新商品，延迟双删保证缓存一致性
-//   1. 先删缓存
-//   2. 写库
-//   3. 异步等 500ms 再删一次（覆盖并发读取旧值后写回的窗口）
+//  1. 先删缓存
+//  2. 写库
+//  3. 异步等 500ms 再删一次（覆盖并发读取旧值后写回的窗口）
 func (s *ProductSrv) ProductUpdate(ctx context.Context, req *types.ProductUpdateReq) (resp interface{}, err error) {
 	product := &model.Product{
 		Name:       req.Name,
