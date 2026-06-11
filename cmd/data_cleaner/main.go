@@ -46,7 +46,7 @@ func main() {
 	}
 	startTime := time.Now()
 	totalDeleted := uint(0)
-	fmt.Println("🚀 开始删除 1000000 条数据...\n")
+	fmt.Println("🚀 开始删除 1000000 条数据...")
 	for i := startId; i < maxId; i += BatchSize {
 		end := min(maxId+1, i+BatchSize)
 		result := db.Unscoped().Where("id>=? and id<?", i, end).Delete(&Order{})
