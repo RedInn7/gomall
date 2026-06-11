@@ -35,7 +35,7 @@ var preorderTestConfigOnce sync.Once
 func initPreorderTestConfig() {
 	preorderTestConfigOnce.Do(func() {
 		// 优先用项目自带 yaml；找不到就构造一份最小的内存版，保证 MoneySecret 非空。
-		re := conf.ConfigReader{FileName: "../config/locales/config.yaml"}
+		re := conf.ConfigReader{FileName: "../../config/locales/config.yaml"}
 		defer func() {
 			if r := recover(); r != nil {
 				// yaml 不存在 / 解析失败 → 构造最小 config
