@@ -22,6 +22,9 @@ func initDBForTest(t *testing.T) {
 		}
 	}()
 	InitMySQL()
+	if _db != nil {
+		_ = _db.AutoMigrate(&model.OutboxEvent{})
+	}
 }
 
 func TestOutbox_InsertFetchMarkSent(t *testing.T) {
