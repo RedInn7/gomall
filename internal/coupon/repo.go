@@ -1,4 +1,4 @@
-package dao
+package coupon
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 type CouponDao struct {
@@ -15,15 +15,15 @@ type CouponDao struct {
 }
 
 func NewCouponDao(ctx context.Context) *CouponDao {
-	return &CouponDao{NewDBClient(ctx)}
+	return &CouponDao{dao.NewDBClient(ctx)}
 }
 
-func (d *CouponDao) CreateBatch(b *model.CouponBatch) error {
+func (d *CouponDao) CreateBatch(b *CouponBatch) error {
 	return d.Create(b).Error
 }
 
-func (d *CouponDao) GetBatch(id uint) (*model.CouponBatch, error) {
-	var b model.CouponBatch
+func (d *CouponDao) GetBatch(id uint) (*CouponBatch, error) {
+	var b CouponBatch
 	err := d.First(&b, id).Error
 	if err != nil {
 		return nil, err
@@ -31,17 +31,17 @@ func (d *CouponDao) GetBatch(id uint) (*model.CouponBatch, error) {
 	return &b, nil
 }
 
-func (d *CouponDao) ListActiveBatches(now time.Time) ([]*model.CouponBatch, error) {
-	var out []*model.CouponBatch
+func (d *CouponDao) ListActiveBatches(now time.Time) ([]*CouponBatch, error) {
+	var out []*CouponBatch
 	err := d.Where("start_at <= ? AND end_at >= ?", now, now).Find(&out).Error
 	return out, err
 }
 
 // ClaimWithDBLock 用 SELECT FOR UPDATE 串行化扣减
-func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*model.UserCoupon, error) {
-	var uc *model.UserCoupon
+func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*UserCoupon, error) {
+	var uc *UserCoupon
 	err := d.Transaction(func(tx *gorm.DB) error {
-		var batch model.CouponBatch
+		var batch CouponBatch
 		if err := tx.Clauses().Set("gorm:query_option", "FOR UPDATE").
 			Where("id = ?", batchId).First(&batch).Error; err != nil {
 			return err
@@ -57,7 +57,7 @@ func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*model.UserCoupon, er
 
 		// 单用户配额
 		var owned int64
-		if err := tx.Model(&model.UserCoupon{}).
+		if err := tx.Model(&UserCoupon{}).
 			Where("user_id = ? AND batch_id = ?", userId, batchId).
 			Count(&owned).Error; err != nil {
 			return err
@@ -66,17 +66,17 @@ func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*model.UserCoupon, er
 			return errors.New("超出单人领取上限")
 		}
 
-		if err := tx.Model(&model.CouponBatch{}).
+		if err := tx.Model(&CouponBatch{}).
 			Where("id = ?", batch.ID).
 			Update("claimed", gorm.Expr("claimed + 1")).Error; err != nil {
 			return err
 		}
 
-		uc = &model.UserCoupon{
+		uc = &UserCoupon{
 			UserId:    userId,
 			BatchId:   batchId,
 			Code:      generateCouponCode(userId, batchId, now),
-			Status:    model.UserCouponStatusUnused,
+			Status:    UserCouponStatusUnused,
 			ClaimedAt: now,
 			ExpireAt:  now.AddDate(0, 0, batch.ValidDays),
 		}
@@ -86,18 +86,18 @@ func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*model.UserCoupon, er
 }
 
 // PersistClaim Lua 已经把 stock 在 redis 扣减成功，这里只负责落库（不再校验总量）
-func (d *CouponDao) PersistClaim(userId, batchId uint, validDays int) (*model.UserCoupon, error) {
+func (d *CouponDao) PersistClaim(userId, batchId uint, validDays int) (*UserCoupon, error) {
 	now := time.Now()
-	uc := &model.UserCoupon{
+	uc := &UserCoupon{
 		UserId:    userId,
 		BatchId:   batchId,
 		Code:      generateCouponCode(userId, batchId, now),
-		Status:    model.UserCouponStatusUnused,
+		Status:    UserCouponStatusUnused,
 		ClaimedAt: now,
 		ExpireAt:  now.AddDate(0, 0, validDays),
 	}
 	err := d.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&model.CouponBatch{}).
+		if err := tx.Model(&CouponBatch{}).
 			Where("id = ?", batchId).
 			Update("claimed", gorm.Expr("claimed + 1")).Error; err != nil {
 			return err
@@ -110,8 +110,8 @@ func (d *CouponDao) PersistClaim(userId, batchId uint, validDays int) (*model.Us
 	return uc, nil
 }
 
-func (d *CouponDao) ListUserCoupons(userId uint, status int) ([]*model.UserCoupon, error) {
-	var out []*model.UserCoupon
+func (d *CouponDao) ListUserCoupons(userId uint, status int) ([]*UserCoupon, error) {
+	var out []*UserCoupon
 	q := d.Where("user_id = ?", userId).Order("id DESC")
 	if status > 0 {
 		q = q.Where("status = ?", status)

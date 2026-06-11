@@ -1,4 +1,4 @@
-package types
+package redpacket
 
 type RedPacketCreateReq struct {
 	Total     int64  `json:"total" form:"total" binding:"required,min=1"`          // 总金额，单位：分

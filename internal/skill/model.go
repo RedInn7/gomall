@@ -1,4 +1,4 @@
-package model
+package skill
 
 type SkillProduct struct {
 	Id         uint `gorm:"primarykey"`

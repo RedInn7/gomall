@@ -1,4 +1,4 @@
-package types
+package skill
 
 type SkillProductImportReq struct {
 }

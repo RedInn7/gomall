@@ -8,8 +8,11 @@ import (
 	"github.com/RedInn7/gomall/internal/carousel"
 	"github.com/RedInn7/gomall/internal/cart"
 	"github.com/RedInn7/gomall/internal/category"
+	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/notice"
+	"github.com/RedInn7/gomall/internal/redpacket"
+	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
 )
@@ -25,10 +28,10 @@ func Run() error {
 			&model.Order{}, &admin.Admin{}, &address.Address{},
 			&cart.Cart{}, &category.Category{}, &carousel.Carousel{},
 			&notice.Notice{}, &model.Product{},
-			&model.ProductImg{}, &model.SkillProduct{},
-			&model.SkillProduct2MQ{},
-			&model.CouponBatch{}, &model.UserCoupon{},
-			&model.RedPacket{}, &model.RedPacketClaim{},
+			&model.ProductImg{}, &skill.SkillProduct{},
+			&skill.SkillProduct2MQ{},
+			&coupon.CouponBatch{}, &coupon.UserCoupon{},
+			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
 			&model.PromoRule{},
 			&model.GroupbuyGroup{}, &model.GroupbuyMember{},
 			&model.ProductPreorder{},

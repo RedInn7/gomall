@@ -7,6 +7,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/RedInn7/gomall/internal/redpacket"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
@@ -28,7 +29,7 @@ func InitCron() {
 		panic(fmt.Sprintf("Cron 初始化失败: %v", err))
 	}
 
-	redPacketService := new(service.RedPacketTaskService)
+	redPacketService := new(redpacket.RedPacketTaskService)
 	_, err = c.AddFunc("0 */5 * * * *", func() {
 		defer func() {
 			if r := recover(); r != nil {

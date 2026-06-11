@@ -16,8 +16,11 @@ import (
 	"github.com/RedInn7/gomall/internal/carousel"
 	"github.com/RedInn7/gomall/internal/cart"
 	"github.com/RedInn7/gomall/internal/category"
+	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/money"
+	"github.com/RedInn7/gomall/internal/redpacket"
+	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/middleware"
 )
 
@@ -74,23 +77,23 @@ func NewRouter() *gin.Engine {
 			authed.POST("favorites/delete", favorite.DeleteFavoriteHandler())
 
 			// 优惠券
-			authed.POST("coupon/batch", api.CreateCouponBatchHandler())
-			authed.GET("coupon/batches", api.ListCouponBatchHandler())
-			authed.POST("coupon/claim", api.ClaimCouponHandler())
-			authed.GET("coupon/my", api.ListMyCouponHandler())
+			authed.POST("coupon/batch", coupon.CreateCouponBatchHandler())
+			authed.GET("coupon/batches", coupon.ListCouponBatchHandler())
+			authed.POST("coupon/claim", coupon.ClaimCouponHandler())
+			authed.GET("coupon/my", coupon.ListMyCouponHandler())
 
 			// 红包：发包幂等；抢包按用户做滑动窗口 + 幂等
 			authed.POST("redpacket/create",
 				middleware.Idempotency(),
-				api.CreateRedPacketHandler())
+				redpacket.CreateRedPacketHandler())
 			authed.POST("redpacket/claim",
 				middleware.SlidingWindow(middleware.SlidingWindowOption{
 					Scope: "redpacket", Window: time.Second, Limit: 3, ByUser: true,
 				}),
 				middleware.Idempotency(),
-				api.ClaimRedPacketHandler())
-			authed.GET("redpacket/show", api.ShowRedPacketHandler())
-			authed.GET("redpacket/list", api.ListMyRedPacketsHandler())
+				redpacket.ClaimRedPacketHandler())
+			authed.GET("redpacket/show", redpacket.ShowRedPacketHandler())
+			authed.GET("redpacket/list", redpacket.ListMyRedPacketsHandler())
 
 			// 幂等 token 颁发
 			authed.GET("idempotency/token", api.IdempotencyTokenHandler())
@@ -146,9 +149,9 @@ func NewRouter() *gin.Engine {
 			authed.POST("money", money.ShowMoneyHandler())
 
 			// 秒杀专场：分布式滑动窗口限流，单用户 1s 内最多 3 次
-			authed.POST("skill_product/init", api.InitSkillProductHandler())
-			authed.GET("skill_product/list", api.ListSkillProductHandler())
-			authed.GET("skill_product/show", api.GetSkillProductHandler())
+			authed.POST("skill_product/init", skill.InitSkillProductHandler())
+			authed.GET("skill_product/list", skill.ListSkillProductHandler())
+			authed.GET("skill_product/show", skill.GetSkillProductHandler())
 			authed.POST("skill_product/skill",
 				middleware.SlidingWindow(middleware.SlidingWindowOption{
 					Scope:  "seckill",
@@ -156,7 +159,7 @@ func NewRouter() *gin.Engine {
 					Limit:  3,
 					ByUser: true,
 				}),
-				api.SkillProductHandler())
+				skill.SkillProductHandler())
 
 			// 初始 admin 引导（仅在系统无 admin 时可用）
 			authed.POST("admin/bootstrap", adminapi.BootstrapAdminHandler())
