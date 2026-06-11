@@ -47,7 +47,7 @@ func (d *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, finalC
 // ListOrderByCondition 获取订单List
 func (d *OrderDao) ListOrderByCondition(uId uint, req *OrderListReq) (r *OrderListResp, err error) {
 	req.BasePage.Normalize()
-	// TODO 商城算是一个TOC的应用，TOC的应该是不允许join操作的，看看后续怎么改走缓存，比如走缓存，找找免费的CDN之类的
+	// TODO: 详情读路径目前用 join，后续考虑缓存化以支撑高并发读
 	cacheKey := fmt.Sprintf("mall:orders:uid:%v:type:%v", uId, req.Type)
 	if req.LastId == 0 {
 		val, err := cache.RedisClient.Get(context.Background(), cacheKey).Result()
@@ -287,8 +287,4 @@ func (d *OrderDao) GetTimeoutWaitReceive(days int, limit int) (orders []*Order, 
 		Limit(limit).
 		Find(&orders).Error
 	return
-}
-
-func NewOrderDaoWithDB(db *gorm.DB) *OrderDao {
-	return &OrderDao{DB: db}
 }

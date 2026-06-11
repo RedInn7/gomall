@@ -43,7 +43,7 @@ func setupTestRedisForService(t *testing.T) func() {
 	}
 }
 
-// memoryProducer 把 Publish 的 payload 攒到 channel 里，模拟 MQ
+// memoryProducer 把 Publish 的 payload 攒到 channel 里，用作 MQ 替身
 type memoryProducer struct {
 	failPublish bool
 	msgs        chan []byte
@@ -267,7 +267,7 @@ func TestAsyncOrder_ConsumerFailureReleasesReserveAndMarksFailed(t *testing.T) {
 	if err := cache.InitStock(context.Background(), pid, 8); err != nil {
 		t.Fatalf("init stock: %v", err)
 	}
-	// 先模拟 enqueue 阶段已经预扣
+	// 先让 enqueue 阶段完成预扣
 	if err := cache.ReserveStock(context.Background(), pid, 2); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
