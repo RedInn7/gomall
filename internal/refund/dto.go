@@ -1,4 +1,4 @@
-package types
+package refund
 
 // RequestRefundReq 用户发起退款。reason 透传给客服 / 风控。
 type RequestRefundReq struct {

@@ -1,4 +1,4 @@
-package service
+package groupbuy
 
 import (
 	"context"
@@ -15,7 +15,6 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -92,13 +91,13 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 	}
 
 	expireAt := time.Now().Add(ttl)
-	g := &model.GroupbuyGroup{
+	g := &GroupbuyGroup{
 		ProductID:    productID,
 		LeaderID:     leaderID,
 		TargetCount:  targetCount,
 		CurrentCount: 1, // 团长自己已算 1 人
 		PriceCents:   priceCents,
-		Status:       model.GroupbuyStatusOpen,
+		Status:       GroupbuyStatusOpen,
 		ExpireAt:     expireAt,
 	}
 
@@ -114,17 +113,17 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 	}
 
 	err := dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := dao.NewGroupbuyDaoByDB(tx).CreateGroup(g); e != nil {
+		if e := NewGroupbuyDaoByDB(tx).CreateGroup(g); e != nil {
 			return e
 		}
 		if e := orderpkg.NewOrderDaoByDB(tx).CreateOrder(leaderOrder); e != nil {
 			return e
 		}
-		member := &model.GroupbuyMember{
+		member := &GroupbuyMember{
 			GroupID: g.ID,
 			UserID:  leaderID,
 			OrderID: int64(leaderOrder.ID),
-			Status:  model.GroupbuyMemberJoined,
+			Status:  GroupbuyMemberJoined,
 		}
 		if e := tx.Create(member).Error; e != nil {
 			return e
@@ -164,7 +163,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 //  4. 若加完 current=target → 同事务外再调 markGroupSuccess 推进
 //  5. 任一失败 → 释放预扣
 func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, addressID uint) (*JoinGroupResp, error) {
-	gbDao := dao.NewGroupbuyDao(ctx)
+	gbDao := NewGroupbuyDao(ctx)
 	g, err := gbDao.GetGroupByID(groupID)
 	if err != nil {
 		return nil, err
@@ -174,9 +173,9 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 	}
 	// 状态前置校验，给出准确业务码
 	switch g.Status {
-	case model.GroupbuyStatusSuccess, model.GroupbuyStatusClosed:
+	case GroupbuyStatusSuccess, GroupbuyStatusClosed:
 		return nil, ErrGroupbuyClosed
-	case model.GroupbuyStatusExpired:
+	case GroupbuyStatusExpired:
 		return nil, ErrGroupbuyExpired
 	}
 	if !g.ExpireAt.After(time.Now()) {
@@ -212,10 +211,10 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		targetCount = g.TargetCount
 	)
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		member := &model.GroupbuyMember{
+		member := &GroupbuyMember{
 			GroupID: groupID,
 			UserID:  userID,
-			Status:  model.GroupbuyMemberJoined,
+			Status:  GroupbuyMemberJoined,
 		}
 		// 先订单后 member：order.ID 需要回填到 member.OrderID
 		if e := orderpkg.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
@@ -224,13 +223,13 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		member.OrderID = int64(order.ID)
 
 		// 原子抢名额 + 写 member 行；成员行的 uniqueIndex 会把"重复加入"在 DB 层兜底
-		if e := dao.NewGroupbuyDaoByDB(tx).JoinGroupAtomic(groupID, member); e != nil {
+		if e := NewGroupbuyDaoByDB(tx).JoinGroupAtomic(groupID, member); e != nil {
 			atomicErr = e
 			return e
 		}
 
 		// 读最新 count，用于响应 + 判定是否成团
-		freshGroup, e := dao.NewGroupbuyDaoByDB(tx).GetGroupByID(groupID)
+		freshGroup, e := NewGroupbuyDaoByDB(tx).GetGroupByID(groupID)
 		if e != nil {
 			return e
 		}
@@ -255,13 +254,13 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 			util.LogrusObj.Errorf("groupbuy release on join failure group=%d err=%v", groupID, relErr)
 		}
 		// JoinGroupAtomic 抛出 ErrGroupbuyFull 时，需要再读一次团状态决定真正业务码
-		if atomicErr != nil && errors.Is(atomicErr, dao.ErrGroupbuyFull) {
+		if atomicErr != nil && errors.Is(atomicErr, ErrGroupbuyFull) {
 			latest, _ := gbDao.GetGroupByID(groupID)
 			if latest != nil {
 				switch latest.Status {
-				case model.GroupbuyStatusClosed, model.GroupbuyStatusSuccess:
+				case GroupbuyStatusClosed, GroupbuyStatusSuccess:
 					return nil, ErrGroupbuyClosed
-				case model.GroupbuyStatusExpired:
+				case GroupbuyStatusExpired:
 					return nil, ErrGroupbuyExpired
 				}
 				if !latest.ExpireAt.After(time.Now()) {
@@ -300,7 +299,7 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 //
 // 多次调用幂等：第一次切 status，之后 MarkGroupSuccessIfFull 返回 false 直接 no-op。
 func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error {
-	gbDao := dao.NewGroupbuyDao(ctx)
+	gbDao := NewGroupbuyDao(ctx)
 	g, err := gbDao.GetGroupByID(groupID)
 	if err != nil {
 		return err
@@ -311,10 +310,10 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 
 	var (
 		switched bool
-		members  []*model.GroupbuyMember
+		members  []*GroupbuyMember
 	)
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		ok, e := dao.NewGroupbuyDaoByDB(tx).MarkGroupSuccessIfFull(groupID)
+		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupSuccessIfFull(groupID)
 		if e != nil {
 			return e
 		}
@@ -323,7 +322,7 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 		}
 		switched = true
 
-		members, e = dao.NewGroupbuyDaoByDB(tx).ListMembers(groupID)
+		members, e = NewGroupbuyDaoByDB(tx).ListMembers(groupID)
 		if e != nil {
 			return e
 		}
@@ -342,7 +341,7 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			}
 		}
 
-		if e = dao.NewGroupbuyDaoByDB(tx).UpdateMembersStatus(groupID, model.GroupbuyMemberSucceed); e != nil {
+		if e = NewGroupbuyDaoByDB(tx).UpdateMembersStatus(groupID, GroupbuyMemberSucceed); e != nil {
 			return e
 		}
 
@@ -386,7 +385,7 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 //
 // 散团是协同式 Saga 的一个标准应用，下游钱包按 outbox 退款。
 func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
-	gbDao := dao.NewGroupbuyDao(ctx)
+	gbDao := NewGroupbuyDao(ctx)
 	g, err := gbDao.GetGroupByID(groupID)
 	if err != nil {
 		return err
@@ -394,16 +393,16 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 	if g == nil {
 		return ErrGroupbuyNotFound
 	}
-	if g.Status != model.GroupbuyStatusOpen {
+	if g.Status != GroupbuyStatusOpen {
 		return nil // 已成团 / 已散团 / 已关闭 —— no-op
 	}
 
 	var (
 		switched bool
-		members  []*model.GroupbuyMember
+		members  []*GroupbuyMember
 	)
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		ok, e := dao.NewGroupbuyDaoByDB(tx).MarkGroupExpired(groupID)
+		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupExpired(groupID)
 		if e != nil {
 			return e
 		}
@@ -412,7 +411,7 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 		}
 		switched = true
 
-		members, e = dao.NewGroupbuyDaoByDB(tx).ListMembers(groupID)
+		members, e = NewGroupbuyDaoByDB(tx).ListMembers(groupID)
 		if e != nil {
 			return e
 		}
@@ -425,7 +424,7 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 			}
 			// RowsAffected=0 不报错：可能已被其它路径关掉
 		}
-		if e = dao.NewGroupbuyDaoByDB(tx).UpdateMembersStatus(groupID, model.GroupbuyMemberRefunded); e != nil {
+		if e = NewGroupbuyDaoByDB(tx).UpdateMembersStatus(groupID, GroupbuyMemberRefunded); e != nil {
 			return e
 		}
 
@@ -461,8 +460,8 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 }
 
 // ShowGroup 拼团详情：用于分享落地页 / 客服回看。
-func (s *GroupbuySrv) ShowGroup(ctx context.Context, groupID uint) (*model.GroupbuyGroup, []*model.GroupbuyMember, error) {
-	gbDao := dao.NewGroupbuyDao(ctx)
+func (s *GroupbuySrv) ShowGroup(ctx context.Context, groupID uint) (*GroupbuyGroup, []*GroupbuyMember, error) {
+	gbDao := NewGroupbuyDao(ctx)
 	g, err := gbDao.GetGroupByID(groupID)
 	if err != nil {
 		return nil, nil, err

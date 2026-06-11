@@ -1,4 +1,4 @@
-package types
+package payment
 
 type PaymentDownReq struct {
 	OrderId uint   `form:"order_id" json:"order_id" binding:"required"`

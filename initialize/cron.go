@@ -7,13 +7,12 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/RedInn7/gomall/internal/groupbuy"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/preorder"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
-	"github.com/RedInn7/gomall/service"
 )
 
 func InitCron() {
@@ -95,7 +94,7 @@ func InitCron() {
 // 单团失败只 ERROR log，不中断 batch —— 留给下次 tick 补，这是 Saga 心法。
 func runGroupbuyExpireSweep() {
 	ctx := context.Background()
-	ids, err := dao.NewGroupbuyDao(ctx).ExpireOpenGroupsBefore(time.Now(), 200)
+	ids, err := groupbuy.NewGroupbuyDao(ctx).ExpireOpenGroupsBefore(time.Now(), 200)
 	if err != nil {
 		util.LogrusObj.Errorf("GroupbuyExpire 扫表失败: %v", err)
 		return
@@ -103,7 +102,7 @@ func runGroupbuyExpireSweep() {
 	if len(ids) == 0 {
 		return
 	}
-	srv := service.GetGroupbuySrv()
+	srv := groupbuy.GetGroupbuySrv()
 	for _, id := range ids {
 		if err := srv.ExpireGroup(ctx, id); err != nil {
 			util.LogrusObj.Errorf("ExpireGroup 失败 groupID=%d err=%v", id, err)

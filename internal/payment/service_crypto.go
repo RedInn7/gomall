@@ -1,4 +1,4 @@
-package service
+package payment
 
 import (
 	"context"
@@ -20,7 +20,6 @@ import (
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
-	"github.com/RedInn7/gomall/types"
 )
 
 var (
@@ -47,7 +46,7 @@ func BuildSignMessage(orderID uint, nonce string, chainID uint64) string {
 }
 
 // IssueNonce 校验订单归属 + 状态 + 颁发一次性 nonce
-func (s *CryptoPaymentSrv) IssueNonce(ctx context.Context, req *types.CryptoNonceReq) (*types.CryptoNonceResp, error) {
+func (s *CryptoPaymentSrv) IssueNonce(ctx context.Context, req *CryptoNonceReq) (*CryptoNonceResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -77,7 +76,7 @@ func (s *CryptoPaymentSrv) IssueNonce(ctx context.Context, req *types.CryptoNonc
 	// chain=0 占位；前端拿到后会把真实 chainID 替换进模板后再交给钱包签名。
 	// 这里返回的模板仅供前端展示/拼接参考。
 	msgPreview := BuildSignMessage(req.OrderId, nonce, 0)
-	return &types.CryptoNonceResp{
+	return &CryptoNonceResp{
 		Nonce:         nonce,
 		MessageToSign: msgPreview,
 		ExpiresIn:     int(cache.Web3NonceTTL.Seconds()),
@@ -85,7 +84,7 @@ func (s *CryptoPaymentSrv) IssueNonce(ctx context.Context, req *types.CryptoNonc
 }
 
 // VerifyAndPark 校验签名+消费 nonce+写 outbox+占位 pending
-func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *types.CryptoPaydownReq) (*types.CryptoPaydownResp, error) {
+func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *CryptoPaydownReq) (*CryptoPaydownResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -154,7 +153,7 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *types.CryptoP
 		log.LogrusObj.Errorf("set web3 pending placeholder fail order=%d err=%v", order.ID, err)
 	}
 
-	return &types.CryptoPaydownResp{
+	return &CryptoPaydownResp{
 		Status:  "pending",
 		Message: "请在钱包确认转账，链上确认后订单将自动更新",
 	}, nil

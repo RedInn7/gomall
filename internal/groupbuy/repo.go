@@ -1,4 +1,4 @@
-package dao
+package groupbuy
 
 import (
 	"context"
@@ -7,25 +7,19 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
-// 拼团 DAO 错误。
-// 上层 service 把它们映射到业务码 81001-81004，并返回客服话术给前端。
-var (
-	ErrGroupbuyFull          = errors.New("拼团已满")
-	ErrGroupbuyExpired       = errors.New("拼团已超时")
-	ErrGroupbuyClosed        = errors.New("拼团已关闭")
-	ErrGroupbuyDuplicateJoin = errors.New("用户已在该团")
-	ErrGroupbuyNotFound      = errors.New("拼团不存在")
-)
+// 拼团 sentinel error 统一在 service.go 声明（ErrGroupbuyFull / ErrGroupbuyExpired /
+// ErrGroupbuyClosed / ErrGroupbuyDuplicateJoin / ErrGroupbuyNotFound），
+// handler 据此映射到业务码 81001-81004 并返回客服话术。
 
 type GroupbuyDao struct {
 	*gorm.DB
 }
 
 func NewGroupbuyDao(ctx context.Context) *GroupbuyDao {
-	return &GroupbuyDao{NewDBClient(ctx)}
+	return &GroupbuyDao{dao.NewDBClient(ctx)}
 }
 
 func NewGroupbuyDaoByDB(db *gorm.DB) *GroupbuyDao {
@@ -33,15 +27,15 @@ func NewGroupbuyDaoByDB(db *gorm.DB) *GroupbuyDao {
 }
 
 // CreateGroup 团长发起拼团；调用方需在事务内组合 CreateOrder + outbox。
-func (d *GroupbuyDao) CreateGroup(g *model.GroupbuyGroup) error {
+func (d *GroupbuyDao) CreateGroup(g *GroupbuyGroup) error {
 	return d.DB.Create(g).Error
 }
 
 // GetGroupByID 读单条团信息（包含已关 / 已散）。
 // 散团的客服解释 / C 端分享落地页都靠这一个查询。
-func (d *GroupbuyDao) GetGroupByID(groupID uint) (*model.GroupbuyGroup, error) {
-	var g model.GroupbuyGroup
-	err := d.DB.Model(&model.GroupbuyGroup{}).Where("id=?", groupID).First(&g).Error
+func (d *GroupbuyDao) GetGroupByID(groupID uint) (*GroupbuyGroup, error) {
+	var g GroupbuyGroup
+	err := d.DB.Model(&GroupbuyGroup{}).Where("id=?", groupID).First(&g).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -58,10 +52,10 @@ func (d *GroupbuyDao) GetGroupByID(groupID uint) (*model.GroupbuyGroup, error) {
 //   - uniqueIndex(group_id, user_id) 兜底 81003 重复加入
 //
 // 重要：current_count + 1 与 member 行写入必须落同一个 tx，调用方负责。
-func (d *GroupbuyDao) JoinGroupAtomic(groupID uint, member *model.GroupbuyMember) error {
-	res := d.DB.Model(&model.GroupbuyGroup{}).
+func (d *GroupbuyDao) JoinGroupAtomic(groupID uint, member *GroupbuyMember) error {
+	res := d.DB.Model(&GroupbuyGroup{}).
 		Where("id=? AND status=? AND current_count<target_count AND expire_at>?",
-			groupID, model.GroupbuyStatusOpen, time.Now()).
+			groupID, GroupbuyStatusOpen, time.Now()).
 		UpdateColumn("current_count", gorm.Expr("current_count + 1"))
 	if res.Error != nil {
 		return res.Error
@@ -80,10 +74,10 @@ func (d *GroupbuyDao) JoinGroupAtomic(groupID uint, member *model.GroupbuyMember
 // MarkGroupSuccessIfFull 当 current_count >= target_count 时把 status 推到 success。
 // 返回 (推进与否, error)；幂等：多次调用只有第一次切 status。
 func (d *GroupbuyDao) MarkGroupSuccessIfFull(groupID uint) (bool, error) {
-	res := d.DB.Model(&model.GroupbuyGroup{}).
+	res := d.DB.Model(&GroupbuyGroup{}).
 		Where("id=? AND status=? AND current_count>=target_count",
-			groupID, model.GroupbuyStatusOpen).
-		Update("status", model.GroupbuyStatusSuccess)
+			groupID, GroupbuyStatusOpen).
+		Update("status", GroupbuyStatusSuccess)
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -93,9 +87,9 @@ func (d *GroupbuyDao) MarkGroupSuccessIfFull(groupID uint) (bool, error) {
 // MarkGroupExpired 把仍 open 的团切到 expired。返回是否真的切了状态。
 // 仅当当前 status=open 时生效，幂等。
 func (d *GroupbuyDao) MarkGroupExpired(groupID uint) (bool, error) {
-	res := d.DB.Model(&model.GroupbuyGroup{}).
-		Where("id=? AND status=?", groupID, model.GroupbuyStatusOpen).
-		Update("status", model.GroupbuyStatusExpired)
+	res := d.DB.Model(&GroupbuyGroup{}).
+		Where("id=? AND status=?", groupID, GroupbuyStatusOpen).
+		Update("status", GroupbuyStatusExpired)
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -109,17 +103,17 @@ func (d *GroupbuyDao) ExpireOpenGroupsBefore(now time.Time, limit int) ([]uint, 
 		limit = 100
 	}
 	var ids []uint
-	err := d.DB.Model(&model.GroupbuyGroup{}).
-		Where("status=? AND expire_at<=?", model.GroupbuyStatusOpen, now).
+	err := d.DB.Model(&GroupbuyGroup{}).
+		Where("status=? AND expire_at<=?", GroupbuyStatusOpen, now).
 		Limit(limit).
 		Pluck("id", &ids).Error
 	return ids, err
 }
 
 // ListMembers 列出团内所有成员，按加入时间升序（团长在最前）。
-func (d *GroupbuyDao) ListMembers(groupID uint) ([]*model.GroupbuyMember, error) {
-	var rows []*model.GroupbuyMember
-	err := d.DB.Model(&model.GroupbuyMember{}).
+func (d *GroupbuyDao) ListMembers(groupID uint) ([]*GroupbuyMember, error) {
+	var rows []*GroupbuyMember
+	err := d.DB.Model(&GroupbuyMember{}).
 		Where("group_id=?", groupID).
 		Order("id ASC").
 		Find(&rows).Error
@@ -129,7 +123,7 @@ func (d *GroupbuyDao) ListMembers(groupID uint) ([]*model.GroupbuyMember, error)
 // UpdateMembersStatus 批量把 group 内所有成员订单同步到 newStatus，由成团 / 散团触发。
 // 单条 UPDATE，保证一致性。
 func (d *GroupbuyDao) UpdateMembersStatus(groupID uint, newStatus uint) error {
-	return d.DB.Model(&model.GroupbuyMember{}).
+	return d.DB.Model(&GroupbuyMember{}).
 		Where("group_id=?", groupID).
 		Update("status", newStatus).Error
 }
@@ -138,7 +132,7 @@ func (d *GroupbuyDao) UpdateMembersStatus(groupID uint, newStatus uint) error {
 // 真兜底依赖 uniqueIndex；DB 层 race 时这里读不到也无所谓。
 func (d *GroupbuyDao) HasUserJoined(groupID, userID uint) (bool, error) {
 	var count int64
-	err := d.DB.Model(&model.GroupbuyMember{}).
+	err := d.DB.Model(&GroupbuyMember{}).
 		Where("group_id=? AND user_id=?", groupID, userID).
 		Count(&count).Error
 	if err != nil {

@@ -1,4 +1,4 @@
-package v1
+package groupbuy
 
 import (
 	"errors"
@@ -8,11 +8,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/model"
-	"github.com/RedInn7/gomall/service"
 )
 
 // GroupbuyCreateReq 团长发起拼团请求。
@@ -36,8 +35,8 @@ type GroupbuyJoinReq struct {
 
 // GroupbuyShowResp 团状态分享落地页响应。
 type GroupbuyShowResp struct {
-	Group   *model.GroupbuyGroup    `json:"group"`
-	Members []*model.GroupbuyMember `json:"members"`
+	Group   *GroupbuyGroup    `json:"group"`
+	Members []*GroupbuyMember `json:"members"`
 }
 
 // GroupbuyCreateHandler 团长发起拼团。
@@ -46,17 +45,17 @@ func GroupbuyCreateHandler() gin.HandlerFunc {
 		var req GroupbuyCreateReq
 		if err := c.ShouldBindJSON(&req); err != nil {
 			log.LogrusObj.Infoln(err)
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
 		u, err := ctl.GetUserInfo(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
 
 		ttl := time.Duration(req.TTLSeconds) * time.Second
-		resp, err := service.GetGroupbuySrv().CreateGroup(
+		resp, err := GetGroupbuySrv().CreateGroup(
 			c.Request.Context(),
 			u.Id, req.ProductID, req.TargetCount, req.PriceCents, ttl,
 			req.BossID, req.AddressID,
@@ -75,7 +74,7 @@ func GroupbuyJoinHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		groupID, err := parseGroupID(c)
 		if err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
 		var req GroupbuyJoinReq
@@ -84,11 +83,11 @@ func GroupbuyJoinHandler() gin.HandlerFunc {
 
 		u, err := ctl.GetUserInfo(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
 
-		resp, err := service.GetGroupbuySrv().JoinGroup(
+		resp, err := GetGroupbuySrv().JoinGroup(
 			c.Request.Context(), u.Id, groupID, req.BossID, req.AddressID,
 		)
 		if err != nil {
@@ -105,10 +104,10 @@ func GroupbuyShowHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		groupID, err := parseGroupID(c)
 		if err != nil {
-			c.JSON(http.StatusOK, ErrorResponse(c, err))
+			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
 			return
 		}
-		g, members, err := service.GetGroupbuySrv().ShowGroup(c.Request.Context(), groupID)
+		g, members, err := GetGroupbuySrv().ShowGroup(c.Request.Context(), groupID)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
 			c.JSON(http.StatusOK, groupbuyErrorResponse(c, err))
@@ -132,14 +131,14 @@ func parseGroupID(c *gin.Context) (uint, error) {
 // 客服在工单系统里看到对应 code 直接命中 pkg/e/msg.go 中的话术。
 func groupbuyErrorResponse(c *gin.Context, err error) *ctl.TrackedErrorResponse {
 	switch {
-	case errors.Is(err, service.ErrGroupbuyFull):
+	case errors.Is(err, ErrGroupbuyFull):
 		return ctl.RespError(c, err, "团已满员", e.ErrGroupbuyFull)
-	case errors.Is(err, service.ErrGroupbuyExpired):
+	case errors.Is(err, ErrGroupbuyExpired):
 		return ctl.RespError(c, err, "团已超时", e.ErrGroupbuyExpired)
-	case errors.Is(err, service.ErrGroupbuyDuplicateJoin):
+	case errors.Is(err, ErrGroupbuyDuplicateJoin):
 		return ctl.RespError(c, err, "重复加入", e.ErrGroupbuyDuplicateJoin)
-	case errors.Is(err, service.ErrGroupbuyClosed):
+	case errors.Is(err, ErrGroupbuyClosed):
 		return ctl.RespError(c, err, "团已关闭", e.ErrGroupbuyClosed)
 	}
-	return ErrorResponse(c, err)
+	return response.ErrorResponse(c, err)
 }
