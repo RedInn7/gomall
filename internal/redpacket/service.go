@@ -1,4 +1,4 @@
-package service
+package redpacket
 
 import (
 	"context"
@@ -12,9 +12,7 @@ import (
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/service/events"
-	"github.com/RedInn7/gomall/types"
 )
 
 const (
@@ -39,7 +37,7 @@ func GetRedPacketSrv() *RedPacketSrv {
 //  2. DB 事务：写 red_packet 主记录 + outbox(red_packet.created)
 //  3. Redis Lua 一把 RPUSH 金额数组 + EXPIRE
 //     钱包扣账由下游消费 red_packet.created 事件入账
-func (s *RedPacketSrv) Create(ctx context.Context, req *types.RedPacketCreateReq) (interface{}, error) {
+func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (interface{}, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -62,18 +60,18 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *types.RedPacketCreateReq
 		return nil, err
 	}
 
-	rp := &model.RedPacket{
+	rp := &RedPacket{
 		UserID:    u.Id,
 		Total:     req.Total,
 		Count:     req.Count,
 		Remaining: req.Count,
 		ExpireAt:  expireAt,
-		Status:    model.RedPacketStatusActive,
+		Status:    RedPacketStatusActive,
 		Greeting:  req.Greeting,
 	}
 
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := dao.NewRedPacketDaoByDB(tx).Create(rp); e != nil {
+		if e := NewRedPacketDaoByDB(tx).Create(rp); e != nil {
 			return e
 		}
 		return dao.NewOutboxDaoByDB(tx).Insert(
@@ -106,18 +104,18 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *types.RedPacketCreateReq
 //  1. Lua 原子 LPOP + 标记 claimed -> amount
 //  2. DB 事务：写 RedPacketClaim + remaining-- + outbox(red_packet.claimed)
 //  3. DB 事务失败 -> Saga 回滚 Lua (LPUSH 金额回 list, 撤销 claimed 标记)
-func (s *RedPacketSrv) Claim(ctx context.Context, req *types.RedPacketClaimReq) (interface{}, error) {
+func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (interface{}, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	rpDao := dao.NewRedPacketDao(ctx)
+	rpDao := NewRedPacketDao(ctx)
 	rp, err := rpDao.Get(req.ID)
 	if err != nil {
 		return nil, errors.New("红包不存在")
 	}
-	if rp.Status != model.RedPacketStatusActive {
+	if rp.Status != RedPacketStatusActive {
 		return nil, errors.New("红包已结束")
 	}
 	if time.Now().After(rp.ExpireAt) {
@@ -131,8 +129,8 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *types.RedPacketClaimReq) 
 	}
 
 	txErr := rpDao.DB.Transaction(func(tx *gorm.DB) error {
-		txDao := dao.NewRedPacketDaoByDB(tx)
-		claim := &model.RedPacketClaim{
+		txDao := NewRedPacketDaoByDB(tx)
+		claim := &RedPacketClaim{
 			RedPacketID: rp.ID,
 			UserID:      u.Id,
 			Amount:      amount,
@@ -164,20 +162,20 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *types.RedPacketClaimReq) 
 
 	// 抢完后异步置位 finished (有竞争也只是状态稍滞后，cron 兜底)
 	if remain, _ := cache.GetRedPacketRemainingCount(ctx, rp.ID); remain == 0 {
-		if e := rpDao.MarkStatus(rp.ID, model.RedPacketStatusFinished); e != nil {
+		if e := rpDao.MarkStatus(rp.ID, RedPacketStatusFinished); e != nil {
 			util.LogrusObj.Errorf("mark redpacket finished failed id=%d err=%v", rp.ID, e)
 		}
 	}
 
-	return &types.RedPacketClaimResp{
+	return &RedPacketClaimResp{
 		RedPacketID: rp.ID,
 		Amount:      amount,
 	}, nil
 }
 
 // Show 红包详情 + 领取明细
-func (s *RedPacketSrv) Show(ctx context.Context, req *types.RedPacketShowReq) (interface{}, error) {
-	rpDao := dao.NewRedPacketDao(ctx)
+func (s *RedPacketSrv) Show(ctx context.Context, req *RedPacketShowReq) (interface{}, error) {
+	rpDao := NewRedPacketDao(ctx)
 	rp, err := rpDao.Get(req.ID)
 	if err != nil {
 		return nil, errors.New("红包不存在")
@@ -186,27 +184,27 @@ func (s *RedPacketSrv) Show(ctx context.Context, req *types.RedPacketShowReq) (i
 	if err != nil {
 		return nil, err
 	}
-	items := make([]*types.RedPacketClaimItem, 0, len(claims))
+	items := make([]*RedPacketClaimItem, 0, len(claims))
 	for _, c := range claims {
-		items = append(items, &types.RedPacketClaimItem{UserID: c.UserID, Amount: c.Amount})
+		items = append(items, &RedPacketClaimItem{UserID: c.UserID, Amount: c.Amount})
 	}
-	return &types.RedPacketDetailResp{
+	return &RedPacketDetailResp{
 		RedPacket: toRedPacketResp(rp),
 		Claims:    items,
 	}, nil
 }
 
 // ListMine 我发出过的红包
-func (s *RedPacketSrv) ListMine(ctx context.Context, req *types.RedPacketListReq) (interface{}, error) {
+func (s *RedPacketSrv) ListMine(ctx context.Context, req *RedPacketListReq) (interface{}, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := dao.NewRedPacketDao(ctx).ListMine(u.Id, req.LastID, req.PageSize)
+	rows, err := NewRedPacketDao(ctx).ListMine(u.Id, req.LastID, req.PageSize)
 	if err != nil {
 		return nil, err
 	}
-	resp := &types.RedPacketListResp{List: make([]*types.RedPacketResp, 0, len(rows))}
+	resp := &RedPacketListResp{List: make([]*RedPacketResp, 0, len(rows))}
 	for _, r := range rows {
 		resp.List = append(resp.List, toRedPacketResp(r))
 	}
@@ -216,8 +214,8 @@ func (s *RedPacketSrv) ListMine(ctx context.Context, req *types.RedPacketListReq
 	return resp, nil
 }
 
-func toRedPacketResp(rp *model.RedPacket) *types.RedPacketResp {
-	return &types.RedPacketResp{
+func toRedPacketResp(rp *RedPacket) *RedPacketResp {
+	return &RedPacketResp{
 		ID:        rp.ID,
 		UserID:    rp.UserID,
 		Total:     rp.Total,

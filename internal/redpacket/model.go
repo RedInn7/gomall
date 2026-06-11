@@ -1,4 +1,4 @@
-package model
+package redpacket
 
 import (
 	"time"

@@ -1,4 +1,4 @@
-package service
+package redpacket
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -21,7 +20,7 @@ type RedPacketTaskService struct{}
 //  4. 下游钱包消费 red_packet.expired 回退发包人金额
 func (s *RedPacketTaskService) RunRedPacketExpireCheck() {
 	ctx := context.Background()
-	rpDao := dao.NewRedPacketDao(ctx)
+	rpDao := NewRedPacketDao(ctx)
 	rows, err := rpDao.GetExpired(100)
 	if err != nil {
 		util.LogrusObj.Errorf("redpacket expire scan failed: %v", err)
@@ -36,8 +35,8 @@ func (s *RedPacketTaskService) RunRedPacketExpireCheck() {
 		}
 
 		txErr := rpDao.DB.Transaction(func(tx *gorm.DB) error {
-			txDao := dao.NewRedPacketDaoByDB(tx)
-			if e := txDao.MarkStatus(rp.ID, model.RedPacketStatusRefunded); e != nil {
+			txDao := NewRedPacketDaoByDB(tx)
+			if e := txDao.MarkStatus(rp.ID, RedPacketStatusRefunded); e != nil {
 				return e
 			}
 			if left <= 0 {
