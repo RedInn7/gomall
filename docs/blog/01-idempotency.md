@@ -195,7 +195,7 @@ SELECT COUNT(*) FROM `order` WHERE user_id = 10 AND created_at > NOW() - INTERVA
 
 - 中间件实现：`middleware/idempotency.go`
 - Redis Lua 脚本：`repository/cache/idempotency.go`
-- token 颁发接口：`api/v1/idempotency.go`
+- token 颁发接口：`internal/idempotency/handler.go`
 - 路由接入：`routes/router.go` 中 `orders/create` 和 `paydown`
 - 单元测试：`repository/cache/idempotency_test.go`
 - 压测脚本：`stressTest/idempotency_replay.js`

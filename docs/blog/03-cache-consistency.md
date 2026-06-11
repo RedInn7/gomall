@@ -104,14 +104,14 @@ A 线程（读）：   SET cache(id=1, 旧值)
 
 ## 我们代码长什么样
 
-`service/product.go` 里 `ProductUpdate`：
+`internal/product/service.go` 里 `ProductUpdate`：
 
 ```go
 func (s *ProductSrv) ProductUpdate(ctx, req) {
-    product := &model.Product{...}
+    product := &Product{...}
 
     _ = cache.DelProductDetail(ctx, req.ID)         // 1. 先删
-    err = dao.NewProductDao(ctx).UpdateProduct(...)  // 2. 写库
+    err = NewProductDao(ctx).UpdateProduct(...)  // 2. 写库
     if err != nil { return err }
 
     cache.DoubleDeleteAsync(req.ID, 0)               // 3. 异步等 500ms 再删一次
@@ -210,8 +210,8 @@ DB binlog → Canal → 消费者 → 写 Redis
 
 ## 代码位置（gomall）
 
-- 写路径（延迟双删）：`service/product.go` 的 `ProductUpdate`
-- 读路径（Cache Aside + 防击穿）：`service/product.go` 的 `ProductShow`
+- 写路径（延迟双删）：`internal/product/service.go` 的 `ProductUpdate`
+- 读路径（Cache Aside + 防击穿）：`internal/product/service.go` 的 `ProductShow`
 - 底层 Redis 操作：`repository/cache/product.go`
 
 ## 想自己验证？

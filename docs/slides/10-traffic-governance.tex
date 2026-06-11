@@ -25,7 +25,7 @@
   \item 算账：单平台 0 点 10 亿 GMV 预算 $\times$ 38\% = \textbf{3.8 亿损失}，比限流误伤几百用户严重几个数量级。
   \item 结论：流量治理不是"挡攻击"，是\textbf{用业务可接受的代价换 GMV 不雪崩}。
 \end{itemize}
-\srcnote{stressTest/REPORT.md \S 1 基线 64k RPS；service/order\_async.go:1--188 异步削峰方案}
+\srcnote{stressTest/REPORT.md \S 1 基线 64k RPS；internal/order/async.go:1--188 异步削峰方案}
 \end{frame}
 
 \begin{frame}{5 个角色，5 种"流量治理是什么"}
@@ -214,7 +214,7 @@ func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
   \end{itemize}
   \item SlidingWindow \texttt{3/s/user} 把脚本打回客户端，\textbf{反黑产 ROI 立等可现}。
 \end{itemize}
-\srcnote{routes/router.go:79--84 红包；:136--142 秒杀；service/skill\_goods.go 秒杀逻辑}
+\srcnote{routes/router.go:79--84 红包；:136--142 秒杀；internal/skill/service.go 秒杀逻辑}
 \end{frame}
 
 \begin{frame}{阈值 3/s/user：用户 vs 脚本的精确分界}
@@ -449,7 +449,7 @@ func (cb *circuitBreaker) report(failed bool) {
   \item 单平台 0 点 10 亿 GMV $\times$ 38\% = \textbf{3.8 亿损失}—— 这是异步削峰的业务 ROI。
   \item gomall 方案：\textbf{把 DB 落库从同步链路拆出来}，前端拿 ticket 轮询。
 \end{itemize}
-\srcnote{service/order\_async.go:1--188；service/order\_consumer.go；repository/rabbitmq/order\_async.go}
+\srcnote{internal/order/async.go:1--188；internal/order/consumer.go；repository/rabbitmq/order\_async.go}
 \end{frame}
 
 \begin{frame}{用户体验业务量化：从"5 秒转圈"到"$<$ 10ms 拿 ticket"}
@@ -467,7 +467,7 @@ DB 落库 & 同步等 & MQ 慢慢落 \\
 \end{tabular}
 \vspace{2mm}
 \small "等"这件事在异步路径里\textbf{从前台变后台}：用户先拿到"已入队"的确定性反馈，再轮询，再切长等待文案 —— 体感从"卡死"变成"在排队"，放弃率掉到个位数。
-\srcnote{service/order\_async.go OrderEnqueue + 前端轮询协议}
+\srcnote{internal/order/async.go OrderEnqueue + 前端轮询协议}
 \end{frame}
 
 \begin{frame}{同步下单 vs 异步 ticket 链路}
@@ -489,12 +489,12 @@ DB 落库 & 同步等 & MQ 慢慢落 \\
 \end{tikzpicture}
 \vspace{2mm}
 \small 上：所有客户端被 DB 阻塞；下：客户端 $<$ 10ms 拿到 ticket，DB 压力被 MQ 缓冲成\textbf{恒定 1k QPS 平流}。
-\srcnote{api 层：EnqueueOrderHandler + OrderStatusHandler; service/order\_async.go}
+\srcnote{internal/order/handler.go：EnqueueOrderHandler + OrderStatusHandler; internal/order/async.go}
 \end{frame}
 
 \begin{frame}[fragile]{OrderEnqueue：核心 12 行}
 \begin{lstlisting}[language=Go,firstnumber=119,basicstyle=\ttfamily\tiny,
-  caption={\srcnote{service/order\_async.go:119--172}}]
+  caption={\srcnote{internal/order/async.go:119--172}}]
 func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
     u, _ := ctl.GetUserInfo(ctx)
     if err := cache.ReserveStock(ctx, req.ProductID, req.Num); err != nil {
@@ -873,7 +873,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 
 \begin{frame}{面试 Q\&A (中)}
 \textbf{Q4}：异步下单会不会丢单？怎么向运营解释 SLO？\\
-\hspace{4mm}\small A：不会。库存先 ReserveStock（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。代码 \texttt{service/order\_async.go:119--172}。运营 SLO：99.95\% 可用 = 年宕 4h22min，异步路径 p95 入队 $<$ 10ms、轮询 $<$ 3s 拿结果。
+\hspace{4mm}\small A：不会。库存先 ReserveStock（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。代码 \texttt{internal/order/async.go:119--172}。运营 SLO：99.95\% 可用 = 年宕 4h22min，异步路径 p95 入队 $<$ 10ms、轮询 $<$ 3s 拿结果。
 
 \vspace{2mm}
 \textbf{Q5}：为什么熔断返回 200 不返回 503？客服怎么用？\\
@@ -905,7 +905,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
   \item[SlidingWindow] \srcnote{middleware/ratelimit.go:59--106 + repository/cache/ratelimit.go:18--34}
   \item[CircuitBreaker] \srcnote{middleware/circuitbreaker.go:44--136}
   \item[HTTPCache] \srcnote{middleware/httpcache.go:47--100}
-  \item[OrderEnqueue] \srcnote{service/order\_async.go:119--172}
+  \item[OrderEnqueue] \srcnote{internal/order/async.go:119--172}
   \item[业务码] \srcnote{pkg/e/code.go:23, 35--39, 49, 54, 57--58 / msg.go:51--52}
   \item[压测报告] \srcnote{stressTest/REPORT.md \S 1, \S 5}
   \item[README SLO 与边界] \srcnote{README.md 业务承诺节 / 业务边界节}
