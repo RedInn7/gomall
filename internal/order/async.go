@@ -1,4 +1,4 @@
-package service
+package order
 
 import (
 	"context"
@@ -14,7 +14,6 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
-	"github.com/RedInn7/gomall/types"
 )
 
 // 异步下单：reserve 库存 -> 写 ticket -> 投递 MQ -> 立即返回 ticket
@@ -116,7 +115,7 @@ type OrderEnqueueResp struct {
 }
 
 // OrderEnqueue 异步下单：reserve 库存 + 写 ticket + 投 MQ
-func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *types.OrderCreateReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)

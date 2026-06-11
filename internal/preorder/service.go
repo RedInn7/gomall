@@ -1,4 +1,4 @@
-package service
+package preorder
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
@@ -19,9 +20,7 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/service/events"
-	"github.com/RedInn7/gomall/types"
 )
 
 // PreorderSrv 预售两段式支付。
@@ -75,7 +74,7 @@ var nowFn = time.Now
 //   - 时间窗校验：now ∈ [DepositStartAt, DepositEndAt)
 //   - 复用 inventory Lua 的 reserve 桶：定金期占住库存但不真扣
 //   - 失败路径：事务失败 → ReleaseReservation 回滚 reserved
-func (s *PreorderSrv) PayDeposit(ctx context.Context, req *types.PreorderDepositReq) (*types.PreorderActionResp, error) {
+func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (*PreorderActionResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -85,7 +84,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *types.PreorderDeposit
 	}
 
 	// 1) 查预售配置 + 窗口校验
-	pp, err := dao.NewPreorderDao(ctx).GetPreorderByProductID(req.ProductID)
+	pp, err := NewPreorderDao(ctx).GetPreorderByProductID(req.ProductID)
 	if err != nil {
 		return nil, err
 	}
@@ -102,20 +101,20 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *types.PreorderDeposit
 
 	// 3) 同事务：建订单 + 扣定金 + Mark + outbox
 	var (
-		order      = &model.Order{}
+		ord        = &order.Order{}
 		releaseErr error
 	)
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		order.UserID = u.Id
-		order.ProductID = req.ProductID
-		order.BossID = req.BossID
-		order.AddressID = req.AddressID
-		order.Num = 1
-		order.Money = pp.DepositCents + pp.FinalCents // 累计金额；分两次扣
-		order.Type = consts.OrderWaitPay
-		order.OrderNum = uint64(snowflake.GenSnowflakeID())
+		ord.UserID = u.Id
+		ord.ProductID = req.ProductID
+		ord.BossID = req.BossID
+		ord.AddressID = req.AddressID
+		ord.Num = 1
+		ord.Money = pp.DepositCents + pp.FinalCents // 累计金额；分两次扣
+		ord.Type = consts.OrderWaitPay
+		ord.OrderNum = uint64(snowflake.GenSnowflakeID())
 
-		if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+		if e := order.NewOrderDaoByDB(tx).CreateOrder(ord); e != nil {
 			return e
 		}
 
@@ -124,7 +123,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *types.PreorderDeposit
 		}
 
 		paidAt := now
-		ok, e := dao.NewPreorderDaoByDB(tx).MarkDepositPaid(tx, order.ID, paidAt)
+		ok, e := NewPreorderDaoByDB(tx).MarkDepositPaid(tx, ord.ID, paidAt)
 		if e != nil {
 			return e
 		}
@@ -133,10 +132,10 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *types.PreorderDeposit
 		}
 
 		return dao.NewOutboxDaoByDB(tx).Insert(
-			"order", "PreorderDepositPaid", "preorder.deposit.paid", order.ID,
+			"order", "PreorderDepositPaid", "preorder.deposit.paid", ord.ID,
 			events.PreorderDepositPaid{
-				OrderID:   order.ID,
-				OrderNum:  order.OrderNum,
+				OrderID:   ord.ID,
+				OrderNum:  ord.OrderNum,
 				UserID:    u.Id,
 				ProductID: req.ProductID,
 				Deposit:   pp.DepositCents,
@@ -152,10 +151,10 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *types.PreorderDeposit
 	}
 	_ = releaseErr
 
-	return &types.PreorderActionResp{
-		OrderID:       order.ID,
-		OrderNum:      order.OrderNum,
-		PreorderStage: model.PreorderStageDepositPaid,
+	return &PreorderActionResp{
+		OrderID:       ord.ID,
+		OrderNum:      ord.OrderNum,
+		PreorderStage: PreorderStageDepositPaid,
 		OrderType:     consts.OrderWaitPay,
 		Message:       fmt.Sprintf("定金已支付，请于 %s 前完成尾款支付", pp.FinalEndAt.Format("2006-01-02 15:04")),
 	}, nil
@@ -165,7 +164,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *types.PreorderDeposit
 //   - 时间窗校验：now ∈ [DepositEndAt, FinalEndAt)
 //   - PreorderStage 必须为 DepositPaid
 //   - 库存层面只在尾款阶段才真正消耗 product.Num（沿用 payment.go 口径）
-func (s *PreorderSrv) PayFinal(ctx context.Context, req *types.PreorderFinalReq) (*types.PreorderActionResp, error) {
+func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*PreorderActionResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -174,22 +173,22 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *types.PreorderFinalReq)
 		return nil, errors.New("支付密码长度错误")
 	}
 
-	baseDao := dao.NewOrderDao(ctx)
-	order, err := baseDao.GetOrderById(req.OrderID, u.Id)
+	baseDao := order.NewOrderDao(ctx)
+	ord, err := baseDao.GetOrderById(req.OrderID, u.Id)
 	if err != nil {
 		return nil, err
 	}
-	if order == nil || order.ID == 0 {
+	if ord == nil || ord.ID == 0 {
 		return nil, errors.New("订单不存在")
 	}
-	if order.PreorderStage == model.PreorderStageForfeited {
+	if ord.PreorderStage == PreorderStageForfeited {
 		return nil, newCodedError(e.ErrPreorderForfeitedDeposit)
 	}
-	if order.PreorderStage != model.PreorderStageDepositPaid {
+	if ord.PreorderStage != PreorderStageDepositPaid {
 		return nil, newCodedError(e.ErrPreorderDepositNotPaid)
 	}
 
-	pp, err := dao.NewPreorderDao(ctx).GetPreorderByProductID(order.ProductID)
+	pp, err := NewPreorderDao(ctx).GetPreorderByProductID(ord.ProductID)
 	if err != nil {
 		return nil, err
 	}
@@ -200,27 +199,27 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *types.PreorderFinalReq)
 
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		// 1) 扣尾款
-		if e := debitUser(tx, u.Id, order.BossID, req.Key, pp.FinalCents); e != nil {
+		if e := debitUser(tx, u.Id, ord.BossID, req.Key, pp.FinalCents); e != nil {
 			return e
 		}
 
 		// 2) 真扣商品库存（DB 层面）。沿用 payment.go 的"读 -> 减 -> 更新"路径；
 		//    高并发由更上层 Redis reserved 桶兜底，这里 product.Num 是历史水位。
 		productDao := product.NewProductDaoByDB(tx)
-		product, e := productDao.GetProductById(order.ProductID)
+		prod, e := productDao.GetProductById(ord.ProductID)
 		if e != nil {
 			return e
 		}
-		if product.Num-order.Num < 0 {
+		if prod.Num-ord.Num < 0 {
 			return errors.New("存在超卖问题")
 		}
-		product.Num -= order.Num
-		if e := productDao.UpdateProduct(order.ProductID, product); e != nil {
+		prod.Num -= ord.Num
+		if e := productDao.UpdateProduct(ord.ProductID, prod); e != nil {
 			return e
 		}
 
 		// 3) 状态机推进：preorder_stage 1->2, type WaitPay->WaitShip
-		ok, e := dao.NewPreorderDaoByDB(tx).MarkFinalPaid(tx, order.ID, now)
+		ok, e := NewPreorderDaoByDB(tx).MarkFinalPaid(tx, ord.ID, now)
 		if e != nil {
 			return e
 		}
@@ -230,12 +229,12 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *types.PreorderFinalReq)
 
 		// 4) outbox 事件
 		return dao.NewOutboxDaoByDB(tx).Insert(
-			"order", "PreorderFinalPaid", "preorder.final.paid", order.ID,
+			"order", "PreorderFinalPaid", "preorder.final.paid", ord.ID,
 			events.PreorderFinalPaid{
-				OrderID:   order.ID,
-				OrderNum:  order.OrderNum,
+				OrderID:   ord.ID,
+				OrderNum:  ord.OrderNum,
 				UserID:    u.Id,
-				ProductID: order.ProductID,
+				ProductID: ord.ProductID,
 				Final:     pp.FinalCents,
 				Total:     pp.DepositCents + pp.FinalCents,
 			},
@@ -246,14 +245,14 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *types.PreorderFinalReq)
 	}
 
 	// 事务成功后再清 Redis reserved，cache 失败不回滚 DB（业务真相在 DB）
-	if cErr := cache.CommitReservation(ctx, order.ProductID, int64(order.Num)); cErr != nil {
-		util.LogrusObj.Errorf("commit reservation on final paid failed orderID=%d err=%v", order.ID, cErr)
+	if cErr := cache.CommitReservation(ctx, ord.ProductID, int64(ord.Num)); cErr != nil {
+		util.LogrusObj.Errorf("commit reservation on final paid failed orderID=%d err=%v", ord.ID, cErr)
 	}
 
-	return &types.PreorderActionResp{
-		OrderID:       order.ID,
-		OrderNum:      order.OrderNum,
-		PreorderStage: model.PreorderStageFinalPaid,
+	return &PreorderActionResp{
+		OrderID:       ord.ID,
+		OrderNum:      ord.OrderNum,
+		PreorderStage: PreorderStageFinalPaid,
 		OrderType:     consts.OrderWaitShip,
 		Message:       "尾款已支付，等待商家发货",
 	}, nil
@@ -262,7 +261,7 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *types.PreorderFinalReq)
 // CancelPreorderInDepositWindow 仅在定金期内可全退；预售结束后调用返回 ErrPreorderForfeitedDeposit。
 //   - 时间窗校验：now ∈ [DepositStartAt, DepositEndAt)
 //   - 把订单整体回退到 Closed + 释放库存 + 退回定金 + 写 outbox(preorder.cancelled)
-func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *types.PreorderCancelReq) (*types.PreorderActionResp, error) {
+func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *PreorderCancelReq) (*PreorderActionResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -271,23 +270,23 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *ty
 		return nil, errors.New("支付密码长度错误")
 	}
 
-	baseDao := dao.NewOrderDao(ctx)
-	order, err := baseDao.GetOrderById(req.OrderID, u.Id)
+	baseDao := order.NewOrderDao(ctx)
+	ord, err := baseDao.GetOrderById(req.OrderID, u.Id)
 	if err != nil {
 		return nil, err
 	}
-	if order == nil || order.ID == 0 {
+	if ord == nil || ord.ID == 0 {
 		return nil, errors.New("订单不存在")
 	}
-	if order.PreorderStage != model.PreorderStageDepositPaid {
+	if ord.PreorderStage != PreorderStageDepositPaid {
 		// 已付尾款或已没收，不再走"全退"路径
-		if order.PreorderStage == model.PreorderStageForfeited {
+		if ord.PreorderStage == PreorderStageForfeited {
 			return nil, newCodedError(e.ErrPreorderForfeitedDeposit)
 		}
 		return nil, errors.New("订单不在可取消的阶段")
 	}
 
-	pp, err := dao.NewPreorderDao(ctx).GetPreorderByProductID(order.ProductID)
+	pp, err := NewPreorderDao(ctx).GetPreorderByProductID(ord.ProductID)
 	if err != nil {
 		return nil, err
 	}
@@ -299,11 +298,11 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *ty
 
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		// 1) 全额退还定金到用户
-		if e := refundUser(tx, u.Id, order.BossID, req.Key, pp.DepositCents); e != nil {
+		if e := refundUser(tx, u.Id, ord.BossID, req.Key, pp.DepositCents); e != nil {
 			return e
 		}
 		// 2) 状态机重置：preorder_stage 1->0, type WaitPay->Closed
-		ok, e := dao.NewPreorderDaoByDB(tx).ResetPreorderOnCancel(tx, order.ID)
+		ok, e := NewPreorderDaoByDB(tx).ResetPreorderOnCancel(tx, ord.ID)
 		if e != nil {
 			return e
 		}
@@ -312,12 +311,12 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *ty
 		}
 		// 3) outbox
 		return dao.NewOutboxDaoByDB(tx).Insert(
-			"order", "PreorderCancelled", "preorder.cancelled", order.ID,
+			"order", "PreorderCancelled", "preorder.cancelled", ord.ID,
 			events.PreorderCancelled{
-				OrderID:   order.ID,
-				OrderNum:  order.OrderNum,
+				OrderID:   ord.ID,
+				OrderNum:  ord.OrderNum,
 				UserID:    u.Id,
-				ProductID: order.ProductID,
+				ProductID: ord.ProductID,
 				Refund:    pp.DepositCents,
 			},
 		)
@@ -327,14 +326,14 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *ty
 	}
 
 	// 事务成功后释放 reserved（与 order_cancel.go 同口径）
-	if relErr := cache.ReleaseReservation(ctx, order.ProductID, int64(order.Num)); relErr != nil {
-		util.LogrusObj.Errorf("release reservation on preorder cancel failed orderID=%d err=%v", order.ID, relErr)
+	if relErr := cache.ReleaseReservation(ctx, ord.ProductID, int64(ord.Num)); relErr != nil {
+		util.LogrusObj.Errorf("release reservation on preorder cancel failed orderID=%d err=%v", ord.ID, relErr)
 	}
 
-	return &types.PreorderActionResp{
-		OrderID:       order.ID,
-		OrderNum:      order.OrderNum,
-		PreorderStage: model.PreorderStageNone,
+	return &PreorderActionResp{
+		OrderID:       ord.ID,
+		OrderNum:      ord.OrderNum,
+		PreorderStage: PreorderStageNone,
 		OrderType:     consts.OrderClosed,
 		Message:       "已在定金期内取消，定金已原路退回",
 	}, nil
@@ -346,7 +345,7 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *ty
 //   - 定金不退给用户：用户的钱在 PayDeposit 已经划给商家，没收逻辑仅写事件 + 状态机，
 //     真正的"定金划归平台收益"路线图阶段由 wallet 服务消费 preorder.forfeited 实现
 func (s *PreorderSrv) ForfeitDepositsForUnpaidFinals(ctx context.Context) error {
-	ppDao := dao.NewPreorderDao(ctx)
+	ppDao := NewPreorderDao(ctx)
 	ids, err := ppDao.ListUnpaidFinalBefore(nowFn(), 200)
 	if err != nil {
 		return err
@@ -364,7 +363,7 @@ func (s *PreorderSrv) ForfeitDepositsForUnpaidFinals(ctx context.Context) error 
 }
 
 func (s *PreorderSrv) forfeitOne(ctx context.Context, orderID uint) error {
-	baseDao := dao.NewOrderDao(ctx)
+	baseDao := order.NewOrderDao(ctx)
 	var (
 		productID uint
 		num       int
@@ -374,19 +373,19 @@ func (s *PreorderSrv) forfeitOne(ctx context.Context, orderID uint) error {
 	)
 	err := baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		// 重新读一次拿快照
-		var order model.Order
-		if e := tx.Model(&model.Order{}).Where("id=?", orderID).First(&order).Error; e != nil {
+		var ord order.Order
+		if e := tx.Model(&order.Order{}).Where("id=?", orderID).First(&ord).Error; e != nil {
 			return e
 		}
-		if order.PreorderStage != model.PreorderStageDepositPaid {
+		if ord.PreorderStage != PreorderStageDepositPaid {
 			return nil // 已被处理过，幂等返回
 		}
-		pp, e := dao.NewPreorderDaoByDB(tx).GetPreorderByProductID(order.ProductID)
+		pp, e := NewPreorderDaoByDB(tx).GetPreorderByProductID(ord.ProductID)
 		if e != nil {
 			return e
 		}
 
-		ok, e := dao.NewPreorderDaoByDB(tx).ForfeitDeposit(tx, order.ID)
+		ok, e := NewPreorderDaoByDB(tx).ForfeitDeposit(tx, ord.ID)
 		if e != nil {
 			return e
 		}
@@ -394,19 +393,19 @@ func (s *PreorderSrv) forfeitOne(ctx context.Context, orderID uint) error {
 			return nil // 状态已变（用户卡点付了），跳过
 		}
 
-		productID = order.ProductID
-		num = order.Num
-		orderNum = order.OrderNum
-		userID = order.UserID
+		productID = ord.ProductID
+		num = ord.Num
+		orderNum = ord.OrderNum
+		userID = ord.UserID
 		deposit = pp.DepositCents
 
 		return dao.NewOutboxDaoByDB(tx).Insert(
-			"order", "PreorderForfeited", "preorder.forfeited", order.ID,
+			"order", "PreorderForfeited", "preorder.forfeited", ord.ID,
 			events.PreorderForfeited{
-				OrderID:   order.ID,
-				OrderNum:  order.OrderNum,
-				UserID:    order.UserID,
-				ProductID: order.ProductID,
+				OrderID:   ord.ID,
+				OrderNum:  ord.OrderNum,
+				UserID:    ord.UserID,
+				ProductID: ord.ProductID,
 				Deposit:   pp.DepositCents,
 			},
 		)
@@ -429,8 +428,8 @@ func (s *PreorderSrv) forfeitOne(ctx context.Context, orderID uint) error {
 
 // ShowPreorder 公共预售信息展示，不校验登录。
 // phase 字段直接给前端使用：deposit / final / forfeited / not_started。
-func (s *PreorderSrv) ShowPreorder(ctx context.Context, productID uint) (*types.PreorderShowResp, error) {
-	pp, err := dao.NewPreorderDao(ctx).GetPreorderByProductID(productID)
+func (s *PreorderSrv) ShowPreorder(ctx context.Context, productID uint) (*PreorderShowResp, error) {
+	pp, err := NewPreorderDao(ctx).GetPreorderByProductID(productID)
 	if err != nil {
 		return nil, err
 	}
@@ -446,7 +445,7 @@ func (s *PreorderSrv) ShowPreorder(ctx context.Context, productID uint) (*types.
 	default:
 		phase = "forfeited"
 	}
-	return &types.PreorderShowResp{
+	return &PreorderShowResp{
 		ProductID:      pp.ProductID,
 		DepositCents:   pp.DepositCents,
 		FinalCents:     pp.FinalCents,

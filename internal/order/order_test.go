@@ -1,11 +1,13 @@
-package service
+package order
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
@@ -14,12 +16,21 @@ import (
 	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
-	"github.com/RedInn7/gomall/types"
 )
+
+// initLogForTest 本地副本（原 service/log_test.go 未随域迁移），仅在本包声明一次。
+func initLogForTest() {
+	if logpkg.LogrusObj == nil {
+		l := logrus.New()
+		l.Out = io.Discard
+		logpkg.LogrusObj = l
+	}
+}
 
 // 这一组测试覆盖满减引擎接入下单链路后的 4 个关键行为：
 //   1) 命中规则 → 订单金额按 final_cents 落库，PromoRuleID 写入
@@ -40,7 +51,7 @@ func setupSQLiteForOrder(t *testing.T) (*gorm.DB, func()) {
 		t.Skipf("sqlite 不可用（CGO 关闭？）：%v", err)
 	}
 	if err := db.AutoMigrate(
-		&user.User{}, &model.Order{}, &product.Product{},
+		&user.User{}, &Order{}, &product.Product{},
 		&promo.PromoRule{}, &model.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
@@ -130,7 +141,7 @@ func TestOrderCreate_AppliesBestPromo(t *testing.T) {
 		8000, 1000, 0, 0 /* unlimited budget */)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
-	resp, err := GetOrderSrv().OrderCreate(ctx, &types.OrderCreateReq{
+	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
 		Money:     10000, // 单价 100 元
@@ -140,7 +151,7 @@ func TestOrderCreate_AppliesBestPromo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrderCreate: %v", err)
 	}
-	order, ok := resp.(*model.Order)
+	order, ok := resp.(*Order)
 	if !ok {
 		t.Fatalf("resp type %T", resp)
 	}
@@ -190,7 +201,7 @@ func TestOrderCreate_NoApplicableRule(t *testing.T) {
 		20000, 3000, 0, 0)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 43})
-	resp, err := GetOrderSrv().OrderCreate(ctx, &types.OrderCreateReq{
+	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
 		Money:     10000,
@@ -200,7 +211,7 @@ func TestOrderCreate_NoApplicableRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrderCreate: %v", err)
 	}
-	order := resp.(*model.Order)
+	order := resp.(*Order)
 
 	if order.PromoRuleID != 0 {
 		t.Fatalf("PromoRuleID = %d, want 0", order.PromoRuleID)
@@ -242,7 +253,7 @@ func TestOrderCreate_PicksBestAmongMultipleRules(t *testing.T) {
 		20000, 0, 9000, 0)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 44})
-	resp, err := GetOrderSrv().OrderCreate(ctx, &types.OrderCreateReq{
+	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
 		Money:     50000, // 单价 500 元
@@ -252,7 +263,7 @@ func TestOrderCreate_PicksBestAmongMultipleRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrderCreate: %v", err)
 	}
-	order := resp.(*model.Order)
+	order := resp.(*Order)
 
 	if order.PromoRuleID != discountRule.ID {
 		t.Fatalf("PromoRuleID = %d, want %d (9 折)", order.PromoRuleID, discountRule.ID)
@@ -288,7 +299,7 @@ func TestOrderCreate_BudgetExhaustedDowngrades(t *testing.T) {
 	}
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 45})
-	resp, err := GetOrderSrv().OrderCreate(ctx, &types.OrderCreateReq{
+	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
 		Money:     10000,
@@ -298,7 +309,7 @@ func TestOrderCreate_BudgetExhaustedDowngrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrderCreate 应降级而非报错: %v", err)
 	}
-	order := resp.(*model.Order)
+	order := resp.(*Order)
 
 	if order.PromoRuleID != 0 {
 		t.Fatalf("降级失败 PromoRuleID = %d, want 0", order.PromoRuleID)
@@ -311,7 +322,7 @@ func TestOrderCreate_BudgetExhaustedDowngrades(t *testing.T) {
 	}
 
 	// DB 二次校验：订单落库的字段也确实是无折扣
-	var dbOrder model.Order
+	var dbOrder Order
 	if err := db.First(&dbOrder, order.ID).Error; err != nil {
 		t.Fatalf("reload order: %v", err)
 	}

@@ -1,4 +1,4 @@
-package service
+package order
 
 import (
 	"context"
@@ -18,10 +18,8 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 	"github.com/RedInn7/gomall/service/events"
-	"github.com/RedInn7/gomall/types"
 )
 
 const OrderTimeKey = "OrderTime"
@@ -39,7 +37,7 @@ func GetOrderSrv() *OrderSrv {
 	return OrderSrvIns
 }
 
-func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -70,7 +68,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 		finalCents = 0
 	}
 
-	order := &model.Order{
+	order := &Order{
 		UserID:    u.Id,
 		ProductID: req.ProductID,
 		BossID:    req.BossID,
@@ -94,7 +92,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 	// 2) 同事务写订单 + 应用满减 + 写 outbox 事件
 	//    满减 budget 耗尽降级：宁可不给折扣也不能让用户下不了单。
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+		if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
 			return e
 		}
 
@@ -108,7 +106,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 					order.PromoRuleID = 0
 					order.PromoDiscountCents = 0
 					order.FinalCents = subtotalCents
-					if uerr := dao.NewOrderDaoByDB(tx).UpdatePromoFields(order.ID,
+					if uerr := NewOrderDaoByDB(tx).UpdatePromoFields(order.ID,
 						order.PromoRuleID, order.PromoDiscountCents, order.FinalCents); uerr != nil {
 						return uerr
 					}
@@ -157,13 +155,13 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 	return
 }
 
-func (s *OrderSrv) OrderList(ctx context.Context, req *types.OrderListReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderList(ctx context.Context, req *OrderListReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	orders, err := dao.NewOrderDao(ctx).ListOrderByCondition(u.Id, req)
+	orders, err := NewOrderDao(ctx).ListOrderByCondition(u.Id, req)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
@@ -177,13 +175,13 @@ func (s *OrderSrv) OrderList(ctx context.Context, req *types.OrderListReq) (resp
 	return orders, nil
 }
 
-func (s *OrderSrv) OrderListOld(ctx context.Context, req *types.OrderListReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderListOld(ctx context.Context, req *OrderListReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	orders, _, err := dao.NewOrderDao(ctx).ListOrderByConditionOld(u.Id, req)
+	orders, _, err := NewOrderDao(ctx).ListOrderByConditionOld(u.Id, req)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
@@ -197,13 +195,13 @@ func (s *OrderSrv) OrderListOld(ctx context.Context, req *types.OrderListReq) (r
 	return orders, nil
 }
 
-func (s *OrderSrv) OrderShow(ctx context.Context, req *types.OrderShowReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderShow(ctx context.Context, req *OrderShowReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	order, err := dao.NewOrderDao(ctx).ShowOrderById(req.OrderId, u.Id)
+	order, err := NewOrderDao(ctx).ShowOrderById(req.OrderId, u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
@@ -239,14 +237,14 @@ func buildPromoCartItems(ctx context.Context, productID uint, unitCents, qty int
 	return []promo.CartItem{item}
 }
 
-func (s *OrderSrv) OrderDelete(ctx context.Context, req *types.OrderDeleteReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderDelete(ctx context.Context, req *OrderDeleteReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
 	}
-	db := dao.NewOrderDao(ctx)
-	var ret *types.OrderListRespItem
+	db := NewOrderDao(ctx)
+	var ret *OrderListRespItem
 	ret, err = db.ShowOrderById(req.OrderId, u.Id)
 	if err != nil {
 		util.LogrusObj.Error("ShowOrderById失败，err:", err)

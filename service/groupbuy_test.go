@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 )
@@ -21,10 +22,10 @@ import (
 // 跑集成测，写在 stressTest/REPORT.md。
 
 func TestGroupbuy_StateMachine_WaitGroupOut(t *testing.T) {
-	if !CanTransition(consts.OrderWaitGroup, consts.OrderWaitShip) {
+	if !order.CanTransition(consts.OrderWaitGroup, consts.OrderWaitShip) {
 		t.Fatal("WaitGroup -> WaitShip 必须合法（凑齐 N 人成团）")
 	}
-	if !CanTransition(consts.OrderWaitGroup, consts.OrderClosed) {
+	if !order.CanTransition(consts.OrderWaitGroup, consts.OrderClosed) {
 		t.Fatal("WaitGroup -> Closed 必须合法（24h 散团）")
 	}
 }
@@ -37,29 +38,29 @@ func TestGroupbuy_StateMachine_WaitGroupIllegal(t *testing.T) {
 		consts.OrderRefunding,
 		consts.OrderRefunded,
 	} {
-		if CanTransition(consts.OrderWaitGroup, illegal) {
+		if order.CanTransition(consts.OrderWaitGroup, illegal) {
 			t.Fatalf("WaitGroup -> %d 应为非法", illegal)
 		}
 	}
 
 	// 终态不能反向回到 WaitGroup
 	for _, term := range []uint{consts.OrderClosed, consts.OrderRefunded} {
-		if CanTransition(term, consts.OrderWaitGroup) {
+		if order.CanTransition(term, consts.OrderWaitGroup) {
 			t.Fatalf("终态 %d 不应能切回 WaitGroup", term)
 		}
 	}
 
 	// 已发货 / 已完成 不能反向到 WaitGroup
 	for _, paid := range []uint{consts.OrderWaitShip, consts.OrderWaitReceive, consts.OrderCompleted} {
-		if CanTransition(paid, consts.OrderWaitGroup) {
+		if order.CanTransition(paid, consts.OrderWaitGroup) {
 			t.Fatalf("%d -> WaitGroup 应为非法（不能回退到拼团中）", paid)
 		}
 	}
 }
 
 func TestGroupbuy_StateName(t *testing.T) {
-	if got := OrderStateName(consts.OrderWaitGroup); got != "拼团中" {
-		t.Fatalf("OrderStateName(WaitGroup) = %q, want 拼团中", got)
+	if got := order.OrderStateName(consts.OrderWaitGroup); got != "拼团中" {
+		t.Fatalf("order.OrderStateName(WaitGroup) = %q, want 拼团中", got)
 	}
 }
 

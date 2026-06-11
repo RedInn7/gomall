@@ -1,4 +1,4 @@
-package v1
+package preorder
 
 import (
 	"net/http"
@@ -6,11 +6,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/service"
-	"github.com/RedInn7/gomall/types"
 )
 
 // PreorderShowHandler 公共预售信息展示。
@@ -22,10 +21,10 @@ func PreorderShowHandler() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		resp, err := service.GetPreorderSrv().ShowPreorder(ctx.Request.Context(), pid)
+		resp, err := GetPreorderSrv().ShowPreorder(ctx.Request.Context(), pid)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
@@ -41,15 +40,15 @@ func PreorderDepositHandler() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		var req types.PreorderDepositReq
+		var req PreorderDepositReq
 		if err := ctx.ShouldBind(&req); err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		req.ProductID = pid
 
-		resp, err := service.GetPreorderSrv().PayDeposit(ctx.Request.Context(), &req)
+		resp, err := GetPreorderSrv().PayDeposit(ctx.Request.Context(), &req)
 		if err != nil {
 			respondPreorderErr(ctx, err)
 			return
@@ -67,15 +66,15 @@ func PreorderFinalHandler() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		var req types.PreorderFinalReq
+		var req PreorderFinalReq
 		if err := ctx.ShouldBind(&req); err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		req.OrderID = oid
 
-		resp, err := service.GetPreorderSrv().PayFinal(ctx.Request.Context(), &req)
+		resp, err := GetPreorderSrv().PayFinal(ctx.Request.Context(), &req)
 		if err != nil {
 			respondPreorderErr(ctx, err)
 			return
@@ -93,15 +92,15 @@ func PreorderCancelHandler() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		var req types.PreorderCancelReq
+		var req PreorderCancelReq
 		if err := ctx.ShouldBind(&req); err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		req.OrderID = oid
 
-		resp, err := service.GetPreorderSrv().CancelPreorderInDepositWindow(ctx.Request.Context(), &req)
+		resp, err := GetPreorderSrv().CancelPreorderInDepositWindow(ctx.Request.Context(), &req)
 		if err != nil {
 			respondPreorderErr(ctx, err)
 			return
@@ -134,9 +133,9 @@ func (p preorderHandlerErr) Error() string { return string(p) }
 // respondPreorderErr 把业务码透出给客户端，让前端按 82xxx 拉对应文案。
 func respondPreorderErr(ctx *gin.Context, err error) {
 	log.LogrusObj.Infoln(err)
-	code := service.CodeOf(err)
+	code := CodeOf(err)
 	if code == e.SUCCESS || code == e.ERROR {
-		ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+		ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 		return
 	}
 	ctx.JSON(http.StatusOK, ctl.RespError(ctx, err, e.GetMsg(code), code))

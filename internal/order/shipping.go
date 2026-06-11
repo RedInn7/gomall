@@ -1,4 +1,4 @@
-package service
+package order
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func GetShippingSrv() *ShippingSrv {
 //   - tracking / carrier 仅经 outbox 事件透传，下游消费者负责持久化或对接物流系统
 //   - 状态推进与 outbox 写入同事务，保证不会"已发货但下游收不到事件"
 func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64, trackingNo, carrier string) error {
-	baseDao := dao.NewOrderDao(ctx)
+	baseDao := NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
 		return err
@@ -46,7 +46,7 @@ func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64, trackingNo
 		return ErrInvalidOrderStateTransition
 	}
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := dao.NewOrderDaoByDB(tx).ShipOrder(orderNum)
+		ok, err := NewOrderDaoByDB(tx).ShipOrder(orderNum)
 		if err != nil {
 			return err
 		}
@@ -76,7 +76,7 @@ func (s *ShippingSrv) ConfirmReceive(ctx context.Context, orderNum uint64) error
 		util.LogrusObj.Error(err)
 		return err
 	}
-	baseDao := dao.NewOrderDao(ctx)
+	baseDao := NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
 		return err
@@ -91,7 +91,7 @@ func (s *ShippingSrv) ConfirmReceive(ctx context.Context, orderNum uint64) error
 		return ErrInvalidOrderStateTransition
 	}
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := dao.NewOrderDaoByDB(tx).ConfirmReceive(orderNum)
+		ok, err := NewOrderDaoByDB(tx).ConfirmReceive(orderNum)
 		if err != nil {
 			return err
 		}

@@ -1,17 +1,17 @@
-package dao
+package order
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
+
+	"gorm.io/gorm"
+
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
-	"gorm.io/gorm"
-	"time"
-
-	"github.com/RedInn7/gomall/repository/db/model"
-	"github.com/RedInn7/gomall/types"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 type OrderDao struct {
@@ -19,7 +19,7 @@ type OrderDao struct {
 }
 
 func NewOrderDao(ctx context.Context) *OrderDao {
-	return &OrderDao{NewDBClient(ctx)}
+	return &OrderDao{dao.NewDBClient(ctx)}
 }
 
 func NewOrderDaoByDB(db *gorm.DB) *OrderDao {
@@ -27,15 +27,15 @@ func NewOrderDaoByDB(db *gorm.DB) *OrderDao {
 }
 
 // CreateOrder 创建订单
-func (dao *OrderDao) CreateOrder(order *model.Order) error {
-	return dao.DB.Create(&order).Error
+func (d *OrderDao) CreateOrder(order *Order) error {
+	return d.DB.Create(&order).Error
 }
 
 // UpdatePromoFields 满减预算耗尽降级时，把订单上的满减字段改回无折扣。
 // 仅在下单事务里使用：调用方已持有 tx；不要在事务外调用，否则违反 FinalCents 与
 // PromoDiscountCents 必须同进同退的约束。
-func (dao *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, finalCents int64) error {
-	return dao.DB.Model(&model.Order{}).
+func (d *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, finalCents int64) error {
+	return d.DB.Model(&Order{}).
 		Where("id = ?", orderID).
 		Updates(map[string]interface{}{
 			"promo_rule_id":        ruleID,
@@ -45,22 +45,22 @@ func (dao *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, fina
 }
 
 // ListOrderByCondition 获取订单List
-func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r *types.OrderListResp, err error) {
+func (d *OrderDao) ListOrderByCondition(uId uint, req *OrderListReq) (r *OrderListResp, err error) {
 	req.BasePage.Normalize()
 	// TODO 商城算是一个TOC的应用，TOC的应该是不允许join操作的，看看后续怎么改走缓存，比如走缓存，找找免费的CDN之类的
 	cacheKey := fmt.Sprintf("mall:orders:uid:%v:type:%v", uId, req.Type)
 	if req.LastId == 0 {
 		val, err := cache.RedisClient.Get(context.Background(), cacheKey).Result()
 		if err == nil && val != "" {
-			r = &types.OrderListResp{List: make([]*types.OrderListRespItem, 0)}
+			r = &OrderListResp{List: make([]*OrderListRespItem, 0)}
 			if jsonErr := json.Unmarshal([]byte(val), r); jsonErr == nil {
 				return r, nil
 			}
 		}
 	}
 
-	r = &types.OrderListResp{List: make([]*types.OrderListRespItem, 0)}
-	baseQuery := dao.DB.Table("`order` as o").Where("o.user_id = ? and o.type=?", uId, req.Type)
+	r = &OrderListResp{List: make([]*OrderListRespItem, 0)}
+	baseQuery := d.DB.Table("`order` as o").Where("o.user_id = ? and o.type=?", uId, req.Type)
 
 	if req.LastId > 0 {
 		baseQuery = baseQuery.Where("o.id<?", req.LastId)
@@ -88,14 +88,14 @@ func (dao *OrderDao) ListOrderByCondition(uId uint, req *types.OrderListReq) (r 
 	return
 }
 
-func (dao *OrderDao) ListOrderByConditionOld(uId uint, req *types.OrderListReq) (r *types.OrderListResp, count int64, err error) {
+func (d *OrderDao) ListOrderByConditionOld(uId uint, req *OrderListReq) (r *OrderListResp, count int64, err error) {
 	req.BasePage.Normalize()
 	// 1. 直接初始化返回对象，完全不考虑 Redis
-	r = &types.OrderListResp{List: make([]*types.OrderListRespItem, 0)}
+	r = &OrderListResp{List: make([]*OrderListRespItem, 0)}
 
 	// 2. 没有任何预防措施，直接操作 `order` 表 (连反引号都不加)
 	// 没有任何动态判断，直接 Where 写死，req.Type 为 0 时也会强行查询 type=0
-	query := dao.DB.Table("order").Where("`order`.user_id = ? and `order`.type = ?", uId, req.Type)
+	query := d.DB.Table("order").Where("`order`.user_id = ? and `order`.type = ?", uId, req.Type)
 
 	// 3. 每一页都查全表总数，200w 数据下这行代码是性能黑洞
 	// 它会强迫 MySQL 进行全表扫描
@@ -125,8 +125,8 @@ func (dao *OrderDao) ListOrderByConditionOld(uId uint, req *types.OrderListReq) 
 	return r, count, nil
 }
 
-func (dao *OrderDao) GetOrderById(id, uId uint) (r *model.Order, err error) {
-	err = dao.DB.Model(&model.Order{}).
+func (d *OrderDao) GetOrderById(id, uId uint) (r *Order, err error) {
+	err = d.DB.Model(&Order{}).
 		Where("id = ? AND user_id = ?", id, uId).
 		First(&r).Error
 
@@ -134,8 +134,8 @@ func (dao *OrderDao) GetOrderById(id, uId uint) (r *model.Order, err error) {
 }
 
 // ShowOrderById 获取订单详情
-func (dao *OrderDao) ShowOrderById(id, uId uint) (r *types.OrderListRespItem, err error) {
-	err = dao.DB.Model(&model.Order{}).
+func (d *OrderDao) ShowOrderById(id, uId uint) (r *OrderListRespItem, err error) {
+	err = d.DB.Model(&Order{}).
 		Joins("AS o LEFT JOIN product AS p ON p.id = o.product_id").
 		Joins("LEFT JOIN address AS a ON a.id = o.address_id").
 		Where("o.id = ? AND o.user_id = ?", id, uId).
@@ -159,22 +159,22 @@ func (dao *OrderDao) ShowOrderById(id, uId uint) (r *types.OrderListRespItem, er
 	return
 }
 
-// DeleteOrderById 获取订单详情
-func (dao *OrderDao) DeleteOrderById(id, uId uint) error {
-	return dao.DB.Model(&model.Order{}).
+// DeleteOrderById 删除订单
+func (d *OrderDao) DeleteOrderById(id, uId uint) error {
+	return d.DB.Model(&Order{}).
 		Where("id=? AND user_id = ?", id, uId).
-		Delete(&model.Order{}).Error
+		Delete(&Order{}).Error
 }
 
 // UpdateOrderById 更新订单详情
-func (dao *OrderDao) UpdateOrderById(id, uId uint, order *model.Order) error {
-	return dao.DB.Where("id = ? AND user_id = ?", id, uId).
+func (d *OrderDao) UpdateOrderById(id, uId uint, order *Order) error {
+	return d.DB.Where("id = ? AND user_id = ?", id, uId).
 		Updates(order).Error
 }
 
-func (dao *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*model.Order, err error) {
+func (d *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*Order, err error) {
 	expireTime := time.Now().Add(-time.Duration(minutes) * time.Minute)
-	err = dao.DB.Model(&model.Order{}).Where(
+	err = d.DB.Model(&Order{}).Where(
 		"type=? and created_at <=?", consts.UnPaid, expireTime).
 		Limit(limit).
 		Find(&orders).Error
@@ -183,9 +183,9 @@ func (dao *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*model.O
 }
 
 // GetOrderByOrderNum 通过 order_num 查询订单
-func (dao *OrderDao) GetOrderByOrderNum(orderNum uint64) (*model.Order, error) {
-	var o model.Order
-	err := dao.DB.Model(&model.Order{}).Where("order_num=?", orderNum).First(&o).Error
+func (d *OrderDao) GetOrderByOrderNum(orderNum uint64) (*Order, error) {
+	var o Order
+	err := d.DB.Model(&Order{}).Where("order_num=?", orderNum).First(&o).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return nil, nil
@@ -195,8 +195,8 @@ func (dao *OrderDao) GetOrderByOrderNum(orderNum uint64) (*model.Order, error) {
 	return &o, nil
 }
 
-func (dao *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
-	res := dao.DB.Model(&model.Order{}).Where(
+func (d *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
+	res := d.DB.Model(&Order{}).Where(
 		"order_num=? and type=?", orderNum, consts.UnPaid).
 		Update("type", consts.Cancelled)
 
@@ -212,8 +212,8 @@ func (dao *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 // 条件 UPDATE 保证幂等：仅当订单仍处于 WaitShip 时才会写入；
 // 已发货 / 已退款的订单 RowsAffected=0，上层据此判定非法转换。
 // 物流单号本期不持久化（model 未引入字段），仅在事件层带出。
-func (dao *OrderDao) ShipOrder(orderNum uint64) (bool, error) {
-	res := dao.DB.Model(&model.Order{}).
+func (d *OrderDao) ShipOrder(orderNum uint64) (bool, error) {
+	res := d.DB.Model(&Order{}).
 		Where("order_num=? AND type=?", orderNum, consts.OrderWaitShip).
 		Update("type", consts.OrderWaitReceive)
 	if res.Error != nil {
@@ -224,8 +224,8 @@ func (dao *OrderDao) ShipOrder(orderNum uint64) (bool, error) {
 
 // ConfirmReceive 确认收货：WaitReceive -> Completed。
 // 用户主动确认与 7d 兜底 cron 共用同一条 SQL，依靠 WHERE 兜底幂等。
-func (dao *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
-	res := dao.DB.Model(&model.Order{}).
+func (d *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
+	res := d.DB.Model(&Order{}).
 		Where("order_num=? AND type=?", orderNum, consts.OrderWaitReceive).
 		Update("type", consts.OrderCompleted)
 	if res.Error != nil {
@@ -236,11 +236,11 @@ func (dao *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
 
 // RequestRefund 申请退款：from 必须落在 allowedFrom 集合内（WaitShip / WaitReceive / Completed）。
 // 通过 WHERE type IN (...) 一次拦截非法 from，避免读后写竞态。
-func (dao *OrderDao) RequestRefund(orderNum uint64, allowedFrom []uint) (bool, error) {
+func (d *OrderDao) RequestRefund(orderNum uint64, allowedFrom []uint) (bool, error) {
 	if len(allowedFrom) == 0 {
 		return false, nil
 	}
-	res := dao.DB.Model(&model.Order{}).
+	res := d.DB.Model(&Order{}).
 		Where("order_num=? AND type IN ?", orderNum, allowedFrom).
 		Update("type", consts.OrderRefunding)
 	if res.Error != nil {
@@ -250,8 +250,8 @@ func (dao *OrderDao) RequestRefund(orderNum uint64, allowedFrom []uint) (bool, e
 }
 
 // ApproveRefund 同意退款：Refunding -> Refunded。
-func (dao *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
-	res := dao.DB.Model(&model.Order{}).
+func (d *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
+	res := d.DB.Model(&Order{}).
 		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
 		Update("type", consts.OrderRefunded)
 	if res.Error != nil {
@@ -262,8 +262,8 @@ func (dao *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
 
 // RejectRefund 驳回退款：Refunding -> Completed。
 // 仅在 from=Refunding 时生效，避免误把还在 WaitShip / WaitReceive 的订单推到 Completed。
-func (dao *OrderDao) RejectRefund(orderNum uint64) (bool, error) {
-	res := dao.DB.Model(&model.Order{}).
+func (d *OrderDao) RejectRefund(orderNum uint64) (bool, error) {
+	res := d.DB.Model(&Order{}).
 		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
 		Update("type", consts.OrderCompleted)
 	if res.Error != nil {
@@ -274,7 +274,7 @@ func (dao *OrderDao) RejectRefund(orderNum uint64) (bool, error) {
 
 // GetTimeoutWaitReceive 拉取已发货超过 days 天仍未确认收货的订单，由 cron 兜底确认收货。
 // 仅扫 WaitReceive 状态，避免误碰退款流程。
-func (dao *OrderDao) GetTimeoutWaitReceive(days int, limit int) (orders []*model.Order, err error) {
+func (d *OrderDao) GetTimeoutWaitReceive(days int, limit int) (orders []*Order, err error) {
 	if days <= 0 {
 		days = 7
 	}
@@ -282,7 +282,7 @@ func (dao *OrderDao) GetTimeoutWaitReceive(days int, limit int) (orders []*model
 		limit = 100
 	}
 	expireTime := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
-	err = dao.DB.Model(&model.Order{}).
+	err = d.DB.Model(&Order{}).
 		Where("type=? AND updated_at <=?", consts.OrderWaitReceive, expireTime).
 		Limit(limit).
 		Find(&orders).Error

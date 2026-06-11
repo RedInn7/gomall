@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	orderpkg "github.com/RedInn7/gomall/internal/order"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -101,7 +102,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 		ExpireAt:     expireAt,
 	}
 
-	leaderOrder := &model.Order{
+	leaderOrder := &orderpkg.Order{
 		UserID:    leaderID,
 		ProductID: productID,
 		BossID:    bossID,
@@ -116,7 +117,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 		if e := dao.NewGroupbuyDaoByDB(tx).CreateGroup(g); e != nil {
 			return e
 		}
-		if e := dao.NewOrderDaoByDB(tx).CreateOrder(leaderOrder); e != nil {
+		if e := orderpkg.NewOrderDaoByDB(tx).CreateOrder(leaderOrder); e != nil {
 			return e
 		}
 		member := &model.GroupbuyMember{
@@ -194,7 +195,7 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		return nil, err
 	}
 
-	order := &model.Order{
+	order := &orderpkg.Order{
 		UserID:    userID,
 		ProductID: g.ProductID,
 		BossID:    bossID,
@@ -217,7 +218,7 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 			Status:  model.GroupbuyMemberJoined,
 		}
 		// 先订单后 member：order.ID 需要回填到 member.OrderID
-		if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+		if e := orderpkg.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
 			return e
 		}
 		member.OrderID = int64(order.ID)
@@ -330,7 +331,7 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 		// 成员订单 WaitGroup → WaitShip。逐条 UPDATE 保证条件 WHERE 命中状态，
 		// 任一失败回滚整个成团操作，cron 重新拉起。
 		for _, m := range members {
-			res := tx.Model(&model.Order{}).
+			res := tx.Model(&orderpkg.Order{}).
 				Where("id=? AND type=?", m.OrderID, consts.OrderWaitGroup).
 				Update("type", consts.OrderWaitShip)
 			if res.Error != nil {
@@ -416,7 +417,7 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 			return e
 		}
 		for _, m := range members {
-			res := tx.Model(&model.Order{}).
+			res := tx.Model(&orderpkg.Order{}).
 				Where("id=? AND type=?", m.OrderID, consts.OrderWaitGroup).
 				Update("type", consts.OrderClosed)
 			if res.Error != nil {

@@ -1,17 +1,17 @@
-package types
+package preorder
 
 // PreorderShowResp 预售配置展示。所有时间用 unix 秒，前端按时区渲染。
 type PreorderShowResp struct {
-	ProductID      uint  `json:"product_id"`
-	DepositCents   int64 `json:"deposit_cents"`
-	FinalCents     int64 `json:"final_cents"`
-	TotalCents     int64 `json:"total_cents"`
-	DepositStartAt int64 `json:"deposit_start_at"`
-	DepositEndAt   int64 `json:"deposit_end_at"`
-	FinalEndAt     int64 `json:"final_end_at"`
-	ShipAt         int64 `json:"ship_at"`
-	NowAt          int64 `json:"now_at"` // 服务端时间，避免客户端时钟偏移误判窗口
-	Phase          string `json:"phase"` // deposit / final / forfeited / not_started
+	ProductID      uint   `json:"product_id"`
+	DepositCents   int64  `json:"deposit_cents"`
+	FinalCents     int64  `json:"final_cents"`
+	TotalCents     int64  `json:"total_cents"`
+	DepositStartAt int64  `json:"deposit_start_at"`
+	DepositEndAt   int64  `json:"deposit_end_at"`
+	FinalEndAt     int64  `json:"final_end_at"`
+	ShipAt         int64  `json:"ship_at"`
+	NowAt          int64  `json:"now_at"` // 服务端时间，避免客户端时钟偏移误判窗口
+	Phase          string `json:"phase"`  // deposit / final / forfeited / not_started
 }
 
 // PreorderDepositReq 付定金。Key 用于解密 / 重加密 user.money，沿用 paydown 口径。
