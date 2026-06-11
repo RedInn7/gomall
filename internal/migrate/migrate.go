@@ -10,6 +10,7 @@ import (
 	"github.com/RedInn7/gomall/internal/category"
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
+	"github.com/RedInn7/gomall/internal/groupbuy"
 	"github.com/RedInn7/gomall/internal/notice"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/preorder"
@@ -19,7 +20,6 @@ import (
 	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 // Run 执行全部表结构的自动迁移。
@@ -38,7 +38,7 @@ func Run() error {
 			&coupon.CouponBatch{}, &coupon.UserCoupon{},
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
 			&promo.PromoRule{},
-			&model.GroupbuyGroup{}, &model.GroupbuyMember{},
+			&groupbuy.GroupbuyGroup{}, &groupbuy.GroupbuyMember{},
 			&preorder.ProductPreorder{},
 		)
 }

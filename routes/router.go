@@ -9,7 +9,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 
-	api "github.com/RedInn7/gomall/api/v1"
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/internal/address"
 	adminapi "github.com/RedInn7/gomall/internal/admin"
@@ -18,10 +17,13 @@ import (
 	"github.com/RedInn7/gomall/internal/category"
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
+	"github.com/RedInn7/gomall/internal/idempotency"
 	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/payment"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/redpacket"
+	"github.com/RedInn7/gomall/internal/refund"
 	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/middleware"
@@ -100,7 +102,7 @@ func NewRouter() *gin.Engine {
 			authed.GET("redpacket/list", redpacket.ListMyRedPacketsHandler())
 
 			// 幂等 token 颁发
-			authed.GET("idempotency/token", api.IdempotencyTokenHandler())
+			authed.GET("idempotency/token", idempotency.IdempotencyTokenHandler())
 
 			// 订单操作（下单走幂等）
 			authed.POST("orders/create", middleware.Idempotency(), order.CreateOrderHandler())
@@ -115,11 +117,11 @@ func NewRouter() *gin.Engine {
 			// 订单状态机扩展：履约 + 退款
 			// 用户主动：确认收货 / 申请退款（幂等）
 			authed.POST("orders/confirm-receive", order.ConfirmReceiveHandler())
-			authed.POST("orders/refund/request", middleware.Idempotency(), api.RequestRefundHandler())
+			authed.POST("orders/refund/request", middleware.Idempotency(), refund.RequestRefundHandler())
 			// 商家 / 运营：发货 / 同意 / 驳回退款。merchant 角色未落地前先挂 admin RBAC
 			authed.POST("orders/ship", middleware.RequireRole("admin"), order.ShipOrderHandler())
-			authed.POST("orders/refund/approve", middleware.RequireRole("admin"), api.ApproveRefundHandler())
-			authed.POST("orders/refund/reject", middleware.RequireRole("admin"), api.RejectRefundHandler())
+			authed.POST("orders/refund/approve", middleware.RequireRole("admin"), refund.ApproveRefundHandler())
+			authed.POST("orders/refund/reject", middleware.RequireRole("admin"), refund.RejectRefundHandler())
 
 			// 购物车
 			authed.POST("carts/create", cart.CreateCartHandler())
@@ -141,13 +143,13 @@ func NewRouter() *gin.Engine {
 					HalfOpenMaxReq:   3,
 				}),
 				middleware.Idempotency(),
-				api.OrderPaymentHandler())
+				payment.OrderPaymentHandler())
 
 			// Web3 钱包签名支付：先取 nonce，再带签名提交。链上确认由 listener 兜底
-			authed.GET("paydown/crypto/nonce", api.CryptoPaydownNonceHandler())
+			authed.GET("paydown/crypto/nonce", payment.CryptoPaydownNonceHandler())
 			authed.POST("paydown/crypto",
 				middleware.Idempotency(),
-				api.CryptoPaydownHandler())
+				payment.CryptoPaydownHandler())
 
 			// 显示金额
 			authed.POST("money", money.ShowMoneyHandler())

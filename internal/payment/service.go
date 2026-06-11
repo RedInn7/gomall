@@ -1,4 +1,4 @@
-package service
+package payment
 
 import (
 	"context"
@@ -17,7 +17,6 @@ import (
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
-	"github.com/RedInn7/gomall/types"
 )
 
 var PaymentSrvIns *PaymentSrv
@@ -34,7 +33,7 @@ func GetPaymentSrv() *PaymentSrv {
 }
 
 // PayDown 支付操作。BossID/ProductID/Num/Money 全部从订单取，不读 req。
-func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (resp interface{}, err error) {
+func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
