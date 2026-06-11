@@ -1,11 +1,10 @@
-package service
+package category
 
 import (
 	"context"
 	"sync"
 
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -23,15 +22,15 @@ func GetCategorySrv() *CategorySrv {
 }
 
 // CategoryList 列举分类
-func (s *CategorySrv) CategoryList(ctx context.Context, req *types.ListCategoryReq) (resp interface{}, err error) {
-	categories, err := dao.NewCategoryDao(ctx).ListCategory()
+func (s *CategorySrv) CategoryList(ctx context.Context, req *ListCategoryReq) (resp interface{}, err error) {
+	categories, err := NewCategoryDao(ctx).ListCategory()
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
 	}
-	cResp := make([]*types.ListCategoryResp, 0)
+	cResp := make([]*ListCategoryResp, 0)
 	for _, v := range categories {
-		cResp = append(cResp, &types.ListCategoryResp{
+		cResp = append(cResp, &ListCategoryResp{
 			ID:           v.ID,
 			CategoryName: v.CategoryName,
 			CreatedAt:    v.CreatedAt.Unix(),

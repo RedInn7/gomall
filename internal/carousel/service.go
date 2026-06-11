@@ -1,11 +1,10 @@
-package service
+package carousel
 
 import (
 	"context"
 	"sync"
 
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -23,8 +22,8 @@ func GetCarouselSrv() *CarouselSrv {
 }
 
 // ListCarousel 列表
-func (s *CarouselSrv) ListCarousel(ctx context.Context, req *types.ListCarouselReq) (resp interface{}, err error) {
-	carousels, err := dao.NewCarouselDao(ctx).ListCarousel()
+func (s *CarouselSrv) ListCarousel(ctx context.Context, req *ListCarouselReq) (resp interface{}, err error) {
+	carousels, err := NewCarouselDao(ctx).ListCarousel()
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return

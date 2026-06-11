@@ -1,4 +1,4 @@
-package model
+package category
 
 import "github.com/jinzhu/gorm"
 
