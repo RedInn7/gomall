@@ -75,7 +75,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (resp i
 		BossID:    req.BossID,
 		Num:       int(req.Num),
 		Money:     unitCents, // 单价口径不变；满减结果记在 PromoDiscountCents / FinalCents
-		Type:      consts.UnPaid,
+		Type:      consts.OrderWaitPay,
 		AddressID: req.AddressID,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		// 满减字段会在事务内根据 ApplyDiscountInTx 的结果再次确认 / 降级写回

@@ -59,7 +59,7 @@ func (s *CryptoPaymentSrv) IssueNonce(ctx context.Context, req *CryptoNonceReq) 
 	if order == nil || order.ID == 0 {
 		return nil, errors.New("订单不存在")
 	}
-	if order.Type != consts.UnPaid {
+	if order.Type != consts.OrderWaitPay {
 		return nil, errors.New("订单状态非未支付")
 	}
 
@@ -97,7 +97,7 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *CryptoPaydown
 	if order == nil || order.ID == 0 {
 		return nil, errors.New("订单不存在")
 	}
-	if order.Type != consts.UnPaid {
+	if order.Type != consts.OrderWaitPay {
 		return nil, errors.New("订单状态非未支付")
 	}
 

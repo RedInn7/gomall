@@ -59,7 +59,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp int
 			return err
 		}
 
-		if order.Type != consts.UnPaid {
+		if order.Type != consts.OrderWaitPay {
 			err = errors.New("订单状态非未支付，无法重复支付")
 			log.LogrusObj.Error(err)
 			return err
@@ -144,7 +144,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp int
 		}
 
 		// 更新订单状态
-		order.Type = consts.OrderTypePendingShipping
+		order.Type = consts.OrderWaitShip
 		err = orderpkg.NewOrderDaoByDB(tx).UpdateOrderById(req.OrderId, uId, order)
 		if err != nil { // 更新订单失败，回滚
 			log.LogrusObj.Error(err)

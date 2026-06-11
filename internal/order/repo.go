@@ -175,7 +175,7 @@ func (d *OrderDao) UpdateOrderById(id, uId uint, order *Order) error {
 func (d *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*Order, err error) {
 	expireTime := time.Now().Add(-time.Duration(minutes) * time.Minute)
 	err = d.DB.Model(&Order{}).Where(
-		"type=? and created_at <=?", consts.UnPaid, expireTime).
+		"type=? and created_at <=?", consts.OrderWaitPay, expireTime).
 		Limit(limit).
 		Find(&orders).Error
 
@@ -197,8 +197,8 @@ func (d *OrderDao) GetOrderByOrderNum(orderNum uint64) (*Order, error) {
 
 func (d *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 	res := d.DB.Model(&Order{}).Where(
-		"order_num=? and type=?", orderNum, consts.UnPaid).
-		Update("type", consts.Cancelled)
+		"order_num=? and type=?", orderNum, consts.OrderWaitPay).
+		Update("type", consts.OrderClosed)
 
 	if res.Error != nil {
 		return false, res.Error
