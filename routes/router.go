@@ -11,6 +11,7 @@ import (
 
 	api "github.com/RedInn7/gomall/api/v1"
 	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/internal/address"
 	"github.com/RedInn7/gomall/middleware"
 )
 
@@ -114,10 +115,10 @@ func NewRouter() *gin.Engine {
 			authed.POST("carts/delete", api.DeleteCartHandler())
 
 			// 地址操作
-			authed.POST("addresses/create", api.CreateAddressHandler())
-			authed.GET("addresses/show", api.ShowAddressHandler())
-			authed.POST("addresses/update", api.UpdateAddressHandler())
-			authed.POST("addresses/delete", api.DeleteAddressHandler())
+			authed.POST("addresses/create", address.CreateAddressHandler())
+			authed.GET("addresses/show", address.ShowAddressHandler())
+			authed.POST("addresses/update", address.UpdateAddressHandler())
+			authed.POST("addresses/delete", address.DeleteAddressHandler())
 
 			// 支付功能：熔断保护下游 + 幂等防重复扣款
 			authed.POST("paydown",
