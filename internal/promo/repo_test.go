@@ -1,4 +1,4 @@
-package dao
+package promo
 
 import (
 	"context"
@@ -6,30 +6,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 // TestPromo_AtomicConsumeBudget_Exhaust 验证 DailyBudget 被打满时返回 ErrPromoBudgetExhausted。
 // 同时复用 outbox 的 skip-if-no-mysql 套路：本地无 MySQL 时跳过。
 func TestPromo_AtomicConsumeBudget_Exhaust(t *testing.T) {
-	initDBForTest(t)
-	if _db == nil {
+	initPromoTestDB(t)
+	if dao.NewDBClient(context.Background()) == nil {
 		t.Skip("MySQL not initialized")
 	}
 	ctx := context.Background()
 	d := NewPromoDao(ctx)
 
 	now := time.Now()
-	rule := &model.PromoRule{
+	rule := &PromoRule{
 		Name:             "test 满 100 减 10",
-		RuleType:         model.PromoRuleTypeAmount,
-		Scope:            model.PromoScopeAll,
+		RuleType:         PromoRuleTypeAmount,
+		Scope:            PromoScopeAll,
 		ThresholdCents:   10000,
 		DiscountCents:    1000,
 		DailyBudgetCents: 1500, // 一共 15 元预算
 		StartAt:          now.Add(-time.Hour),
 		EndAt:            now.Add(time.Hour),
-		Status:           model.PromoStatusActive,
+		Status:           PromoStatusActive,
 	}
 	if err := d.Create(rule); err != nil {
 		t.Fatalf("create rule: %v", err)
@@ -59,24 +60,24 @@ func TestPromo_AtomicConsumeBudget_Exhaust(t *testing.T) {
 
 // TestPromo_RestoreBudget 验证取消订单退还预算后可以重新被消费。
 func TestPromo_RestoreBudget(t *testing.T) {
-	initDBForTest(t)
-	if _db == nil {
+	initPromoTestDB(t)
+	if dao.NewDBClient(context.Background()) == nil {
 		t.Skip()
 	}
 	ctx := context.Background()
 	d := NewPromoDao(ctx)
 
 	now := time.Now()
-	rule := &model.PromoRule{
+	rule := &PromoRule{
 		Name:             "test restore",
-		RuleType:         model.PromoRuleTypeAmount,
-		Scope:            model.PromoScopeAll,
+		RuleType:         PromoRuleTypeAmount,
+		Scope:            PromoScopeAll,
 		ThresholdCents:   10000,
 		DiscountCents:    2000,
 		DailyBudgetCents: 2000,
 		StartAt:          now.Add(-time.Hour),
 		EndAt:            now.Add(time.Hour),
-		Status:           model.PromoStatusActive,
+		Status:           PromoStatusActive,
 	}
 	if err := d.Create(rule); err != nil {
 		t.Fatalf("create: %v", err)
@@ -106,24 +107,24 @@ func TestPromo_RestoreBudget(t *testing.T) {
 
 // TestPromo_AtomicConsume_UnlimitedBudget DailyBudget=0 视为不限。
 func TestPromo_AtomicConsume_UnlimitedBudget(t *testing.T) {
-	initDBForTest(t)
-	if _db == nil {
+	initPromoTestDB(t)
+	if dao.NewDBClient(context.Background()) == nil {
 		t.Skip()
 	}
 	ctx := context.Background()
 	d := NewPromoDao(ctx)
 
 	now := time.Now()
-	rule := &model.PromoRule{
+	rule := &PromoRule{
 		Name:             "test unlimited",
-		RuleType:         model.PromoRuleTypeAmount,
-		Scope:            model.PromoScopeAll,
+		RuleType:         PromoRuleTypeAmount,
+		Scope:            PromoScopeAll,
 		ThresholdCents:   10000,
 		DiscountCents:    1000,
 		DailyBudgetCents: 0,
 		StartAt:          now.Add(-time.Hour),
 		EndAt:            now.Add(time.Hour),
-		Status:           model.PromoStatusActive,
+		Status:           PromoStatusActive,
 	}
 	if err := d.Create(rule); err != nil {
 		t.Fatalf("create: %v", err)
@@ -141,31 +142,31 @@ func TestPromo_AtomicConsume_UnlimitedBudget(t *testing.T) {
 // TestPromo_ListActiveForCart 验证规则范围过滤：全场 + 命中类目 / 商品 都拉到，
 // 不相关的不拉。
 func TestPromo_ListActiveForCart(t *testing.T) {
-	initDBForTest(t)
-	if _db == nil {
+	initPromoTestDB(t)
+	if dao.NewDBClient(context.Background()) == nil {
 		t.Skip()
 	}
 	ctx := context.Background()
 	d := NewPromoDao(ctx)
 
 	now := time.Now()
-	rules := []*model.PromoRule{
-		{Name: "全场 100-10", RuleType: 1, Scope: model.PromoScopeAll,
+	rules := []*PromoRule{
+		{Name: "全场 100-10", RuleType: 1, Scope: PromoScopeAll,
 			ThresholdCents: 10000, DiscountCents: 1000,
 			StartAt: now.Add(-time.Hour), EndAt: now.Add(time.Hour),
-			Status: model.PromoStatusActive},
-		{Name: "图书 100-15", RuleType: 1, Scope: model.PromoScopeCategory, ScopeRefID: 10,
+			Status: PromoStatusActive},
+		{Name: "图书 100-15", RuleType: 1, Scope: PromoScopeCategory, ScopeRefID: 10,
 			ThresholdCents: 10000, DiscountCents: 1500,
 			StartAt: now.Add(-time.Hour), EndAt: now.Add(time.Hour),
-			Status: model.PromoStatusActive},
-		{Name: "数码 999-100", RuleType: 1, Scope: model.PromoScopeCategory, ScopeRefID: 20,
+			Status: PromoStatusActive},
+		{Name: "数码 999-100", RuleType: 1, Scope: PromoScopeCategory, ScopeRefID: 20,
 			ThresholdCents: 99900, DiscountCents: 10000,
 			StartAt: now.Add(-time.Hour), EndAt: now.Add(time.Hour),
-			Status: model.PromoStatusActive},
-		{Name: "已停 全场", RuleType: 1, Scope: model.PromoScopeAll,
+			Status: PromoStatusActive},
+		{Name: "已停 全场", RuleType: 1, Scope: PromoScopeAll,
 			ThresholdCents: 10000, DiscountCents: 9999,
 			StartAt: now.Add(-time.Hour), EndAt: now.Add(time.Hour),
-			Status: model.PromoStatusStopped},
+			Status: PromoStatusStopped},
 	}
 	for _, r := range rules {
 		if err := d.Create(r); err != nil {
@@ -195,5 +196,23 @@ func TestPromo_ListActiveForCart(t *testing.T) {
 	}
 	if hit["已停 全场"] {
 		t.Fatalf("stopped 规则不应被拉到")
+	}
+}
+
+func initPromoTestDB(t *testing.T) {
+	t.Helper()
+	if dao.NewDBClient(context.Background()) != nil {
+		return
+	}
+	re := conf.ConfigReader{FileName: "../../config/locales/config.yaml"}
+	conf.InitConfigForTest(&re)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Skipf("MySQL not available: %v", r)
+		}
+	}()
+	dao.InitMySQL()
+	if db := dao.NewDBClient(context.Background()); db != nil {
+		_ = db.AutoMigrate(&PromoRule{})
 	}
 }

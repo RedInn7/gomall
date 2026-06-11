@@ -1,4 +1,4 @@
-package dao
+package promo
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 // ErrPromoBudgetExhausted 当日预算用尽。业务层捕获后转 80003 业务码返回前端 / 客服。
@@ -18,7 +18,7 @@ type PromoDao struct {
 }
 
 func NewPromoDao(ctx context.Context) *PromoDao {
-	return &PromoDao{NewDBClient(ctx)}
+	return &PromoDao{dao.NewDBClient(ctx)}
 }
 
 func NewPromoDaoByDB(db *gorm.DB) *PromoDao {
@@ -26,13 +26,13 @@ func NewPromoDaoByDB(db *gorm.DB) *PromoDao {
 }
 
 // Create 落规则。运营创建时调用，默认 Status=draft。
-func (d *PromoDao) Create(r *model.PromoRule) error {
+func (d *PromoDao) Create(r *PromoRule) error {
 	return d.DB.Create(r).Error
 }
 
 // Get 单条
-func (d *PromoDao) Get(id uint) (*model.PromoRule, error) {
-	var r model.PromoRule
+func (d *PromoDao) Get(id uint) (*PromoRule, error) {
+	var r PromoRule
 	if err := d.DB.First(&r, id).Error; err != nil {
 		return nil, err
 	}
@@ -40,8 +40,8 @@ func (d *PromoDao) Get(id uint) (*model.PromoRule, error) {
 }
 
 // ListAll 后台列规则，按 id 倒序
-func (d *PromoDao) ListAll() ([]*model.PromoRule, error) {
-	var rows []*model.PromoRule
+func (d *PromoDao) ListAll() ([]*PromoRule, error) {
+	var rows []*PromoRule
 	err := d.DB.Order("id DESC").Find(&rows).Error
 	return rows, err
 }
@@ -53,43 +53,43 @@ func (d *PromoDao) ListAll() ([]*model.PromoRule, error) {
 //
 // 引擎在 service 层把购物车里出现过的 category_id / product_id 组装好后一次性传进来，
 // 避免在 DAO 多次查 DB。
-func (d *PromoDao) ListActiveRules(now time.Time, scope int, scopeRefIDs []int64) ([]*model.PromoRule, error) {
+func (d *PromoDao) ListActiveRules(now time.Time, scope int, scopeRefIDs []int64) ([]*PromoRule, error) {
 	q := d.DB.Where("status = ? AND start_at <= ? AND end_at >= ?",
-		model.PromoStatusActive, now, now)
+		PromoStatusActive, now, now)
 
 	switch scope {
-	case model.PromoScopeAll:
-		q = q.Where("scope = ?", model.PromoScopeAll)
+	case PromoScopeAll:
+		q = q.Where("scope = ?", PromoScopeAll)
 	default:
 		if len(scopeRefIDs) == 0 {
-			q = q.Where("scope = ?", model.PromoScopeAll)
+			q = q.Where("scope = ?", PromoScopeAll)
 		} else {
 			q = q.Where("scope = ? OR (scope = ? AND scope_ref_id IN ?)",
-				model.PromoScopeAll, scope, scopeRefIDs)
+				PromoScopeAll, scope, scopeRefIDs)
 		}
 	}
 
-	var rows []*model.PromoRule
+	var rows []*PromoRule
 	err := q.Order("id ASC").Find(&rows).Error
 	return rows, err
 }
 
 // ListActiveForCart 同时考虑类目和商品两种 scope。供引擎一次拉齐。
-func (d *PromoDao) ListActiveForCart(now time.Time, categoryIDs, productIDs []int64) ([]*model.PromoRule, error) {
+func (d *PromoDao) ListActiveForCart(now time.Time, categoryIDs, productIDs []int64) ([]*PromoRule, error) {
 	q := d.DB.Where("status = ? AND start_at <= ? AND end_at >= ?",
-		model.PromoStatusActive, now, now)
+		PromoStatusActive, now, now)
 
 	// 组装 OR：全场 OR 命中类目 OR 命中商品
-	conds := d.DB.Where("scope = ?", model.PromoScopeAll)
+	conds := d.DB.Where("scope = ?", PromoScopeAll)
 	if len(categoryIDs) > 0 {
-		conds = conds.Or("scope = ? AND scope_ref_id IN ?", model.PromoScopeCategory, categoryIDs)
+		conds = conds.Or("scope = ? AND scope_ref_id IN ?", PromoScopeCategory, categoryIDs)
 	}
 	if len(productIDs) > 0 {
-		conds = conds.Or("scope = ? AND scope_ref_id IN ?", model.PromoScopeProduct, productIDs)
+		conds = conds.Or("scope = ? AND scope_ref_id IN ?", PromoScopeProduct, productIDs)
 	}
 	q = q.Where(conds)
 
-	var rows []*model.PromoRule
+	var rows []*PromoRule
 	err := q.Order("id ASC").Find(&rows).Error
 	return rows, err
 }
@@ -111,9 +111,9 @@ func (d *PromoDao) AtomicConsumeBudget(tx *gorm.DB, ruleID uint, amount int64) e
 	if amount <= 0 {
 		return nil
 	}
-	res := tx.Model(&model.PromoRule{}).
+	res := tx.Model(&PromoRule{}).
 		Where("id = ? AND status = ? AND (daily_budget_cents = 0 OR consumed_today + ? <= daily_budget_cents)",
-			ruleID, model.PromoStatusActive, amount).
+			ruleID, PromoStatusActive, amount).
 		UpdateColumn("consumed_today", gorm.Expr("consumed_today + ?", amount))
 	if res.Error != nil {
 		return res.Error
@@ -131,7 +131,7 @@ func (d *PromoDao) RestoreBudget(tx *gorm.DB, ruleID uint, amount int64) error {
 	if amount <= 0 {
 		return nil
 	}
-	return tx.Model(&model.PromoRule{}).
+	return tx.Model(&PromoRule{}).
 		Where("id = ? AND consumed_today >= ?", ruleID, amount).
 		UpdateColumn("consumed_today", gorm.Expr("consumed_today - ?", amount)).Error
 }
@@ -139,7 +139,7 @@ func (d *PromoDao) RestoreBudget(tx *gorm.DB, ruleID uint, amount int64) error {
 // Stop 运营手动停用一条规则。Stop 后正在进行中的订单不影响，
 // 新订单不再命中（ListActiveRules 已经按 status=active 过滤）。
 func (d *PromoDao) Stop(id uint) error {
-	return d.DB.Model(&model.PromoRule{}).
+	return d.DB.Model(&PromoRule{}).
 		Where("id = ?", id).
-		Update("status", model.PromoStatusStopped).Error
+		Update("status", PromoStatusStopped).Error
 }

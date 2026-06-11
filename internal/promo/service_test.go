@@ -1,16 +1,14 @@
-package service
+package promo
 
 import (
 	"testing"
 	"time"
-
-	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 // makeRule 构造一个 active 状态的规则。便于 table-driven 测试简写。
 func makeRule(id uint, name string, ruleType, scope int, refID int64,
-	thresholdCents, discountCents int64, discountBps int) *model.PromoRule {
-	r := &model.PromoRule{
+	thresholdCents, discountCents int64, discountBps int) *PromoRule {
+	r := &PromoRule{
 		Name:           name,
 		RuleType:       ruleType,
 		Scope:          scope,
@@ -20,7 +18,7 @@ func makeRule(id uint, name string, ruleType, scope int, refID int64,
 		DiscountBps:    discountBps,
 		StartAt:        time.Now().Add(-1 * time.Hour),
 		EndAt:          time.Now().Add(24 * time.Hour),
-		Status:         model.PromoStatusActive,
+		Status:         PromoStatusActive,
 	}
 	r.ID = id
 	return r
@@ -32,10 +30,10 @@ func TestPromo_StepThresholdPicksHighestDiscount(t *testing.T) {
 	items := []CartItem{
 		{ProductID: 1, CategoryID: 10, UnitCents: 25000, Quantity: 1}, // 250 元
 	}
-	rules := []*model.PromoRule{
-		makeRule(1, "满 100 减 10", model.PromoRuleTypeAmount, model.PromoScopeAll, 0, 10000, 1000, 0),
-		makeRule(2, "满 200 减 25", model.PromoRuleTypeAmount, model.PromoScopeAll, 0, 20000, 2500, 0),
-		makeRule(3, "满 300 减 40", model.PromoRuleTypeAmount, model.PromoScopeAll, 0, 30000, 4000, 0),
+	rules := []*PromoRule{
+		makeRule(1, "满 100 减 10", PromoRuleTypeAmount, PromoScopeAll, 0, 10000, 1000, 0),
+		makeRule(2, "满 200 减 25", PromoRuleTypeAmount, PromoScopeAll, 0, 20000, 2500, 0),
+		makeRule(3, "满 300 减 40", PromoRuleTypeAmount, PromoScopeAll, 0, 30000, 4000, 0),
 	}
 	best, discount := PickBestPromoRule(items, rules)
 	if best == nil || best.ID != 2 {
@@ -52,9 +50,9 @@ func TestPromo_DiscountVsAmount(t *testing.T) {
 	items := []CartItem{
 		{ProductID: 1, CategoryID: 10, UnitCents: 50000, Quantity: 1},
 	}
-	rules := []*model.PromoRule{
-		makeRule(1, "满 200 减 25", model.PromoRuleTypeAmount, model.PromoScopeAll, 0, 20000, 2500, 0),
-		makeRule(2, "满 200 9 折", model.PromoRuleTypeDiscount, model.PromoScopeAll, 0, 20000, 0, 9000),
+	rules := []*PromoRule{
+		makeRule(1, "满 200 减 25", PromoRuleTypeAmount, PromoScopeAll, 0, 20000, 2500, 0),
+		makeRule(2, "满 200 9 折", PromoRuleTypeDiscount, PromoScopeAll, 0, 20000, 0, 9000),
 	}
 	best, discount := PickBestPromoRule(items, rules)
 	if best == nil || best.ID != 2 {
@@ -71,9 +69,9 @@ func TestPromo_DiscountWinsOverAmountReverse(t *testing.T) {
 	items := []CartItem{
 		{ProductID: 1, CategoryID: 10, UnitCents: 20000, Quantity: 1},
 	}
-	rules := []*model.PromoRule{
-		makeRule(1, "满 200 减 25", model.PromoRuleTypeAmount, model.PromoScopeAll, 0, 20000, 2500, 0),
-		makeRule(2, "满 200 9 折", model.PromoRuleTypeDiscount, model.PromoScopeAll, 0, 20000, 0, 9000),
+	rules := []*PromoRule{
+		makeRule(1, "满 200 减 25", PromoRuleTypeAmount, PromoScopeAll, 0, 20000, 2500, 0),
+		makeRule(2, "满 200 9 折", PromoRuleTypeDiscount, PromoScopeAll, 0, 20000, 0, 9000),
 	}
 	best, discount := PickBestPromoRule(items, rules)
 	if best == nil || best.ID != 1 {
@@ -89,8 +87,8 @@ func TestPromo_ThresholdNotMet(t *testing.T) {
 	items := []CartItem{
 		{ProductID: 1, CategoryID: 10, UnitCents: 8000, Quantity: 1},
 	}
-	rules := []*model.PromoRule{
-		makeRule(1, "满 100 减 10", model.PromoRuleTypeAmount, model.PromoScopeAll, 0, 10000, 1000, 0),
+	rules := []*PromoRule{
+		makeRule(1, "满 100 减 10", PromoRuleTypeAmount, PromoScopeAll, 0, 10000, 1000, 0),
 	}
 	best, discount := PickBestPromoRule(items, rules)
 	if best != nil || discount != 0 {
@@ -104,11 +102,11 @@ func TestPromo_CategoryScopeOnlyAppliesToCategory(t *testing.T) {
 		{ProductID: 1, CategoryID: 10, UnitCents: 12000, Quantity: 1}, // 类目 10 = 120 元
 		{ProductID: 2, CategoryID: 20, UnitCents: 30000, Quantity: 1}, // 类目 20 = 300 元
 	}
-	rules := []*model.PromoRule{
+	rules := []*PromoRule{
 		// 类目 10 满 100 减 15；该类目小计 120，命中 → 减 15
-		makeRule(1, "图书满 100 减 15", model.PromoRuleTypeAmount, model.PromoScopeCategory, 10, 10000, 1500, 0),
+		makeRule(1, "图书满 100 减 15", PromoRuleTypeAmount, PromoScopeCategory, 10, 10000, 1500, 0),
 		// 类目 20 满 500 减 60；该类目小计 300，不达门槛
-		makeRule(2, "数码满 500 减 60", model.PromoRuleTypeAmount, model.PromoScopeCategory, 20, 50000, 6000, 0),
+		makeRule(2, "数码满 500 减 60", PromoRuleTypeAmount, PromoScopeCategory, 20, 50000, 6000, 0),
 	}
 	best, discount := PickBestPromoRule(items, rules)
 	if best == nil || best.ID != 1 {
@@ -125,8 +123,8 @@ func TestPromo_ProductScopeOnlyAppliesToProduct(t *testing.T) {
 		{ProductID: 1, CategoryID: 10, UnitCents: 25000, Quantity: 1},
 		{ProductID: 2, CategoryID: 10, UnitCents: 5000, Quantity: 1},
 	}
-	rules := []*model.PromoRule{
-		makeRule(1, "P1 满 200 减 30", model.PromoRuleTypeAmount, model.PromoScopeProduct, 1, 20000, 3000, 0),
+	rules := []*PromoRule{
+		makeRule(1, "P1 满 200 减 30", PromoRuleTypeAmount, PromoScopeProduct, 1, 20000, 3000, 0),
 	}
 	best, discount := PickBestPromoRule(items, rules)
 	if best == nil || best.ID != 1 {
@@ -154,8 +152,8 @@ func TestPromo_DiscountCapsAtBase(t *testing.T) {
 	items := []CartItem{
 		{ProductID: 1, CategoryID: 10, UnitCents: 12000, Quantity: 1},
 	}
-	rules := []*model.PromoRule{
-		makeRule(1, "异常 满 100 减 200", model.PromoRuleTypeAmount, model.PromoScopeAll, 0, 10000, 20000, 0),
+	rules := []*PromoRule{
+		makeRule(1, "异常 满 100 减 200", PromoRuleTypeAmount, PromoScopeAll, 0, 10000, 20000, 0),
 	}
 	_, discount := PickBestPromoRule(items, rules)
 	if discount != 12000 {
@@ -168,8 +166,8 @@ func TestPromo_NoApplicableRule(t *testing.T) {
 	items := []CartItem{
 		{ProductID: 1, CategoryID: 10, UnitCents: 5000, Quantity: 1},
 	}
-	rules := []*model.PromoRule{
-		makeRule(1, "数码满 500 减 60", model.PromoRuleTypeAmount, model.PromoScopeCategory, 20, 50000, 6000, 0),
+	rules := []*PromoRule{
+		makeRule(1, "数码满 500 减 60", PromoRuleTypeAmount, PromoScopeCategory, 20, 50000, 6000, 0),
 	}
 	best, _ := PickBestPromoRule(items, rules)
 	if best != nil {

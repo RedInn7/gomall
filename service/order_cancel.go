@@ -5,6 +5,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/RedInn7/gomall/internal/promo"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
@@ -63,7 +64,7 @@ func CancelUnpaidOrder(orderNum uint64) error {
 	// 满减预算退还：失败不阻塞关单（库存已经放开，对用户而言已经完成关单），
 	// 仅打 [promo] 日志让 SRE / 客服 grep 兜底
 	if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
-		if rdErr := GetPromoSrv().ReleaseDiscount(ctx, order.ID, order.PromoRuleID, order.PromoDiscountCents, "cancel"); rdErr != nil {
+		if rdErr := promo.GetPromoSrv().ReleaseDiscount(ctx, order.ID, order.PromoRuleID, order.PromoDiscountCents, "cancel"); rdErr != nil {
 			util.LogrusObj.Errorf("[promo] release on cancel failed orderNum=%d rule=%d err=%v",
 				orderNum, order.PromoRuleID, rdErr)
 		} else {

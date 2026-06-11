@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm/schema"
 
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -40,7 +41,7 @@ func setupSQLiteForOrder(t *testing.T) (*gorm.DB, func()) {
 	}
 	if err := db.AutoMigrate(
 		&user.User{}, &model.Order{}, &product.Product{},
-		&model.PromoRule{}, &model.OutboxEvent{},
+		&promo.PromoRule{}, &model.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
@@ -92,10 +93,10 @@ func seedOrderProduct(t *testing.T, db *gorm.DB, name string, priceCents int64) 
 func seedPromoRule(t *testing.T, db *gorm.DB, name string,
 	ruleType, scope int, refID int64,
 	thresholdCents, discountCents int64, discountBps int,
-	dailyBudgetCents int64) *model.PromoRule {
+	dailyBudgetCents int64) *promo.PromoRule {
 	t.Helper()
 	now := time.Now()
-	r := &model.PromoRule{
+	r := &promo.PromoRule{
 		Name:             name,
 		RuleType:         ruleType,
 		Scope:            scope,
@@ -106,7 +107,7 @@ func seedPromoRule(t *testing.T, db *gorm.DB, name string,
 		DailyBudgetCents: dailyBudgetCents,
 		StartAt:          now.Add(-time.Hour),
 		EndAt:            now.Add(24 * time.Hour),
-		Status:           model.PromoStatusActive,
+		Status:           promo.PromoStatusActive,
 	}
 	if err := db.Create(r).Error; err != nil {
 		t.Fatalf("create promo rule: %v", err)
@@ -125,7 +126,7 @@ func TestOrderCreate_AppliesBestPromo(t *testing.T) {
 
 	product := seedOrderProduct(t, db, "p-best-promo", 10000)
 	rule := seedPromoRule(t, db, "满 80 减 10",
-		model.PromoRuleTypeAmount, model.PromoScopeAll, 0,
+		promo.PromoRuleTypeAmount, promo.PromoScopeAll, 0,
 		8000, 1000, 0, 0 /* unlimited budget */)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
@@ -155,7 +156,7 @@ func TestOrderCreate_AppliesBestPromo(t *testing.T) {
 	}
 
 	// 预算消耗也应同步落库
-	var dbRule model.PromoRule
+	var dbRule promo.PromoRule
 	if err := db.First(&dbRule, rule.ID).Error; err != nil {
 		t.Fatalf("reload rule: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestOrderCreate_NoApplicableRule(t *testing.T) {
 
 	product := seedOrderProduct(t, db, "p-no-rule", 10000)
 	_ = seedPromoRule(t, db, "满 200 减 30",
-		model.PromoRuleTypeAmount, model.PromoScopeAll, 0,
+		promo.PromoRuleTypeAmount, promo.PromoScopeAll, 0,
 		20000, 3000, 0, 0)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 43})
@@ -234,10 +235,10 @@ func TestOrderCreate_PicksBestAmongMultipleRules(t *testing.T) {
 
 	product := seedOrderProduct(t, db, "p-multi-rule", 50000)
 	_ = seedPromoRule(t, db, "满 200 减 25",
-		model.PromoRuleTypeAmount, model.PromoScopeAll, 0,
+		promo.PromoRuleTypeAmount, promo.PromoScopeAll, 0,
 		20000, 2500, 0, 0)
 	discountRule := seedPromoRule(t, db, "满 200 9 折",
-		model.PromoRuleTypeDiscount, model.PromoScopeAll, 0,
+		promo.PromoRuleTypeDiscount, promo.PromoScopeAll, 0,
 		20000, 0, 9000, 0)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 44})
@@ -277,10 +278,10 @@ func TestOrderCreate_BudgetExhaustedDowngrades(t *testing.T) {
 	product := seedOrderProduct(t, db, "p-budget-exh", 10000)
 	// 预算只剩 500 分，规则要扣 1000 分 → AtomicConsumeBudget 必返 ErrPromoBudgetExhausted
 	rule := seedPromoRule(t, db, "满 80 减 10 (小预算)",
-		model.PromoRuleTypeAmount, model.PromoScopeAll, 0,
+		promo.PromoRuleTypeAmount, promo.PromoScopeAll, 0,
 		8000, 1000, 0, 1000 /* daily budget = 10 元 */)
 	// 直接把 consumed_today 推到差 500 分就满
-	if err := db.Model(&model.PromoRule{}).
+	if err := db.Model(&promo.PromoRule{}).
 		Where("id=?", rule.ID).
 		Update("consumed_today", 500).Error; err != nil {
 		t.Fatalf("seed consumed_today: %v", err)
@@ -327,7 +328,7 @@ func TestOrderCreate_BudgetExhaustedDowngrades(t *testing.T) {
 	}
 
 	// 规则的 consumed_today 也不该被推进（事务回滚 / 没扣到）
-	var dbRule model.PromoRule
+	var dbRule promo.PromoRule
 	if err := db.First(&dbRule, rule.ID).Error; err != nil {
 		t.Fatalf("reload rule: %v", err)
 	}

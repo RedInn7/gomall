@@ -1,4 +1,4 @@
-package types
+package promo
 
 import "time"
 
@@ -16,9 +16,10 @@ type PromoCalculateReq struct {
 }
 
 // PromoApplyResp 计算结果。
-//   RuleID=0 表示没有任何规则适用，前端应展示原价；
-//   DiscountCents 是本笔订单可减金额（单位：分），订单实付 = 原价 - DiscountCents；
-//   Reason 是给客服 / 用户看的可解释文案。
+//
+//	RuleID=0 表示没有任何规则适用，前端应展示原价；
+//	DiscountCents 是本笔订单可减金额（单位：分），订单实付 = 原价 - DiscountCents；
+//	Reason 是给客服 / 用户看的可解释文案。
 type PromoApplyResp struct {
 	RuleID         uint   `json:"rule_id"`
 	RuleName       string `json:"rule_name"`
