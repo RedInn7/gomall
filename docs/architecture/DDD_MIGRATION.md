@@ -59,8 +59,11 @@ internal/
   - 再迁 product 8 件套到 internal/product（agent 做受体改名等细活），全局 sed 改名 model.Product(Img)/dao.NewProduct*Dao/types.Product*→product.*
   - 修 payment.go 局部变量 product 遮蔽包名（→prod）
 
-### 剩余（order 簇，互相耦合，建议顺序）
-1. [x] `promo` 已完成（含 CartItem/ErrPromoBudgetExhausted 内聚；两个白盒测试迁入；repo 测试自带 initPromoTestDB）
+### 剩余（order 簇）
+1. [x] `promo` 完成
+2. [x] `order` 核心 + `preorder` 完成（一起做：dao/preorder.go 移出 package dao 解 dao→order 环；consumer 用 orderpkg 别名避局部 order 变量遮蔽；5 个 order 白盒测试迁入；refund_test/groupbuy_test 的 CanTransition 改引 order.*）
+3. [ ] 剩 `payment`(payment+payment_crypto+pay.go+paydown_crypto.go)、`refund`、`groupbuy`、`idempotency`——都已 import orderpkg/product/promo，迁起来直接
+4. [ ] 收尾：删空 api/v1(连 common.go)、service、repository/db/{dao,model} 残壳；抽 outbox→internal/shared/outbox；删 orderpkg 别名改回 order（消费者迁完后局部变量不再冲突时）
 2. `order` 核心（order + order_async/cancel/consumer/shipping/state/task 共 7 个 service 文件 + dao + model + types*2 + api*2），被 payment/refund/preorder/groupbuy/cancel 引用 model.Order/dao.NewOrderDao
 3. order 的下游：`payment`(payment+crypto)、`refund`、`preorder`(routes)、`groupbuy`(routes)
 4. `idempotency`（api handler，偏共享，考虑放 shared 或 order）
