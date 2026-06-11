@@ -1,4 +1,4 @@
-package model
+package product
 
 import (
 	"strconv"
@@ -8,7 +8,7 @@ import (
 	"github.com/RedInn7/gomall/repository/cache"
 )
 
-// 商品模型
+// Product 商品模型
 type Product struct {
 	gorm.Model
 	Name          string `gorm:"size:255;index"`
@@ -36,10 +36,8 @@ func (product *Product) View() uint64 {
 	return count
 }
 
-// AddView 商品游览
+// AddView 增加商品点击数及排行榜计数
 func (product *Product) AddView() {
-	// 增加视频点击数
 	cache.RedisClient.Incr(cache.RedisContext, cache.ProductViewKey(product.ID))
-	// 增加排行点击数
 	cache.RedisClient.ZIncrBy(cache.RedisContext, cache.RankKey, 1, strconv.Itoa(int(product.ID)))
 }

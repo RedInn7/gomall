@@ -11,6 +11,7 @@ import (
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/notice"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/internal/user"
@@ -28,8 +29,8 @@ func Run() error {
 			&user.User{}, &favorite.Favorite{},
 			&model.Order{}, &admin.Admin{}, &address.Address{},
 			&cart.Cart{}, &category.Category{}, &carousel.Carousel{},
-			&notice.Notice{}, &model.Product{},
-			&model.ProductImg{}, &skill.SkillProduct{},
+			&notice.Notice{}, &product.Product{},
+			&product.ProductImg{}, &skill.SkillProduct{},
 			&skill.SkillProduct2MQ{},
 			&coupon.CouponBatch{}, &coupon.UserCoupon{},
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},

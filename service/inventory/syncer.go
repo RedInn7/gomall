@@ -3,10 +3,10 @@ package inventory
 import (
 	"context"
 
+	"github.com/RedInn7/gomall/internal/product"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 )
 
 // SeedFromDB 启动时把 product.num 复制到 Redis stock:available 桶。
@@ -18,8 +18,8 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
 	d := dao.NewDBClient(ctx)
 	var lastID uint
 	for {
-		var rows []*model.Product
-		q := d.Model(&model.Product{}).Order("id ASC").Limit(batchSize)
+		var rows []*product.Product
+		q := d.Model(&product.Product{}).Order("id ASC").Limit(batchSize)
 		if lastID > 0 {
 			q = q.Where("id > ?", lastID)
 		}

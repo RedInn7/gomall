@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/RedInn7/gomall/internal/product"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/es"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 	"github.com/RedInn7/gomall/service/events"
@@ -52,7 +52,7 @@ func handleProductChanged(ctx context.Context, ev events.ProductChanged) error {
 	if ev.Op == "delete" {
 		return es.DeleteProduct(ctx, ev.ProductID)
 	}
-	p, err := dao.NewProductDao(ctx).GetProductById(ev.ProductID)
+	p, err := product.NewProductDao(ctx).GetProductById(ev.ProductID)
 	if err != nil || p == nil {
 		return err
 	}

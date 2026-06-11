@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -38,7 +39,7 @@ func setupSQLiteForOrder(t *testing.T) (*gorm.DB, func()) {
 		t.Skipf("sqlite 不可用（CGO 关闭？）：%v", err)
 	}
 	if err := db.AutoMigrate(
-		&user.User{}, &model.Order{}, &model.Product{},
+		&user.User{}, &model.Order{}, &product.Product{},
 		&model.PromoRule{}, &model.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
@@ -69,9 +70,9 @@ func ensureSnowflakeForOrder() {
 
 // seedOrderProduct 建一个 BossID=1 / CategoryID=10 / 库存 50 的商品，并初始化 Redis 库存桶。
 // 单价 / 名字交给调用方在 product 上额外设置。
-func seedOrderProduct(t *testing.T, db *gorm.DB, name string, priceCents int64) *model.Product {
+func seedOrderProduct(t *testing.T, db *gorm.DB, name string, priceCents int64) *product.Product {
 	t.Helper()
-	p := &model.Product{
+	p := &product.Product{
 		Name:       name,
 		CategoryID: 10,
 		Num:        50,

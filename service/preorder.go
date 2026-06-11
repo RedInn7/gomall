@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -205,7 +206,7 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *types.PreorderFinalReq)
 
 		// 2) 真扣商品库存（DB 层面）。沿用 payment.go 的"读 -> 减 -> 更新"路径；
 		//    高并发由更上层 Redis reserved 桶兜底，这里 product.Num 是历史水位。
-		productDao := dao.NewProductDaoByDB(tx)
+		productDao := product.NewProductDaoByDB(tx)
 		product, e := productDao.GetProductById(order.ProductID)
 		if e != nil {
 			return e

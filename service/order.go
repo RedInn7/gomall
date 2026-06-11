@@ -11,6 +11,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -228,7 +229,7 @@ func buildPromoCartItems(ctx context.Context, productID uint, unitCents, qty int
 		UnitCents: unitCents,
 		Quantity:  qty,
 	}
-	pdao := dao.NewProductDao(ctx)
+	pdao := product.NewProductDao(ctx)
 	if pdao != nil && pdao.DB != nil {
 		if p, err := pdao.GetProductById(productID); err == nil && p != nil {
 			item.CategoryID = int64(p.CategoryID)

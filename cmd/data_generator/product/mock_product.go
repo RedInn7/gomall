@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/internal/product"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -23,18 +23,18 @@ func main() {
 	if err != nil {
 		panic("链接数据库失败，err: " + err.Error())
 	}
-	err = db.AutoMigrate(&model.Product{})
+	err = db.AutoMigrate(&product.Product{})
 	if err != nil {
 		panic("链接数据库失败，err: " + err.Error())
 	}
 	fmt.Printf("🚀 开始生成 %d 条数据...\n", TotalRecords)
 	startTime := time.Now()
-	var buffer []model.Product
+	var buffer []product.Product
 	count := 0
 	for i := 0; i < TotalRecords; i++ {
 		priceVal := rand.Float64() * 1000
 		discountVal := priceVal * 0.8
-		p := model.Product{
+		p := product.Product{
 			Name:          fmt.Sprintf("高性能商品_%d", i),
 			CategoryID:    uint(rand.Intn(50) + 1), // 假设有 50 个分类
 			Title:         fmt.Sprintf("这是第 %d 个商品的超长标题，用于测试数据库读取性能", i),

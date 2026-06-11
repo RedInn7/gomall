@@ -7,10 +7,10 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -83,7 +83,7 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 		return
 	}
 
-	product, err := dao.NewProductDao(ctx).GetProductById(req.ProductId)
+	product, err := product.NewProductDao(ctx).GetProductById(req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
