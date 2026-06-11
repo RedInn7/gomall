@@ -63,7 +63,7 @@ func (s *CartSrv) CartList(ctx context.Context, req *CartListReq) (resp interfac
 	}
 
 	resp = &types.DataListResp{
-		Item:  carts, // TODO 无分页，之后考虑要不要加
+		Item:  carts, // 列表暂不分页
 		Total: int64(len(carts)),
 	}
 

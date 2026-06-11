@@ -73,13 +73,13 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp int
 		totalMoney := order.Money * int64(num)
 
 		userDao := user.NewUserDaoByDB(tx)
-		user, err := userDao.GetUserById(uId)
+		buyer, err := userDao.GetUserById(uId)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 
-		userMoney, err := user.DecryptMoney(req.Key)
+		userMoney, err := buyer.DecryptMoney(req.Key)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
@@ -89,14 +89,14 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp int
 			return errors.New("金额不足")
 		}
 
-		user.Money = strconv.FormatInt(userMoney-totalMoney, 10)
-		user.Money, err = user.EncryptMoney(req.Key)
+		buyer.Money = strconv.FormatInt(userMoney-totalMoney, 10)
+		buyer.Money, err = buyer.EncryptMoney(req.Key)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 
-		err = userDao.UpdateUserById(uId, user)
+		err = userDao.UpdateUserById(uId, buyer)
 		if err != nil { // 更新用户金额失败，回滚
 			log.LogrusObj.Error(err)
 			return err
@@ -162,8 +162,8 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp int
 			Num:           num,
 			OnSale:        false,
 			BossID:        uId,
-			BossName:      user.UserName,
-			BossAvatar:    user.Avatar,
+			BossName:      buyer.UserName,
+			BossAvatar:    buyer.Avatar,
 		}
 
 		err = productDao.CreateProduct(&productUser)
