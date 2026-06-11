@@ -19,6 +19,7 @@ import (
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/money"
+	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	"github.com/RedInn7/gomall/internal/skill"
@@ -102,21 +103,21 @@ func NewRouter() *gin.Engine {
 			authed.GET("idempotency/token", api.IdempotencyTokenHandler())
 
 			// 订单操作（下单走幂等）
-			authed.POST("orders/create", middleware.Idempotency(), api.CreateOrderHandler())
+			authed.POST("orders/create", middleware.Idempotency(), order.CreateOrderHandler())
 			// 异步下单：MQ 削峰，前端拿 ticket 轮询 status
-			authed.POST("orders/enqueue", middleware.Idempotency(), api.EnqueueOrderHandler())
-			authed.GET("orders/status", api.OrderStatusHandler())
-			authed.GET("orders/list", api.ListOrdersHandler())
-			authed.GET("orders/old/list", api.ListOrdersHandlerOld())
-			authed.GET("orders/show", api.ShowOrderHandler())
-			authed.POST("orders/delete", api.DeleteOrderHandler())
+			authed.POST("orders/enqueue", middleware.Idempotency(), order.EnqueueOrderHandler())
+			authed.GET("orders/status", order.OrderStatusHandler())
+			authed.GET("orders/list", order.ListOrdersHandler())
+			authed.GET("orders/old/list", order.ListOrdersHandlerOld())
+			authed.GET("orders/show", order.ShowOrderHandler())
+			authed.POST("orders/delete", order.DeleteOrderHandler())
 
 			// 订单状态机扩展：履约 + 退款
 			// 用户主动：确认收货 / 申请退款（幂等）
-			authed.POST("orders/confirm-receive", api.ConfirmReceiveHandler())
+			authed.POST("orders/confirm-receive", order.ConfirmReceiveHandler())
 			authed.POST("orders/refund/request", middleware.Idempotency(), api.RequestRefundHandler())
 			// 商家 / 运营：发货 / 同意 / 驳回退款。merchant 角色未落地前先挂 admin RBAC
-			authed.POST("orders/ship", middleware.RequireRole("admin"), api.ShipOrderHandler())
+			authed.POST("orders/ship", middleware.RequireRole("admin"), order.ShipOrderHandler())
 			authed.POST("orders/refund/approve", middleware.RequireRole("admin"), api.ApproveRefundHandler())
 			authed.POST("orders/refund/reject", middleware.RequireRole("admin"), api.RejectRefundHandler())
 

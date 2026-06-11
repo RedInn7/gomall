@@ -1,4 +1,4 @@
-package service
+package order
 
 import (
 	"context"
@@ -20,7 +20,7 @@ type OrderTaskService struct {
 }
 
 func (s *OrderTaskService) RunOrderTimeoutCheck() {
-	baseDao := dao.NewOrderDao(context.Background())
+	baseDao := NewOrderDao(context.Background())
 	orders, err := baseDao.GetTimeoutOrders(15, 100)
 	if err != nil {
 		util.LogrusObj.Errorf("Cron Job Error: fetch orders failed: %v\n", err)
@@ -29,7 +29,7 @@ func (s *OrderTaskService) RunOrderTimeoutCheck() {
 
 	for _, order := range orders {
 		err := baseDao.DB.Transaction(func(tx *gorm.DB) error {
-			txOrderDao := dao.NewOrderDaoByDB(tx)
+			txOrderDao := NewOrderDaoByDB(tx)
 			txProductDao := product.NewProductDaoWithDB(tx)
 			success, err := txOrderDao.CloseOrderWithCheck(order.OrderNum)
 			if err != nil {
@@ -60,7 +60,7 @@ func (s *OrderTaskService) RunOrderTimeoutCheck() {
 // 同事务推进状态机 + 写 order.completed 事件，下游服务（点评 / 结算 / 数据）由事件驱动。
 func (s *OrderTaskService) RunAutoConfirmReceive() {
 	ctx := context.Background()
-	baseDao := dao.NewOrderDao(ctx)
+	baseDao := NewOrderDao(ctx)
 	orders, err := baseDao.GetTimeoutWaitReceive(autoConfirmReceiveDays, 100)
 	if err != nil {
 		util.LogrusObj.Errorf("Cron Job Error: fetch wait-receive orders failed: %v", err)
@@ -68,7 +68,7 @@ func (s *OrderTaskService) RunAutoConfirmReceive() {
 	}
 	for _, order := range orders {
 		err := baseDao.DB.Transaction(func(tx *gorm.DB) error {
-			ok, err := dao.NewOrderDaoByDB(tx).ConfirmReceive(order.OrderNum)
+			ok, err := NewOrderDaoByDB(tx).ConfirmReceive(order.OrderNum)
 			if err != nil {
 				return err
 			}

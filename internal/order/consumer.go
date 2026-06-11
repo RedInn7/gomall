@@ -1,4 +1,4 @@
-package service
+package order
 
 import (
 	"context"
@@ -13,22 +13,21 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 	"github.com/RedInn7/gomall/service/events"
 )
 
 // asyncOrderWriter 真正写订单和 outbox 的抽象，测试时替换为内存实现
-type asyncOrderWriter func(ctx context.Context, task AsyncOrderTask, order *model.Order) error
+type asyncOrderWriter func(ctx context.Context, task AsyncOrderTask, order *Order) error
 
 var defaultAsyncOrderWriter asyncOrderWriter = persistAsyncOrder
 
 // SetAsyncOrderWriter 注入自定义写订单实现（仅测试用）
 func SetAsyncOrderWriter(w asyncOrderWriter) { defaultAsyncOrderWriter = w }
 
-func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *model.Order) error {
+func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *Order) error {
 	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+		if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
 			return e
 		}
 		return dao.NewOutboxDaoByDB(tx).Insert(
@@ -55,7 +54,7 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 		return err
 	}
 
-	order := &model.Order{
+	order := &Order{
 		UserID:    task.UserID,
 		ProductID: task.ProductID,
 		BossID:    task.BossID,

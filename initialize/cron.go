@@ -7,6 +7,8 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/preorder"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
@@ -16,7 +18,7 @@ import (
 
 func InitCron() {
 	c := cron.New(cron.WithSeconds())
-	orderService := new(service.OrderTaskService)
+	orderService := new(order.OrderTaskService)
 	_, err := c.AddFunc("* */5 * * * *", func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -114,7 +116,7 @@ func runGroupbuyExpireSweep() {
 // cron 层直接调一次即可。
 func runPreorderForfeitSweep() {
 	ctx := context.Background()
-	if err := service.GetPreorderSrv().ForfeitDepositsForUnpaidFinals(ctx); err != nil {
+	if err := preorder.GetPreorderSrv().ForfeitDepositsForUnpaidFinals(ctx); err != nil {
 		util.LogrusObj.Errorf("PreorderForfeit 执行失败: %v", err)
 	}
 }
@@ -125,7 +127,7 @@ func InitOrderDelayConsumer() {
 		util.LogrusObj.Errorf("InitOrderDelayTopology failed: %v", err)
 		return
 	}
-	if err := rabbitmq.ConsumeOrderCancelDelay(service.CancelUnpaidOrder); err != nil {
+	if err := rabbitmq.ConsumeOrderCancelDelay(order.CancelUnpaidOrder); err != nil {
 		util.LogrusObj.Errorf("ConsumeOrderCancelDelay failed: %v", err)
 	}
 }

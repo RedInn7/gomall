@@ -1,28 +1,31 @@
-package service
+package preorder
 
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
-	"github.com/RedInn7/gomall/types"
 )
 
 // 测试场景下需要 AES MoneySecret，否则 EncryptMoney / DecryptMoney 走空 key panic。
@@ -70,8 +73,8 @@ func setupSQLiteForPreorder(t *testing.T) (*gorm.DB, func()) {
 		t.Skipf("sqlite 不可用（CGO 关闭？）：%v", err)
 	}
 	if err := db.AutoMigrate(
-		&user.User{}, &model.Order{}, &product.Product{},
-		&model.ProductPreorder{}, &model.OutboxEvent{},
+		&user.User{}, &order.Order{}, &product.Product{},
+		&ProductPreorder{}, &model.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
@@ -139,7 +142,7 @@ func seedPreorder(t *testing.T, db *gorm.DB, depositWindow, finalWindow time.Dur
 	depStart := now.Add(-depositWindow)
 	depEnd := now.Add(depositWindow)
 	finalEnd := depEnd.Add(finalWindow)
-	pp := &model.ProductPreorder{
+	pp := &ProductPreorder{
 		ProductID:      product.ID,
 		DepositCents:   1000,
 		FinalCents:     2000,
@@ -200,7 +203,7 @@ func TestPreorder_OutOfDepositWindowRejected(t *testing.T) {
 	if err := db.Create(product).Error; err != nil {
 		t.Fatalf("create product: %v", err)
 	}
-	pp := &model.ProductPreorder{
+	pp := &ProductPreorder{
 		ProductID:      product.ID,
 		DepositCents:   100,
 		FinalCents:     200,
@@ -217,7 +220,7 @@ func TestPreorder_OutOfDepositWindowRejected(t *testing.T) {
 	}
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: buyer.ID})
-	_, err := GetPreorderSrv().PayDeposit(ctx, &types.PreorderDepositReq{
+	_, err := GetPreorderSrv().PayDeposit(ctx, &PreorderDepositReq{
 		ProductID: product.ID, BossID: boss.ID, AddressID: 1, Key: key,
 	})
 	if err == nil {
@@ -245,14 +248,14 @@ func TestPreorder_PayDepositLocksStockAndAdvancesStage(t *testing.T) {
 	fx := seedPreorder(t, db, time.Hour, time.Hour)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: fx.UserID})
-	resp, err := GetPreorderSrv().PayDeposit(ctx, &types.PreorderDepositReq{
+	resp, err := GetPreorderSrv().PayDeposit(ctx, &PreorderDepositReq{
 		ProductID: fx.ProductID, BossID: fx.BossID, AddressID: 1, Key: fx.Key,
 	})
 	if err != nil {
 		t.Fatalf("PayDeposit: %v", err)
 	}
-	if resp.PreorderStage != model.PreorderStageDepositPaid {
-		t.Fatalf("stage = %d, want %d", resp.PreorderStage, model.PreorderStageDepositPaid)
+	if resp.PreorderStage != PreorderStageDepositPaid {
+		t.Fatalf("stage = %d, want %d", resp.PreorderStage, PreorderStageDepositPaid)
 	}
 	if resp.OrderType != consts.OrderWaitPay {
 		t.Fatalf("order type = %d, want WaitPay", resp.OrderType)
@@ -265,11 +268,11 @@ func TestPreorder_PayDepositLocksStockAndAdvancesStage(t *testing.T) {
 	}
 
 	// DB：order 已落 + deposit_paid_at 非空
-	var dbOrder model.Order
+	var dbOrder order.Order
 	if err := db.First(&dbOrder, resp.OrderID).Error; err != nil {
 		t.Fatalf("load order: %v", err)
 	}
-	if dbOrder.PreorderStage != model.PreorderStageDepositPaid {
+	if dbOrder.PreorderStage != PreorderStageDepositPaid {
 		t.Fatalf("dbOrder stage = %d", dbOrder.PreorderStage)
 	}
 	if dbOrder.DepositPaidAt == nil {
@@ -297,7 +300,7 @@ func TestPreorder_PayFinalConsumesStockAndAdvancesState(t *testing.T) {
 	fx := seedPreorder(t, db, time.Hour, time.Hour)
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: fx.UserID})
 
-	depResp, err := GetPreorderSrv().PayDeposit(ctx, &types.PreorderDepositReq{
+	depResp, err := GetPreorderSrv().PayDeposit(ctx, &PreorderDepositReq{
 		ProductID: fx.ProductID, BossID: fx.BossID, AddressID: 1, Key: fx.Key,
 	})
 	if err != nil {
@@ -309,14 +312,14 @@ func TestPreorder_PayFinalConsumesStockAndAdvancesState(t *testing.T) {
 	nowFn = func() time.Time { return fx.DepEnd.Add(1 * time.Minute) }
 	defer func() { nowFn = origNow }()
 
-	finalResp, err := GetPreorderSrv().PayFinal(ctx, &types.PreorderFinalReq{
+	finalResp, err := GetPreorderSrv().PayFinal(ctx, &PreorderFinalReq{
 		OrderID: depResp.OrderID, Key: fx.Key,
 	})
 	if err != nil {
 		t.Fatalf("PayFinal: %v", err)
 	}
-	if finalResp.PreorderStage != model.PreorderStageFinalPaid {
-		t.Fatalf("stage = %d, want %d", finalResp.PreorderStage, model.PreorderStageFinalPaid)
+	if finalResp.PreorderStage != PreorderStageFinalPaid {
+		t.Fatalf("stage = %d, want %d", finalResp.PreorderStage, PreorderStageFinalPaid)
 	}
 	if finalResp.OrderType != consts.OrderWaitShip {
 		t.Fatalf("order type = %d, want WaitShip", finalResp.OrderType)
@@ -358,7 +361,7 @@ func TestPreorder_FinalWindowExpiredCronForfeits(t *testing.T) {
 	fx := seedPreorder(t, db, time.Hour, time.Hour)
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: fx.UserID})
 
-	depResp, err := GetPreorderSrv().PayDeposit(ctx, &types.PreorderDepositReq{
+	depResp, err := GetPreorderSrv().PayDeposit(ctx, &PreorderDepositReq{
 		ProductID: fx.ProductID, BossID: fx.BossID, AddressID: 1, Key: fx.Key,
 	})
 	if err != nil {
@@ -374,11 +377,11 @@ func TestPreorder_FinalWindowExpiredCronForfeits(t *testing.T) {
 		t.Fatalf("ForfeitDepositsForUnpaidFinals: %v", err)
 	}
 
-	var dbOrder model.Order
+	var dbOrder order.Order
 	if err := db.First(&dbOrder, depResp.OrderID).Error; err != nil {
 		t.Fatalf("load order: %v", err)
 	}
-	if dbOrder.PreorderStage != model.PreorderStageForfeited {
+	if dbOrder.PreorderStage != PreorderStageForfeited {
 		t.Fatalf("stage = %d, want Forfeited(3)", dbOrder.PreorderStage)
 	}
 	if dbOrder.Type != consts.OrderClosed {
@@ -424,7 +427,7 @@ func TestPreorder_CancelInDepositWindowRefundsAndReleases(t *testing.T) {
 	fx := seedPreorder(t, db, time.Hour, time.Hour)
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: fx.UserID})
 
-	depResp, err := GetPreorderSrv().PayDeposit(ctx, &types.PreorderDepositReq{
+	depResp, err := GetPreorderSrv().PayDeposit(ctx, &PreorderDepositReq{
 		ProductID: fx.ProductID, BossID: fx.BossID, AddressID: 1, Key: fx.Key,
 	})
 	if err != nil {
@@ -433,11 +436,11 @@ func TestPreorder_CancelInDepositWindowRefundsAndReleases(t *testing.T) {
 
 	// 仍在定金期内取消
 	cancelResp, err := GetPreorderSrv().CancelPreorderInDepositWindow(ctx,
-		&types.PreorderCancelReq{OrderID: depResp.OrderID, Key: fx.Key})
+		&PreorderCancelReq{OrderID: depResp.OrderID, Key: fx.Key})
 	if err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
-	if cancelResp.PreorderStage != model.PreorderStageNone {
+	if cancelResp.PreorderStage != PreorderStageNone {
 		t.Fatalf("stage = %d, want None", cancelResp.PreorderStage)
 	}
 	if cancelResp.OrderType != consts.OrderClosed {
@@ -484,7 +487,7 @@ func TestPreorder_CancelAfterDepositEndForfeits(t *testing.T) {
 	fx := seedPreorder(t, db, time.Hour, time.Hour)
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: fx.UserID})
 
-	depResp, err := GetPreorderSrv().PayDeposit(ctx, &types.PreorderDepositReq{
+	depResp, err := GetPreorderSrv().PayDeposit(ctx, &PreorderDepositReq{
 		ProductID: fx.ProductID, BossID: fx.BossID, AddressID: 1, Key: fx.Key,
 	})
 	if err != nil {
@@ -497,7 +500,7 @@ func TestPreorder_CancelAfterDepositEndForfeits(t *testing.T) {
 	defer func() { nowFn = origNow }()
 
 	_, err = GetPreorderSrv().CancelPreorderInDepositWindow(ctx,
-		&types.PreorderCancelReq{OrderID: depResp.OrderID, Key: fx.Key})
+		&PreorderCancelReq{OrderID: depResp.OrderID, Key: fx.Key})
 	if err == nil {
 		t.Fatal("预售期结束后取消应被拒")
 	}
@@ -519,7 +522,7 @@ func TestPreorder_FinalRequiresDepositPaid(t *testing.T) {
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: fx.UserID})
 
 	// 直接造一个 stage=None 的订单，绕过 PayDeposit
-	order := &model.Order{
+	order := &order.Order{
 		UserID: fx.UserID, ProductID: fx.ProductID, BossID: fx.BossID,
 		Num: 1, Money: fx.Deposit + fx.Final, Type: consts.OrderWaitPay,
 		OrderNum: 99001,
@@ -532,7 +535,7 @@ func TestPreorder_FinalRequiresDepositPaid(t *testing.T) {
 	nowFn = func() time.Time { return fx.DepEnd.Add(1 * time.Minute) }
 	defer func() { nowFn = origNow }()
 
-	_, err := GetPreorderSrv().PayFinal(ctx, &types.PreorderFinalReq{
+	_, err := GetPreorderSrv().PayFinal(ctx, &PreorderFinalReq{
 		OrderID: order.ID, Key: fx.Key,
 	})
 	if err == nil {
@@ -595,3 +598,11 @@ func safeCallPreorder(fn func() error) (err error) {
 }
 
 var _ = safeCallPreorder
+
+func initLogForTest() {
+	if logpkg.LogrusObj == nil {
+		l := logrus.New()
+		l.Out = io.Discard
+		logpkg.LogrusObj = l
+	}
+}

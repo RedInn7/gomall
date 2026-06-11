@@ -1,4 +1,4 @@
-package dao
+package preorder
 
 import (
 	"context"
@@ -8,7 +8,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 // PreorderDao 围绕 product_preorder 表 + order 表的预售字段做收敛。
@@ -18,7 +19,7 @@ type PreorderDao struct {
 }
 
 func NewPreorderDao(ctx context.Context) *PreorderDao {
-	return &PreorderDao{NewDBClient(ctx)}
+	return &PreorderDao{dao.NewDBClient(ctx)}
 }
 
 func NewPreorderDaoByDB(db *gorm.DB) *PreorderDao {
@@ -29,8 +30,8 @@ func NewPreorderDaoByDB(db *gorm.DB) *PreorderDao {
 var ErrPreorderNotFound = errors.New("商品未配置预售")
 
 // GetPreorderByProductID 查商品预售配置。无配置返回 ErrPreorderNotFound（不是 nil + nil）。
-func (d *PreorderDao) GetPreorderByProductID(productID uint) (*model.ProductPreorder, error) {
-	var p model.ProductPreorder
+func (d *PreorderDao) GetPreorderByProductID(productID uint) (*ProductPreorder, error) {
+	var p ProductPreorder
 	err := d.DB.Where("product_id=?", productID).First(&p).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -43,8 +44,8 @@ func (d *PreorderDao) GetPreorderByProductID(productID uint) (*model.ProductPreo
 
 // UpsertPreorder 插入或更新预售配置。运营 / 商家后台落地后这里会暴露 API；
 // 当前仅供测试与初始化脚本使用。
-func (d *PreorderDao) UpsertPreorder(p *model.ProductPreorder) error {
-	var existing model.ProductPreorder
+func (d *PreorderDao) UpsertPreorder(p *ProductPreorder) error {
+	var existing ProductPreorder
 	err := d.DB.Where("product_id=?", p.ProductID).First(&existing).Error
 	if err == nil {
 		p.ID = existing.ID
@@ -60,10 +61,10 @@ func (d *PreorderDao) UpsertPreorder(p *model.ProductPreorder) error {
 // MarkDepositPaid 条件 UPDATE：仅在 preorder_stage=None 时落地，幂等。
 // 同时把 deposit_paid_at 写入，order.type 保留 WaitPay（沿用旧消费者口径）。
 func (d *PreorderDao) MarkDepositPaid(tx *gorm.DB, orderID uint, paidAt time.Time) (bool, error) {
-	res := tx.Model(&model.Order{}).
-		Where("id=? AND preorder_stage=?", orderID, model.PreorderStageNone).
+	res := tx.Model(&order.Order{}).
+		Where("id=? AND preorder_stage=?", orderID, PreorderStageNone).
 		Updates(map[string]any{
-			"preorder_stage":  model.PreorderStageDepositPaid,
+			"preorder_stage":  PreorderStageDepositPaid,
 			"deposit_paid_at": paidAt,
 		})
 	if res.Error != nil {
@@ -75,11 +76,11 @@ func (d *PreorderDao) MarkDepositPaid(tx *gorm.DB, orderID uint, paidAt time.Tim
 // MarkFinalPaid 条件 UPDATE：仅在 stage=DepositPaid 且 type=WaitPay 时推进到 WaitShip。
 // 一次 SQL 同时改 preorder_stage / final_paid_at / type，三件事原子提交。
 func (d *PreorderDao) MarkFinalPaid(tx *gorm.DB, orderID uint, paidAt time.Time) (bool, error) {
-	res := tx.Model(&model.Order{}).
+	res := tx.Model(&order.Order{}).
 		Where("id=? AND preorder_stage=? AND type=?",
-			orderID, model.PreorderStageDepositPaid, consts.OrderWaitPay).
+			orderID, PreorderStageDepositPaid, consts.OrderWaitPay).
 		Updates(map[string]any{
-			"preorder_stage": model.PreorderStageFinalPaid,
+			"preorder_stage": PreorderStageFinalPaid,
 			"final_paid_at":  paidAt,
 			"type":           consts.OrderWaitShip,
 		})
@@ -92,13 +93,14 @@ func (d *PreorderDao) MarkFinalPaid(tx *gorm.DB, orderID uint, paidAt time.Time)
 // ForfeitDeposit 把"已付定金但逾期未付尾款"的订单一次性收尾：
 //   - preorder_stage: 1 -> 3 (Forfeited)
 //   - order.type:     WaitPay -> Closed
+//
 // 条件 WHERE 兜底幂等，重复调用 RowsAffected=0。
 func (d *PreorderDao) ForfeitDeposit(tx *gorm.DB, orderID uint) (bool, error) {
-	res := tx.Model(&model.Order{}).
+	res := tx.Model(&order.Order{}).
 		Where("id=? AND preorder_stage=? AND type=?",
-			orderID, model.PreorderStageDepositPaid, consts.OrderWaitPay).
+			orderID, PreorderStageDepositPaid, consts.OrderWaitPay).
 		Updates(map[string]any{
-			"preorder_stage": model.PreorderStageForfeited,
+			"preorder_stage": PreorderStageForfeited,
 			"type":           consts.OrderClosed,
 		})
 	if res.Error != nil {
@@ -110,11 +112,11 @@ func (d *PreorderDao) ForfeitDeposit(tx *gorm.DB, orderID uint) (bool, error) {
 // ResetPreorderOnCancel 定金期内用户主动取消：把订单整体回到"未付且非预售"，库存由调用方释放。
 // 沿用 CloseOrderWithCheck 的条件 UPDATE 思路，但额外清空 deposit_paid_at / preorder_stage。
 func (d *PreorderDao) ResetPreorderOnCancel(tx *gorm.DB, orderID uint) (bool, error) {
-	res := tx.Model(&model.Order{}).
+	res := tx.Model(&order.Order{}).
 		Where("id=? AND preorder_stage=? AND type=?",
-			orderID, model.PreorderStageDepositPaid, consts.OrderWaitPay).
+			orderID, PreorderStageDepositPaid, consts.OrderWaitPay).
 		Updates(map[string]any{
-			"preorder_stage":  model.PreorderStageNone,
+			"preorder_stage":  PreorderStageNone,
 			"deposit_paid_at": nil,
 			"type":            consts.OrderClosed,
 		})
@@ -137,7 +139,7 @@ func (d *PreorderDao) ListUnpaidFinalBefore(now time.Time, limit int) ([]uint, e
 	err := d.DB.Table("`order` as o").
 		Joins("INNER JOIN product_preorder pp ON pp.product_id = o.product_id AND pp.deleted_at IS NULL").
 		Where("o.preorder_stage = ? AND o.type = ? AND pp.final_end_at < ?",
-			model.PreorderStageDepositPaid, consts.OrderWaitPay, now).
+			PreorderStageDepositPaid, consts.OrderWaitPay, now).
 		Limit(limit).
 		Order("o.id ASC").
 		Pluck("o.id", &orderIDs).Error

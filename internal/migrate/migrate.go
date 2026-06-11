@@ -11,6 +11,8 @@ import (
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/notice"
+	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/preorder"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/redpacket"
@@ -28,7 +30,7 @@ func Run() error {
 	return db.Set("gorm:table_options", "charset=utf8mb4").
 		AutoMigrate(
 			&user.User{}, &favorite.Favorite{},
-			&model.Order{}, &admin.Admin{}, &address.Address{},
+			&order.Order{}, &admin.Admin{}, &address.Address{},
 			&cart.Cart{}, &category.Category{}, &carousel.Carousel{},
 			&notice.Notice{}, &product.Product{},
 			&product.ProductImg{}, &skill.SkillProduct{},
@@ -37,6 +39,6 @@ func Run() error {
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
 			&promo.PromoRule{},
 			&model.GroupbuyGroup{}, &model.GroupbuyMember{},
-			&model.ProductPreorder{},
+			&preorder.ProductPreorder{},
 		)
 }

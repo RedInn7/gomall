@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -50,7 +51,7 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 		util.LogrusObj.Error(err)
 		return err
 	}
-	baseDao := dao.NewOrderDao(ctx)
+	baseDao := orderpkg.NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
 		return err
@@ -62,16 +63,16 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 		return errors.New("无权操作该订单")
 	}
 	if !inUintSlice(order.Type, refundAllowedFrom) {
-		return ErrInvalidOrderStateTransition
+		return orderpkg.ErrInvalidOrderStateTransition
 	}
 	fromType := order.Type
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := dao.NewOrderDaoByDB(tx).RequestRefund(orderNum, refundAllowedFrom)
+		ok, err := orderpkg.NewOrderDaoByDB(tx).RequestRefund(orderNum, refundAllowedFrom)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return ErrInvalidOrderStateTransition
+			return orderpkg.ErrInvalidOrderStateTransition
 		}
 		return dao.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefunding", "order.refunding", order.ID,
@@ -92,7 +93,7 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 //
 // 真正的资金回退在下游 wallet 服务消费事件时执行；本服务仅做状态推进。
 func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
-	baseDao := dao.NewOrderDao(ctx)
+	baseDao := orderpkg.NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
 		return err
@@ -101,16 +102,16 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 		return errors.New("订单不存在")
 	}
 	if order.Type != consts.OrderRefunding {
-		return ErrInvalidOrderStateTransition
+		return orderpkg.ErrInvalidOrderStateTransition
 	}
 	amount := order.Money * int64(order.Num)
 	txErr := baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := dao.NewOrderDaoByDB(tx).ApproveRefund(orderNum)
+		ok, err := orderpkg.NewOrderDaoByDB(tx).ApproveRefund(orderNum)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return ErrInvalidOrderStateTransition
+			return orderpkg.ErrInvalidOrderStateTransition
 		}
 		return dao.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefunded", "order.refunded", order.ID,
@@ -145,7 +146,7 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 //   - 仅允许 Refunding -> Completed
 //   - 写 outbox(order.refund_rejected) 让客服 / 用户系统得知
 func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason string) error {
-	baseDao := dao.NewOrderDao(ctx)
+	baseDao := orderpkg.NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
 		return err
@@ -154,15 +155,15 @@ func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason st
 		return errors.New("订单不存在")
 	}
 	if order.Type != consts.OrderRefunding {
-		return ErrInvalidOrderStateTransition
+		return orderpkg.ErrInvalidOrderStateTransition
 	}
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := dao.NewOrderDaoByDB(tx).RejectRefund(orderNum)
+		ok, err := orderpkg.NewOrderDaoByDB(tx).RejectRefund(orderNum)
 		if err != nil {
 			return err
 		}
 		if !ok {
-			return ErrInvalidOrderStateTransition
+			return orderpkg.ErrInvalidOrderStateTransition
 		}
 		return dao.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefundRejected", "order.refund_rejected", order.ID,

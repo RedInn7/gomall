@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	web3sig "github.com/RedInn7/gomall/pkg/web3/signature"
@@ -52,7 +53,7 @@ func (s *CryptoPaymentSrv) IssueNonce(ctx context.Context, req *types.CryptoNonc
 		return nil, err
 	}
 
-	order, err := dao.NewOrderDao(ctx).GetOrderById(req.OrderId, u.Id)
+	order, err := orderpkg.NewOrderDao(ctx).GetOrderById(req.OrderId, u.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +91,7 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *types.CryptoP
 		return nil, err
 	}
 
-	order, err := dao.NewOrderDao(ctx).GetOrderById(req.OrderID, u.Id)
+	order, err := orderpkg.NewOrderDao(ctx).GetOrderById(req.OrderID, u.Id)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +127,7 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *types.CryptoP
 	// 3) 同一事务里写 outbox web3.payment.pending，保证消息一定与业务校验“同生共死”
 	walletAddr := web3sig.NormalizeAddress(req.WalletAddr)
 	totalAmount := order.Money * int64(order.Num)
-	err = dao.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
+	err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		return dao.NewOutboxDaoByDB(tx).Insert(
 			"order", "Web3PaymentPending", "web3.payment.pending", order.ID,
 			events.Web3PaymentPending{

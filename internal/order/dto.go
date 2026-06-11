@@ -1,6 +1,10 @@
-package types
+package order
 
-import "time"
+import (
+	"time"
+
+	"github.com/RedInn7/gomall/types"
+)
 
 type OrderServiceReq struct {
 	OrderId   uint `form:"order_id" json:"order_id"`
@@ -12,7 +16,7 @@ type OrderServiceReq struct {
 	UserID    uint `form:"user_id" json:"user_id"`
 	OrderNum  uint `form:"order_num" json:"order_num"`
 	Type      int  `form:"type" json:"type"`
-	*BasePage
+	*types.BasePage
 }
 
 type OrderCreateReq struct {
@@ -29,7 +33,7 @@ type OrderCreateReq struct {
 
 type OrderListReq struct {
 	Type int `form:"type" json:"type"`
-	BasePage
+	types.BasePage
 }
 
 type OrderShowReq struct {

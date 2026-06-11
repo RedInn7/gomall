@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -50,10 +51,10 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 		paidProductID uint
 		paidNum       int
 	)
-	err = dao.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
+	err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		uId := u.Id
 
-		order, err := dao.NewOrderDaoByDB(tx).GetOrderById(req.OrderId, uId)
+		order, err := orderpkg.NewOrderDaoByDB(tx).GetOrderById(req.OrderId, uId)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
@@ -145,7 +146,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 
 		// 更新订单状态
 		order.Type = consts.OrderTypePendingShipping
-		err = dao.NewOrderDaoByDB(tx).UpdateOrderById(req.OrderId, uId, order)
+		err = orderpkg.NewOrderDaoByDB(tx).UpdateOrderById(req.OrderId, uId, order)
 		if err != nil { // 更新订单失败，回滚
 			log.LogrusObj.Error(err)
 			return err

@@ -1,4 +1,4 @@
-package service
+package order
 
 import (
 	"context"
@@ -17,8 +17,6 @@ import (
 	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/repository/db/model"
-	"github.com/RedInn7/gomall/types"
 )
 
 func init() {
@@ -128,7 +126,7 @@ func TestAsyncOrder_EnqueueReservesAndPublishes(t *testing.T) {
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
 
-	resp, err := GetOrderSrv().OrderEnqueue(ctx, &types.OrderCreateReq{
+	resp, err := GetOrderSrv().OrderEnqueue(ctx, &OrderCreateReq{
 		ProductID: pid,
 		Num:       2,
 		Money:     1000,
@@ -192,7 +190,7 @@ func TestAsyncOrder_EnqueuePublishFailReleasesReserve(t *testing.T) {
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 1})
 
-	_, err := GetOrderSrv().OrderEnqueue(ctx, &types.OrderCreateReq{
+	_, err := GetOrderSrv().OrderEnqueue(ctx, &OrderCreateReq{
 		ProductID: pid,
 		Num:       3,
 		AddressID: 1,
@@ -230,8 +228,8 @@ func TestAsyncOrder_ConsumerSuccessWritesTicketOK(t *testing.T) {
 	_ = prod
 
 	// 内存版 writer：直接给 order 设一个 ID，不碰 DB
-	var captured *model.Order
-	SetAsyncOrderWriter(func(_ context.Context, _ AsyncOrderTask, order *model.Order) error {
+	var captured *Order
+	SetAsyncOrderWriter(func(_ context.Context, _ AsyncOrderTask, order *Order) error {
 		order.ID = 4242
 		captured = order
 		return nil
@@ -277,7 +275,7 @@ func TestAsyncOrder_ConsumerFailureReleasesReserveAndMarksFailed(t *testing.T) {
 	_, store, restore := installAsyncTestDeps(t)
 	defer restore()
 
-	SetAsyncOrderWriter(func(_ context.Context, _ AsyncOrderTask, _ *model.Order) error {
+	SetAsyncOrderWriter(func(_ context.Context, _ AsyncOrderTask, _ *Order) error {
 		return errors.New("db boom")
 	})
 

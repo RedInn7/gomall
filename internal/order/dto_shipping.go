@@ -1,4 +1,4 @@
-package types
+package order
 
 // ShipOrderReq 商家发货请求。物流单号 / 承运商本期仅经事件透传，不入主表。
 type ShipOrderReq struct {

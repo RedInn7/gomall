@@ -3,9 +3,9 @@ package initialize
 import (
 	"context"
 
+	"github.com/RedInn7/gomall/internal/order"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
-	"github.com/RedInn7/gomall/service"
 )
 
 // InitOrderAsyncConsumer 声明异步下单拓扑并启动消费者
@@ -20,7 +20,7 @@ func InitOrderAsyncConsumer(ctx context.Context) {
 		return
 	}
 	if err := rabbitmq.ConsumeOrderAsync(func(body []byte) error {
-		return service.HandleAsyncOrderTask(ctx, body)
+		return order.HandleAsyncOrderTask(ctx, body)
 	}); err != nil {
 		util.LogrusObj.Errorf("ConsumeOrderAsync failed: %v", err)
 		return

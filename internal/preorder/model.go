@@ -1,4 +1,4 @@
-package model
+package preorder
 
 import (
 	"time"
@@ -11,10 +11,11 @@ import (
 // 定金 / 尾款金额单位均为"分"，与 order.money / user.money 口径对齐。
 //
 // 时间窗口划分：
-//   [DepositStartAt, DepositEndAt)   定金期，PayDeposit 在此区间可调用
-//   [DepositEndAt,   FinalEndAt)     尾款期，PayFinal 在此区间可调用
-//   [FinalEndAt,     +∞)             失效期，未付尾款由 cron 没收
-//   ShipAt                           预计发货时间，仅展示，不参与状态机
+//
+//	[DepositStartAt, DepositEndAt)   定金期，PayDeposit 在此区间可调用
+//	[DepositEndAt,   FinalEndAt)     尾款期，PayFinal 在此区间可调用
+//	[FinalEndAt,     +∞)             失效期，未付尾款由 cron 没收
+//	ShipAt                           预计发货时间，仅展示，不参与状态机
 type ProductPreorder struct {
 	gorm.Model
 	ProductID      uint      `gorm:"not null;uniqueIndex"`

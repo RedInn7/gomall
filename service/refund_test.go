@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 )
 
@@ -14,8 +15,8 @@ func TestRefund_StateGuardLogic_Request(t *testing.T) {
 		if !inUintSlice(from, refundAllowedFrom) {
 			t.Fatalf("退款发起期望允许 from=%d", from)
 		}
-		if !CanTransition(from, consts.OrderRefunding) {
-			t.Fatalf("CanTransition(%d, Refunding) 应为 true", from)
+		if !order.CanTransition(from, consts.OrderRefunding) {
+			t.Fatalf("order.CanTransition(%d, Refunding) 应为 true", from)
 		}
 	}
 	for _, from := range []uint{consts.OrderWaitPay, consts.OrderClosed, consts.OrderRefunded, consts.OrderRefunding} {
@@ -26,18 +27,18 @@ func TestRefund_StateGuardLogic_Request(t *testing.T) {
 }
 
 func TestRefund_StateGuardLogic_Approve(t *testing.T) {
-	if !CanTransition(consts.OrderRefunding, consts.OrderRefunded) {
+	if !order.CanTransition(consts.OrderRefunding, consts.OrderRefunded) {
 		t.Fatal("Refunding -> Refunded 必须合法")
 	}
 	for _, illegal := range []uint{consts.OrderWaitPay, consts.OrderWaitShip, consts.OrderWaitReceive, consts.OrderCompleted, consts.OrderClosed, consts.OrderRefunded} {
-		if CanTransition(illegal, consts.OrderRefunded) {
+		if order.CanTransition(illegal, consts.OrderRefunded) {
 			t.Fatalf("非法转换 %d -> Refunded 应被拒绝", illegal)
 		}
 	}
 }
 
 func TestRefund_StateGuardLogic_Reject(t *testing.T) {
-	if !CanTransition(consts.OrderRefunding, consts.OrderCompleted) {
+	if !order.CanTransition(consts.OrderRefunding, consts.OrderCompleted) {
 		t.Fatal("Refunding -> Completed (reject) 必须合法")
 	}
 }

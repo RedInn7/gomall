@@ -1,4 +1,4 @@
-package service
+package order
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 //  4. outbox 写 order.cancelled 事件
 func CancelUnpaidOrder(orderNum uint64) error {
 	ctx := context.Background()
-	baseDao := dao.NewOrderDao(ctx)
+	baseDao := NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
 		return err
@@ -30,7 +30,7 @@ func CancelUnpaidOrder(orderNum uint64) error {
 
 	var closed bool
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := dao.NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
+		ok, err := NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
 		if err != nil {
 			return err
 		}
