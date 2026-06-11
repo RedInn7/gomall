@@ -1,4 +1,4 @@
-package dao
+package cart
 
 import (
 	"context"
@@ -6,8 +6,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/pkg/e"
-	"github.com/RedInn7/gomall/repository/db/model"
-	"github.com/RedInn7/gomall/types"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 type CartDao struct {
@@ -15,7 +14,7 @@ type CartDao struct {
 }
 
 func NewCartDao(ctx context.Context) *CartDao {
-	return &CartDao{NewDBClient(ctx)}
+	return &CartDao{dao.NewDBClient(ctx)}
 }
 
 func NewCartDaoByDB(db *gorm.DB) *CartDao {
@@ -23,12 +22,12 @@ func NewCartDaoByDB(db *gorm.DB) *CartDao {
 }
 
 // CreateCart 创建 cart pId(商品 id)、uId(用户id)、bId(店家id)
-func (dao *CartDao) CreateCart(pId, uId, bId uint) (cart *model.Cart, status int, err error) {
+func (d *CartDao) CreateCart(pId, uId, bId uint) (cart *Cart, status int, err error) {
 	// 查询有无此条商品
-	cart, err = dao.GetCartById(pId, uId, bId)
+	cart, err = d.GetCartById(pId, uId, bId)
 	// 空的，第一次加入
 	if err == gorm.ErrRecordNotFound {
-		cart = &model.Cart{
+		cart = &Cart{
 			UserID:    uId,
 			ProductID: pId,
 			BossID:    bId,
@@ -36,7 +35,7 @@ func (dao *CartDao) CreateCart(pId, uId, bId uint) (cart *model.Cart, status int
 			MaxNum:    10,
 			Check:     false,
 		}
-		err = dao.DB.Create(&cart).Error
+		err = d.DB.Create(&cart).Error
 		if err != nil {
 			return
 		}
@@ -45,19 +44,19 @@ func (dao *CartDao) CreateCart(pId, uId, bId uint) (cart *model.Cart, status int
 	if cart.Num < cart.MaxNum {
 		// 小于最大 num
 		cart.Num++
-		err = dao.DB.Save(&cart).Error
+		err = d.DB.Save(&cart).Error
 		if err != nil {
 			return
 		}
 		return cart, e.ErrorProductExistCart, err
 	}
-	// 大于最大num
+	// 大于最大 num
 	return cart, e.ErrorProductMoreCart, err
 }
 
-// GetCartById 获取Cart通过Id
-func (dao *CartDao) GetCartById(pId, uId, bId uint) (cart *model.Cart, err error) {
-	err = dao.DB.Model(&model.Cart{}).
+// GetCartById 通过 id 获取 Cart
+func (d *CartDao) GetCartById(pId, uId, bId uint) (cart *Cart, err error) {
+	err = d.DB.Model(&Cart{}).
 		Where("user_id = ? AND product_id = ? AND boss_id = ?",
 			uId, pId, bId).
 		First(&cart).Error
@@ -65,9 +64,9 @@ func (dao *CartDao) GetCartById(pId, uId, bId uint) (cart *model.Cart, err error
 	return
 }
 
-// ListCartByUserId 获取 Cart 通过 user_id
-func (dao *CartDao) ListCartByUserId(uId uint) (cart []*types.CartResp, err error) {
-	err = dao.DB.Model(&model.Cart{}).
+// ListCartByUserId 通过 user_id 获取 Cart
+func (d *CartDao) ListCartByUserId(uId uint) (cart []*CartResp, err error) {
+	err = d.DB.Model(&Cart{}).
 		Joins("AS c LEFT JOIN product AS p ON c.product_id = p.id").
 		Where("c.user_id = ?", uId).
 		Select("c.id AS id," +
@@ -87,16 +86,16 @@ func (dao *CartDao) ListCartByUserId(uId uint) (cart []*types.CartResp, err erro
 	return
 }
 
-// UpdateCartNumById 通过id更新Cart信息
-func (dao *CartDao) UpdateCartNumById(cId, uId, num uint) error {
-	return dao.DB.Model(&model.Cart{}).
+// UpdateCartNumById 通过 id 更新 Cart 信息
+func (d *CartDao) UpdateCartNumById(cId, uId, num uint) error {
+	return d.DB.Model(&Cart{}).
 		Where("id = ? AND user_id = ?", cId, uId).
 		Update("num", num).Error
 }
 
 // DeleteCartById 通过 cart_id 删除 cart
-func (dao *CartDao) DeleteCartById(cId, uId uint) error {
-	return dao.DB.Model(&model.Cart{}).
+func (d *CartDao) DeleteCartById(cId, uId uint) error {
+	return d.DB.Model(&Cart{}).
 		Where("id = ? AND user_id = ?", cId, uId).
-		Delete(&model.Cart{}).Error
+		Delete(&Cart{}).Error
 }

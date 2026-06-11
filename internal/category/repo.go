@@ -1,11 +1,11 @@
-package dao
+package category
 
 import (
 	"context"
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 type CategoryDao struct {
@@ -13,7 +13,7 @@ type CategoryDao struct {
 }
 
 func NewCategoryDao(ctx context.Context) *CategoryDao {
-	return &CategoryDao{NewDBClient(ctx)}
+	return &CategoryDao{dao.NewDBClient(ctx)}
 }
 
 func NewCategoryDaoByDB(db *gorm.DB) *CategoryDao {
@@ -21,7 +21,7 @@ func NewCategoryDaoByDB(db *gorm.DB) *CategoryDao {
 }
 
 // ListCategory 分类列表
-func (dao *CategoryDao) ListCategory() (r []*model.Category, err error) {
-	err = dao.DB.Model(&model.Category{}).Find(&r).Error
+func (d *CategoryDao) ListCategory() (r []*Category, err error) {
+	err = d.DB.Model(&Category{}).Find(&r).Error
 	return
 }

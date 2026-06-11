@@ -1,4 +1,4 @@
-package types
+package carousel
 
 type ListCarouselReq struct {
 }

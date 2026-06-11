@@ -1,8 +1,8 @@
-package model
+package cart
 
 import "github.com/jinzhu/gorm"
 
-// 购物车模型
+// Cart 购物车模型
 type Cart struct {
 	gorm.Model
 	UserID    uint

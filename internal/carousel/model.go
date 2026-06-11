@@ -1,4 +1,4 @@
-package model
+package carousel
 
 import "github.com/jinzhu/gorm"
 

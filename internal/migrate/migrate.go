@@ -4,6 +4,9 @@ import (
 	"context"
 
 	"github.com/RedInn7/gomall/internal/address"
+	"github.com/RedInn7/gomall/internal/carousel"
+	"github.com/RedInn7/gomall/internal/cart"
+	"github.com/RedInn7/gomall/internal/category"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
 )
@@ -17,7 +20,7 @@ func Run() error {
 		AutoMigrate(
 			&model.User{}, &model.Favorite{},
 			&model.Order{}, &model.Admin{}, &address.Address{},
-			&model.Cart{}, &model.Category{}, &model.Carousel{},
+			&cart.Cart{}, &category.Category{}, &carousel.Carousel{},
 			&model.Notice{}, &model.Product{},
 			&model.ProductImg{}, &model.SkillProduct{},
 			&model.SkillProduct2MQ{},
