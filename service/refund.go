@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
@@ -129,7 +130,7 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 	// 退款落单成功，把满减预算退还。失败仅打日志，不影响主流程：
 	// 用户已被告知退款获批；预算挂账由 SRE / 数据脚本兜底回收。
 	if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
-		if rdErr := GetPromoSrv().ReleaseDiscount(ctx, order.ID, order.PromoRuleID, order.PromoDiscountCents, "refund"); rdErr != nil {
+		if rdErr := promo.GetPromoSrv().ReleaseDiscount(ctx, order.ID, order.PromoRuleID, order.PromoDiscountCents, "refund"); rdErr != nil {
 			util.LogrusObj.Errorf("[promo] release on refund failed orderNum=%d rule=%d err=%v",
 				orderNum, order.PromoRuleID, rdErr)
 		} else {

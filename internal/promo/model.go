@@ -1,4 +1,4 @@
-package model
+package promo
 
 import (
 	"time"
@@ -31,18 +31,18 @@ const (
 
 type PromoRule struct {
 	gorm.Model
-	Name             string    `gorm:"size:128;not null"`                // 业务可读名，会回传给前端 / 客服
-	RuleType         int       `gorm:"not null;default:1"`               // 1 满减 / 2 满折扣
-	Scope            int       `gorm:"not null;default:1;index"`         // 1 全场 / 2 类目 / 3 商品
-	ScopeRefID       int64     `gorm:"not null;default:0;index"`         // 类目 id 或商品 id；全场 = 0
-	ThresholdCents   int64     `gorm:"not null"`                         // 满 X 分
-	DiscountCents    int64     `gorm:"not null;default:0"`               // 减 Y 分（RuleType=1）
-	DiscountBps      int       `gorm:"not null;default:0"`               // 折扣 bps（RuleType=2），9 折 = 9000
-	DailyBudgetCents int64     `gorm:"not null;default:0"`               // 当日预算分；0 = 不限
-	ConsumedToday    int64     `gorm:"not null;default:0"`               // 当日已消耗分（每日 0 点重置 —— cron 路线图）
+	Name             string    `gorm:"size:128;not null"`        // 业务可读名，会回传给前端 / 客服
+	RuleType         int       `gorm:"not null;default:1"`       // 1 满减 / 2 满折扣
+	Scope            int       `gorm:"not null;default:1;index"` // 1 全场 / 2 类目 / 3 商品
+	ScopeRefID       int64     `gorm:"not null;default:0;index"` // 类目 id 或商品 id；全场 = 0
+	ThresholdCents   int64     `gorm:"not null"`                 // 满 X 分
+	DiscountCents    int64     `gorm:"not null;default:0"`       // 减 Y 分（RuleType=1）
+	DiscountBps      int       `gorm:"not null;default:0"`       // 折扣 bps（RuleType=2），9 折 = 9000
+	DailyBudgetCents int64     `gorm:"not null;default:0"`       // 当日预算分；0 = 不限
+	ConsumedToday    int64     `gorm:"not null;default:0"`       // 当日已消耗分（每日 0 点重置 —— cron 路线图）
 	StartAt          time.Time `gorm:"not null;index:idx_promo_window"`
 	EndAt            time.Time `gorm:"not null;index:idx_promo_window"`
-	Status           int       `gorm:"not null;default:0;index"`         // 0 draft / 1 active / 2 stopped
+	Status           int       `gorm:"not null;default:0;index"` // 0 draft / 1 active / 2 stopped
 }
 
 func (PromoRule) TableName() string { return "promo_rule" }

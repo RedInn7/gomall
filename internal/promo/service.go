@@ -1,4 +1,4 @@
-package service
+package promo
 
 import (
 	"context"
@@ -11,9 +11,7 @@ import (
 
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/service/events"
-	"github.com/RedInn7/gomall/types"
 )
 
 var (
@@ -28,10 +26,6 @@ func GetPromoSrv() *PromoSrv {
 	promoSrvOnce.Do(func() { promoSrvIns = &PromoSrv{} })
 	return promoSrvIns
 }
-
-// ErrPromoBudgetExhausted 让上层一眼能区分预算用尽与其它 DB 错误。
-// 业务层捕获后转 e.PromoBudgetExhausted 业务码。
-var ErrPromoBudgetExhausted = dao.ErrPromoBudgetExhausted
 
 // ----------------------------------------------------------------------
 // 纯计算逻辑（不依赖 DB / context，便于单测）
@@ -66,8 +60,8 @@ func SubtotalCents(items []CartItem) int64 {
 // 业务规则：一笔订单只能用一条 PromoRule，不叠加（与 Coupon 不同）。
 // 取舍：在所有"达到门槛"的候选里取"折扣金额最大"。这是给消费者侧的"最优"，
 // 平台侧成本反而最高 —— 但这是行业普遍做法，不偷偷给用户用较小那条。
-func PickBestPromoRule(items []CartItem, rules []*model.PromoRule) (*model.PromoRule, int64) {
-	var best *model.PromoRule
+func PickBestPromoRule(items []CartItem, rules []*PromoRule) (*PromoRule, int64) {
+	var best *PromoRule
 	var bestDiscount int64
 	for _, r := range rules {
 		base := applicableSubtotal(items, r)
@@ -87,7 +81,7 @@ func PickBestPromoRule(items []CartItem, rules []*model.PromoRule) (*model.Promo
 }
 
 // applicableSubtotal 计算规则作用范围内的子集合计金额。
-func applicableSubtotal(items []CartItem, r *model.PromoRule) int64 {
+func applicableSubtotal(items []CartItem, r *PromoRule) int64 {
 	var sum int64
 	for _, it := range items {
 		if itemMatchesRule(it, r) {
@@ -97,13 +91,13 @@ func applicableSubtotal(items []CartItem, r *model.PromoRule) int64 {
 	return sum
 }
 
-func itemMatchesRule(it CartItem, r *model.PromoRule) bool {
+func itemMatchesRule(it CartItem, r *PromoRule) bool {
 	switch r.Scope {
-	case model.PromoScopeAll:
+	case PromoScopeAll:
 		return true
-	case model.PromoScopeCategory:
+	case PromoScopeCategory:
 		return it.CategoryID == r.ScopeRefID
-	case model.PromoScopeProduct:
+	case PromoScopeProduct:
 		return it.ProductID == r.ScopeRefID
 	default:
 		return false
@@ -113,32 +107,32 @@ func itemMatchesRule(it CartItem, r *model.PromoRule) bool {
 // computeDiscountOnBase 在已通过门槛校验的 base 金额上计算减免（分）。
 //   - 满减：直接减 DiscountCents，且不允许减成负数（封顶在 base）
 //   - 满折扣：base * (1 - bps/base)，向下取整保平台
-func computeDiscountOnBase(base int64, r *model.PromoRule) int64 {
+func computeDiscountOnBase(base int64, r *PromoRule) int64 {
 	switch r.RuleType {
-	case model.PromoRuleTypeAmount:
+	case PromoRuleTypeAmount:
 		if r.DiscountCents > base {
 			return base
 		}
 		return r.DiscountCents
-	case model.PromoRuleTypeDiscount:
-		if r.DiscountBps <= 0 || r.DiscountBps >= model.PromoDiscountBpsBase {
+	case PromoRuleTypeDiscount:
+		if r.DiscountBps <= 0 || r.DiscountBps >= PromoDiscountBpsBase {
 			return 0
 		}
 		// 折扣金额 = base * (base_bps - discount_bps) / base_bps
-		num := base * int64(model.PromoDiscountBpsBase-r.DiscountBps)
-		return num / int64(model.PromoDiscountBpsBase)
+		num := base * int64(PromoDiscountBpsBase-r.DiscountBps)
+		return num / int64(PromoDiscountBpsBase)
 	default:
 		return 0
 	}
 }
 
 // buildReason 给客服 / 用户的可解释文案。所有金额一律展示为元（保留两位）。
-func buildReason(r *model.PromoRule, discount int64) string {
+func buildReason(r *PromoRule, discount int64) string {
 	switch r.RuleType {
-	case model.PromoRuleTypeAmount:
+	case PromoRuleTypeAmount:
 		return fmt.Sprintf("%s — 减 %s 元", r.Name, centsToYuan(discount))
-	case model.PromoRuleTypeDiscount:
-		discPct := float64(model.PromoDiscountBpsBase-r.DiscountBps) / 100.0
+	case PromoRuleTypeDiscount:
+		discPct := float64(PromoDiscountBpsBase-r.DiscountBps) / 100.0
 		return fmt.Sprintf("%s — 立省 %.1f%% 共 %s 元", r.Name, discPct, centsToYuan(discount))
 	default:
 		return r.Name
@@ -164,8 +158,8 @@ func centsToYuan(c int64) string {
 // 调用方：结算页加载、购物车实时悬浮提示。
 //
 // SLO：calculate p99 < 50ms（实际 DB 一次查询 + 内存循环）。
-func (s *PromoSrv) CalculateBestDiscount(ctx context.Context, items []CartItem) (*types.PromoApplyResp, error) {
-	resp := &types.PromoApplyResp{
+func (s *PromoSrv) CalculateBestDiscount(ctx context.Context, items []CartItem) (*PromoApplyResp, error) {
+	resp := &PromoApplyResp{
 		OriginalCents: SubtotalCents(items),
 		FinalCents:    SubtotalCents(items),
 	}
@@ -176,7 +170,7 @@ func (s *PromoSrv) CalculateBestDiscount(ctx context.Context, items []CartItem) 
 	categoryIDs := uniqueCategoryIDs(items)
 	productIDs := uniqueProductIDs(items)
 
-	rules, err := dao.NewPromoDao(ctx).
+	rules, err := NewPromoDao(ctx).
 		ListActiveForCart(time.Now(), categoryIDs, productIDs)
 	if err != nil {
 		return nil, err
@@ -240,7 +234,7 @@ func (s *PromoSrv) ApplyDiscountInTx(tx *gorm.DB, orderID, ruleID uint, discount
 	if ruleID == 0 || discountCents <= 0 {
 		return nil
 	}
-	if err := dao.NewPromoDaoByDB(tx).AtomicConsumeBudget(tx, ruleID, discountCents); err != nil {
+	if err := NewPromoDaoByDB(tx).AtomicConsumeBudget(tx, ruleID, discountCents); err != nil {
 		return err
 	}
 	return dao.NewOutboxDaoByDB(tx).Insert(
@@ -262,9 +256,9 @@ func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, di
 	if ruleID == 0 || discountCents <= 0 {
 		return nil
 	}
-	db := dao.NewPromoDao(ctx).DB
+	db := NewPromoDao(ctx).DB
 	return db.Transaction(func(tx *gorm.DB) error {
-		if err := dao.NewPromoDaoByDB(tx).RestoreBudget(tx, ruleID, discountCents); err != nil {
+		if err := NewPromoDaoByDB(tx).RestoreBudget(tx, ruleID, discountCents); err != nil {
 			return err
 		}
 		return dao.NewOutboxDaoByDB(tx).Insert(
@@ -283,19 +277,19 @@ func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, di
 // admin 后台
 // ----------------------------------------------------------------------
 
-func (s *PromoSrv) CreateRule(ctx context.Context, req *types.PromoRuleCreateReq) (*model.PromoRule, error) {
+func (s *PromoSrv) CreateRule(ctx context.Context, req *PromoRuleCreateReq) (*PromoRule, error) {
 	if !req.EndAt.After(req.StartAt) {
 		return nil, errors.New("end_at 必须晚于 start_at")
 	}
-	if req.RuleType == model.PromoRuleTypeAmount && req.DiscountCents <= 0 {
+	if req.RuleType == PromoRuleTypeAmount && req.DiscountCents <= 0 {
 		return nil, errors.New("满减规则必须设置 discount_cents")
 	}
-	if req.RuleType == model.PromoRuleTypeDiscount {
-		if req.DiscountBps <= 0 || req.DiscountBps >= model.PromoDiscountBpsBase {
+	if req.RuleType == PromoRuleTypeDiscount {
+		if req.DiscountBps <= 0 || req.DiscountBps >= PromoDiscountBpsBase {
 			return nil, errors.New("折扣 bps 必须落在 (0, 10000) 内")
 		}
 	}
-	r := &model.PromoRule{
+	r := &PromoRule{
 		Name:             req.Name,
 		RuleType:         req.RuleType,
 		Scope:            req.Scope,
@@ -306,20 +300,20 @@ func (s *PromoSrv) CreateRule(ctx context.Context, req *types.PromoRuleCreateReq
 		DailyBudgetCents: req.DailyBudgetCents,
 		StartAt:          req.StartAt,
 		EndAt:            req.EndAt,
-		Status:           model.PromoStatusActive,
+		Status:           PromoStatusActive,
 	}
-	if err := dao.NewPromoDao(ctx).Create(r); err != nil {
+	if err := NewPromoDao(ctx).Create(r); err != nil {
 		return nil, err
 	}
 	return r, nil
 }
 
-func (s *PromoSrv) ListRules(ctx context.Context) ([]*model.PromoRule, error) {
-	return dao.NewPromoDao(ctx).ListAll()
+func (s *PromoSrv) ListRules(ctx context.Context) ([]*PromoRule, error) {
+	return NewPromoDao(ctx).ListAll()
 }
 
 func (s *PromoSrv) StopRule(ctx context.Context, id uint) error {
-	return dao.NewPromoDao(ctx).Stop(id)
+	return NewPromoDao(ctx).Stop(id)
 }
 
 // 让 e 包能被 import：占位避免 unused import 报错

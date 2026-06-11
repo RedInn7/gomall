@@ -12,6 +12,7 @@ import (
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/notice"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/internal/user"
@@ -34,7 +35,7 @@ func Run() error {
 			&skill.SkillProduct2MQ{},
 			&coupon.CouponBatch{}, &coupon.UserCoupon{},
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
-			&model.PromoRule{},
+			&promo.PromoRule{},
 			&model.GroupbuyGroup{}, &model.GroupbuyMember{},
 			&model.ProductPreorder{},
 		)

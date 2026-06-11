@@ -12,6 +12,7 @@ import (
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -52,12 +53,12 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 	// 满减计算先于事务发生：纯读路径，DB 慢一点也不影响事务保持时间。
 	// 走 Product DAO 反查 CategoryID —— 老客户端不传类目信息，由服务端兜底。
 	cartItems := buildPromoCartItems(ctx, req.ProductID, unitCents, qty)
-	promoApply, promoErr := GetPromoSrv().CalculateBestDiscount(ctx, cartItems)
+	promoApply, promoErr := promo.GetPromoSrv().CalculateBestDiscount(ctx, cartItems)
 	if promoErr != nil {
 		// 失败降级：CalculateBestDiscount 不应阻断下单（SLO 承诺：不影响 happy path）。
 		util.LogrusObj.Warnf("[promo] calculate best discount failed product=%d err=%v, fallback to no-discount",
 			req.ProductID, promoErr)
-		promoApply = &types.PromoApplyResp{OriginalCents: subtotalCents, FinalCents: subtotalCents}
+		promoApply = &promo.PromoApplyResp{OriginalCents: subtotalCents, FinalCents: subtotalCents}
 	}
 
 	discountCents, ruleID := promoApply.DiscountCents, promoApply.RuleID
@@ -99,9 +100,9 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *types.OrderCreateReq) (
 
 		// 试着扣预算；budget 用尽则降级为无折扣，并改写订单上的满减字段
 		if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
-			applyErr := GetPromoSrv().ApplyDiscountInTx(tx, order.ID, order.PromoRuleID, order.PromoDiscountCents)
+			applyErr := promo.GetPromoSrv().ApplyDiscountInTx(tx, order.ID, order.PromoRuleID, order.PromoDiscountCents)
 			if applyErr != nil {
-				if errors.Is(applyErr, ErrPromoBudgetExhausted) {
+				if errors.Is(applyErr, promo.ErrPromoBudgetExhausted) {
 					util.LogrusObj.Warnf("[promo] downgrade rule=%d budget exhausted, order=%d falls back to no-discount",
 						order.PromoRuleID, order.ID)
 					order.PromoRuleID = 0
@@ -223,8 +224,8 @@ func (s *OrderSrv) OrderShow(ctx context.Context, req *types.OrderShowReq) (resp
 // buildPromoCartItems 给满减引擎拼一行 CartItem。
 // 老客户端 OrderCreateReq 没有 CategoryID，服务端回查 Product 兜底；
 // 商品不存在 / DB 失败时降级返回不带类目的 cartItem，引擎仅匹配商品级 / 全场规则。
-func buildPromoCartItems(ctx context.Context, productID uint, unitCents, qty int64) []CartItem {
-	item := CartItem{
+func buildPromoCartItems(ctx context.Context, productID uint, unitCents, qty int64) []promo.CartItem {
+	item := promo.CartItem{
 		ProductID: int64(productID),
 		UnitCents: unitCents,
 		Quantity:  qty,
@@ -235,7 +236,7 @@ func buildPromoCartItems(ctx context.Context, productID uint, unitCents, qty int
 			item.CategoryID = int64(p.CategoryID)
 		}
 	}
-	return []CartItem{item}
+	return []promo.CartItem{item}
 }
 
 func (s *OrderSrv) OrderDelete(ctx context.Context, req *types.OrderDeleteReq) (resp interface{}, err error) {
