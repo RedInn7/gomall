@@ -60,7 +60,7 @@ internal/
   - 修 payment.go 局部变量 product 遮蔽包名（→prod）
 
 ### 剩余（order 簇，互相耦合，建议顺序）
-1. `promo`（被 order/refund/order_cancel 的 GetPromoSrv 调用；自带 routes/promo_routes.go）——先迁，它只依赖 outbox
+1. [x] `promo` 已完成（含 CartItem/ErrPromoBudgetExhausted 内聚；两个白盒测试迁入；repo 测试自带 initPromoTestDB）
 2. `order` 核心（order + order_async/cancel/consumer/shipping/state/task 共 7 个 service 文件 + dao + model + types*2 + api*2），被 payment/refund/preorder/groupbuy/cancel 引用 model.Order/dao.NewOrderDao
 3. order 的下游：`payment`(payment+crypto)、`refund`、`preorder`(routes)、`groupbuy`(routes)
 4. `idempotency`（api handler，偏共享，考虑放 shared 或 order）
@@ -76,6 +76,9 @@ internal/
 
 ### 教训
 - 后台 agent 可能中途 API 掉线（FailedToOpenSocket）。hub 这种"必须全量 build 绿"的大改交给单 agent 时，**完成后务必自己 build/grep 复核**；中断了就接力手工补全（handler/router/import）。
+- **sed/re.sub 改名坑**：用 Python `re.sub` 时 `GetPromoSrv()` 的 `()` 是正则空分组，会把 `GetPromoSrv().X` 改成 `promo.GetPromoSrv()().X`（双括号）。改函数调用名要么用 `str.replace`，要么把 `()` 写成 `\(\)` 或干脆只匹配函数名 `GetPromoSrv`。
+- 跨包共享的 sentinel error（如 `dao.ErrPromoBudgetExhausted`）随领域迁走后变 `promo.ErrPromoBudgetExhausted`，consumer 里 `errors.Is(err, ErrPromoBudgetExhausted)` 的裸引用也要改。
+- 白盒 repo 测试若依赖 dao 包私有 `_db`/`initDBForTest`，迁入领域包后要自带一个 init helper（用 `dao.NewDBClient(ctx)==nil` 判活 + `dao.InitMySQL` + `AutoMigrate(&本域model{})`，skip-if-no-mysql）。
 - [ ] **outbox 放到最后**：各领域迁移期间继续以 `dao.NewOutboxDao`/`model.OutboxEvent` 限定引用；待 model/dao 清空后再抽到 internal/shared/outbox
 - [ ] 剩余领域（顺序敏感，会回touch已迁移领域）：
   - 叶子但带 cache：`coupon`(cache/coupon.go)、`redpacket`(consumer+task+cache/redpacket.go)、`skill`(skill_goods，用 product)
