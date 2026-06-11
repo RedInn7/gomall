@@ -25,10 +25,10 @@ type User struct {
 }
 
 const (
-	PassWordCost         = 12       // 密码加密难度
-	Active        string = "active" // 激活用户
-	RoleUser      string = "user"
-	RoleAdmin     string = "admin"
+	PassWordCost        = 12       // 密码加密难度
+	Active       string = "active" // 激活用户
+	RoleUser     string = "user"
+	RoleAdmin    string = "admin"
 )
 
 // SetPassword 设置密码

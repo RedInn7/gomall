@@ -7,8 +7,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -75,7 +75,7 @@ func (s *OrderTaskService) RunAutoConfirmReceive() {
 			if !ok {
 				return errors.New("自动确认收货失败：订单状态已变更")
 			}
-			return dao.NewOutboxDaoByDB(tx).Insert(
+			return outbox.NewOutboxDaoByDB(tx).Insert(
 				"order", "OrderCompleted", "order.completed", order.ID,
 				events.OrderCompletedEvent{
 					OrderID:  order.ID,

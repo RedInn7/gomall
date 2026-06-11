@@ -11,11 +11,11 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -173,7 +173,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp int
 		}
 
 		// outbox 事件：order.paid，事件投递交给 publisher 异步处理
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderPaid", "order.paid", order.ID,
 			events.OrderPaid{
 				OrderID:   order.ID,

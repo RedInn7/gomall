@@ -1,4 +1,4 @@
-package dao
+package outbox
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 type OutboxDao struct {
@@ -15,7 +15,7 @@ type OutboxDao struct {
 }
 
 func NewOutboxDao(ctx context.Context) *OutboxDao {
-	return &OutboxDao{NewDBClient(ctx)}
+	return &OutboxDao{dao.NewDBClient(ctx)}
 }
 
 func NewOutboxDaoByDB(db *gorm.DB) *OutboxDao {
@@ -28,22 +28,22 @@ func (d *OutboxDao) Insert(aggregateType, eventType, routingKey string, aggregat
 	if err != nil {
 		return err
 	}
-	e := &model.OutboxEvent{
+	e := &OutboxEvent{
 		AggregateType: aggregateType,
 		AggregateID:   aggregateID,
 		EventType:     eventType,
 		RoutingKey:    routingKey,
 		Payload:       string(body),
-		Status:        model.OutboxStatusPending,
+		Status:        OutboxStatusPending,
 		NextRetryAt:   time.Now(),
 	}
 	return d.DB.Create(e).Error
 }
 
 // FetchBatch 取出 limit 个待发布事件 (pending + 已到重试时间)，按 id 升序保证 FIFO
-func (d *OutboxDao) FetchBatch(limit int) ([]*model.OutboxEvent, error) {
-	var rows []*model.OutboxEvent
-	err := d.DB.Where("status = ? AND next_retry_at <= ?", model.OutboxStatusPending, time.Now()).
+func (d *OutboxDao) FetchBatch(limit int) ([]*OutboxEvent, error) {
+	var rows []*OutboxEvent
+	err := d.DB.Where("status = ? AND next_retry_at <= ?", OutboxStatusPending, time.Now()).
 		Order("id ASC").
 		Limit(limit).
 		Find(&rows).Error
@@ -51,9 +51,9 @@ func (d *OutboxDao) FetchBatch(limit int) ([]*model.OutboxEvent, error) {
 }
 
 func (d *OutboxDao) MarkSent(id uint) error {
-	return d.DB.Model(&model.OutboxEvent{}).Where("id = ?", id).
+	return d.DB.Model(&OutboxEvent{}).Where("id = ?", id).
 		Updates(map[string]any{
-			"status":     model.OutboxStatusSent,
+			"status":     OutboxStatusSent,
 			"updated_at": time.Now(),
 		}).Error
 }
@@ -67,7 +67,7 @@ func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string
 		"updated_at": now,
 	}
 	if attempts+1 >= maxAttempts {
-		updates["status"] = model.OutboxStatusDead
+		updates["status"] = OutboxStatusDead
 	} else {
 		backoff := time.Duration(1<<attempts) * time.Second
 		if backoff > 5*time.Minute {
@@ -75,7 +75,7 @@ func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string
 		}
 		updates["next_retry_at"] = now.Add(backoff)
 	}
-	return d.DB.Model(&model.OutboxEvent{}).Where("id = ?", id).Updates(updates).Error
+	return d.DB.Model(&OutboxEvent{}).Where("id = ?", id).Updates(updates).Error
 }
 
 func truncate(s string, n int) string {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -128,7 +129,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 		if e := tx.Create(member).Error; e != nil {
 			return e
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"groupbuy", "GroupbuyCreated", "groupbuy.created", g.ID,
 			events.GroupbuyCreated{
 				GroupID:     g.ID,
@@ -237,7 +238,7 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 			currentCnt = freshGroup.CurrentCount
 		}
 
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"groupbuy", "GroupbuyJoined", "groupbuy.joined", groupID,
 			events.GroupbuyJoined{
 				GroupID:      groupID,
@@ -351,7 +352,7 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			orderIDs = append(orderIDs, m.OrderID)
 			memberIDs = append(memberIDs, m.ID)
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"groupbuy", "GroupbuySuccess", "groupbuy.success", groupID,
 			events.GroupbuySuccess{
 				GroupID:   groupID,
@@ -432,7 +433,7 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 		for _, m := range members {
 			orderIDs = append(orderIDs, m.OrderID)
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"groupbuy", "GroupbuyExpired", "groupbuy.expired", groupID,
 			events.GroupbuyExpired{
 				GroupID:   groupID,

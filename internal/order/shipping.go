@@ -8,9 +8,9 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -53,7 +53,7 @@ func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64, trackingNo
 		if !ok {
 			return ErrInvalidOrderStateTransition
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderShipped", "order.shipped", order.ID,
 			events.OrderShipped{
 				OrderID:    order.ID,
@@ -98,7 +98,7 @@ func (s *ShippingSrv) ConfirmReceive(ctx context.Context, orderNum uint64) error
 		if !ok {
 			return ErrInvalidOrderStateTransition
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderCompleted", "order.completed", order.ID,
 			events.OrderCompletedEvent{
 				OrderID:  order.ID,

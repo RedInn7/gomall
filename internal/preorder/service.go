@@ -13,6 +13,7 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -131,7 +132,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 			return errors.New("preorder stage 推进失败：订单状态已变更")
 		}
 
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "PreorderDepositPaid", "preorder.deposit.paid", ord.ID,
 			events.PreorderDepositPaid{
 				OrderID:   ord.ID,
@@ -228,7 +229,7 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*Pre
 		}
 
 		// 4) outbox 事件
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "PreorderFinalPaid", "preorder.final.paid", ord.ID,
 			events.PreorderFinalPaid{
 				OrderID:   ord.ID,
@@ -310,7 +311,7 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *Pr
 			return errors.New("取消失败：订单状态已变更")
 		}
 		// 3) outbox
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "PreorderCancelled", "preorder.cancelled", ord.ID,
 			events.PreorderCancelled{
 				OrderID:   ord.ID,
@@ -399,7 +400,7 @@ func (s *PreorderSrv) forfeitOne(ctx context.Context, orderID uint) error {
 		userID = ord.UserID
 		deposit = pp.DepositCents
 
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "PreorderForfeited", "preorder.forfeited", ord.ID,
 			events.PreorderForfeited{
 				OrderID:   ord.ID,

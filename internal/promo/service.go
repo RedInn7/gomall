@@ -9,8 +9,8 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/e"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -237,7 +237,7 @@ func (s *PromoSrv) ApplyDiscountInTx(tx *gorm.DB, orderID, ruleID uint, discount
 	if err := NewPromoDaoByDB(tx).AtomicConsumeBudget(tx, ruleID, discountCents); err != nil {
 		return err
 	}
-	return dao.NewOutboxDaoByDB(tx).Insert(
+	return outbox.NewOutboxDaoByDB(tx).Insert(
 		"promo", "PromoApplied", "promo.applied", orderID,
 		events.PromoApplied{
 			OrderID:       orderID,
@@ -261,7 +261,7 @@ func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, di
 		if err := NewPromoDaoByDB(tx).RestoreBudget(tx, ruleID, discountCents); err != nil {
 			return err
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"promo", "PromoReleased", "promo.released", orderID,
 			events.PromoReleased{
 				OrderID:       orderID,

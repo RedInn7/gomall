@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -30,7 +31,7 @@ func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *Order) e
 		if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
 			return e
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderCreated", "order.created", order.ID,
 			events.OrderCreated{
 				OrderID:   order.ID,

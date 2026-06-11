@@ -13,6 +13,7 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/promo"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -119,7 +120,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (resp i
 			}
 		}
 
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderCreated", "order.created", order.ID,
 			events.OrderCreated{
 				OrderID:   order.ID,

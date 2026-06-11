@@ -1,4 +1,4 @@
-package dao
+package outbox
 
 import (
 	"context"
@@ -6,12 +6,12 @@ import (
 	"time"
 
 	conf "github.com/RedInn7/gomall/config"
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
 func initDBForTest(t *testing.T) {
 	t.Helper()
-	if _db != nil {
+	if dao.NewDBClient(context.Background()) != nil {
 		return
 	}
 	re := conf.ConfigReader{FileName: "../../../config/locales/config.yaml"}
@@ -21,15 +21,15 @@ func initDBForTest(t *testing.T) {
 			t.Skipf("MySQL not available: %v", r)
 		}
 	}()
-	InitMySQL()
-	if _db != nil {
-		_ = _db.AutoMigrate(&model.OutboxEvent{})
+	dao.InitMySQL()
+	if dao.NewDBClient(context.Background()) != nil {
+		_ = dao.NewDBClient(context.Background()).AutoMigrate(&OutboxEvent{})
 	}
 }
 
 func TestOutbox_InsertFetchMarkSent(t *testing.T) {
 	initDBForTest(t)
-	if _db == nil {
+	if dao.NewDBClient(context.Background()) == nil {
 		t.Skip("MySQL not initialized")
 	}
 	ctx := context.Background()
@@ -50,7 +50,7 @@ func TestOutbox_InsertFetchMarkSent(t *testing.T) {
 		t.Fatal("expected at least one pending row")
 	}
 
-	var target *model.OutboxEvent
+	var target *OutboxEvent
 	for _, r := range rows {
 		if r.RoutingKey == "order.created" && r.AggregateID == 1 {
 			target = r
@@ -75,7 +75,7 @@ func TestOutbox_InsertFetchMarkSent(t *testing.T) {
 
 func TestOutbox_MarkFailedBackoff(t *testing.T) {
 	initDBForTest(t)
-	if _db == nil {
+	if dao.NewDBClient(context.Background()) == nil {
 		t.Skip()
 	}
 	ctx := context.Background()
@@ -84,7 +84,7 @@ func TestOutbox_MarkFailedBackoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows, _ := d.FetchBatch(100)
-	var target *model.OutboxEvent
+	var target *OutboxEvent
 	for _, r := range rows {
 		if r.AggregateID == 7 && r.RoutingKey == "test.probe" {
 			target = r
@@ -110,9 +110,9 @@ func TestOutbox_MarkFailedBackoff(t *testing.T) {
 	if err := d.MarkFailed(target.ID, 2, 3, "boom"); err != nil {
 		t.Fatal(err)
 	}
-	var fresh model.OutboxEvent
+	var fresh OutboxEvent
 	d.DB.First(&fresh, target.ID)
-	if fresh.Status != model.OutboxStatusDead {
+	if fresh.Status != OutboxStatusDead {
 		t.Fatalf("expect dead status, got %d", fresh.Status)
 	}
 	// 等到 backoff 过期也不应被 Fetch（已 dead）

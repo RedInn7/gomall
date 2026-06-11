@@ -9,9 +9,9 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/internal/migrate"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	userpb "github.com/RedInn7/gomall/proto/user"
-	"github.com/RedInn7/gomall/internal/migrate"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	grpcsvc "github.com/RedInn7/gomall/service/grpc"
 )

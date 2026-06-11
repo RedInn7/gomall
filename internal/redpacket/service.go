@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -74,7 +75,7 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (int
 		if e := NewRedPacketDaoByDB(tx).Create(rp); e != nil {
 			return e
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"red_packet", "RedPacketCreated", "red_packet.created", rp.ID,
 			events.RedPacketCreated{
 				RedPacketID: rp.ID,
@@ -141,7 +142,7 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (inter
 		if _, e := txDao.DecrRemaining(rp.ID); e != nil {
 			return e
 		}
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"red_packet", "RedPacketClaimed", "red_packet.claimed", rp.ID,
 			events.RedPacketClaimed{
 				RedPacketID: rp.ID,

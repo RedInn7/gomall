@@ -6,9 +6,9 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/internal/promo"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -38,7 +38,7 @@ func CancelUnpaidOrder(orderNum uint64) error {
 			return nil
 		}
 		closed = true
-		return dao.NewOutboxDaoByDB(tx).Insert(
+		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderCancelled", "order.cancelled", order.ID,
 			events.OrderCancelled{
 				OrderID:   order.ID,

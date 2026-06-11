@@ -6,8 +6,6 @@ import (
 	"time"
 
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 )
 
@@ -26,7 +24,7 @@ func (c PublisherConfig) withDefaults() PublisherConfig {
 		c.BatchSize = 100
 	}
 	if c.MaxAttempts <= 0 {
-		c.MaxAttempts = model.OutboxDefaultMaxAttempts
+		c.MaxAttempts = OutboxDefaultMaxAttempts
 	}
 	return c
 }
@@ -66,7 +64,7 @@ func (p *Publisher) drainBatch(ctx context.Context) {
 	if rabbitmq.GlobalRabbitMQ == nil {
 		return
 	}
-	rows, err := dao.NewOutboxDao(ctx).FetchBatch(p.cfg.BatchSize)
+	rows, err := NewOutboxDao(ctx).FetchBatch(p.cfg.BatchSize)
 	if err != nil {
 		util.LogrusObj.Errorln("outbox FetchBatch:", err)
 		return
@@ -74,12 +72,12 @@ func (p *Publisher) drainBatch(ctx context.Context) {
 	for _, ev := range rows {
 		if err := rabbitmq.PublishDomainEvent(ctx, ev.RoutingKey, []byte(ev.Payload)); err != nil {
 			util.LogrusObj.Errorf("publish outbox event id=%d routing=%s failed: %v", ev.ID, ev.RoutingKey, err)
-			if e := dao.NewOutboxDao(ctx).MarkFailed(ev.ID, ev.Attempts, p.cfg.MaxAttempts, err.Error()); e != nil {
+			if e := NewOutboxDao(ctx).MarkFailed(ev.ID, ev.Attempts, p.cfg.MaxAttempts, err.Error()); e != nil {
 				util.LogrusObj.Errorln("outbox MarkFailed:", e)
 			}
 			continue
 		}
-		if err := dao.NewOutboxDao(ctx).MarkSent(ev.ID); err != nil {
+		if err := NewOutboxDao(ctx).MarkSent(ev.ID); err != nil {
 			util.LogrusObj.Errorln("outbox MarkSent:", err)
 		}
 	}
