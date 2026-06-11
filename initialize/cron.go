@@ -7,15 +7,17 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/RedInn7/gomall/internal/groupbuy"
+	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/preorder"
+	"github.com/RedInn7/gomall/internal/redpacket"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
-	"github.com/RedInn7/gomall/service"
 )
 
 func InitCron() {
 	c := cron.New(cron.WithSeconds())
-	orderService := new(service.OrderTaskService)
+	orderService := new(order.OrderTaskService)
 	_, err := c.AddFunc("* */5 * * * *", func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -28,7 +30,7 @@ func InitCron() {
 		panic(fmt.Sprintf("Cron 初始化失败: %v", err))
 	}
 
-	redPacketService := new(service.RedPacketTaskService)
+	redPacketService := new(redpacket.RedPacketTaskService)
 	_, err = c.AddFunc("0 */5 * * * *", func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -92,7 +94,7 @@ func InitCron() {
 // 单团失败只 ERROR log，不中断 batch —— 留给下次 tick 补，这是 Saga 心法。
 func runGroupbuyExpireSweep() {
 	ctx := context.Background()
-	ids, err := dao.NewGroupbuyDao(ctx).ExpireOpenGroupsBefore(time.Now(), 200)
+	ids, err := groupbuy.NewGroupbuyDao(ctx).ExpireOpenGroupsBefore(time.Now(), 200)
 	if err != nil {
 		util.LogrusObj.Errorf("GroupbuyExpire 扫表失败: %v", err)
 		return
@@ -100,7 +102,7 @@ func runGroupbuyExpireSweep() {
 	if len(ids) == 0 {
 		return
 	}
-	srv := service.GetGroupbuySrv()
+	srv := groupbuy.GetGroupbuySrv()
 	for _, id := range ids {
 		if err := srv.ExpireGroup(ctx, id); err != nil {
 			util.LogrusObj.Errorf("ExpireGroup 失败 groupID=%d err=%v", id, err)
@@ -113,7 +115,7 @@ func runGroupbuyExpireSweep() {
 // cron 层直接调一次即可。
 func runPreorderForfeitSweep() {
 	ctx := context.Background()
-	if err := service.GetPreorderSrv().ForfeitDepositsForUnpaidFinals(ctx); err != nil {
+	if err := preorder.GetPreorderSrv().ForfeitDepositsForUnpaidFinals(ctx); err != nil {
 		util.LogrusObj.Errorf("PreorderForfeit 执行失败: %v", err)
 	}
 }
@@ -124,7 +126,7 @@ func InitOrderDelayConsumer() {
 		util.LogrusObj.Errorf("InitOrderDelayTopology failed: %v", err)
 		return
 	}
-	if err := rabbitmq.ConsumeOrderCancelDelay(service.CancelUnpaidOrder); err != nil {
+	if err := rabbitmq.ConsumeOrderCancelDelay(order.CancelUnpaidOrder); err != nil {
 		util.LogrusObj.Errorf("ConsumeOrderCancelDelay failed: %v", err)
 	}
 }

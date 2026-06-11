@@ -6,9 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/repository/es"
-	"github.com/RedInn7/gomall/types"
 )
 
 // fakeSearcher 单测用 Milvus 替身，按预置 Hit 列表回放
@@ -20,8 +19,8 @@ func (f fakeSearcher) Search(_ context.Context, _ []float32, _ int, _ *uint) ([]
 	return f.hits, nil
 }
 
-func newProduct(id uint, name string) *model.Product {
-	p := &model.Product{
+func newProduct(id uint, name string) *product.Product {
+	p := &product.Product{
 		Name:  name,
 		Title: name,
 	}
@@ -53,8 +52,8 @@ func TestSemanticSearchHybridFusionAndTopK(t *testing.T) {
 				{Doc: &es.ProductDoc{ID: 4}, Score: 1},
 			}, 3, nil
 		},
-		loader: func(_ context.Context, ids []uint) ([]*model.Product, error) {
-			out := make([]*model.Product, 0, len(ids))
+		loader: func(_ context.Context, ids []uint) ([]*product.Product, error) {
+			out := make([]*product.Product, 0, len(ids))
 			for _, id := range ids {
 				out = append(out, newProduct(id, "p"))
 			}
@@ -62,7 +61,7 @@ func TestSemanticSearchHybridFusionAndTopK(t *testing.T) {
 		},
 	}
 
-	hits, err := semanticSearchWith(context.Background(), &types.ProductSemanticSearchReq{
+	hits, err := semanticSearchWith(context.Background(), &product.ProductSemanticSearchReq{
 		Query: "笔记本",
 		TopK:  3,
 	}, deps)
@@ -112,7 +111,7 @@ func TestSemanticSearchDefaultsAndValidation(t *testing.T) {
 			}
 			return nil, 0, nil
 		},
-		loader: func(_ context.Context, ids []uint) ([]*model.Product, error) {
+		loader: func(_ context.Context, ids []uint) ([]*product.Product, error) {
 			if len(ids) != 0 {
 				t.Errorf("loader called with %d ids, want 0", len(ids))
 			}
@@ -120,11 +119,11 @@ func TestSemanticSearchDefaultsAndValidation(t *testing.T) {
 		},
 	}
 
-	if _, err := semanticSearchWith(context.Background(), &types.ProductSemanticSearchReq{Query: "x"}, deps); err != nil {
+	if _, err := semanticSearchWith(context.Background(), &product.ProductSemanticSearchReq{Query: "x"}, deps); err != nil {
 		t.Fatalf("err=%v", err)
 	}
 
-	if _, err := semanticSearchWith(context.Background(), &types.ProductSemanticSearchReq{Query: ""}, deps); err == nil {
+	if _, err := semanticSearchWith(context.Background(), &product.ProductSemanticSearchReq{Query: ""}, deps); err == nil {
 		t.Fatal("expected error for empty query")
 	}
 }

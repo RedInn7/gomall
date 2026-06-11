@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
-	"github.com/RedInn7/gomall/service/outbox"
 )
 
 var globalPublisher *outbox.Publisher

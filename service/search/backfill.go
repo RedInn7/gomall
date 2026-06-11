@@ -3,9 +3,9 @@ package search
 import (
 	"context"
 
+	"github.com/RedInn7/gomall/internal/product"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/repository/es"
 )
 
@@ -20,8 +20,8 @@ func BackfillFromDB(ctx context.Context, batchSize int) (indexed int, err error)
 	db := dao.NewDBClient(ctx)
 	var lastID uint
 	for {
-		var rows []*model.Product
-		q := db.Model(&model.Product{}).Order("id ASC").Limit(batchSize)
+		var rows []*product.Product
+		q := db.Model(&product.Product{}).Order("id ASC").Limit(batchSize)
 		if lastID > 0 {
 			q = q.Where("id > ?", lastID)
 		}

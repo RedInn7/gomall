@@ -3,12 +3,12 @@ package search
 import (
 	"context"
 
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/repository/es"
-	"github.com/RedInn7/gomall/types"
 )
 
 // SearchProducts 调用 ES 多字段模糊匹配。keyword 取请求里的 info / title / name 任意非空字段
-func SearchProducts(ctx context.Context, req *types.ProductSearchReq) ([]*es.ProductDoc, int64, error) {
+func SearchProducts(ctx context.Context, req *product.ProductSearchReq) ([]*es.ProductDoc, int64, error) {
 	kw := firstNonEmpty(req.Info, req.Title, req.Name)
 	req.BasePage.Normalize()
 	from := (req.PageNum - 1) * req.PageSize

@@ -17,8 +17,9 @@ import (
 )
 
 // TokenBucket 单实例 IP 维度令牌桶限流
-//   rps:   每秒放令牌速率
-//   burst: 桶容量
+//
+//	rps:   每秒放令牌速率
+//	burst: 桶容量
 func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
 	var (
 		mu       sync.Mutex
@@ -49,10 +50,10 @@ func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
 }
 
 type SlidingWindowOption struct {
-	Scope    string        // 限流作用域，作为 redis key 的一部分（如 "seckill"）
-	Window   time.Duration // 窗口大小
-	Limit    int64         // 窗口内最大请求数
-	ByUser   bool          // true: 按用户 id 限流；false: 按 IP
+	Scope  string        // 限流作用域，作为 redis key 的一部分（如 "seckill"）
+	Window time.Duration // 窗口大小
+	Limit  int64         // 窗口内最大请求数
+	ByUser bool          // true: 按用户 id 限流；false: 按 IP
 }
 
 // SlidingWindow Redis 滑动窗口分布式限流
