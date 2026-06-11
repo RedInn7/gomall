@@ -52,6 +52,19 @@ internal/
 - [x] Phase 1：抽 `internal/migrate`，dao 解除对 model 反向依赖（commit 70f3475）
 - [x] `internal/shared/response`（commit df73569）
 - [x] 叶子领域 8 个：`address carousel cart category`（批1）+ `money admin notice favorite`（批2）
+- [x] 带 cache 领域 3 个：`coupon redpacket skill`（批3，cache 留 repository/cache，cron 重接线）
+- [x] **hub `user`**（被 13 个文件引用）：全局 sed 改名 model.User/dao.NewUserDao→user.*，逐文件补 import、清无用 import；修局部变量 user 遮蔽包名
+
+### Hub 迁移办法（user 已用，product/order 照此）
+1. agent/手工先迁该域 5 件套到 internal/<hub>，de-prefix 自有符号。
+2. 全局 sed：`model.<Sym>`/`dao.New<Sym>Dao`→`<hub>.<Sym>`（用 `\b` 边界，别误伤 model.UserCoupon 等）。
+3. `go build ./...` 看报错，逐文件加 `internal/<hub>` import、删变为无用的 dao/model import（无 goimports，手工）。
+4. 注意**局部变量与包同名遮蔽**（favorite/preorder_test 里的 `user` 变量 → 改 curUser/buyer）；`&pkg.Type{}` 在局部变量声明后会被解析成字段访问而报错。
+5. 白盒 `_test.go`（如 model/user_test.go）随领域迁走，改 package + 修相对路径（深度变了：repository/db/model 的 ../../../ → internal/user 的 ../../）。
+6. 跨测试共享 helper（如 service 包的 initLogForTest）若随某域迁走，要在原包补一份。
+
+### 教训
+- 后台 agent 可能中途 API 掉线（FailedToOpenSocket）。hub 这种"必须全量 build 绿"的大改交给单 agent 时，**完成后务必自己 build/grep 复核**；中断了就接力手工补全（handler/router/import）。
 - [ ] **outbox 放到最后**：各领域迁移期间继续以 `dao.NewOutboxDao`/`model.OutboxEvent` 限定引用；待 model/dao 清空后再抽到 internal/shared/outbox
 - [ ] 剩余领域（顺序敏感，会回touch已迁移领域）：
   - 叶子但带 cache：`coupon`(cache/coupon.go)、`redpacket`(consumer+task+cache/redpacket.go)、`skill`(skill_goods，用 product)
