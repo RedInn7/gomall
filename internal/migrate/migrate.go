@@ -3,6 +3,7 @@ package migrate
 import (
 	"context"
 
+	"github.com/RedInn7/gomall/internal/address"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/db/model"
 )
@@ -15,7 +16,7 @@ func Run() error {
 	return db.Set("gorm:table_options", "charset=utf8mb4").
 		AutoMigrate(
 			&model.User{}, &model.Favorite{},
-			&model.Order{}, &model.Admin{}, &model.Address{},
+			&model.Order{}, &model.Admin{}, &address.Address{},
 			&model.Cart{}, &model.Category{}, &model.Carousel{},
 			&model.Notice{}, &model.Product{},
 			&model.ProductImg{}, &model.SkillProduct{},
