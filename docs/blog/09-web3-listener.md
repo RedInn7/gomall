@@ -131,7 +131,7 @@ outbox.Insert(
 )
 ```
 
-然后由现有的 publisher（`service/outbox`）异步投到 RabbitMQ。下游订阅 `web3.payment.confirmed` 的服务可以是：
+然后由现有的 publisher（`internal/shared/outbox`）异步投到 RabbitMQ。下游订阅 `web3.payment.confirmed` 的服务可以是：
 
 - 订单服务：根据 orderID 把状态推进到 paid
 - 风控服务：累计买家地址的链上行为

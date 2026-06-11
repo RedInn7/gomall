@@ -41,7 +41,7 @@
   \item 业务侧叫"占着但没消耗"，本仓库用 Redis 两桶建模：available / reserved。
   \item 单桶 \texttt{stock=N} 表达不了这个中间态 —— 要么误锁（用户没付就丢库存），要么超卖（两个人下同一件）。
 \end{itemize}
-\srcnote{repository/cache/inventory.go:11--14；service/order\_task.go:23 现行口径 15 分钟}
+\srcnote{repository/cache/inventory.go:11--14；internal/order/task.go:23 现行口径 15 分钟}
 \end{frame}
 
 \begin{frame}{本 deck 七条业务问题}
@@ -54,7 +54,7 @@
   \item 客服收到"加购后还有 5 件，下单时说缺货"工单，怎么自查 + 怎么回？
   \item 库存对外业务承诺（SLO）是什么？哪些场景超过 SLO 就要赔？
 \end{enumerate}
-\srcnote{对应代码 repository/cache/inventory.go + service/inventory/syncer.go + service/order.go + service/order\_cancel.go}
+\srcnote{对应代码 repository/cache/inventory.go + service/inventory/syncer.go + internal/order/service.go + internal/order/cancel.go}
 \end{frame}
 
 % ============================================================
@@ -212,15 +212,15 @@ return 1                                     -- 6. 占位成功
 \small 链路：\texttt{用户点提交 $\to$ Redis 占库存 $\to$ DB 写订单 + outbox $\to$ MQ 排关单延迟}。\\
 任一步失败：\textbf{已占的库存必须退回}，否则商家会"凭空缺货"。
 \begin{lstlisting}[language=Go,firstnumber=58,
-  caption={\srcnote{service/order.go:58--86 reserve + tx + 补偿 release}}]
+  caption={\srcnote{internal/order/service.go:58--86 reserve + tx + 补偿 release}}]
 // 1) Redis 预扣: available -> reserved，失败直接拒单
 if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
     return nil, err                       // ErrStockInsufficient
 }
 // 2) 同事务写订单 + 写 outbox
 err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-    if e := dao.NewOrderDaoByDB(tx).CreateOrder(order); e != nil { return e }
-    return dao.NewOutboxDaoByDB(tx).Insert(/* OrderCreated */)
+    if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil { return e }
+    return outbox.NewOutboxDaoByDB(tx).Insert(/* OrderCreated */)
 })
 if err != nil {
     // 3) 事务失败：必须释放刚扣的预占（Saga 补偿）
@@ -254,7 +254,7 @@ if err != nil {
 \vspace{1mm}
 \small \textbf{如果不补偿}：available 数字永远比真实可售小，长期堆积\textbf{所有 Redis 库存被锁死} —— 商家明明备了 100 件，前台只显示"还剩 0" —— 这是真实 P1 事故。\\
 客服话术：用户来投诉时，先查 outbox 是否有同 orderNum 的 \texttt{OrderCreated} 事件 + Redis snapshot 的 reserved 是否偏高，判断是否触发补偿。
-\srcnote{service/order.go:79--85 显式调用 ReleaseReservation 补偿}
+\srcnote{internal/order/service.go:79--85 显式调用 ReleaseReservation 补偿}
 \end{frame}
 
 \begin{frame}[fragile]{commit / release 成对设计的业务理由}
@@ -296,7 +296,7 @@ return 1
 \vspace{2mm}
 \small gomall 当前现状：\\
 \quad - RMQ TTL 延迟队列 \texttt{OrderCancelDelay = 30 \* time.Minute} \srcnote{repository/rabbitmq/order\_delay.go:22}\\
-\quad - Cron 兜底扫表 \texttt{GetTimeoutOrders(15, 100)} 视 15min 为超时 \srcnote{service/order\_task.go:23}\\
+\quad - Cron 兜底扫表 \texttt{GetTimeoutOrders(15, 100)} 视 15min 为超时 \srcnote{internal/order/task.go:23}\\
 \textbf{这两处口径不一致}（README 已自爆）：MQ 30 分钟到点关、Cron 15 分钟见就关，实际生效以\textbf{先到的为准 = 15 分钟}。修法是统一到 \texttt{consts.OrderCancelTimeout}，避免商家投诉"为什么我设了 30 分钟实际 15 分钟就关了"。
 \srcnote{consts 路线图：单一来源 OrderCancelTimeout 常量}
 \end{frame}
@@ -304,13 +304,13 @@ return 1
 \begin{frame}[fragile]{关单释放的幂等保证：客服可以放心"再点一次"}
 \small 业务背景：客服在工单系统点"立即关单"按钮，可能因为前端超时连点两次；RMQ 重投也会同 orderNum 触发两次；Cron 兜底也会撞上 —— 必须\textbf{多次执行结果一致}，库存不能退第二次。
 \begin{lstlisting}[language=Go,firstnumber=31,
-  caption={\srcnote{service/order\_cancel.go:31--62 关单 + 库存退回}}]
+  caption={\srcnote{internal/order/cancel.go:31--62 关单 + 库存退回}}]
 err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
-    ok, err := dao.NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
+    ok, err := NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
     if err != nil { return err }
     if !ok { return nil }                  // 1. 已关 -> 短路 no-op
     closed = true
-    return dao.NewOutboxDaoByDB(tx).Insert(/* OrderCancelled */)
+    return outbox.NewOutboxDaoByDB(tx).Insert(/* OrderCancelled */)
 })
 if err != nil { return err }
 if !closed { return nil }                  // 2. 没真关 -> 不退库存
@@ -340,7 +340,7 @@ if relErr := cache.ReleaseReservation(ctx,
 - 单 RMQ：进程重启 / 消息丢 = 漏关 = 商家"凭空缺货"。\\
 - 单 Cron：5min 扫一次，最差用户付完款 5min 才看到 available 回补。\\
 - 双保险：MQ 主路径秒级，Cron 兜底分钟级，两路汇到同一个幂等 \texttt{CancelUnpaidOrder} 入口。
-\srcnote{repository/rabbitmq/order\_delay.go:22 OrderCancelDelay；service/order\_task.go:23 Cron 15min}
+\srcnote{repository/rabbitmq/order\_delay.go:22 OrderCancelDelay；internal/order/task.go:23 Cron 15min}
 \end{frame}
 
 % ============================================================
@@ -373,8 +373,8 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
     if batchSize <= 0 { batchSize = 500 }            // 默认页 500
     d := dao.NewDBClient(ctx); var lastID uint
     for {
-        var rows []*model.Product
-        q := d.Model(&model.Product{}).Order("id ASC").Limit(batchSize)
+        var rows []*product.Product
+        q := d.Model(&product.Product{}).Order("id ASC").Limit(batchSize)
         if lastID > 0 { q = q.Where("id > ?", lastID) }  // 游标分页
         if err := q.Find(&rows).Error; err != nil { return err }
         if len(rows) == 0 { break }
@@ -427,7 +427,7 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
   \quad - 真没了：\textit{"该商品已全部售出，为您推荐同款……"}
   \item \textbf{自愈机制}：MQ TTL + Cron 双保险确保 30 分钟内一定释放，客服不需要人工介入。
 \end{itemize}
-\srcnote{repository/cache/inventory.go:127--138 GetStockSnapshot；service/order\_cancel.go:59 release 调用}
+\srcnote{repository/cache/inventory.go:127--138 GetStockSnapshot；internal/order/cancel.go:59 release 调用}
 \end{frame}
 
 \begin{frame}{工单 B："我下单成功了为什么显示缺货"}
@@ -457,7 +457,7 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
   \quad - 退货寄回 / 残次品分流 $\to$ WMS 仓储系统对接。\\
   \quad - 售后工单 $\to$ 评价 $\to$ 二次售后的全链路在 deck 09 路线图章节。
 \end{itemize}
-\srcnote{当前未实现售后链路；扩展点：service/refund.go + ReleaseFromCommitted Lua}
+\srcnote{当前未实现售后链路；扩展点：internal/refund/service.go + ReleaseFromCommitted Lua}
 \end{frame}
 
 \begin{frame}{业务码 / 错误的客服对照表（含诚实标注）}
@@ -555,7 +555,7 @@ T+4h      & 复盘 + 修复脚本上线 & 库存 owner \\
   \item \textbf{不做跨仓调拨 / 在途回流}：发货后归 WMS（本仓库未实现），退货寄回 + 残次品分流缺失。
   \item \textbf{不做商家自助补货 API}：商家想加 100 件库存只能找运营手动改 \texttt{product.num} + 跑 \texttt{InitStock}。
   \item \textbf{不做冻结库存}：质押 / 财务冻结 / 法务冻结这些 B 端需求都没建模。
-  \item \textbf{不做防黄牛单用户上限}：reserveScript 暂未加 owned $<$ perUser check（coupon.go:30--44 已实现该范式可复用）。
+  \item \textbf{不做防黄牛单用户上限}：reserveScript 暂未加 owned $<$ perUser check（internal/coupon/service.go:30--44 已实现该范式可复用）。
 \end{itemize}
 \srcnote{docs/architecture/feature-matrix.md 路线图全表}
 \end{frame}
@@ -580,7 +580,7 @@ SKU 多规格扩展 & 颜色 / 尺寸 / 套餐独立扣减 & P2 \\
 \vspace{2mm}
 \small \textbf{P0 优先级}：把库存错误从 Go 错误对象升级到独立业务码 —— 不写代码也能在 5min 内做完。\\
 \textbf{P1 三件}（库存预警 / 自助补货 / 缺货看板）是"商家入驻"业务的核心 —— 直接影响 GMV。
-\srcnote{coupon.go:30--44 已实现的 owned check 可复用到 reserveScript}
+\srcnote{internal/coupon/service.go:30--44 已实现的 owned check 可复用到 reserveScript}
 \end{frame}
 
 \begin{frame}{业务承诺：超卖 vs 误锁，两条不同的红线}
@@ -629,7 +629,7 @@ SKU 多规格扩展 & 颜色 / 尺寸 / 套餐独立扣减 & P2 \\
 
 \vspace{1mm}
 \textbf{Q6}：当前关单超时是 15 还是 30 分钟？\\
-\hspace{4mm} A：\textbf{口径不一致}（README 自爆）。RMQ TTL 30min，Cron 兜底 15min，实际生效 = min(两者) = 15min。修法：统一到 \texttt{consts.OrderCancelTimeout}。代码：\texttt{repository/rabbitmq/order\_delay.go:22} + \texttt{service/order\_task.go:23}。
+\hspace{4mm} A：\textbf{口径不一致}（README 自爆）。RMQ TTL 30min，Cron 兜底 15min，实际生效 = min(两者) = 15min。修法：统一到 \texttt{consts.OrderCancelTimeout}。代码：\texttt{repository/rabbitmq/order\_delay.go:22} + \texttt{internal/order/task.go:23}。
 
 \vspace{1mm}
 \textbf{Q7}：用户退款后库存怎么回？\\
@@ -651,13 +651,13 @@ SKU 多规格扩展 & 颜色 / 尺寸 / 套餐独立扣减 & P2 \\
   \item[reserve / commit / release Lua]\srcnote{repository/cache/inventory.go:32--66}
   \item[InitStock + Snapshot]\srcnote{repository/cache/inventory.go:69--138}
   \item[SeedFromDB + 启动注入]\srcnote{service/inventory/syncer.go:14--48；initialize/inventory.go:11--17}
-  \item[OrderCreate reserve + Saga 补偿]\srcnote{service/order.go:57--86}
-  \item[CancelUnpaidOrder release（幂等）]\srcnote{service/order\_cancel.go:14--63}
+  \item[OrderCreate reserve + Saga 补偿]\srcnote{internal/order/service.go:57--86}
+  \item[CancelUnpaidOrder release（幂等）]\srcnote{internal/order/cancel.go:14--63}
 \end{description}
 \textbf{关单口径（双口径自爆）}
 \begin{description}\setlength\itemsep{-1mm}
   \item[RMQ TTL 30 分钟]\srcnote{repository/rabbitmq/order\_delay.go:22 OrderCancelDelay}
-  \item[Cron 兜底 15 分钟]\srcnote{service/order\_task.go:23 GetTimeoutOrders(15, 100)}
+  \item[Cron 兜底 15 分钟]\srcnote{internal/order/task.go:23 GetTimeoutOrders(15, 100)}
 \end{description}
 \textbf{业务码（诚实标注）}
 \begin{description}\setlength\itemsep{-1mm}
