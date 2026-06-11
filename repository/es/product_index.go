@@ -11,7 +11,7 @@ import (
 
 	"github.com/elastic/go-elasticsearch/esapi"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/internal/product"
 )
 
 const ProductIndex = "product"
@@ -40,7 +40,7 @@ var productIndexMapping = `{
   }
 }`
 
-// ProductDoc ES 中的商品文档结构，与 model.Product 同构但去掉了 gorm 字段
+// ProductDoc ES 中的商品文档结构，与 product.Product 同构但去掉了 gorm 字段
 type ProductDoc struct {
 	ID            uint   `json:"id"`
 	Name          string `json:"name"`
@@ -56,7 +56,7 @@ type ProductDoc struct {
 	CreatedAt     int64  `json:"created_at"`
 }
 
-func docFromModel(p *model.Product) *ProductDoc {
+func docFromModel(p *product.Product) *ProductDoc {
 	return &ProductDoc{
 		ID:            p.ID,
 		Name:          p.Name,
@@ -103,7 +103,7 @@ func EnsureProductIndex(ctx context.Context) error {
 }
 
 // UpsertProduct 写入或更新一条
-func UpsertProduct(ctx context.Context, p *model.Product) error {
+func UpsertProduct(ctx context.Context, p *product.Product) error {
 	if EsClient == nil {
 		return errors.New("es client not initialized")
 	}
