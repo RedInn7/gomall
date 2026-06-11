@@ -1,4 +1,6 @@
-package types
+package product
+
+import "github.com/RedInn7/gomall/types"
 
 type ProductSearchReq struct {
 	ID            uint   `form:"id" json:"id"`
@@ -9,7 +11,7 @@ type ProductSearchReq struct {
 	Price         string `form:"price" json:"price"`
 	DiscountPrice string `form:"discount_price" json:"discount_price"`
 	OnSale        bool   `form:"on_sale" json:"on_sale"`
-	BasePage
+	types.BasePage
 }
 
 type ProductCreateReq struct {
@@ -27,12 +29,12 @@ type ProductCreateReq struct {
 
 type ProductListReq struct {
 	CategoryID uint `form:"category_id" json:"category_id"`
-	BasePage
+	types.BasePage
 }
 
 type ProductDeleteReq struct {
 	ID uint `form:"id" json:"id"`
-	BasePage
+	types.BasePage
 }
 
 type ProductShowReq struct {

@@ -7,10 +7,8 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
-	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/repository/es"
-	"github.com/RedInn7/gomall/types"
 )
 
 // hybrid 权重 50/50，作为业务调优入口；如需调整可改成读配置
@@ -29,7 +27,7 @@ type embedFunc func(ctx context.Context, text string) ([]float32, error)
 type keywordSearchFunc func(ctx context.Context, keyword string, from, size int, categoryID *uint) ([]es.ScoredProductDoc, int64, error)
 
 // productLoaderFunc 抽象 DB 批量取商品，便于单测注入
-type productLoaderFunc func(ctx context.Context, ids []uint) ([]*model.Product, error)
+type productLoaderFunc func(ctx context.Context, ids []uint) ([]*product.Product, error)
 
 // hybridDeps 把可注入的依赖封装起来，生产用 defaultHybridDeps，单测可重写
 type hybridDeps struct {
@@ -46,16 +44,16 @@ func defaultHybridDeps() hybridDeps {
 	}
 }
 
-func loadProductsByIDs(ctx context.Context, ids []uint) ([]*model.Product, error) {
-	return dao.NewProductDao(ctx).ListByIDs(ids)
+func loadProductsByIDs(ctx context.Context, ids []uint) ([]*product.Product, error) {
+	return product.NewProductDao(ctx).ListByIDs(ids)
 }
 
 // SemanticSearch 走 embedding + Milvus 召回，再与 ES 关键词召回做加权融合后截断 TopK
-func SemanticSearch(ctx context.Context, req *types.ProductSemanticSearchReq) ([]types.ProductSemanticHit, error) {
+func SemanticSearch(ctx context.Context, req *product.ProductSemanticSearchReq) ([]product.ProductSemanticHit, error) {
 	return semanticSearchWith(ctx, req, defaultHybridDeps())
 }
 
-func semanticSearchWith(ctx context.Context, req *types.ProductSemanticSearchReq, deps hybridDeps) ([]types.ProductSemanticHit, error) {
+func semanticSearchWith(ctx context.Context, req *product.ProductSemanticSearchReq, deps hybridDeps) ([]product.ProductSemanticHit, error) {
 	if req == nil || req.Query == "" {
 		return nil, errors.New("query 不能为空")
 	}
@@ -89,7 +87,7 @@ func semanticSearchWith(ctx context.Context, req *types.ProductSemanticSearchReq
 	semNorm := minMaxNormalize(vecScores(vecHits))
 	kwNorm := minMaxNormalize(esScores(keywordHits))
 
-	fused := make(map[uint]*types.ProductSemanticHit)
+	fused := make(map[uint]*product.ProductSemanticHit)
 	for i, h := range vecHits {
 		id := uint(h.ID)
 		if id == 0 {
@@ -114,12 +112,12 @@ func semanticSearchWith(ctx context.Context, req *types.ProductSemanticSearchReq
 	if err != nil {
 		return nil, err
 	}
-	prodMap := make(map[uint]*model.Product, len(products))
+	prodMap := make(map[uint]*product.Product, len(products))
 	for _, p := range products {
 		prodMap[p.ID] = p
 	}
 
-	out := make([]types.ProductSemanticHit, 0, len(fused))
+	out := make([]product.ProductSemanticHit, 0, len(fused))
 	for id, h := range fused {
 		p, ok := prodMap[id]
 		if !ok {
@@ -142,11 +140,11 @@ func semanticSearchWith(ctx context.Context, req *types.ProductSemanticSearchReq
 	return out, nil
 }
 
-func getOrInit(m map[uint]*types.ProductSemanticHit, id uint) *types.ProductSemanticHit {
+func getOrInit(m map[uint]*product.ProductSemanticHit, id uint) *product.ProductSemanticHit {
 	if h, ok := m[id]; ok {
 		return h
 	}
-	h := &types.ProductSemanticHit{}
+	h := &product.ProductSemanticHit{}
 	m[id] = h
 	return h
 }
@@ -197,8 +195,8 @@ func minMaxNormalize(scores []float32) []float32 {
 	return out
 }
 
-func productRespFromModel(p *model.Product) *types.ProductResp {
-	resp := &types.ProductResp{
+func productRespFromModel(p *product.Product) *product.ProductResp {
+	resp := &product.ProductResp{
 		ID:            p.ID,
 		Name:          p.Name,
 		CategoryID:    p.CategoryID,

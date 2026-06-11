@@ -5,20 +5,20 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/es"
 	"github.com/RedInn7/gomall/types"
 )
 
 // ProductSearch ES 可用时走 ES 模糊搜索；不可用时退化到 DB SearchProduct。
-func ProductSearch(ctx context.Context, req *types.ProductSearchReq) (resp interface{}, err error) {
+func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (resp interface{}, err error) {
 	if es.EsClient != nil {
 		docs, total, esErr := SearchProducts(ctx, req)
 		if esErr == nil {
-			pRespList := make([]*types.ProductResp, 0, len(docs))
+			pRespList := make([]*product.ProductResp, 0, len(docs))
 			for _, d := range docs {
-				pResp := &types.ProductResp{
+				pResp := &product.ProductResp{
 					ID:            d.ID,
 					Name:          d.Name,
 					CategoryID:    d.CategoryID,
@@ -42,15 +42,15 @@ func ProductSearch(ctx context.Context, req *types.ProductSearchReq) (resp inter
 		log.LogrusObj.Errorf("ES search failed, fall back to DB: %v", esErr)
 	}
 
-	products, count, err := dao.NewProductDao(ctx).SearchProduct(req.Info, req.BasePage)
+	products, count, err := product.NewProductDao(ctx).SearchProduct(req.Info, req.BasePage)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return
 	}
 
-	pRespList := make([]*types.ProductResp, 0)
+	pRespList := make([]*product.ProductResp, 0)
 	for _, p := range products {
-		pResp := &types.ProductResp{
+		pResp := &product.ProductResp{
 			ID:            p.ID,
 			Name:          p.Name,
 			CategoryID:    p.CategoryID,

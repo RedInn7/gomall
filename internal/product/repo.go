@@ -1,4 +1,4 @@
-package dao
+package product
 
 import (
 	"context"
@@ -6,7 +6,7 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/repository/db/model"
+	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -15,33 +15,33 @@ type ProductDao struct {
 }
 
 func NewProductDao(ctx context.Context) *ProductDao {
-	return &ProductDao{NewDBClient(ctx)}
+	return &ProductDao{dao.NewDBClient(ctx)}
 }
 
 func NewProductDaoByDB(db *gorm.DB) *ProductDao {
 	return &ProductDao{db}
 }
 
-// GetProductById 通过 id 获取product
-func (dao *ProductDao) GetProductById(id uint) (product *model.Product, err error) {
-	err = dao.DB.Model(&model.Product{}).
+// GetProductById 通过 id 获取 product
+func (d *ProductDao) GetProductById(id uint) (product *Product, err error) {
+	err = d.DB.Model(&Product{}).
 		Where("id=?", id).First(&product).Error
 
 	return
 }
 
-// ShowProductById 通过 id 获取product
-func (dao *ProductDao) ShowProductById(id uint) (product *model.Product, err error) {
-	err = dao.DB.Model(&model.Product{}).
+// ShowProductById 通过 id 获取 product
+func (d *ProductDao) ShowProductById(id uint) (product *Product, err error) {
+	err = d.DB.Model(&Product{}).
 		Where("id=?", id).First(&product).Error
 
 	return
 }
 
 // ListProductByCondition 获取商品列表
-func (dao *ProductDao) ListProductByCondition(condition map[string]interface{}, page types.BasePage) (products []*model.Product, err error) {
+func (d *ProductDao) ListProductByCondition(condition map[string]interface{}, page types.BasePage) (products []*Product, err error) {
 	page.Normalize()
-	err = dao.DB.Where(condition).
+	err = d.DB.Where(condition).
 		Offset((page.PageNum - 1) * page.PageSize).
 		Limit(page.PageSize).
 		Find(&products).Error
@@ -50,37 +50,37 @@ func (dao *ProductDao) ListProductByCondition(condition map[string]interface{}, 
 }
 
 // CreateProduct 创建商品
-func (dao *ProductDao) CreateProduct(product *model.Product) error {
-	return dao.DB.Model(&model.Product{}).
+func (d *ProductDao) CreateProduct(product *Product) error {
+	return d.DB.Model(&Product{}).
 		Create(&product).Error
 }
 
-// CountProductByCondition 根据情况获取商品的数量
-func (dao *ProductDao) CountProductByCondition(condition map[string]interface{}) (total int64, err error) {
-	err = dao.DB.Model(&model.Product{}).
+// CountProductByCondition 根据条件统计商品数量
+func (d *ProductDao) CountProductByCondition(condition map[string]interface{}) (total int64, err error) {
+	err = d.DB.Model(&Product{}).
 		Where(condition).Count(&total).Error
 
 	return
 }
 
 // DeleteProduct 删除商品
-func (dao *ProductDao) DeleteProduct(pId, uId uint) error {
-	return dao.DB.Model(&model.Product{}).
+func (d *ProductDao) DeleteProduct(pId, uId uint) error {
+	return d.DB.Model(&Product{}).
 		Where("id = ? AND boss_id = ?", pId, uId).
-		Delete(&model.Product{}).
+		Delete(&Product{}).
 		Error
 }
 
 // UpdateProduct 更新商品
-func (dao *ProductDao) UpdateProduct(pId uint, product *model.Product) error {
-	return dao.DB.Model(&model.Product{}).
+func (d *ProductDao) UpdateProduct(pId uint, product *Product) error {
+	return d.DB.Model(&Product{}).
 		Where("id=?", pId).Updates(&product).Error
 }
 
 // SearchProduct 搜索商品
-func (dao *ProductDao) SearchProduct(info string, page types.BasePage) (products []*model.Product, count int64, err error) {
+func (d *ProductDao) SearchProduct(info string, page types.BasePage) (products []*Product, count int64, err error) {
 	page.Normalize()
-	err = dao.DB.Model(&model.Product{}).
+	err = d.DB.Model(&Product{}).
 		Where("name LIKE ? OR info LIKE ?", "%"+info+"%", "%"+info+"%").
 		Offset((page.PageNum - 1) * page.PageSize).
 		Limit(page.PageSize).
@@ -90,7 +90,7 @@ func (dao *ProductDao) SearchProduct(info string, page types.BasePage) (products
 		return
 	}
 
-	err = dao.DB.Model(&model.Product{}).
+	err = d.DB.Model(&Product{}).
 		Where("name LIKE ? OR info LIKE ?", "%"+info+"%", "%"+info+"%").
 		Count(&count).
 		Error
@@ -98,8 +98,8 @@ func (dao *ProductDao) SearchProduct(info string, page types.BasePage) (products
 	return
 }
 
-func (dao *ProductDao) RollbackStock(productId uint, num int) (bool, error) {
-	res := dao.DB.Model(&model.Product{}).
+func (d *ProductDao) RollbackStock(productId uint, num int) (bool, error) {
+	res := d.DB.Model(&Product{}).
 		Where("id=?", productId).
 		Update("num", gorm.Expr("num+?", num))
 
@@ -117,11 +117,11 @@ func NewProductDaoWithDB(db *gorm.DB) *ProductDao {
 }
 
 // ListByIDs 按 id 批量取商品，结果顺序不保证，调用方按需重排
-func (dao *ProductDao) ListByIDs(ids []uint) (products []*model.Product, err error) {
+func (d *ProductDao) ListByIDs(ids []uint) (products []*Product, err error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	err = dao.DB.Model(&model.Product{}).
+	err = d.DB.Model(&Product{}).
 		Where("id IN ?", ids).
 		Find(&products).Error
 	return

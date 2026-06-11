@@ -6,6 +6,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/RedInn7/gomall/internal/product"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
@@ -29,7 +30,7 @@ func (s *OrderTaskService) RunOrderTimeoutCheck() {
 	for _, order := range orders {
 		err := baseDao.DB.Transaction(func(tx *gorm.DB) error {
 			txOrderDao := dao.NewOrderDaoByDB(tx)
-			txProductDao := dao.NewProductDaoWithDB(tx)
+			txProductDao := product.NewProductDaoWithDB(tx)
 			success, err := txOrderDao.CloseOrderWithCheck(order.OrderNum)
 			if err != nil {
 				return err

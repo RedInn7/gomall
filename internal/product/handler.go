@@ -1,4 +1,4 @@
-package v1
+package product
 
 import (
 	"errors"
@@ -7,35 +7,33 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/service"
-	"github.com/RedInn7/gomall/types"
 )
 
 // CreateProductHandler 创建商品
 func CreateProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.ProductCreateReq
+		var req ProductCreateReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 
 		form, err := ctx.MultipartForm()
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		files := form.File["image"]
-		l := service.GetProductSrv()
+		l := GetProductSrv()
 		resp, err := l.ProductCreate(ctx.Request.Context(), files, &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
@@ -45,22 +43,21 @@ func CreateProductHandler() gin.HandlerFunc {
 // ListProductsHandler 商品列表
 func ListProductsHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.ProductListReq
+		var req ProductListReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		if req.PageSize == 0 {
 			req.PageSize = consts.BaseProductPageSize
 		}
 
-		l := service.GetProductSrv()
+		l := GetProductSrv()
 		resp, err := l.ProductList(ctx.Request.Context(), &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
@@ -70,19 +67,18 @@ func ListProductsHandler() gin.HandlerFunc {
 // ShowProductHandler 商品详情
 func ShowProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.ProductShowReq
+		var req ProductShowReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 
-		l := service.GetProductSrv()
+		l := GetProductSrv()
 		resp, err := l.ProductShow(ctx.Request.Context(), &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
@@ -92,19 +88,18 @@ func ShowProductHandler() gin.HandlerFunc {
 // DeleteProductHandler 删除商品
 func DeleteProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.ProductDeleteReq
+		var req ProductDeleteReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 
-		l := service.GetProductSrv()
+		l := GetProductSrv()
 		resp, err := l.ProductDelete(ctx.Request.Context(), &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
@@ -114,19 +109,18 @@ func DeleteProductHandler() gin.HandlerFunc {
 // UpdateProductHandler 更新商品
 func UpdateProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.ProductUpdateReq
+		var req ProductUpdateReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 
-		l := service.GetProductSrv()
+		l := GetProductSrv()
 		resp, err := l.ProductUpdate(ctx.Request.Context(), &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
@@ -135,24 +129,23 @@ func UpdateProductHandler() gin.HandlerFunc {
 
 func ListProductImgHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.ListProductImgReq
+		var req ListProductImgReq
 		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		if req.ID == 0 {
 			err := errors.New("参数错误,id不能为空")
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 
-		l := service.GetProductSrv()
+		l := GetProductSrv()
 		resp, err := l.ProductImgList(ctx.Request.Context(), &req)
 		if err != nil {
 			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
 			return
 		}
 		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))

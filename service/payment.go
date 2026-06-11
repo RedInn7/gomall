@@ -9,12 +9,12 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/service/events"
 	"github.com/RedInn7/gomall/types"
 )
@@ -126,18 +126,18 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			return err
 		}
 
-		productDao := dao.NewProductDaoByDB(tx)
-		product, err := productDao.GetProductById(productID)
+		productDao := product.NewProductDaoByDB(tx)
+		prod, err := productDao.GetProductById(productID)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
-		if product.Num-num < 0 {
+		if prod.Num-num < 0 {
 			log.LogrusObj.Error("存在超卖问题")
 			return errors.New("存在超卖问题")
 		}
-		product.Num -= num
-		err = productDao.UpdateProduct(productID, product)
+		prod.Num -= num
+		err = productDao.UpdateProduct(productID, prod)
 		if err != nil { // 更新商品数量减少失败，回滚
 			log.LogrusObj.Error(err)
 			return err
@@ -151,14 +151,14 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *types.PaymentDownReq) (re
 			return err
 		}
 
-		productUser := model.Product{
-			Name:          product.Name,
-			CategoryID:    product.CategoryID,
-			Title:         product.Title,
-			Info:          product.Info,
-			ImgPath:       product.ImgPath,
-			Price:         product.Price,
-			DiscountPrice: product.DiscountPrice,
+		productUser := product.Product{
+			Name:          prod.Name,
+			CategoryID:    prod.CategoryID,
+			Title:         prod.Title,
+			Info:          prod.Info,
+			ImgPath:       prod.ImgPath,
+			Price:         prod.Price,
+			DiscountPrice: prod.DiscountPrice,
 			Num:           num,
 			OnSale:        false,
 			BossID:        uId,

@@ -19,6 +19,7 @@ import (
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/money"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/internal/user"
@@ -48,11 +49,11 @@ func NewRouter() *gin.Engine {
 
 		// 商品操作
 		// 公开 GET 接口挂 HTTP cache：ETag + Cache-Control 卸载浏览器/CDN 流量
-		v1.GET("product/list", middleware.HTTPCache(30*time.Second), api.ListProductsHandler())
-		v1.GET("product/show", middleware.HTTPCache(60*time.Second), api.ShowProductHandler())
+		v1.GET("product/list", middleware.HTTPCache(30*time.Second), product.ListProductsHandler())
+		v1.GET("product/show", middleware.HTTPCache(60*time.Second), product.ShowProductHandler())
 		v1.POST("product/search", search.SearchProductsHandler())
 		v1.POST("product/semantic-search", search.SemanticSearchProductsHandler())                     // 语义检索: ES + Milvus 融合
-		v1.GET("product/imgs/list", api.ListProductImgHandler())                                       // 商品图片
+		v1.GET("product/imgs/list", product.ListProductImgHandler())                                   // 商品图片
 		v1.GET("category/list", middleware.HTTPCache(300*time.Second), category.ListCategoryHandler()) // 商品分类
 		v1.GET("carousels", middleware.HTTPCache(300*time.Second), carousel.ListCarouselsHandler())    // 轮播图
 
@@ -70,9 +71,9 @@ func NewRouter() *gin.Engine {
 			authed.POST("user/avatar", user.UploadAvatarHandler()) // 上传头像
 
 			// 商品操作
-			authed.POST("product/create", api.CreateProductHandler())
-			authed.POST("product/update", api.UpdateProductHandler())
-			authed.POST("product/delete", api.DeleteProductHandler())
+			authed.POST("product/create", product.CreateProductHandler())
+			authed.POST("product/update", product.UpdateProductHandler())
+			authed.POST("product/delete", product.DeleteProductHandler())
 			// 收藏夹
 			authed.GET("favorites/list", favorite.ListFavoritesHandler())
 			authed.POST("favorites/create", favorite.CreateFavoriteHandler())

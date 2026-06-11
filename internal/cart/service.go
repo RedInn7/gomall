@@ -5,10 +5,10 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/types"
 )
 
@@ -33,7 +33,7 @@ func (s *CartSrv) CartCreate(ctx context.Context, req *CartCreateReq) (resp inte
 		return nil, err
 	}
 	// 判断有无这个商品
-	_, err = dao.NewProductDao(ctx).GetProductById(req.ProductId)
+	_, err = product.NewProductDao(ctx).GetProductById(req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return

@@ -1,4 +1,4 @@
-package service
+package product
 
 import (
 	"context"
@@ -16,7 +16,6 @@ import (
 	util "github.com/RedInn7/gomall/pkg/utils/upload"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/repository/db/model"
 	"github.com/RedInn7/gomall/service/events"
 	"github.com/RedInn7/gomall/types"
 )
@@ -38,8 +37,8 @@ func GetProductSrv() *ProductSrv {
 //  1. 先读缓存，命中直接返回
 //  2. 未命中: SETNX 抢回源锁，单飞回源 DB
 //  3. 未抢到锁的请求短暂重试一次，仍未命中则直接回源（兜底）
-func (s *ProductSrv) ProductShow(ctx context.Context, req *types.ProductShowReq) (resp interface{}, err error) {
-	cached := &types.ProductResp{}
+func (s *ProductSrv) ProductShow(ctx context.Context, req *ProductShowReq) (resp interface{}, err error) {
+	cached := &ProductResp{}
 	if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
 		return cached, nil
 	} else if cacheErr != cache.ErrProductCacheMiss {
@@ -66,13 +65,13 @@ func (s *ProductSrv) ProductShow(ctx context.Context, req *types.ProductShowReq)
 	return pResp, nil
 }
 
-func (s *ProductSrv) loadProductFromDB(ctx context.Context, id uint) (*types.ProductResp, error) {
-	p, err := dao.NewProductDao(ctx).ShowProductById(id)
+func (s *ProductSrv) loadProductFromDB(ctx context.Context, id uint) (*ProductResp, error) {
+	p, err := NewProductDao(ctx).ShowProductById(id)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	pResp := &types.ProductResp{
+	pResp := &ProductResp{
 		ID:            p.ID,
 		Name:          p.Name,
 		CategoryID:    p.CategoryID,
@@ -96,8 +95,8 @@ func (s *ProductSrv) loadProductFromDB(ctx context.Context, id uint) (*types.Pro
 	return pResp, nil
 }
 
-// 创建商品
-func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileHeader, req *types.ProductCreateReq) (resp interface{}, err error) {
+// ProductCreate 创建商品
+func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileHeader, req *ProductCreateReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error("获取用户信息失败，err==", err)
@@ -131,7 +130,7 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		log.LogrusObj.Error("上传图片失败，err:", err)
 		return
 	}
-	product := &model.Product{
+	product := &Product{
 		Name:          req.Name,
 		CategoryID:    req.CategoryID,
 		Title:         req.Title,
@@ -145,7 +144,7 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		BossName:      boss.UserName,
 		BossAvatar:    boss.Avatar,
 	}
-	productDao := dao.NewProductDao(ctx)
+	productDao := NewProductDao(ctx)
 	err = productDao.CreateProduct(product)
 	if err != nil {
 		log.LogrusObj.Error("创建产品失败，err:", err)
@@ -170,11 +169,11 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 			log.LogrusObj.Error(err)
 			return
 		}
-		productImg := &model.ProductImg{
+		productImg := &ProductImg{
 			ProductID: product.ID,
 			ImgPath:   path,
 		}
-		err = dao.NewProductImgDaoByDB(productDao.DB).CreateProductImg(productImg)
+		err = NewProductImgDaoByDB(productDao.DB).CreateProductImg(productImg)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return
@@ -184,13 +183,13 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 	return
 }
 
-func (s *ProductSrv) ProductList(ctx context.Context, req *types.ProductListReq) (resp interface{}, err error) {
+func (s *ProductSrv) ProductList(ctx context.Context, req *ProductListReq) (resp interface{}, err error) {
 	var total int64
 	condition := make(map[string]interface{})
 	if req.CategoryID != 0 {
 		condition["category_id"] = req.CategoryID
 	}
-	productDao := dao.NewProductDao(ctx)
+	productDao := NewProductDao(ctx)
 	products, err := productDao.ListProductByCondition(condition, req.BasePage)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -201,9 +200,9 @@ func (s *ProductSrv) ProductList(ctx context.Context, req *types.ProductListReq)
 		log.LogrusObj.Error(err)
 		return
 	}
-	pRespList := make([]*types.ProductResp, 0)
+	pRespList := make([]*ProductResp, 0)
 	for _, p := range products {
-		pResp := &types.ProductResp{
+		pResp := &ProductResp{
 			ID:            p.ID,
 			Name:          p.Name,
 			CategoryID:    p.CategoryID,
@@ -236,13 +235,13 @@ func (s *ProductSrv) ProductList(ctx context.Context, req *types.ProductListReq)
 }
 
 // ProductDelete 删除商品 + 删缓存
-func (s *ProductSrv) ProductDelete(ctx context.Context, req *types.ProductDeleteReq) (resp interface{}, err error) {
+func (s *ProductSrv) ProductDelete(ctx context.Context, req *ProductDeleteReq) (resp interface{}, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return
 	}
-	err = dao.NewProductDao(ctx).DeleteProduct(req.ID, u.Id)
+	err = NewProductDao(ctx).DeleteProduct(req.ID, u.Id)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return
@@ -267,19 +266,18 @@ func emitProductChanged(ctx context.Context, productID uint, op string) {
 //  1. 先删缓存
 //  2. 写库
 //  3. 异步等 500ms 再删一次（覆盖并发读取旧值后写回的窗口）
-func (s *ProductSrv) ProductUpdate(ctx context.Context, req *types.ProductUpdateReq) (resp interface{}, err error) {
-	product := &model.Product{
-		Name:       req.Name,
-		CategoryID: req.CategoryID,
-		Title:      req.Title,
-		Info:       req.Info,
-		// ImgPath:       service.ImgPath,
+func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (resp interface{}, err error) {
+	product := &Product{
+		Name:          req.Name,
+		CategoryID:    req.CategoryID,
+		Title:         req.Title,
+		Info:          req.Info,
 		Price:         req.Price,
 		DiscountPrice: req.DiscountPrice,
 		OnSale:        req.OnSale,
 	}
 	_ = cache.DelProductDetail(ctx, req.ID)
-	err = dao.NewProductDao(ctx).UpdateProduct(req.ID, product)
+	err = NewProductDao(ctx).UpdateProduct(req.ID, product)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return
@@ -290,9 +288,9 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *types.ProductUpdate
 	return
 }
 
-// ProductImgList 获取商品列表图片
-func (s *ProductSrv) ProductImgList(ctx context.Context, req *types.ListProductImgReq) (resp interface{}, err error) {
-	productImgs, err := dao.NewProductImgDao(ctx).ListProductImgByProductId(req.ID)
+// ProductImgList 获取商品图片列表
+func (s *ProductSrv) ProductImgList(ctx context.Context, req *ListProductImgReq) (resp interface{}, err error) {
+	productImgs, err := NewProductImgDao(ctx).ListProductImgByProductId(req.ID)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return

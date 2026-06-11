@@ -14,6 +14,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -69,7 +70,7 @@ func setupSQLiteForPreorder(t *testing.T) (*gorm.DB, func()) {
 		t.Skipf("sqlite 不可用（CGO 关闭？）：%v", err)
 	}
 	if err := db.AutoMigrate(
-		&user.User{}, &model.Order{}, &model.Product{},
+		&user.User{}, &model.Order{}, &product.Product{},
 		&model.ProductPreorder{}, &model.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
@@ -129,7 +130,7 @@ func seedPreorder(t *testing.T, db *gorm.DB, depositWindow, finalWindow time.Dur
 		t.Fatalf("create boss: %v", err)
 	}
 
-	product := &model.Product{Name: "preorder-item", Num: 10, BossID: boss.ID}
+	product := &product.Product{Name: "preorder-item", Num: 10, BossID: boss.ID}
 	if err := db.Create(product).Error; err != nil {
 		t.Fatalf("create product: %v", err)
 	}
@@ -195,7 +196,7 @@ func TestPreorder_OutOfDepositWindowRejected(t *testing.T) {
 	if err := db.Create(boss).Error; err != nil {
 		t.Fatalf("create boss: %v", err)
 	}
-	product := &model.Product{Name: "out-of-window", Num: 5, BossID: boss.ID}
+	product := &product.Product{Name: "out-of-window", Num: 5, BossID: boss.ID}
 	if err := db.Create(product).Error; err != nil {
 		t.Fatalf("create product: %v", err)
 	}
@@ -328,7 +329,7 @@ func TestPreorder_PayFinalConsumesStockAndAdvancesState(t *testing.T) {
 	}
 
 	// product.Num 真扣
-	var product model.Product
+	var product product.Product
 	if err := db.First(&product, fx.ProductID).Error; err != nil {
 		t.Fatalf("load product: %v", err)
 	}

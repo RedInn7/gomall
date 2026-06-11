@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
@@ -15,7 +16,7 @@ import (
 // SearchProductsHandler 搜索商品（ES 关键词检索，降级 DB）
 func SearchProductsHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.ProductSearchReq
+		var req product.ProductSearchReq
 		if err := ctx.ShouldBind(&req); err != nil {
 			log.LogrusObj.Infoln(err)
 			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
@@ -38,7 +39,7 @@ func SearchProductsHandler() gin.HandlerFunc {
 // SemanticSearchProductsHandler 语义检索: embedding + Milvus 向量召回 + ES 关键词召回融合排序
 func SemanticSearchProductsHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req types.ProductSemanticSearchReq
+		var req product.ProductSemanticSearchReq
 		if err := ctx.ShouldBindJSON(&req); err != nil {
 			log.LogrusObj.Infoln(err)
 			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
