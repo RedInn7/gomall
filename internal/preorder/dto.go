@@ -17,7 +17,7 @@ type PreorderShowResp struct {
 // PreorderDepositReq 付定金。Key 用于解密 / 重加密 user.money，沿用 paydown 口径。
 // AddressID 在定金期可填可不填；尾款支付前补地址在前端引导即可。
 type PreorderDepositReq struct {
-	ProductID uint   `uri:"productID" json:"product_id"`
+	ProductID uint   `uri:"id" json:"product_id"`
 	BossID    uint   `json:"boss_id" binding:"required"`
 	AddressID uint   `json:"address_id"`
 	Key       string `json:"key" binding:"required"`
@@ -25,13 +25,13 @@ type PreorderDepositReq struct {
 
 // PreorderFinalReq 付尾款。
 type PreorderFinalReq struct {
-	OrderID uint   `uri:"orderID" json:"order_id"`
+	OrderID uint   `uri:"id" json:"order_id"`
 	Key     string `json:"key" binding:"required"`
 }
 
 // PreorderCancelReq 定金期内取消，全额退款。
 type PreorderCancelReq struct {
-	OrderID uint   `uri:"orderID" json:"order_id"`
+	OrderID uint   `uri:"id" json:"order_id"`
 	Key     string `json:"key" binding:"required"`
 }
 
