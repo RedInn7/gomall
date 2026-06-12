@@ -11,17 +11,17 @@ import (
 //
 // 接口契约：
 //
-//	GET  /preorder/:productID          公开预售信息（不需登录）
-//	POST /preorder/:productID/deposit  付定金（authed）
-//	POST /preorder/:orderID/final      付尾款（authed）
-//	POST /preorder/:orderID/cancel     定金期内取消（authed）
+//	GET  /preorder/:id          公开预售信息（:id=productID）（不需登录）
+//	POST /preorder/:id/deposit  付定金（authed）
+//	POST /preorder/:id/final      付尾款（authed）
+//	POST /preorder/:id/cancel     定金期内取消（authed）
 //
 // 后续接入：在 routes/router.go 的相应位置调用本函数即可，例如：
 //
 //	RegisterPreorderRoutes(v1, authed)
 func RegisterPreorderRoutes(public *gin.RouterGroup, authed *gin.RouterGroup) {
-	public.GET("/preorder/:productID", preorder.PreorderShowHandler())
-	authed.POST("/preorder/:productID/deposit", preorder.PreorderDepositHandler())
-	authed.POST("/preorder/:orderID/final", preorder.PreorderFinalHandler())
-	authed.POST("/preorder/:orderID/cancel", preorder.PreorderCancelHandler())
+	public.GET("/preorder/:id", preorder.PreorderShowHandler())
+	authed.POST("/preorder/:id/deposit", preorder.PreorderDepositHandler())
+	authed.POST("/preorder/:id/final", preorder.PreorderFinalHandler())
+	authed.POST("/preorder/:id/cancel", preorder.PreorderCancelHandler())
 }
