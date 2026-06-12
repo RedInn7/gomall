@@ -2,10 +2,14 @@ package coupon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
@@ -42,7 +46,7 @@ func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*UserCoupon, error) {
 	var uc *UserCoupon
 	err := d.Transaction(func(tx *gorm.DB) error {
 		var batch CouponBatch
-		if err := tx.Clauses().Set("gorm:query_option", "FOR UPDATE").
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ?", batchId).First(&batch).Error; err != nil {
 			return err
 		}
@@ -120,9 +124,16 @@ func (d *CouponDao) ListUserCoupons(userId uint, status int) ([]*UserCoupon, err
 	return out, err
 }
 
+// generateCouponCode 券码 = 时间戳 + 批次 + 用户 + 随机熵。
+// 时间戳只有秒级精度，同一用户同一秒内连续领取必须靠随机段避开 code 唯一索引冲突。
 func generateCouponCode(userId, batchId uint, t time.Time) string {
+	var entropy [4]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		binary.BigEndian.PutUint32(entropy[:], uint32(time.Now().UnixNano()))
+	}
 	return t.Format("20060102150405") + "-" +
-		uintToStr(batchId) + "-" + uintToStr(userId)
+		uintToStr(batchId) + "-" + uintToStr(userId) + "-" +
+		hex.EncodeToString(entropy[:])
 }
 
 func uintToStr(v uint) string {

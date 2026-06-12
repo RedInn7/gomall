@@ -233,12 +233,28 @@ func TestFavoriteDelete_RemovesAndMissingRejected(t *testing.T) {
 		t.Fatalf("FavoriteCreate: %v", err)
 	}
 
-	// 删除走 user_id + product_id 定位
-	if _, err := GetFavoriteSrv().FavoriteDelete(ctx,
-		&FavoriteDeleteReq{Id: fx.Buyer.ID, ProductId: fx.Product.ID}); err != nil {
-		t.Fatalf("FavoriteDelete: %v", err)
+	// 越权删除：用户 B 即使在请求体里塞 A 的 user_id，也删不掉 A 的收藏。
+	// 删除条件取自登录态 uid，B 名下没有该收藏，直接报错且 A 的行保留。
+	intruder := &user.User{UserName: "intruder-" + t.Name(), NickName: "路人"}
+	if err := db.Create(intruder).Error; err != nil {
+		t.Fatalf("create intruder: %v", err)
+	}
+	intruderCtx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: intruder.ID})
+	if _, err := GetFavoriteSrv().FavoriteDelete(intruderCtx,
+		&FavoriteDeleteReq{Id: fx.Buyer.ID, ProductId: fx.Product.ID}); err == nil {
+		t.Fatal("跨用户删除应当报错")
 	}
 	var cnt int64
+	db.Model(&Favorite{}).Where("user_id=?", fx.Buyer.ID).Count(&cnt)
+	if cnt != 1 {
+		t.Fatalf("跨用户删除不应生效，favorite rows = %d, want 1", cnt)
+	}
+
+	// 本人删除：按登录态 uid + product_id 定位，请求体里的 user_id 不被采信
+	if _, err := GetFavoriteSrv().FavoriteDelete(ctx,
+		&FavoriteDeleteReq{ProductId: fx.Product.ID}); err != nil {
+		t.Fatalf("FavoriteDelete: %v", err)
+	}
 	db.Model(&Favorite{}).Where("user_id=?", fx.Buyer.ID).Count(&cnt)
 	if cnt != 0 {
 		t.Fatalf("favorite rows = %d, want 0", cnt)
@@ -246,7 +262,7 @@ func TestFavoriteDelete_RemovesAndMissingRejected(t *testing.T) {
 
 	// 再删一次：记录已不存在，应当报错
 	if _, err := GetFavoriteSrv().FavoriteDelete(ctx,
-		&FavoriteDeleteReq{Id: fx.Buyer.ID, ProductId: fx.Product.ID}); err == nil {
+		&FavoriteDeleteReq{ProductId: fx.Product.ID}); err == nil {
 		t.Fatal("删除不存在的收藏应当报错")
 	}
 }

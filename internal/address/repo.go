@@ -42,7 +42,7 @@ func (d *AddressDao) ListAddressByUid(uid uint) (r []*AddressResp, err error) {
 	err = d.DB.Model(&Address{}).
 		Where("user_id = ?", uid).
 		Order("created_at desc").
-		Select("id, user_id, name, phone, address, UNIX_TIMESTAMP(created_at)").
+		Select("id, user_id, name, phone, address, UNIX_TIMESTAMP(created_at) AS created_at").
 		Find(&r).Error
 
 	return
@@ -58,8 +58,8 @@ func (d *AddressDao) DeleteAddressById(aId, uId uint) (err error) {
 		Delete(&Address{}).Error
 }
 
-func (d *AddressDao) UpdateAddressById(aId uint, address *Address) (err error) {
+func (d *AddressDao) UpdateAddressById(aId, uId uint, address *Address) (err error) {
 	return d.DB.Model(&Address{}).
-		Where("id=?", aId).
+		Where("id = ? AND user_id = ?", aId, uId).
 		Updates(address).Error
 }

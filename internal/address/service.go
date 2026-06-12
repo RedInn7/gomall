@@ -103,7 +103,7 @@ func (s *AddressSrv) AddressUpdate(ctx context.Context, req *AddressServiceReq) 
 		Phone:   req.Phone,
 		Address: req.Address,
 	}
-	err = addressDao.UpdateAddressById(req.Id, address)
+	err = addressDao.UpdateAddressById(req.Id, u.Id, address)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return

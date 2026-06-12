@@ -106,11 +106,16 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 	return
 }
 
-// FavoriteDelete 删除收藏夹
+// FavoriteDelete 删除收藏夹，仅允许操作当前登录用户自己的收藏
 func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *FavoriteDeleteReq) (resp interface{}, err error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
 	favoriteDao := NewFavoritesDao(ctx)
 	var exist bool
-	exist, err = favoriteDao.FavoriteExistOrNot(req.Id, req.ProductId)
+	exist, err = favoriteDao.FavoriteExistOrNot(u.Id, req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return
@@ -118,7 +123,7 @@ func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *FavoriteDeleteReq
 	if !exist {
 		return nil, errors.New("不存在对应收藏夹")
 	}
-	err = favoriteDao.DeleteFavoriteByUserIdAndProductId(req.Id, req.ProductId)
+	err = favoriteDao.DeleteFavoriteByUserIdAndProductId(u.Id, req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return

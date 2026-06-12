@@ -117,8 +117,8 @@ func TestAddress_CreateUpdateDeleteRoundTrip(t *testing.T) {
 }
 
 // TestAddress_ListOrderedByCreatedAtDesc 验证列表按 created_at 倒序，
-// 以及 DTO 的逐字段映射。CreatedAt 字段依赖 SELECT 列别名映射，
-// 当前查询表达式未带 AS 别名，该字段不参与断言（详见缺陷记录）。
+// 以及 DTO 的逐字段映射（含 UNIX_TIMESTAMP(created_at) AS created_at
+// 的别名映射，CreatedAt 应等于落库时间的 Unix 秒）。
 func TestAddress_ListOrderedByCreatedAtDesc(t *testing.T) {
 	initLogForTest()
 	db, cleanup := setupSQLiteForAddress(t)
@@ -160,9 +160,14 @@ func TestAddress_ListOrderedByCreatedAtDesc(t *testing.T) {
 		if items[i].UserID != uid || items[i].ID == 0 || items[i].Address != "测试地址" {
 			t.Fatalf("DTO 映射缺字段: %+v", items[i])
 		}
+		wantTs := base.Add(time.Duration(2-i) * time.Hour).Unix()
+		if items[i].CreatedAt <= 0 {
+			t.Fatalf("位置 %d CreatedAt 应为正的 unix 秒，got %d", i, items[i].CreatedAt)
+		}
+		if items[i].CreatedAt != wantTs {
+			t.Fatalf("位置 %d CreatedAt = %d, want %d", i, items[i].CreatedAt, wantTs)
+		}
 	}
-	t.Logf("CreatedAt 映射观测值（别名缺失时为 0）：%d / %d / %d",
-		items[0].CreatedAt, items[1].CreatedAt, items[2].CreatedAt)
 }
 
 // TestAddress_CrossUserIsolation 验证按 (id, user_id) 双键限定的越权防护：
@@ -199,6 +204,21 @@ func TestAddress_CrossUserIsolation(t *testing.T) {
 	}
 	if lr := resp.(*types.DataListResp); lr.Total != 0 {
 		t.Fatalf("他人列表 total = %d, want 0", lr.Total)
+	}
+
+	// 他人更新不生效：where 条件带 user_id，0 行命中，owner 的数据原样保留
+	if _, err := srv.AddressUpdate(intruderCtx, &AddressServiceReq{
+		Id: row.ID, Name: "黑客", Phone: "13100000000", Address: "篡改地址",
+	}); err != nil {
+		t.Fatalf("跨用户更新不应报错（静默 0 行）: %v", err)
+	}
+	var afterUpdate Address
+	if err := db.First(&afterUpdate, row.ID).Error; err != nil {
+		t.Fatalf("reload address: %v", err)
+	}
+	if afterUpdate.UserID != owner || afterUpdate.Name != "王五" ||
+		afterUpdate.Phone != "13700000003" || afterUpdate.Address != "广州市天河区体育西路 3 号" {
+		t.Fatalf("跨用户更新不应生效: %+v", afterUpdate)
 	}
 
 	// 他人删除不生效：行依旧属于 owner
