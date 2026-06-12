@@ -1,14 +1,14 @@
 package favorite
 
 import (
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/user"
 )
 
 type Favorite struct {
-	gorm.Model
+	dbmodel.Model
 	User      user.User       `gorm:"ForeignKey:UserID"`
 	UserID    uint            `gorm:"not null"`
 	Product   product.Product `gorm:"ForeignKey:ProductID"`

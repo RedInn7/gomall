@@ -1,11 +1,11 @@
 package notice
 
 import (
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
 // Notice 公告模型 存放公告和邮件模板
 type Notice struct {
-	gorm.Model
+	dbmodel.Model
 	Text string `gorm:"type:text"`
 }
