@@ -28,12 +28,26 @@ const OrderTimeKey = "OrderTime"
 var OrderSrvIns *OrderSrv
 var OrderSrvOnce sync.Once
 
-type OrderSrv struct {
+// PromoCalculator 满减引擎在下单链路暴露的能力面。
+// 以接口注入而非直引 *promo.PromoSrv，便于在测试中用替身验证降级与预算耗尽分支。
+type PromoCalculator interface {
+	CalculateBestDiscount(ctx context.Context, items []promo.CartItem) (*promo.PromoApplyResp, error)
+	ApplyDiscountInTx(tx *gorm.DB, orderID, ruleID uint, discountCents int64) error
 }
 
+type OrderSrv struct {
+	promo PromoCalculator
+}
+
+// NewOrderSrv 构造下单服务；promoCalc 为满减计算依赖。
+func NewOrderSrv(promoCalc PromoCalculator) *OrderSrv {
+	return &OrderSrv{promo: promoCalc}
+}
+
+// GetOrderSrv 默认装配：满减依赖指向真实 promo 服务。
 func GetOrderSrv() *OrderSrv {
 	OrderSrvOnce.Do(func() {
-		OrderSrvIns = &OrderSrv{}
+		OrderSrvIns = NewOrderSrv(promo.GetPromoSrv())
 	})
 	return OrderSrvIns
 }
@@ -52,7 +66,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (resp i
 	// 满减计算先于事务发生：纯读路径，DB 慢一点也不影响事务保持时间。
 	// 走 Product DAO 反查 CategoryID —— 老客户端不传类目信息，由服务端兜底。
 	cartItems := buildPromoCartItems(ctx, req.ProductID, unitCents, qty)
-	promoApply, promoErr := promo.GetPromoSrv().CalculateBestDiscount(ctx, cartItems)
+	promoApply, promoErr := s.promo.CalculateBestDiscount(ctx, cartItems)
 	if promoErr != nil {
 		// 失败降级：CalculateBestDiscount 不应阻断下单（SLO 承诺：不影响 happy path）。
 		util.LogrusObj.Warnf("[promo] calculate best discount failed product=%d err=%v, fallback to no-discount",
@@ -99,7 +113,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (resp i
 
 		// 试着扣预算；budget 用尽则降级为无折扣，并改写订单上的满减字段
 		if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
-			applyErr := promo.GetPromoSrv().ApplyDiscountInTx(tx, order.ID, order.PromoRuleID, order.PromoDiscountCents)
+			applyErr := s.promo.ApplyDiscountInTx(tx, order.ID, order.PromoRuleID, order.PromoDiscountCents)
 			if applyErr != nil {
 				if errors.Is(applyErr, promo.ErrPromoBudgetExhausted) {
 					util.LogrusObj.Warnf("[promo] downgrade rule=%d budget exhausted, order=%d falls back to no-discount",
