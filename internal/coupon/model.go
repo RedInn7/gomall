@@ -3,7 +3,7 @@ package coupon
 import (
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
 const (
@@ -17,7 +17,7 @@ const (
 
 // CouponBatch 优惠券批次/活动
 type CouponBatch struct {
-	gorm.Model
+	dbmodel.Model
 	Name      string    `gorm:"size:128;not null"`
 	Type      int       `gorm:"not null;default:1"` // 1 满减 / 2 折扣
 	Threshold int64     `gorm:"not null"`           // 满 X 分可用
@@ -34,7 +34,7 @@ func (CouponBatch) TableName() string { return "coupon_batch" }
 
 // UserCoupon 用户领取的具体优惠券
 type UserCoupon struct {
-	gorm.Model
+	dbmodel.Model
 	UserId      uint      `gorm:"not null;index"`
 	BatchId     uint      `gorm:"not null;index"`
 	Code        string    `gorm:"size:32;uniqueIndex"`

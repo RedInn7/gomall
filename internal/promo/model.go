@@ -3,7 +3,7 @@ package promo
 import (
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
 // 满减 / 阶梯折扣规则。与 CouponBatch 互补：
@@ -30,7 +30,7 @@ const (
 )
 
 type PromoRule struct {
-	gorm.Model
+	dbmodel.Model
 	Name             string    `gorm:"size:128;not null"`        // 业务可读名，会回传给前端 / 客服
 	RuleType         int       `gorm:"not null;default:1"`       // 1 满减 / 2 满折扣
 	Scope            int       `gorm:"not null;default:1;index"` // 1 全场 / 2 类目 / 3 商品

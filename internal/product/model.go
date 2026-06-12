@@ -3,14 +3,14 @@ package product
 import (
 	"strconv"
 
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 
 	"github.com/RedInn7/gomall/repository/cache"
 )
 
 // Product 商品模型
 type Product struct {
-	gorm.Model
+	dbmodel.Model
 	Name          string `gorm:"size:255;index"`
 	CategoryID    uint   `gorm:"not null"`
 	Title         string
