@@ -17,7 +17,7 @@ import (
 // 不校验登录，返回 deposit / final / not_started / forfeited 四态。
 func PreorderShowHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		pid, ok := parseUintParam(ctx, "productID")
+		pid, ok := parseUintParam(ctx, "id")
 		if !ok {
 			return
 		}
@@ -36,7 +36,7 @@ func PreorderShowHandler() gin.HandlerFunc {
 // body: { boss_id, address_id, key }
 func PreorderDepositHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		pid, ok := parseUintParam(ctx, "productID")
+		pid, ok := parseUintParam(ctx, "id")
 		if !ok {
 			return
 		}
@@ -62,7 +62,7 @@ func PreorderDepositHandler() gin.HandlerFunc {
 // body: { key }
 func PreorderFinalHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		oid, ok := parseUintParam(ctx, "orderID")
+		oid, ok := parseUintParam(ctx, "id")
 		if !ok {
 			return
 		}
@@ -88,7 +88,7 @@ func PreorderFinalHandler() gin.HandlerFunc {
 // body: { key }
 func PreorderCancelHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		oid, ok := parseUintParam(ctx, "orderID")
+		oid, ok := parseUintParam(ctx, "id")
 		if !ok {
 			return
 		}
