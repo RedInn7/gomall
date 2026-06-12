@@ -58,7 +58,7 @@
 \bottomrule
 \end{tabular}
 \par\smallskip
-{\centering\srcnote{对照行业漏斗经验值 + gomall README \S 业务承诺；internal/order/service.go:40--102 下单入口}\par}
+{\centering\srcnote{对照行业漏斗经验值 + gomall README \S 业务承诺；internal/order/service.go:55--171 下单入口}\par}
 \end{frame}
 
 \begin{frame}{下单不是一次点击，是一条业务链}
@@ -79,7 +79,7 @@
   \item 这份 deck 盯 \textbf{加购 / 地址 / 下单} 三步；支付走 deck 05 / Web3 走 deck 06。
   \item 三个停留点对应客服三大投诉：购物车数量错 / 地址写错 / 订单号查不到。
 \end{itemize}
-\srcnote{routes/router.go:92--111 三段路由共同支撑这条链}
+\srcnote{internal/order/routes.go:12--19、internal/cart/routes.go:13--16、internal/address/routes.go:13--16 三段路由共同支撑这条链}
 \end{frame}
 
 \begin{frame}{业务边界：下单\textbf{不做}什么}
@@ -93,7 +93,7 @@
 \vspace{2mm}
 \small \textbf{诚实声明}：MVP 阶段聚焦"普通用户买普通商品"的主干，避免业务范围漂移把核心链路稀释。\\
 礼品 / 拼团 / 预售 / 发票 / 海外见 \texttt{docs/architecture/feature-matrix.md} 路线图。
-\srcnote{README.md \S 业务边界（不做什么）；internal/order/service.go:46--55 当前 Order 模型字段}
+\srcnote{README.md \S 业务边界（不做什么）；internal/order/model.go:10--35 当前 Order 模型字段}
 \end{frame}
 
 % ============================================================
@@ -130,7 +130,7 @@ num         & 件数      & "已超过单次购买上限 N 件" \\
 \vspace{2mm}
 \textbf{业务硬约束（gomall 现状）}：\texttt{Address} 只保留 \texttt{name / phone / address} 三字段，\\
 合并省事但订单一旦发起就该\textbf{冻结地址快照}，否则用户改地址簿 $\to$ 历史订单收货地址被同步改 = 客服恶梦。
-\srcnote{internal/address/service.go:34--46 当前最小模型；internal/order/model.go AddressID 引用关系（待加 snapshot 字段）}
+\srcnote{internal/address/model.go:5--11 当前最小模型；internal/order/model.go:15 AddressID 引用关系（待加 snapshot 字段）}
 \end{frame}
 
 % ============================================================
@@ -154,7 +154,7 @@ UUID v4            & 完全随机、无序        & 索引页频繁分裂 \\
   \item 订单号要塞进 \textbf{短信 / 客服系统 / 退款单}，太长用户读不出来（雪花 19 位刚好）。
   \item 索引页要顺序写，UUID 把 B+ 树搅得到处分裂 = 写放大 + 内存抖动。
 \end{itemize}
-\srcnote{pkg/utils/snowflake/snowflake.go:10--25 InitSnowflake}
+\srcnote{pkg/utils/snowflake/snowflake.go:10--17 InitSnowflake}
 \end{frame}
 
 \begin{frame}{雪花订单号的\textbf{业务价值帧}}
@@ -262,7 +262,7 @@ func GenSnowflakeID() int64 {
 \end{tabular}
 \vspace{1mm}
 \keypoint{业务取舍：用 30 min "短期锁仓"换"下单不超卖"的承诺 —— 客户体验 > 商家短期周转。}
-\srcnote{repository/cache/inventory.go:25--26 ErrStockInsufficient；internal/order/service.go:88--92 15min TTL（注：与 30min 业务承诺待对齐）}
+\srcnote{repository/cache/inventory.go:25--26 ErrStockInsufficient；internal/order/service.go:157--161 15min TTL（注：与 30min 业务承诺待对齐）}
 \end{frame}
 
 \begin{frame}{为什么不"下单即真扣"}
@@ -279,7 +279,7 @@ func GenSnowflakeID() int64 {
 \vspace{2mm}
 \small \textbf{业务不变量}：\texttt{available + reserved + sold $\equiv$ 初始水位}，\\
 任何一刻巡检脚本读三个桶相加 = 商品总库存 $\to$ 不平就告警。
-\srcnote{repository/cache/inventory.go:77--125 reserve/commit/release 三脚 Lua}
+\srcnote{repository/cache/inventory.go:32--66 reserve/commit/release 三脚 Lua；:78--125 Go 封装}
 \end{frame}
 
 % ============================================================
@@ -300,17 +300,18 @@ func GenSnowflakeID() int64 {
   \item \textbf{第 2 步}：同一 \texttt{gorm.Transaction} 写订单 + 写 outbox，二选一不行。
   \item \textbf{第 3 步}：投递延迟队列，超时未付款自动取消 $\to$ reserved 退回 available。
 \end{itemize}
-\srcnote{internal/order/service.go:40--102 全函数；internal/order/service.go:64--78 同事务写 order + outbox}
+\srcnote{internal/order/service.go:55--171 全函数；internal/order/service.go:109--147 同事务写 order + 满减落账 + outbox}
 \end{frame}
 
 \begin{frame}[fragile]{OrderCreate 主体三步}
-\begin{lstlisting}[language=Go,firstnumber=46,
-  caption={\srcnote{internal/order/service.go:46--86}}]
+\begin{lstlisting}[language=Go,firstnumber=86,
+  caption={\srcnote{internal/order/service.go:86--155 节选（满减计算/降级见 deck 13）}}]
 order := &Order{
     UserID:    u.Id,
     ProductID: req.ProductID,
     Num:       int(req.Num),
     OrderNum:  uint64(snowflake.GenSnowflakeID()),
+    // 满减落点 PromoRuleID / PromoDiscountCents / FinalCents 略
 }
 
 // 1) Redis 预扣库存（事务外）
@@ -318,11 +319,12 @@ if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
     return nil, err
 }
 
-// 2) 同事务写订单 + 写 outbox
+// 2) 同事务写订单 + 应用满减 + 写 outbox
 err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
     if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
         return e
     }
+    // s.promo.ApplyDiscountInTx(...) 预算耗尽降级为无折扣，略
     return outbox.NewOutboxDaoByDB(tx).Insert(
         "order", "OrderCreated", "order.created", order.ID,
         events.OrderCreated{ OrderID: order.ID, OrderNum: order.OrderNum,
@@ -373,7 +375,7 @@ if err != nil {
 \end{tikzpicture}}
 \par\smallskip
 {\small \textbf{业务侧好处}：API 返回时只承担一次 DB 写代价，用户感知延迟 < 5ms；MQ 发布失败由 publisher 重试，\textbf{不阻塞下单链路} = 不会因为 RMQ 抖一下整个下单挂掉。}
-\srcnote{internal/shared/outbox/repo.go:44--78 FetchBatch + MarkSent + MarkFailed}
+\srcnote{internal/shared/outbox/repo.go:44--79 FetchBatch + MarkSent + MarkFailed}
 \end{frame}
 
 % ============================================================
@@ -491,7 +493,7 @@ order 表 6M 行 / 653 MB 不影响延迟 —— 不查表就不付代价。
   \item \textbf{异步}：MQ 顶住瞬时压力，consumer 平滑落库；代价 = 用户多一次轮询。
   \item \textbf{业务承诺}：P0 接口（下单 / 支付）\textbf{不挂限流}，靠异步削峰扛峰值（README SLO 行）。
 \end{itemize}
-\srcnote{routes/router.go:92--95 两条路同挂 Idempotency；README.md \S 业务承诺 P0 不挂限流}
+\srcnote{internal/order/routes.go:12--14 两条路同挂 Idempotency；README.md \S 业务承诺 P0 不挂限流}
 \end{frame}
 
 \begin{frame}{同步 vs 异步：链路对比}
@@ -514,12 +516,12 @@ order 表 6M 行 / 653 MB 不影响延迟 —— 不查表就不付代价。
   \draw[arrow] (c2.south) to[out=-30,in=-150] node[below,font=\tiny]{poll status} (q2.south);
   \node[font=\tiny,above=1mm of s2] {/orders/enqueue + /orders/status};
 \end{tikzpicture}}
-\srcnote{internal/order/async.go:119--172 enqueue；:175--188 status}
+\srcnote{internal/order/async.go:118--171 enqueue；:174--187 status}
 \end{frame}
 
 \begin{frame}[fragile]{OrderEnqueue 核心 12 行}
-\begin{lstlisting}[language=Go,firstnumber=119,
-  caption={\srcnote{internal/order/async.go:119--150}}]
+\begin{lstlisting}[language=Go,firstnumber=118,
+  caption={\srcnote{internal/order/async.go:118--171 节选}}]
 func (s *OrderSrv) OrderEnqueue(ctx context.Context,
     req *OrderCreateReq) (resp interface{}, err error) {
 
@@ -550,7 +552,7 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context,
   \item \textbf{ticket $\ne$ 订单号}：consumer 落库后回写 \texttt{OrderTicketStatus.OrderNum}，前端读 status 时一并拿到。
   \item \textbf{失败也写 ticket}：投递失败回写 \texttt{status=failed, reason=publish failed}，\textbf{前端不用纠结超时还是真失败} —— 一定能给用户一个明确答复。
 \end{itemize}
-\srcnote{internal/order/async.go:23--52 常量与状态结构；:164--168 失败写 failed}
+\srcnote{internal/order/async.go:22--51 常量与状态结构；:163--166 失败写 failed}
 \end{frame}
 
 \begin{frame}{ticket 状态机}
@@ -569,7 +571,7 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context,
   \item \textbf{ok}：DB 行已写，可走支付 —— 前端跳转支付页。
   \item \textbf{failed}：MQ 发布失败 / consumer 自检不通过 —— 前端弹"系统繁忙，请稍后重试"。
 \end{itemize}
-\srcnote{internal/order/async.go:47--52 OrderTicketStatus 三状态}
+\srcnote{internal/order/async.go:25--27 三状态常量；:46--51 OrderTicketStatus 结构}
 \end{frame}
 
 \begin{frame}{对账：reserve / commit / release 不变量}
@@ -641,7 +643,7 @@ publisher 重试超限 & outbox 标 dead   & 客服联系商家手动补发货 \
 \vspace{3mm}
 \small \textbf{业务关键}：每一种失败都有\textbf{明确的归属者和兜底话术}，\\
 没有"既不属于 A 也不属于 B"的灰区 —— 客服永远能给用户一个明确答复。
-\srcnote{internal/shared/outbox/repo.go:62--78 MarkFailed 退避策略；internal/order/service.go:79--85 释放路径}
+\srcnote{internal/shared/outbox/repo.go:62--79 MarkFailed 退避策略；internal/order/service.go:148--155 释放路径}
 \end{frame}
 
 \begin{frame}{失败回滚状态机}
@@ -677,7 +679,7 @@ publisher 重试超限 & outbox 标 dead   & 客服联系商家手动补发货 \
 \vspace{2mm}
 \small \textbf{下单服务能给的钩子}：把 \texttt{ip / device\_id / address\_id / pay\_account} 作为事件字段写到 outbox，\\
 异步推风控系统打分。下单链路本身\textbf{不做拦截判断}，否则尾延迟会被风控规则拖垮 = 违反 p99 < 500ms 业务承诺。
-\srcnote{service/events/order\_created.go OrderCreated 已有 UserID/ProductID，扩展加风控字段}
+\srcnote{service/events/events.go:15--21 OrderCreated 已有 UserID/ProductID，扩展加风控字段}
 \end{frame}
 
 % ============================================================
@@ -767,16 +769,16 @@ publisher 重试超限 & outbox 标 dead   & 客服联系商家手动补发货 \
 
 \begin{frame}{代码位置一览}
 \begin{description}\setlength{\itemsep}{0.2mm}
-  \item[加购 / 地址]\srcnote{internal/cart/service.go:29--103；internal/address/service.go:27--127}
+  \item[加购 / 地址]\srcnote{internal/cart/service.go:29--103；internal/address/service.go:25--124}
   \item[雪花生成]\srcnote{pkg/utils/snowflake/snowflake.go:10--25}
-  \item[同步下单主体]\srcnote{internal/order/service.go:40--102 OrderCreate}
-  \item[库存预扣/提交/释放]\srcnote{repository/cache/inventory.go:77--125 三脚 Lua}
-  \item[outbox 同事务写入 + 扫表]\srcnote{internal/shared/outbox/repo.go:26--78 Insert/FetchBatch/MarkSent/MarkFailed}
-  \item[异步下单 + ticket 状态]\srcnote{internal/order/async.go:23--52 状态常量；:119--188 enqueue+status}
+  \item[同步下单主体]\srcnote{internal/order/service.go:55--171 OrderCreate}
+  \item[库存预扣/提交/释放]\srcnote{repository/cache/inventory.go:32--66 三脚 Lua；:78--125 Go 封装}
+  \item[outbox 同事务写入 + 扫表]\srcnote{internal/shared/outbox/repo.go:26--79 Insert/FetchBatch/MarkSent/MarkFailed}
+  \item[异步下单 + ticket 状态]\srcnote{internal/order/async.go:22--51 状态常量；:118--187 enqueue+status}
   \item[幂等中间件三态]\srcnote{middleware/idempotency.go:35--112}
   \item[业务码定义]\srcnote{pkg/e/code.go:23--58 20001/20008/60002/70001/70002}
-  \item[OrderCreated 事件 / publisher]\srcnote{service/events/order\_created.go；internal/shared/outbox/publisher.go}
-  \item[路由]\srcnote{routes/router.go:92--111 orders + carts + addresses}
+  \item[OrderCreated 事件 / publisher]\srcnote{service/events/events.go:15--21；internal/shared/outbox/publisher.go}
+  \item[路由]\srcnote{internal/order/routes.go:10--26；internal/cart/routes.go:8--17；internal/address/routes.go:8--17}
 \end{description}
 \vspace{1mm}
 \keypoint{配套 deck：07 库存 / 08 营销 / 10 流量治理 / 11 一致性。}
