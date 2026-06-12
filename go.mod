@@ -8,12 +8,12 @@ require (
 	github.com/Shopify/sarama v1.19.0
 	github.com/apache/skywalking-go v0.0.0-20230511031014-a2c5f8e67468
 	github.com/bwmarrin/snowflake v0.3.0
-	github.com/dgrijalva/jwt-go v3.2.0+incompatible
 	github.com/elastic/go-elasticsearch v0.0.0
 	github.com/ethereum/go-ethereum v1.17.3
 	github.com/gin-contrib/sessions v0.0.5
 	github.com/gin-gonic/gin v1.9.0
 	github.com/go-playground/validator/v10 v10.12.0
+	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/jinzhu/gorm v1.9.16
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
 	github.com/opentracing/opentracing-go v1.2.0
