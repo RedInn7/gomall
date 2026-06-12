@@ -1,10 +1,10 @@
 package cart
 
-import "github.com/jinzhu/gorm"
+import "github.com/RedInn7/gomall/internal/shared/dbmodel"
 
 // Cart 购物车模型
 type Cart struct {
-	gorm.Model
+	dbmodel.Model
 	UserID    uint
 	ProductID uint `gorm:"not null"`
 	BossID    uint

@@ -3,12 +3,12 @@ package order
 import (
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
 // Order 订单信息
 type Order struct {
-	gorm.Model
+	dbmodel.Model
 	UserID    uint   `gorm:"not null"`
 	ProductID uint   `gorm:"not null"`
 	BossID    uint   `gorm:"not null"`

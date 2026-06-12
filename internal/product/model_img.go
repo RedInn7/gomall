@@ -1,9 +1,9 @@
 package product
 
-import "github.com/jinzhu/gorm"
+import "github.com/RedInn7/gomall/internal/shared/dbmodel"
 
 type ProductImg struct {
-	gorm.Model
+	dbmodel.Model
 	ProductID uint `gorm:"not null"`
 	ImgPath   string
 }

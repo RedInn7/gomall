@@ -3,7 +3,7 @@ package redpacket
 import (
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
 // 红包状态
@@ -19,7 +19,7 @@ const (
 //	权威剩余份数在 Redis LIST 里 (RPUSH 预拆 + LPOP 抢)
 //	DB.Remaining 仅为最终一致快照，用于历史查询/对账
 type RedPacket struct {
-	gorm.Model
+	dbmodel.Model
 	UserID    uint      `gorm:"not null;index"`               // 发包人
 	Total     int64     `gorm:"not null"`                     // 总额，单位：分
 	Count     int       `gorm:"not null"`                     // 红包总份数
@@ -35,7 +35,7 @@ func (RedPacket) TableName() string { return "red_packet" }
 //
 //	uniq(red_packet_id, user_id) 兜底 DB 层面的"同用户不可重复领"
 type RedPacketClaim struct {
-	gorm.Model
+	dbmodel.Model
 	RedPacketID uint  `gorm:"not null;uniqueIndex:uk_rp_user,priority:1"`
 	UserID      uint  `gorm:"not null;uniqueIndex:uk_rp_user,priority:2;index"`
 	Amount      int64 `gorm:"not null"` // 抢到金额，单位：分

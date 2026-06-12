@@ -14,7 +14,6 @@ require (
 	github.com/gin-gonic/gin v1.9.0
 	github.com/go-playground/validator/v10 v10.12.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
-	github.com/jinzhu/gorm v1.9.16
 	github.com/mattn/go-sqlite3 v2.0.3+incompatible
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
 	github.com/opentracing/opentracing-go v1.2.0
@@ -23,7 +22,6 @@ require (
 	github.com/redis/go-redis/v9 v9.0.4
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/sirupsen/logrus v1.9.3
-	github.com/spf13/cast v1.5.0
 	github.com/spf13/viper v1.15.0
 	github.com/uber/jaeger-client-go v2.30.0+incompatible
 	go.uber.org/zap v1.24.0
@@ -106,6 +104,7 @@ require (
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
 	github.com/spf13/afero v1.10.0 // indirect
+	github.com/spf13/cast v1.5.0 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect

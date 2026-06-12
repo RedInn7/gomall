@@ -1,8 +1,8 @@
 package category
 
-import "github.com/jinzhu/gorm"
+import "github.com/RedInn7/gomall/internal/shared/dbmodel"
 
 type Category struct {
-	gorm.Model
+	dbmodel.Model
 	CategoryName string
 }
