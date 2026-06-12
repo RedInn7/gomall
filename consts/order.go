@@ -15,29 +15,6 @@ const (
 	OrderWaitGroup          // 8 拼团中（成员订单凑齐 N 人前的过渡态）
 )
 
-// 旧别名，标 Deprecated 保留兼容；新代码请使用 OrderXxx 命名。
-// 这里同时把旧 OrderType* 系列合并进来：OrderTypeShipping 旧值 3 与 Cancelled 撞值
-// 但代码里没有任何引用，把它对齐到 OrderWaitReceive(4)；OrderTypeReceipt 同理。
-const (
-	// Deprecated: use OrderWaitPay.
-	UnPaid = OrderWaitPay
-	// Deprecated: use OrderWaitShip.
-	Paid = OrderWaitShip
-	// Deprecated: use OrderClosed.
-	Cancelled = OrderClosed
-	// Deprecated: use OrderRefunded.
-	Refunded = OrderRefunded
-
-	// Deprecated: use OrderWaitPay.
-	OrderTypeUnPaid = OrderWaitPay
-	// Deprecated: use OrderWaitShip.
-	OrderTypePendingShipping = OrderWaitShip
-	// Deprecated: use OrderWaitReceive.
-	OrderTypeShipping = OrderWaitReceive
-	// Deprecated: use OrderCompleted.
-	OrderTypeReceipt = OrderCompleted
-)
-
 // OrderStateMap 业务侧使用的中文显示名，主要供日志 / 后台展示 / 错误信息使用。
 var OrderStateMap = map[uint]string{
 	OrderWaitPay:     "待付款",
@@ -48,12 +25,4 @@ var OrderStateMap = map[uint]string{
 	OrderRefunding:   "退款中",
 	OrderRefunded:    "已退款",
 	OrderWaitGroup:   "拼团中",
-}
-
-// OrderTypeMap 旧前端字典保留兼容。
-var OrderTypeMap = map[int]string{
-	int(OrderTypeUnPaid):          "未支付",
-	int(OrderTypePendingShipping): "已支付，待发货",
-	int(OrderTypeShipping):        "已发货，待收货",
-	int(OrderTypeReceipt):         "已完成",
 }
