@@ -22,11 +22,11 @@ func TestCron_NewExpressions_ParseOK(t *testing.T) {
 	)
 	// 与 InitCron 内 c.AddFunc 传的字符串保持一致；任何一条改动 cron.go 都要同步这里。
 	exprs := []string{
-		"* */5 * * * *",   // OrderTimeoutCheck（已知遗留 60×/5min bug，仅校验 parse 通过）
-		"0 */5 * * * *",   // RedPacketExpire 每 5min 整
-		"0 0 */6 * * *",   // AutoConfirmReceive 每 6h
-		"@every 5m",       // GroupbuyExpire 新加
-		"@every 1h",       // PreorderForfeit 新加
+		"* */5 * * * *", // OrderTimeoutCheck（已知遗留 60×/5min bug，仅校验 parse 通过）
+		"0 */5 * * * *", // RedPacketExpire 每 5min 整
+		"0 0 */6 * * *", // AutoConfirmReceive 每 6h
+		"@every 5m",     // GroupbuyExpire 新加
+		"@every 1h",     // PreorderForfeit 新加
 	}
 	for _, expr := range exprs {
 		if _, err := p.Parse(expr); err != nil {

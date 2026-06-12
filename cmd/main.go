@@ -41,6 +41,7 @@ func loading() {
 	tryInitRabbitMQ()
 	initialize.InitOutboxPublisher(context.Background())
 	initialize.InitOrderAsyncConsumer(context.Background())
+	initialize.InitPromoReleaseConsumer(context.Background())
 	tryInitES(context.Background())
 	tryInitWeb3Listener(context.Background())
 	tryInitMilvus(context.Background())

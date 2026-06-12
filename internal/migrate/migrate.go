@@ -37,7 +37,7 @@ func Run() error {
 			&skill.SkillProduct2MQ{},
 			&coupon.CouponBatch{}, &coupon.UserCoupon{},
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
-			&promo.PromoRule{},
+			&promo.PromoRule{}, &promo.PromoRelease{},
 			&groupbuy.GroupbuyGroup{}, &groupbuy.GroupbuyMember{},
 			&preorder.ProductPreorder{},
 		)
