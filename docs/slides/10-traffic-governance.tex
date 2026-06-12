@@ -25,7 +25,7 @@
   \item 算账：单平台 0 点 10 亿 GMV 预算 $\times$ 38\% = \textbf{3.8 亿损失}，比限流误伤几百用户严重几个数量级。
   \item 结论：流量治理不是"挡攻击"，是\textbf{用业务可接受的代价换 GMV 不雪崩}。
 \end{itemize}
-\srcnote{stressTest/REPORT.md \S 1 基线 64k RPS；internal/order/async.go:1--188 异步削峰方案}
+\srcnote{stressTest/REPORT.md \S 1 基线 64k RPS；internal/order/async.go:1--187 异步削峰方案}
 \end{frame}
 
 \begin{frame}{5 个角色，5 种"流量治理是什么"}
@@ -56,9 +56,9 @@ SRE     & 上游 429 / 下游慢     & SLO 是否还在预算内 \\
   \end{itemize}
   \item P0 路径靠\textbf{异步削峰 + 缓存 + 库存预扣}扛峰值，限流只挂全局兜底（IP 100 RPS）。
   \item P2 营销路径反过来：宁可误杀真人、不能让黑产薅光（\texttt{3/s/user} 激进阈值）。
-  \item 这两套取舍写在同一份 router.go 里，是流量治理"按业务等级分挂载"的核心。
+  \item 这两套取舍分别声明在各领域的 routes.go 里（router.go 只做组合根），是流量治理"按业务等级分挂载"的核心。
 \end{itemize}
-\srcnote{README.md SLO 表；routes/router.go:22, 79--84, 94, 114--121, 136--142}
+\srcnote{README.md SLO 表；routes/router.go:41 全局令牌桶；internal/payment/routes.go:14--21；internal/skill/routes.go:17--24}
 \end{frame}
 
 \begin{frame}{gomall 五层闸门的业务定位}
@@ -79,7 +79,7 @@ SRE     & 上游 429 / 下游慢     & SLO 是否还在预算内 \\
 \end{tikzpicture}
 \vspace{2mm}
 \small 五层不是流水线串联，是\textbf{按接口按业务分级挑选挂载}：每层挡一个具体的角色痛点。
-\srcnote{routes/router.go:22, 39--45, 79--84, 94, 114--121, 136--142 全部挂载点}
+\srcnote{routes/router.go:41 全局令牌桶；其余挂载点见 internal/\{product,redpacket,skill,payment,order\}/routes.go}
 \end{frame}
 
 \begin{frame}{五层闸门 vs 五个角色：哪层解决谁的痛}
@@ -115,7 +115,7 @@ P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
 \vspace{2mm}
 \small \textbf{P0 宁可下游慢、不能上游 429}；\textbf{P2 宁可误杀、不能让黑产薅光}。\\
 两类接口用同一套阈值就两头不讨好：P0 损 GMV、P2 黑产薅干。
-\srcnote{routes/router.go:22, 39--45, 79--84, 94, 114--121, 136--142}
+\srcnote{routes/router.go:41 全局令牌桶；internal/product/routes.go:15--16；internal/redpacket/routes.go:20--25；internal/payment/routes.go:14--21；internal/skill/routes.go:17--24}
 \end{frame}
 
 % ============================================================
@@ -134,7 +134,7 @@ P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
   \end{itemize}
   \item 这层是\textbf{兜底闸门}，业务侧精细限流挂掉时至少不会被压死。
 \end{itemize}
-\srcnote{routes/router.go:22 TokenBucket(rate.Limit(100), 200)；middleware/ratelimit.go:22--49}
+\srcnote{routes/router.go:41 TokenBucket(rate.Limit(100), 200)；middleware/ratelimit.go:23--50}
 \end{frame}
 
 \begin{frame}{为什么 100 RPS / 200 burst：基线 64k 反推}
@@ -149,7 +149,7 @@ P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
   \end{itemize}
   \item 商家视角：阈值定太松爬虫拿数据、定太死客户投诉；100/200 是\textbf{用 64k 基线 / 真实页面行为}双向算出的折中。
 \end{itemize}
-\srcnote{routes/router.go:22；stressTest/REPORT.md \S 1 单机 64{,}254 RPS}
+\srcnote{routes/router.go:41；stressTest/REPORT.md \S 1 单机 64{,}254 RPS}
 \end{frame}
 
 \begin{frame}{TokenBucket 算法：桶 + 令牌生成 + 漏出}
@@ -169,12 +169,12 @@ P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
   \item burst 决定能否吸收\textbf{瞬时尖刺}（首屏并发 / 用户狂点）。
   \item 业务含义：\textbf{允许尖刺 / 拒绝高水位}—— 真用户偶尔狂点不痛、爬虫稳态 5 QPS 触不到这层，但配合 IP 黑名单可以拦。
 \end{itemize}
-\srcnote{middleware/ratelimit.go:22--49 golang.org/x/time/rate 实现}
+\srcnote{middleware/ratelimit.go:23--50 golang.org/x/time/rate 实现}
 \end{frame}
 
 \begin{frame}[fragile]{TokenBucket 中间件实现 (逐行)}
-\begin{lstlisting}[language=Go,firstnumber=22,basicstyle=\ttfamily\tiny,
-  caption={\srcnote{middleware/ratelimit.go:22--49}}]
+\begin{lstlisting}[language=Go,firstnumber=23,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{middleware/ratelimit.go:23--50}}]
 func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
     var mu sync.Mutex
     limiters := make(map[string]*rate.Limiter)
@@ -214,7 +214,7 @@ func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
   \end{itemize}
   \item SlidingWindow \texttt{3/s/user} 把脚本打回客户端，\textbf{反黑产 ROI 立等可现}。
 \end{itemize}
-\srcnote{routes/router.go:79--84 红包；:136--142 秒杀；internal/skill/service.go 秒杀逻辑}
+\srcnote{internal/redpacket/routes.go:20--25 红包；internal/skill/routes.go:17--24 秒杀；internal/skill/service.go 秒杀逻辑}
 \end{frame}
 
 \begin{frame}{阈值 3/s/user：用户 vs 脚本的精确分界}
@@ -232,11 +232,11 @@ func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
   \end{itemize}
   \item 必须\textbf{按用户 ID}限，必须\textbf{分布式精确}（多实例下 Redis 共享状态）。
 \end{itemize}
-\srcnote{routes/router.go:136--142 Scope:seckill Limit:3 Window:1s ByUser:true}
+\srcnote{internal/skill/routes.go:17--24 Scope:seckill Limit:3 Window:1s ByUser:true}
 \end{frame}
 
 \begin{frame}{压测实测：3/s/user 阈值 2.2\% 误差}
-\textbf{场景}：30 VU $\times$ 15s 打 \texttt{/skill\_product/skill}，共用同一 token（模拟同一用户脚本）。
+\textbf{场景}：30 VU $\times$ 15s 打 \texttt{/skill\_product/skill}，共用同一 token（复现同一用户脚本的请求形态）。
 
 \vspace{2mm}
 \begin{tabular}{@{}lrr@{}}
@@ -274,7 +274,7 @@ func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
   \item 滑动窗口 = 每次请求先\textbf{踢掉 window 之外的旧记录}，再 ZCARD 数当前窗口内的请求数；
   \item 业务正确性：没有"窗口边界双倍突刺"，反黑产精度高。
 \end{itemize}
-\srcnote{repository/cache/ratelimit.go:18--34 Lua 脚本; middleware/ratelimit.go:69--104 调用方}
+\srcnote{repository/cache/ratelimit.go:18--34 Lua 脚本; middleware/ratelimit.go:70--106 调用方}
 \end{frame}
 
 \begin{frame}[fragile]{SlidingWindow Lua 脚本 (逐行)}
@@ -294,7 +294,7 @@ return {1, count + 1}
 
 \begin{frame}{红包接口：同一套机制再用一次}
 \begin{itemize}
-  \item \texttt{/redpacket/claim} 也是 \textbf{Limit:3 Window:1s ByUser:true}（router.go:79--84）。
+  \item \texttt{/redpacket/claim} 也是 \textbf{Limit:3 Window:1s ByUser:true}（internal/redpacket/routes.go:20--25）。
   \item 与秒杀不同的是：红包额外挂\textbf{幂等}（避免一次抢包重复扣余额）。
   \item 业务模式归纳：
   \begin{itemize}
@@ -304,7 +304,7 @@ return {1, count + 1}
   \end{itemize}
   \item 运营视角：双 11 / 春节 / 618 上新活动，复用现有中间件 = \textbf{零新代码、当天上线}。
 \end{itemize}
-\srcnote{routes/router.go:79--84 红包抢包；:136--142 秒杀；:92, 94, 114, 120 幂等链}
+\srcnote{internal/redpacket/routes.go:20--25 红包抢包；internal/skill/routes.go:17--24 秒杀；幂等链 internal/order/routes.go:12, 14 与 internal/payment/routes.go:20, 26}
 \end{frame}
 
 % ============================================================
@@ -324,14 +324,14 @@ return {1, count + 1}
   \item CircuitBreaker 的业务含义：\textbf{我代下游回答你不行，免得你等 30 秒还白等}。
   \item P0 SLO 99.95\% 的预算 4h22min/年，雪崩一次烧完。
 \end{itemize}
-\srcnote{routes/router.go:114--119 paydown 接 CB；middleware/circuitbreaker.go:44--136}
+\srcnote{internal/payment/routes.go:14--21 paydown 接 CB；middleware/circuitbreaker.go:44--136}
 \end{frame}
 
 \begin{frame}{熔断保护的不是自己，是下游 + 自己 + 用户}
 \begin{itemize}
   \item gomall \texttt{/paydown} 的下游 = 第三方支付（Stripe / 微信 / 支付宝）。
   \item 失败模式：\textbf{慢}（不是 500）。50x 可以快速判错，慢调用最毒。
-  \item CircuitBreaker 三态阈值 \textbf{5 失败 / 10s 等待 / 3 探测}（router.go:114--119）的业务含义：
+  \item CircuitBreaker 三态阈值 \textbf{5 失败 / 10s 等待 / 3 探测}（internal/payment/routes.go:15--19）的业务含义：
   \begin{itemize}
     \item \textbf{5} = 容忍偶发抖动不一抖就跳 $\to$ 不误伤健康下游；
     \item \textbf{10s} = 给下游一次完整告警 + 自愈周期 $\to$ 配合下游 SRE 处理；
@@ -339,7 +339,7 @@ return {1, count + 1}
   \end{itemize}
   \item Open 期间订单怎么办：落 outbox 等回路（详见 deck 11 Outbox），\textbf{不丢单}、不写脏数据。
 \end{itemize}
-\srcnote{routes/router.go:114--119；middleware/circuitbreaker.go 三态机；deck 11 Outbox 配套}
+\srcnote{internal/payment/routes.go:14--21；middleware/circuitbreaker.go 三态机；deck 11 Outbox 配套}
 \end{frame}
 
 \begin{frame}{CircuitBreaker 三态机}
@@ -428,7 +428,7 @@ func (cb *circuitBreaker) report(failed bool) {
   \item 客户端拿 70002 指数退避（1s/2s/4s）；重试必须带原 Idempotency-Key。
   \item paydown 同时挂 CB + Idempotency 不是巧合：缺一边 $\to$ 重复扣款；缺另一边 $\to$ 雪崩。
 \end{itemize}
-\srcnote{routes/router.go:114--121；middleware/circuitbreaker.go:57--65；pkg/e/code.go:58}
+\srcnote{internal/payment/routes.go:14--21；middleware/circuitbreaker.go:57--65；pkg/e/code.go:58}
 \end{frame}
 
 % ============================================================
@@ -449,7 +449,7 @@ func (cb *circuitBreaker) report(failed bool) {
   \item 单平台 0 点 10 亿 GMV $\times$ 38\% = \textbf{3.8 亿损失}—— 这是异步削峰的业务 ROI。
   \item gomall 方案：\textbf{把 DB 落库从同步链路拆出来}，前端拿 ticket 轮询。
 \end{itemize}
-\srcnote{internal/order/async.go:1--188；internal/order/consumer.go；repository/rabbitmq/order\_async.go}
+\srcnote{internal/order/async.go:1--187；internal/order/consumer.go；repository/rabbitmq/order\_async.go}
 \end{frame}
 
 \begin{frame}{用户体验业务量化：从"5 秒转圈"到"$<$ 10ms 拿 ticket"}
@@ -493,8 +493,8 @@ DB 落库 & 同步等 & MQ 慢慢落 \\
 \end{frame}
 
 \begin{frame}[fragile]{OrderEnqueue：核心 12 行}
-\begin{lstlisting}[language=Go,firstnumber=119,basicstyle=\ttfamily\tiny,
-  caption={\srcnote{internal/order/async.go:119--172}}]
+\begin{lstlisting}[language=Go,firstnumber=118,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{internal/order/async.go:118--171}}]
 func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
     u, _ := ctl.GetUserInfo(ctx)
     if err := cache.ReserveStock(ctx, req.ProductID, req.Num); err != nil {
@@ -531,7 +531,7 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
   \end{itemize}
   \item gomall 实现：\texttt{HTTPCache(maxAge)} 中间件统一发 ETag + Cache-Control。
 \end{itemize}
-\srcnote{middleware/httpcache.go:47--100 HTTPCache; routes/router.go:39--45 挂载点}
+\srcnote{middleware/httpcache.go:47--100 HTTPCache; internal/product/routes.go:15--16 等挂载点}
 \end{frame}
 
 \begin{frame}{HTTP cache 的三种命中}
@@ -551,7 +551,7 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
   \item \textbf{协商缓存}（ETag + If-None-Match）：到 CDN，命中 304 无 body $\to$ 省带宽；
   \item \textbf{回源}：CDN 不命中，回 gomall；ETag 用 SHA-256 前 16 字节算。
 \end{itemize}
-\srcnote{middleware/httpcache.go:78--98 ETag 协商；routes/router.go:39 product/list max-age=30}
+\srcnote{middleware/httpcache.go:78--98 ETag 协商；internal/product/routes.go:15 product/list max-age=30}
 \end{frame}
 
 \begin{frame}{各接口的 max-age：运营改价的可接受延迟}
@@ -568,7 +568,7 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
 \vspace{2mm}\\
 \small \textbf{max-age 的业务取舍}：太长 $\to$ "改价 / 下架"延迟生效（运营投诉）；太短 $\to$ 卸不了流量（SRE 投诉）。
 300s = 运营改完最多 5min 生效，可接受；30s = 库存接近灵敏阈值的折中（敏感链路保护用户买不到错的）。
-\srcnote{routes/router.go:39--45 各路由的 maxAge 参数}
+\srcnote{internal/product/routes.go:15--16、internal/category/routes.go:13、internal/carousel/routes.go:13 各路由的 maxAge 参数}
 \end{frame}
 
 % ============================================================
@@ -612,7 +612,7 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
   \end{itemize}
   \item 客服\textbf{不需要转 SRE}：70001 是设计内行为。
 \end{itemize}
-\srcnote{routes/router.go:79--84, 136--142；pkg/e/msg.go:51}
+\srcnote{internal/redpacket/routes.go:20--25；internal/skill/routes.go:17--24；pkg/e/msg.go:51}
 \end{frame}
 
 \begin{frame}{70002 客诉：客服 + SRE 双线联动}
@@ -631,7 +631,7 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
   \end{itemize}
   \item 关键：\textbf{70002 = 设计内的"已知不可用"} $\neq$ "系统挂了"。客服话术要让用户感到\textbf{平台主动控制}，不是\textbf{失控}。
 \end{itemize}
-\srcnote{routes/router.go:114--121；middleware/circuitbreaker.go:57--65}
+\srcnote{internal/payment/routes.go:14--21；middleware/circuitbreaker.go:57--65}
 \end{frame}
 
 % ============================================================
@@ -736,7 +736,7 @@ SlidingWindow 精度 & 误差 $\le$ 5\%      & 实测 \textbf{2.2\%} \\
   \item gomall 自己负责 L2 + L3，挡住\textbf{绝大部分业务异常流量}。
   \item L1 / L4 通常由云厂商和独立风控团队提供，不自己造。
 \end{itemize}
-\srcnote{routes/router.go:22 (L2); :136--142 (L3)}
+\srcnote{routes/router.go:41 (L2); internal/skill/routes.go:17--24 (L3)}
 \end{frame}
 
 \begin{frame}{服务调服务调服务：三层熔断的级联防护}
@@ -761,7 +761,7 @@ SlidingWindow 精度 & 误差 $\le$ 5\%      & 实测 \textbf{2.2\%} \\
   \item CB-B 守"支付聚合服务"整体：三家全挂时止血。
   \item CB-A 守"订单服务"整体：极端场景退化只读，让用户至少能看到订单列表。
 \end{itemize}
-\srcnote{middleware/circuitbreaker.go:44--136 单实例 CB; routes/router.go:114--119 仅 CB-A 接入}
+\srcnote{middleware/circuitbreaker.go:44--136 单实例 CB; internal/payment/routes.go:14--21 仅 CB-A 接入}
 \end{frame}
 
 \begin{frame}{级联防护的两个隐藏陷阱}
@@ -807,7 +807,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 \end{tabular}\par
 \vspace{2mm}
 {\small gomall 选\textbf{滑动窗口 ZSet}（sliding-log 变种）跑秒杀，因为业务上要\textbf{精确反黑产}；选\textbf{令牌桶}跑全局，因为允许首屏突发。}
-\srcnote{middleware/ratelimit.go:22--49 token-bucket; repository/cache/ratelimit.go:18--34 sliding-log}
+\srcnote{middleware/ratelimit.go:23--50 token-bucket; repository/cache/ratelimit.go:18--34 sliding-log}
 \end{frame}
 
 \begin{frame}{熔断打开后：兜底数据让"不可用"变"降级可用"}
@@ -864,7 +864,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 
 \vspace{2mm}
 \textbf{Q2}：阈值 3/s/user 是怎么定的？\\
-\hspace{4mm}\small A：① 真人最快点击 300--500ms / 次 $\to$ 1s 最多 2--3 次，留 50\% 余量定 3；② 第 4 次开始 70001 截断脚本；③ 必须按 userID 不是 IP（NAT 出口共享 IP），多实例下用 Redis 共享状态。代码 \texttt{routes/router.go:136--142}。
+\hspace{4mm}\small A：① 真人最快点击 300--500ms / 次 $\to$ 1s 最多 2--3 次，留 50\% 余量定 3；② 第 4 次开始 70001 截断脚本；③ 必须按 userID 不是 IP（NAT 出口共享 IP），多实例下用 Redis 共享状态。代码 \texttt{internal/skill/routes.go:17--24}。
 
 \vspace{2mm}
 \textbf{Q3}：CircuitBreaker 5/10s/3 三个数字有什么讲究？\\
@@ -873,7 +873,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 
 \begin{frame}{面试 Q\&A (中)}
 \textbf{Q4}：异步下单会不会丢单？怎么向运营解释 SLO？\\
-\hspace{4mm}\small A：不会。库存先 ReserveStock（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。代码 \texttt{internal/order/async.go:119--172}。运营 SLO：99.95\% 可用 = 年宕 4h22min，异步路径 p95 入队 $<$ 10ms、轮询 $<$ 3s 拿结果。
+\hspace{4mm}\small A：不会。库存先 ReserveStock（Redis Lua 原子），任一失败都 ReleaseReservation 回滚；ticket TTL=1h 兜底；MQ 用 RabbitMQ 持久化 + 手动 ack。代码 \texttt{internal/order/async.go:118--171}。运营 SLO：99.95\% 可用 = 年宕 4h22min，异步路径 p95 入队 $<$ 10ms、轮询 $<$ 3s 拿结果。
 
 \vspace{2mm}
 \textbf{Q5}：为什么熔断返回 200 不返回 503？客服怎么用？\\
@@ -900,12 +900,12 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 \begin{frame}{代码位置一览}
 \footnotesize
 \begin{description}
-  \item[router 挂载点] \srcnote{routes/router.go:22, 39--45, 79--84, 94, 114--121, 136--142}
-  \item[TokenBucket] \srcnote{middleware/ratelimit.go:22--49}
-  \item[SlidingWindow] \srcnote{middleware/ratelimit.go:59--106 + repository/cache/ratelimit.go:18--34}
+  \item[router 挂载点] \srcnote{routes/router.go:41 全局令牌桶；internal/product/routes.go:15--16；internal/redpacket/routes.go:20--25；internal/payment/routes.go:14--21；internal/skill/routes.go:17--24}
+  \item[TokenBucket] \srcnote{middleware/ratelimit.go:23--50}
+  \item[SlidingWindow] \srcnote{middleware/ratelimit.go:60--107 + repository/cache/ratelimit.go:18--34}
   \item[CircuitBreaker] \srcnote{middleware/circuitbreaker.go:44--136}
   \item[HTTPCache] \srcnote{middleware/httpcache.go:47--100}
-  \item[OrderEnqueue] \srcnote{internal/order/async.go:119--172}
+  \item[OrderEnqueue] \srcnote{internal/order/async.go:118--171}
   \item[业务码] \srcnote{pkg/e/code.go:23, 35--39, 49, 54, 57--58 / msg.go:51--52}
   \item[压测报告] \srcnote{stressTest/REPORT.md \S 1, \S 5}
   \item[README SLO 与边界] \srcnote{README.md 业务承诺节 / 业务边界节}
