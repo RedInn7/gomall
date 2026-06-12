@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/e"
@@ -252,12 +253,31 @@ func (s *PromoSrv) ApplyDiscountInTx(tx *gorm.DB, orderID, ruleID uint, discount
 //
 // 业务约束：不要求 ruleID 当前仍在 active —— 即使规则已 stop，也允许退还，
 // 否则 stop 后未关单订单的预算会被错算掉。
+//
+// 幂等保障：调用方是 order.cancelled / order.refunded 的 at-least-once 消费者，
+// 同一订单可能重复进来。事务内先写 promo_release 台账（order_id 唯一索引 +
+// ON CONFLICT DO NOTHING / ON DUPLICATE KEY），冲突即说明已释放过，
+// 直接返回 nil —— 不重复回补预算、不重复发 promo.released 事件。
 func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, discountCents int64, reason string) error {
 	if ruleID == 0 || discountCents <= 0 {
 		return nil
 	}
 	db := NewPromoDao(ctx).DB
 	return db.Transaction(func(tx *gorm.DB) error {
+		rec := &PromoRelease{
+			OrderID:       orderID,
+			RuleID:        ruleID,
+			DiscountCents: discountCents,
+			Reason:        reason,
+		}
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(rec)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			// 台账已存在：本次是重复投递，预算与事件均已落，幂等返回。
+			return nil
+		}
 		if err := NewPromoDaoByDB(tx).RestoreBudget(tx, ruleID, discountCents); err != nil {
 			return err
 		}

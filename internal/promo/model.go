@@ -46,3 +46,17 @@ type PromoRule struct {
 }
 
 func (PromoRule) TableName() string { return "promo_rule" }
+
+// PromoRelease 预算退还台账。order_id 唯一索引承担幂等去重：
+// order.cancelled / order.refunded 事件 at-least-once 投递下重复消费时，
+// INSERT 冲突即判定"已释放过"，不会二次回补预算。
+// 一笔订单整个生命周期最多退还一次（取消与退款互斥），所以唯一键落在 order_id 上。
+type PromoRelease struct {
+	dbmodel.Model
+	OrderID       uint   `gorm:"uniqueIndex"`
+	RuleID        uint   `gorm:"not null;index"`
+	DiscountCents int64  `gorm:"not null"`
+	Reason        string `gorm:"size:32"` // cancel / refund / manual
+}
+
+func (PromoRelease) TableName() string { return "promo_release" }
