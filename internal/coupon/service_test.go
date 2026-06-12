@@ -170,6 +170,41 @@ func TestCouponClaim_DBLock_PerUserLimit(t *testing.T) {
 	}
 }
 
+// TestCouponClaim_DBLock_SameSecondCodesUnique 同一用户同一批次在同一秒内连续领取：
+// 券码带随机熵后两张都应落库成功且 code 互异，不再撞 code 唯一索引。
+func TestCouponClaim_DBLock_SameSecondCodesUnique(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForCoupon(t)
+	defer cleanup()
+
+	now := time.Now()
+	b := seedCouponBatch(t, db, 10, 2, now.Add(-time.Hour), now.Add(time.Hour))
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 307})
+
+	resp1, err := GetCouponSrv().Claim(ctx, "db", b.ID)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	resp2, err := GetCouponSrv().Claim(ctx, "db", b.ID)
+	if err != nil {
+		t.Fatalf("second claim in same second: %v", err)
+	}
+
+	uc1, uc2 := resp1.(*UserCoupon), resp2.(*UserCoupon)
+	if uc1.Code == "" || uc2.Code == "" {
+		t.Fatalf("code 不应为空: %q / %q", uc1.Code, uc2.Code)
+	}
+	if uc1.Code == uc2.Code {
+		t.Fatalf("同秒两次领取的券码不应相同: %q", uc1.Code)
+	}
+
+	var cnt int64
+	db.Model(&UserCoupon{}).Where("user_id=? AND batch_id=?", 307, b.ID).Count(&cnt)
+	if cnt != 2 {
+		t.Fatalf("user coupon rows = %d, want 2", cnt)
+	}
+}
+
 func TestCouponClaim_DBLock_SoldOut(t *testing.T) {
 	initLogForTest()
 	db, cleanup := setupSQLiteForCoupon(t)

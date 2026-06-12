@@ -274,6 +274,7 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (
 		Info:          req.Info,
 		Price:         req.Price,
 		DiscountPrice: req.DiscountPrice,
+		Num:           req.Num,
 		OnSale:        req.OnSale,
 	}
 	_ = cache.DelProductDetail(ctx, req.ID)

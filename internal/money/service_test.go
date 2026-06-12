@@ -2,6 +2,7 @@ package money
 
 import (
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"testing"
@@ -109,10 +110,9 @@ func TestMoney_ShowDecryptsBalance(t *testing.T) {
 	}
 }
 
-// TestMoney_ShowWrongKeyNeverRevealsBalance 错误支付密码绝不能解出真实余额。
-// 底层 AES-CBC 对错误 key 的行为是解出乱码（解析为 0）或去填充 panic，
-// 两种结局都可接受，唯一不可接受的是返回正确金额。
-func TestMoney_ShowWrongKeyNeverRevealsBalance(t *testing.T) {
+// TestMoney_ShowWrongKeyReturnsBusinessError 错误支付密码必须返回业务错误：
+// 不能 panic（解填充越界已在 DecryptMoney 内折叠），也不能把乱码当余额展示。
+func TestMoney_ShowWrongKeyReturnsBusinessError(t *testing.T) {
 	initLogForTest()
 	db, cleanup := setupSQLiteForMoney(t)
 	defer cleanup()
@@ -120,22 +120,15 @@ func TestMoney_ShowWrongKeyNeverRevealsBalance(t *testing.T) {
 	u := seedUserWithMoney(t, db, "u-money-wrongkey", "12345", "123456")
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: u.ID})
 
-	var resp interface{}
-	var err error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Logf("错误 key 触发解密 panic（已兜住）：%v", r)
-			}
-		}()
-		resp, err = GetMoneySrv().MoneyShow(ctx, &MoneyShowReq{Key: "654321"})
-	}()
-
-	if err == nil && resp != nil {
-		if got, ok := resp.(*MoneyShowResp); ok && got.UserMoney == "123.45" {
-			t.Fatalf("错误 key 不应解出真实余额：%+v", got)
-		}
-		t.Logf("错误 key 的展示值：%+v", resp)
+	resp, err := GetMoneySrv().MoneyShow(ctx, &MoneyShowReq{Key: "654321"})
+	if err == nil {
+		t.Fatalf("错误 key 应返回业务错误而非展示数据：%+v", resp)
+	}
+	if !errors.Is(err, user.ErrMoneyKeyIncorrect) {
+		t.Fatalf("err = %v, want %v", err, user.ErrMoneyKeyIncorrect)
+	}
+	if resp != nil {
+		t.Fatalf("错误 key 不应返回任何余额数据：%+v", resp)
 	}
 }
 

@@ -22,7 +22,7 @@ func NewCarouselDaoByDB(db *gorm.DB) *CarouselDao {
 
 func (d *CarouselDao) ListCarousel() (r []*ListCarouselResp, err error) {
 	err = d.DB.Model(&Carousel{}).
-		Select("id, img_path, product_id, UNIX_TIMESTAMP(created_at)").
+		Select("id, img_path, product_id, UNIX_TIMESTAMP(created_at) AS created_at").
 		Find(&r).Error
 
 	return
