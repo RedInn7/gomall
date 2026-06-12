@@ -5,7 +5,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -41,12 +40,14 @@ func CancelUnpaidOrder(orderNum uint64) error {
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderCancelled", "order.cancelled", order.ID,
 			events.OrderCancelled{
-				OrderID:   order.ID,
-				OrderNum:  orderNum,
-				UserID:    order.UserID,
-				ProductID: order.ProductID,
-				Num:       order.Num,
-				Reason:    "timeout",
+				OrderID:            order.ID,
+				OrderNum:           orderNum,
+				UserID:             order.UserID,
+				ProductID:          order.ProductID,
+				Num:                order.Num,
+				Reason:             "timeout",
+				PromoRuleID:        order.PromoRuleID,
+				PromoDiscountCents: order.PromoDiscountCents,
 			},
 		)
 	})
@@ -61,16 +62,7 @@ func CancelUnpaidOrder(orderNum uint64) error {
 		util.LogrusObj.Errorf("release reservation on cancel failed orderNum=%d err=%v", orderNum, relErr)
 	}
 
-	// 满减预算退还：失败不阻塞关单（库存已经放开，对用户而言已经完成关单），
-	// 仅打 [promo] 日志让 SRE / 客服 grep 兜底
-	if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
-		if rdErr := promo.GetPromoSrv().ReleaseDiscount(ctx, order.ID, order.PromoRuleID, order.PromoDiscountCents, "cancel"); rdErr != nil {
-			util.LogrusObj.Errorf("[promo] release on cancel failed orderNum=%d rule=%d err=%v",
-				orderNum, order.PromoRuleID, rdErr)
-		} else {
-			util.LogrusObj.Infof("[promo] released on cancel orderNum=%d rule=%d discount=%d",
-				orderNum, order.PromoRuleID, order.PromoDiscountCents)
-		}
-	}
+	// 满减预算退还不在这里同步执行：order.cancelled 事件已携带 promo_rule_id /
+	// promo_discount_cents，由 promo 侧消费该事件异步完成（at-least-once + 幂等台账）。
 	return nil
 }

@@ -9,7 +9,6 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
-	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -116,11 +115,13 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefunded", "order.refunded", order.ID,
 			events.OrderRefundedEvent{
-				OrderID:  order.ID,
-				OrderNum: order.OrderNum,
-				UserID:   order.UserID,
-				Amount:   amount,
-				TxID:     "",
+				OrderID:            order.ID,
+				OrderNum:           order.OrderNum,
+				UserID:             order.UserID,
+				Amount:             amount,
+				TxID:               "",
+				PromoRuleID:        order.PromoRuleID,
+				PromoDiscountCents: order.PromoDiscountCents,
 			},
 		)
 	})
@@ -128,17 +129,8 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 		return txErr
 	}
 
-	// 退款落单成功，把满减预算退还。失败仅打日志，不影响主流程：
-	// 用户已被告知退款获批；预算挂账由 SRE / 数据脚本兜底回收。
-	if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
-		if rdErr := promo.GetPromoSrv().ReleaseDiscount(ctx, order.ID, order.PromoRuleID, order.PromoDiscountCents, "refund"); rdErr != nil {
-			util.LogrusObj.Errorf("[promo] release on refund failed orderNum=%d rule=%d err=%v",
-				orderNum, order.PromoRuleID, rdErr)
-		} else {
-			util.LogrusObj.Infof("[promo] released on refund orderNum=%d rule=%d discount=%d",
-				orderNum, order.PromoRuleID, order.PromoDiscountCents)
-		}
-	}
+	// 满减预算退还不在这里同步执行：order.refunded 事件已携带 promo_rule_id /
+	// promo_discount_cents，由 promo 侧消费该事件异步完成（at-least-once + 幂等台账）。
 	return nil
 }
 
