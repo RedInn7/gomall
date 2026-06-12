@@ -71,10 +71,23 @@ func (d *ProductDao) DeleteProduct(pId, uId uint) error {
 		Error
 }
 
-// UpdateProduct 更新商品
+// UpdateProduct 更新商品。
+// 显式映射列名走 map 更新：gorm 对 struct 的 Updates 会跳过零值字段，
+// 导致下架（on_sale=false）、库存清零（num=0）这类零值写入静默丢失。
+// 字段集合与调用方组装的可更新字段一一对应，boss 维度与图片路径不在此处变更。
 func (d *ProductDao) UpdateProduct(pId uint, product *Product) error {
 	return d.DB.Model(&Product{}).
-		Where("id=?", pId).Updates(&product).Error
+		Where("id=?", pId).
+		Updates(map[string]interface{}{
+			"name":           product.Name,
+			"category_id":    product.CategoryID,
+			"title":          product.Title,
+			"info":           product.Info,
+			"price":          product.Price,
+			"discount_price": product.DiscountPrice,
+			"num":            product.Num,
+			"on_sale":        product.OnSale,
+		}).Error
 }
 
 // SearchProduct 搜索商品

@@ -2,9 +2,13 @@ package cart
 
 import (
 	"context"
+	"database/sql"
 	"io"
+	"sync"
 	"testing"
+	"time"
 
+	sqlite3 "github.com/mattn/go-sqlite3"
 	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -15,20 +19,48 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
+	"github.com/RedInn7/gomall/types"
 )
 
 // 购物车域的 DB 闭环测试：sqlite in-memory，覆盖加购（首次/重复/超上限）、
-// 改数量、删除，以及商品不存在时的拒绝路径。
+// 改数量、删除、列表 DTO 组装，以及商品不存在时的拒绝路径。
 //
-// 注意：CartList 依赖 ListCartByUserId 的手写 SELECT，其中用到 MySQL 方言
-// （UNIX_TIMESTAMP、限定名引用保留字 check：`c.check` 在 sqlite 是语法错误，
-// MySQL 允许保留字跟在限定符后），sqlite 下无法执行，因此列表 DTO 组装
-// 不在本组覆盖范围内。
+// ListCartByUserId 的手写 SELECT 用到 MySQL 的 UNIX_TIMESTAMP，
+// sqlite 没有该函数，这里通过自定义 driver 注册同名函数补齐方言差异；
+// 保留字 check 以 `check` 反引号限定名引用，MySQL/sqlite 均可解析。
+
+var cartSQLiteDriverOnce sync.Once
+
+const cartSQLiteDriverName = "sqlite3_cart_unixts"
+
+func registerCartSQLiteDriver() {
+	cartSQLiteDriverOnce.Do(func() {
+		sql.Register(cartSQLiteDriverName, &sqlite3.SQLiteDriver{
+			ConnectHook: func(conn *sqlite3.SQLiteConn) error {
+				return conn.RegisterFunc("UNIX_TIMESTAMP", func(ts string) int64 {
+					layouts := []string{
+						"2006-01-02 15:04:05.999999999-07:00",
+						"2006-01-02 15:04:05.999999999Z07:00",
+						"2006-01-02 15:04:05",
+						time.RFC3339Nano,
+					}
+					for _, layout := range layouts {
+						if t, err := time.Parse(layout, ts); err == nil {
+							return t.Unix()
+						}
+					}
+					return 0
+				}, true)
+			},
+		})
+	})
+}
 
 func setupSQLiteForCart(t *testing.T) (*gorm.DB, func()) {
 	t.Helper()
+	registerCartSQLiteDriver()
 	dsn := "file:cart-" + t.Name() + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
+	db, err := gorm.Open(&sqlite.Dialector{DriverName: cartSQLiteDriverName, DSN: dsn}, &gorm.Config{
 		NamingStrategy: schema.NamingStrategy{SingularTable: true},
 	})
 	if err != nil {
@@ -163,6 +195,81 @@ func TestCartCreate_ProductNotFound(t *testing.T) {
 	db.Model(&Cart{}).Count(&cnt)
 	if cnt != 0 {
 		t.Fatalf("不应落任何购物车行，got %d", cnt)
+	}
+}
+
+// TestCartList_AssemblesDTO 覆盖列表闭环：加购后 CartList 返回
+// cart × product 两表 join 出来的 DTO，逐字段断言（含保留字 check 列
+// 与 UNIX_TIMESTAMP 出来的 created_at）。
+func TestCartList_AssemblesDTO(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForCart(t)
+	defer cleanup()
+
+	const userID, bossID = uint(109), uint(209)
+	p := &product.Product{
+		Name: "cart-item", Info: "商品详情", ImgPath: "item.jpg",
+		DiscountPrice: "88", Num: 100,
+		BossID: bossID, BossName: "店主",
+	}
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("create product: %v", err)
+	}
+
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: userID})
+	if _, err := GetCartSrv().CartCreate(ctx, &CartCreateReq{
+		ProductId: p.ID, BossID: bossID,
+	}); err != nil {
+		t.Fatalf("CartCreate: %v", err)
+	}
+	var row Cart
+	if err := db.Where("user_id=?", userID).First(&row).Error; err != nil {
+		t.Fatalf("load cart: %v", err)
+	}
+
+	resp, err := GetCartSrv().CartList(ctx, &CartListReq{})
+	if err != nil {
+		t.Fatalf("CartList: %v", err)
+	}
+	dl, ok := resp.(*types.DataListResp)
+	if !ok {
+		t.Fatalf("resp type = %T", resp)
+	}
+	if dl.Total != 1 {
+		t.Fatalf("total = %d, want 1", dl.Total)
+	}
+	items, ok := dl.Item.([]*CartResp)
+	if !ok || len(items) != 1 {
+		t.Fatalf("item type/len 异常：%T", dl.Item)
+	}
+	got := items[0]
+	if got.ID != row.ID || got.UserID != userID || got.ProductID != p.ID {
+		t.Fatalf("id/user/product = %d/%d/%d", got.ID, got.UserID, got.ProductID)
+	}
+	if got.Num != 1 || got.MaxNum != 10 || got.Check_ {
+		t.Fatalf("num/max/check = %d/%d/%v, want 1/10/false", got.Num, got.MaxNum, got.Check_)
+	}
+	if got.BossId != bossID || got.BossName != "店主" {
+		t.Fatalf("boss = %d/%q", got.BossId, got.BossName)
+	}
+	if got.ImgPath != "item.jpg" || got.Info != "商品详情" || got.DiscountPrice != "88" {
+		t.Fatalf("img/info/discount = %q/%q/%q", got.ImgPath, got.Info, got.DiscountPrice)
+	}
+	if got.CreatedAt <= 0 {
+		t.Fatalf("created_at 应为正的 unix 秒，got %d", got.CreatedAt)
+	}
+	if diff := got.CreatedAt - row.CreatedAt.Unix(); diff < -1 || diff > 1 {
+		t.Fatalf("created_at = %d, want ≈ %d", got.CreatedAt, row.CreatedAt.Unix())
+	}
+
+	// 他人列表为空
+	otherCtx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: userID + 1})
+	otherResp, err := GetCartSrv().CartList(otherCtx, &CartListReq{})
+	if err != nil {
+		t.Fatalf("CartList(other): %v", err)
+	}
+	if lr := otherResp.(*types.DataListResp); lr.Total != 0 {
+		t.Fatalf("他人列表 total = %d, want 0", lr.Total)
 	}
 }
 

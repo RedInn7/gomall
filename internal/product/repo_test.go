@@ -160,12 +160,13 @@ func TestProductDao_UpdateProduct(t *testing.T) {
 
 	d := NewProductDaoByDB(db)
 	p := mustCreateProduct(t, d, &Product{
-		Name: "old-name", CategoryID: 2, Title: "old-title",
-		Price: "100", DiscountPrice: "90", Num: 3, BossID: 5, OnSale: true,
+		Name: "old-name", CategoryID: 2, Title: "old-title", Info: "old-info",
+		ImgPath: "old.png", Price: "100", DiscountPrice: "90", Num: 3, BossID: 5, OnSale: true,
 	})
 
 	err := d.UpdateProduct(p.ID, &Product{
-		Name: "new-name", Title: "new-title", Price: "120", DiscountPrice: "110",
+		Name: "new-name", CategoryID: 4, Title: "new-title", Info: "new-info",
+		Price: "120", DiscountPrice: "110", Num: 8, OnSale: true,
 	})
 	if err != nil {
 		t.Fatalf("UpdateProduct: %v", err)
@@ -175,13 +176,47 @@ func TestProductDao_UpdateProduct(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if got.Name != "new-name" || got.Title != "new-title" ||
-		got.Price != "120" || got.DiscountPrice != "110" {
+	if got.Name != "new-name" || got.CategoryID != 4 || got.Title != "new-title" ||
+		got.Info != "new-info" || got.Price != "120" || got.DiscountPrice != "110" ||
+		got.Num != 8 || !got.OnSale {
 		t.Fatalf("更新字段未生效: %+v", got)
 	}
-	// Updates 走 struct 非零值语义：未传字段（Num/BossID/CategoryID）保持原值
-	if got.Num != 3 || got.BossID != 5 || got.CategoryID != 2 {
-		t.Fatalf("未更新字段被改动: %+v", got)
+	// boss 维度与图片路径不在 UpdateProduct 字段集合内，保持原值
+	if got.BossID != 5 || got.ImgPath != "old.png" {
+		t.Fatalf("不可更新字段被改动: %+v", got)
+	}
+}
+
+// TestProductDao_UpdateProductPersistsZeroValues 下架（on_sale=false）与库存清零
+// 都是零值写入，必须真实落库——map 更新语义不允许 gorm 跳过零值字段。
+func TestProductDao_UpdateProductPersistsZeroValues(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForProduct(t)
+	defer cleanup()
+
+	d := NewProductDaoByDB(db)
+	p := mustCreateProduct(t, d, &Product{
+		Name: "on-sale-item", CategoryID: 2, Title: "t", Info: "i",
+		Price: "100", DiscountPrice: "90", Num: 3, BossID: 5, OnSale: true,
+	})
+
+	err := d.UpdateProduct(p.ID, &Product{
+		Name: "on-sale-item", CategoryID: 2, Title: "t", Info: "i",
+		Price: "100", DiscountPrice: "90", Num: 0, OnSale: false,
+	})
+	if err != nil {
+		t.Fatalf("UpdateProduct: %v", err)
+	}
+
+	got, err := d.GetProductById(p.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.OnSale {
+		t.Fatal("下架后 on_sale 应为 false")
+	}
+	if got.Num != 0 {
+		t.Fatalf("num = %d, want 0", got.Num)
 	}
 }
 
