@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/dgrijalva/jwt-go"
+	"github.com/golang-jwt/jwt/v4"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
@@ -18,7 +18,7 @@ func secret() []byte {
 type Claims struct {
 	ID       uint   `json:"id"`
 	Username string `json:"username"`
-	jwt.StandardClaims
+	jwt.RegisteredClaims
 }
 
 // GenerateToken 签发用户Token
@@ -29,8 +29,8 @@ func GenerateToken(id uint, username string) (accessToken, refreshToken string, 
 	claims := Claims{
 		ID:       id,
 		Username: username,
-		StandardClaims: jwt.StandardClaims{
-			ExpiresAt: expireTime.Unix(),
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expireTime),
 			Issuer:    "mall",
 		},
 	}
@@ -40,8 +40,8 @@ func GenerateToken(id uint, username string) (accessToken, refreshToken string, 
 		return "", "", err
 	}
 
-	refreshToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.StandardClaims{
-		ExpiresAt: rtExpireTime.Unix(),
+	refreshToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		ExpiresAt: jwt.NewNumericDate(rtExpireTime),
 		Issuer:    "mall",
 	}).SignedString(secret())
 	if err != nil {
@@ -78,12 +78,12 @@ func ParseRefreshToken(accessToken, rToken string) (newAToken, newRToken string,
 		return
 	}
 
-	if accessClaim.ExpiresAt > time.Now().Unix() {
+	if accessClaim.ExpiresAt != nil && time.Now().Before(accessClaim.ExpiresAt.Time) {
 		// 如果 access_token 没过期,每一次请求都刷新 refresh_token 和 access_token
 		return GenerateToken(accessClaim.ID, accessClaim.Username)
 	}
 
-	if refreshClaim.ExpiresAt > time.Now().Unix() {
+	if refreshClaim.ExpiresAt != nil && time.Now().Before(refreshClaim.ExpiresAt.Time) {
 		// 如果 access_token 过期了,但是 refresh_token 没过期, 刷新 refresh_token 和 access_token
 		return GenerateToken(accessClaim.ID, accessClaim.Username)
 	}
@@ -98,7 +98,7 @@ type EmailClaims struct {
 	Email          string `json:"email"`
 	PasswordDigest string `json:"password_digest,omitempty"`
 	OperationType  uint   `json:"operation_type"`
-	jwt.StandardClaims
+	jwt.RegisteredClaims
 }
 
 // GenerateEmailToken 签发邮箱验证 token。passwordDigest 必须是 bcrypt 哈希值。
@@ -110,8 +110,8 @@ func GenerateEmailToken(userID, Operation uint, email, passwordDigest string) (s
 		Email:          email,
 		PasswordDigest: passwordDigest,
 		OperationType:  Operation,
-		StandardClaims: jwt.StandardClaims{
-			ExpiresAt: expireTime.Unix(),
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(expireTime),
 			Issuer:    "cmall",
 		},
 	}
