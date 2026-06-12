@@ -52,7 +52,7 @@ func setupSQLiteForOrder(t *testing.T) (*gorm.DB, func()) {
 	}
 	if err := db.AutoMigrate(
 		&user.User{}, &Order{}, &product.Product{},
-		&promo.PromoRule{}, &outbox.OutboxEvent{},
+		&promo.PromoRule{}, &promo.PromoRelease{}, &outbox.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}

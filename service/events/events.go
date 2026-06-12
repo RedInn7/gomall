@@ -28,13 +28,17 @@ type OrderPaid struct {
 	Num       int    `json:"num"`
 }
 
+// OrderCancelled 关单事件。promo_rule_id / promo_discount_cents 自包含携带，
+// promo 消费者据此异步退还满减预算，无需反查订单表。
 type OrderCancelled struct {
-	OrderID   uint   `json:"order_id"`
-	OrderNum  uint64 `json:"order_num"`
-	UserID    uint   `json:"user_id"`
-	ProductID uint   `json:"product_id"`
-	Num       int    `json:"num"`
-	Reason    string `json:"reason"`
+	OrderID            uint   `json:"order_id"`
+	OrderNum           uint64 `json:"order_num"`
+	UserID             uint   `json:"user_id"`
+	ProductID          uint   `json:"product_id"`
+	Num                int    `json:"num"`
+	Reason             string `json:"reason"`
+	PromoRuleID        uint   `json:"promo_rule_id"`
+	PromoDiscountCents int64  `json:"promo_discount_cents"`
 }
 
 // OrderShipped 商家发货事件。tracking_no / carrier 仅在事件内透传，本期不入主表。
@@ -66,12 +70,15 @@ type OrderRefunding struct {
 
 // OrderRefundedEvent 退款已同意。Amount 单位：分；TxID 由后续 wallet/支付服务回填。
 // 本期只走状态机推进，不真触发第三方扣款。
+// promo_rule_id / promo_discount_cents 自包含携带，promo 消费者据此异步退还满减预算。
 type OrderRefundedEvent struct {
-	OrderID  uint   `json:"order_id"`
-	OrderNum uint64 `json:"order_num"`
-	UserID   uint   `json:"user_id"`
-	Amount   int64  `json:"amount"`
-	TxID     string `json:"tx_id"`
+	OrderID            uint   `json:"order_id"`
+	OrderNum           uint64 `json:"order_num"`
+	UserID             uint   `json:"user_id"`
+	Amount             int64  `json:"amount"`
+	TxID               string `json:"tx_id"`
+	PromoRuleID        uint   `json:"promo_rule_id"`
+	PromoDiscountCents int64  `json:"promo_discount_cents"`
 }
 
 // OrderRefundRejected 退款被运营驳回，订单退回 Completed。
