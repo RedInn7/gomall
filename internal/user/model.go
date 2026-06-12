@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"github.com/CocaineCong/secret"
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 	"golang.org/x/crypto/bcrypt"
 
 	conf "github.com/RedInn7/gomall/config"
@@ -17,7 +17,7 @@ var ErrMoneyKeyIncorrect = errors.New("支付密码错误")
 
 // User 用户模型
 type User struct {
-	gorm.Model
+	dbmodel.Model
 	UserName       string `gorm:"unique"`
 	Email          string
 	PasswordDigest string

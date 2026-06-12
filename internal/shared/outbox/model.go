@@ -3,7 +3,7 @@ package outbox
 import (
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
 const (
@@ -23,7 +23,7 @@ const (
 //	status:                        1 pending / 2 sent / 3 dead
 //	next_retry_at:                 下一次允许重试的时间
 type OutboxEvent struct {
-	gorm.Model
+	dbmodel.Model
 	AggregateType string    `gorm:"size:64;not null;index:idx_outbox_dispatch,priority:2"`
 	AggregateID   uint      `gorm:"not null"`
 	EventType     string    `gorm:"size:64;not null"`

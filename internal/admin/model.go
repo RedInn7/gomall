@@ -1,7 +1,7 @@
 package admin
 
 import (
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 	"golang.org/x/crypto/bcrypt"
 
 	conf "github.com/RedInn7/gomall/config"
@@ -10,7 +10,7 @@ import (
 )
 
 type Admin struct {
-	gorm.Model
+	dbmodel.Model
 	UserName       string
 	PasswordDigest string
 	Avatar         string `gorm:"size:1000"`

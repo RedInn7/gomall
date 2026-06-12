@@ -3,7 +3,7 @@ package groupbuy
 import (
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
 // 团 / 成员状态。
@@ -25,7 +25,7 @@ const (
 //	兜底，避免读后写竞态。
 //	价格 / 商品维度不允许中途改：price_cents / product_id 一旦写入即不可变。
 type GroupbuyGroup struct {
-	gorm.Model
+	dbmodel.Model
 	ProductID    uint      `gorm:"not null;index:idx_gb_product"`
 	LeaderID     uint      `gorm:"not null;index:idx_gb_leader"`
 	TargetCount  int       `gorm:"not null"`
@@ -42,7 +42,7 @@ func (GroupbuyGroup) TableName() string { return "groupbuy_group" }
 //	uniq(group_id, user_id) 由 DB 层兜底重复加入；
 //	order_id 在团长发起 / 成员加入路径上同事务写入，保证不会出现"团里有人但没订单"。
 type GroupbuyMember struct {
-	gorm.Model
+	dbmodel.Model
 	GroupID uint  `gorm:"not null;uniqueIndex:uk_gb_group_user,priority:1"`
 	UserID  uint  `gorm:"not null;uniqueIndex:uk_gb_group_user,priority:2;index"`
 	OrderID int64 `gorm:"not null"`

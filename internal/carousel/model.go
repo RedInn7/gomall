@@ -1,9 +1,9 @@
 package carousel
 
-import "github.com/jinzhu/gorm"
+import "github.com/RedInn7/gomall/internal/shared/dbmodel"
 
 type Carousel struct {
-	gorm.Model
+	dbmodel.Model
 	ImgPath   string
 	ProductID uint `gorm:"not null"`
 }

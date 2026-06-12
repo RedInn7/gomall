@@ -3,7 +3,7 @@ package preorder
 import (
 	"time"
 
-	"github.com/jinzhu/gorm"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
 // ProductPreorder 预售商品配置。
@@ -17,7 +17,7 @@ import (
 //	[FinalEndAt,     +∞)             失效期，未付尾款由 cron 没收
 //	ShipAt                           预计发货时间，仅展示，不参与状态机
 type ProductPreorder struct {
-	gorm.Model
+	dbmodel.Model
 	ProductID      uint      `gorm:"not null;uniqueIndex"`
 	DepositCents   int64     `gorm:"not null"`
 	FinalCents     int64     `gorm:"not null"`
