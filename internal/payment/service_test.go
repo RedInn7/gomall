@@ -2,7 +2,7 @@ package payment
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
 	"strconv"
 	"sync"
@@ -174,19 +174,6 @@ func seedPayment(t *testing.T, db *gorm.DB, buyerCents int64) paymentFixture {
 	}
 }
 
-// payDownRecovering 兜住底层 AES 解填充在密钥错误时抛出的 panic
-// （secret 库 SecretDecrypt 失败直接 panic，事务由 gorm 回滚后向上传递），
-// 统一折叠成 error 方便断言"拒付"。
-func payDownRecovering(ctx context.Context, req *PaymentDownReq) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("paydown panic: %v", r)
-		}
-	}()
-	_, err = GetPaymentSrv().PayDown(ctx, req)
-	return
-}
-
 // assertPaymentUntouched 校验失败路径下买卖双方/订单/库存/outbox 全部保持原样。
 func assertPaymentUntouched(t *testing.T, db *gorm.DB, fx paymentFixture) {
 	t.Helper()
@@ -349,11 +336,14 @@ func TestPayDown_WrongKeyRejectedNoStateChange(t *testing.T) {
 	fx := seedPayment(t, db, 100000)
 	uctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: fx.BuyerID})
 
-	// 长度合法但密钥错误：解出来要么是乱码（按余额不足拒付），
-	// 要么解填充失败由 payDownRecovering 折叠成 error；两种结果都必须是拒付。
-	err := payDownRecovering(uctx, &PaymentDownReq{OrderId: fx.OrderID, Key: "zzz999"})
+	// 长度合法但密钥错误：DecryptMoney 内部已把解填充 panic / 乱码明文
+	// 统一折叠为支付密码错误，PayDown 直接返回 err，事务回滚，无任何状态变化。
+	_, err := GetPaymentSrv().PayDown(uctx, &PaymentDownReq{OrderId: fx.OrderID, Key: "zzz999"})
 	if err == nil {
 		t.Fatal("错误支付密码应当拒付")
+	}
+	if !errors.Is(err, user.ErrMoneyKeyIncorrect) {
+		t.Fatalf("err = %v, want %v", err, user.ErrMoneyKeyIncorrect)
 	}
 	assertPaymentUntouched(t, db, fx)
 }

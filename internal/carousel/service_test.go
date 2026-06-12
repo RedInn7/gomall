@@ -42,8 +42,8 @@ func setupSQLiteForCarousel(t *testing.T) (*gorm.DB, func()) {
 }
 
 // TestCarousel_ListReturnsSeededRows 覆盖列表闭环：落库两条，
-// 接口返回 DataListResp 且逐字段映射正确。CreatedAt 依赖 SELECT 列
-// 别名映射，当前查询表达式未带 AS 别名，该字段不参与断言（详见缺陷记录）。
+// 接口返回 DataListResp 且逐字段映射正确，CreatedAt 经
+// UNIX_TIMESTAMP(created_at) AS created_at 映射为落库时间的 Unix 秒。
 func TestCarousel_ListReturnsSeededRows(t *testing.T) {
 	initLogForTest()
 	db, cleanup := setupSQLiteForCarousel(t)
@@ -86,8 +86,13 @@ func TestCarousel_ListReturnsSeededRows(t *testing.T) {
 		if got.ID != s.ID || got.ImgPath != s.ImgPath {
 			t.Fatalf("DTO 映射不一致: got %+v, seed %+v", got, s)
 		}
+		if got.CreatedAt <= 0 {
+			t.Fatalf("product %d CreatedAt 应为正的 unix 秒，got %d", s.ProductID, got.CreatedAt)
+		}
+		if got.CreatedAt != s.CreatedAt.Unix() {
+			t.Fatalf("product %d CreatedAt = %d, want %d", s.ProductID, got.CreatedAt, s.CreatedAt.Unix())
+		}
 	}
-	t.Logf("CreatedAt 映射观测值（别名缺失时为 0）：%d / %d", items[0].CreatedAt, items[1].CreatedAt)
 }
 
 // TestCarousel_ListEmptyTable 空表时 Total 为 0，不报错。

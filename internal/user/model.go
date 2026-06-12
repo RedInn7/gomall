@@ -1,14 +1,19 @@
 package user
 
 import (
+	"errors"
+	"strconv"
+
 	"github.com/CocaineCong/secret"
 	"github.com/jinzhu/gorm"
-	"github.com/spf13/cast"
 	"golang.org/x/crypto/bcrypt"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
 )
+
+// ErrMoneyKeyIncorrect 支付密码错误：密文无法用该密钥还原出合法金额
+var ErrMoneyKeyIncorrect = errors.New("支付密码错误")
 
 // User 用户模型
 type User struct {
@@ -56,8 +61,13 @@ func (u *User) AvatarURL() string {
 	return pConfig.PhotoHost + conf.Config.System.HttpPort + pConfig.AvatarPath + u.Avatar
 }
 
-// EncryptMoney 加密金额
+// EncryptMoney 加密金额。底层库在加密失败时直接 panic，这里统一折叠为 error。
 func (u *User) EncryptMoney(key string) (money string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			money, err = "", errors.New("余额加密失败")
+		}
+	}()
 	aesObj, err := secret.NewAesEncrypt(conf.Config.EncryptSecret.MoneySecret, key, "", secret.AesEncrypt128, secret.AesModeTypeCBC)
 	if err != nil {
 		return
@@ -68,12 +78,24 @@ func (u *User) EncryptMoney(key string) (money string, err error) {
 }
 
 // DecryptMoney 解密金额，返回值单位为分。
+// 密钥错误时底层 AES-CBC 去填充会越界 panic，这里折叠为支付密码错误；
+// 解密成功但明文不是合法整数金额（错误密钥解出乱码）同样按支付密码错误处理，
+// 绝不把乱码当余额向上返回。
 func (u *User) DecryptMoney(key string) (money int64, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			money, err = 0, ErrMoneyKeyIncorrect
+		}
+	}()
 	aesObj, err := secret.NewAesEncrypt(conf.Config.EncryptSecret.MoneySecret, key, "", secret.AesEncrypt128, secret.AesModeTypeCBC)
 	if err != nil {
 		return
 	}
 
-	money = cast.ToInt64(aesObj.SecretDecrypt(u.Money))
-	return
+	plain := aesObj.SecretDecrypt(u.Money)
+	money, err = strconv.ParseInt(plain, 10, 64)
+	if err != nil {
+		return 0, ErrMoneyKeyIncorrect
+	}
+	return money, nil
 }

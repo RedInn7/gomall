@@ -75,7 +75,7 @@ func (d *CartDao) ListCartByUserId(uId uint) (cart []*CartResp, err error) {
 			"UNIX_TIMESTAMP(c.created_at) AS created_at," +
 			"c.num AS num," +
 			"c.max_num AS max_num," +
-			"c.check AS check_," +
+			"c.`check` AS check_," +
 			"p.img_path AS img_path," +
 			"p.boss_id AS boss_id," +
 			"p.boss_name AS boss_name," +
