@@ -136,10 +136,7 @@ func TestAsyncOrder_EnqueueReservesAndPublishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	r, ok := resp.(OrderEnqueueResp)
-	if !ok {
-		t.Fatalf("resp type %T", resp)
-	}
+	r := resp
 	if r.Status != OrderTicketStatusPending || r.Ticket == "" {
 		t.Fatalf("unexpected resp: %+v", r)
 	}
@@ -321,9 +318,9 @@ func TestAsyncOrder_StatusReadsBackTicket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	st, ok := resp.(OrderTicketStatus)
-	if !ok || st.Status != OrderTicketStatusOK || st.OrderID != 101 || st.OrderNum != 202 {
-		t.Fatalf("unexpected: %+v ok=%v", resp, ok)
+	st := resp
+	if st.Status != OrderTicketStatusOK || st.OrderID != 101 || st.OrderNum != 202 {
+		t.Fatalf("unexpected: %+v", resp)
 	}
 
 	if _, err := GetOrderSrv().OrderStatus(context.Background(), "missing"); err == nil {

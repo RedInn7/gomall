@@ -39,12 +39,20 @@ type OrderSrv struct {
 	promo PromoCalculator
 }
 
-// NewOrderSrv 构造下单服务；promoCalc 为满减计算依赖。
+// 装配约定（与其余领域一致）：
+//   - NewOrderSrv 是唯一的依赖注入缝，仅供测试按需替换 promo 计算器；
+//   - GetOrderSrv 是生产侧的默认装配，handler 一律走它，拿到全局单例。
+//
+// 二者不是新旧两套实现，而是同一套的「测试入口 / 生产入口」分工：
+// NewOrderSrv 决定怎么装，GetOrderSrv 决定装好后给谁用。新增依赖时只改 NewOrderSrv。
+
+// NewOrderSrv 构造下单服务，注入满减计算依赖。测试用替身、生产用真实 promo 服务。
 func NewOrderSrv(promoCalc PromoCalculator) *OrderSrv {
 	return &OrderSrv{promo: promoCalc}
 }
 
-// GetOrderSrv 默认装配：满减依赖指向真实 promo 服务。
+// GetOrderSrv 返回生产默认装配的下单服务单例：满减依赖指向真实 promo 服务。
+// handler 调用入口固定走这里，不直接 NewOrderSrv，保证全局一份装配。
 func GetOrderSrv() *OrderSrv {
 	OrderSrvOnce.Do(func() {
 		OrderSrvIns = NewOrderSrv(promo.GetPromoSrv())
@@ -52,7 +60,7 @@ func GetOrderSrv() *OrderSrv {
 	return OrderSrvIns
 }
 
-func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -151,7 +159,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (resp i
 		if relErr := cache.ReleaseReservation(ctx, req.ProductID, int64(req.Num)); relErr != nil {
 			util.LogrusObj.Errorf("release reservation on tx failure failed: %v", relErr)
 		}
-		return
+		return nil, err
 	}
 
 	data := redis.Z{
@@ -166,11 +174,10 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (resp i
 		}
 	}
 
-	resp = order
-	return
+	return order, nil
 }
 
-func (s *OrderSrv) OrderList(ctx context.Context, req *OrderListReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderList(ctx context.Context, req *OrderListReq) (*OrderListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -179,7 +186,7 @@ func (s *OrderSrv) OrderList(ctx context.Context, req *OrderListReq) (resp inter
 	orders, err := NewOrderDao(ctx).ListOrderByCondition(u.Id, req)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	for i := range orders.List {
 		if conf.Config.System.UploadModel == consts.UploadModelLocal {
@@ -190,7 +197,7 @@ func (s *OrderSrv) OrderList(ctx context.Context, req *OrderListReq) (resp inter
 	return orders, nil
 }
 
-func (s *OrderSrv) OrderListOld(ctx context.Context, req *OrderListReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderListOld(ctx context.Context, req *OrderListReq) (*OrderListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -199,7 +206,7 @@ func (s *OrderSrv) OrderListOld(ctx context.Context, req *OrderListReq) (resp in
 	orders, _, err := NewOrderDao(ctx).ListOrderByConditionOld(u.Id, req)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	for i := range orders.List {
 		if conf.Config.System.UploadModel == consts.UploadModelLocal {
@@ -210,7 +217,7 @@ func (s *OrderSrv) OrderListOld(ctx context.Context, req *OrderListReq) (resp in
 	return orders, nil
 }
 
-func (s *OrderSrv) OrderShow(ctx context.Context, req *OrderShowReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderShow(ctx context.Context, req *OrderShowReq) (*OrderListRespItem, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -219,7 +226,7 @@ func (s *OrderSrv) OrderShow(ctx context.Context, req *OrderShowReq) (resp inter
 	order, err := NewOrderDao(ctx).ShowOrderById(req.OrderId, u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	if order == nil || order.ID == 0 {
 		return nil, errors.New("没找到数据")
@@ -229,9 +236,7 @@ func (s *OrderSrv) OrderShow(ctx context.Context, req *OrderShowReq) (resp inter
 		order.ImgPath = conf.Config.PhotoPath.PhotoHost + conf.Config.System.HttpPort + conf.Config.PhotoPath.ProductPath + order.ImgPath
 	}
 
-	resp = order
-
-	return
+	return order, nil
 }
 
 // buildPromoCartItems 给满减引擎拼一行 CartItem。
@@ -252,15 +257,16 @@ func buildPromoCartItems(ctx context.Context, productID uint, unitCents, qty int
 	return []promo.CartItem{item}
 }
 
-func (s *OrderSrv) OrderDelete(ctx context.Context, req *OrderDeleteReq) (resp interface{}, err error) {
+// OrderDelete 软删订单。成功时不回传订单体（保持既有 API 契约：data 为 null），
+// 仅用 ShowOrderById 做存在性校验。
+func (s *OrderSrv) OrderDelete(ctx context.Context, req *OrderDeleteReq) (*OrderListRespItem, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	db := NewOrderDao(ctx)
-	var ret *OrderListRespItem
-	ret, err = db.ShowOrderById(req.OrderId, u.Id)
+	ret, err := db.ShowOrderById(req.OrderId, u.Id)
 	if err != nil {
 		util.LogrusObj.Error("ShowOrderById失败，err:", err)
 		return nil, err
@@ -269,11 +275,10 @@ func (s *OrderSrv) OrderDelete(ctx context.Context, req *OrderDeleteReq) (resp i
 		return nil, errors.New("没有查找到数据")
 	}
 
-	err = db.DeleteOrderById(req.OrderId, u.Id)
-	if err != nil {
+	if err = db.DeleteOrderById(req.OrderId, u.Id); err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	return
+	return nil, nil
 }
