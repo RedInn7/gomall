@@ -49,36 +49,6 @@ func (d *UserDao) UnFollowUser(uId, followerId uint) (err error) {
 	return
 }
 
-// ListFollowing 展示关注的人 我关注的人
-func (d *UserDao) ListFollowing(userId uint) (f []*User, err error) {
-	u := new(User)
-	f = make([]*User, 0)
-	d.DB.Model(&User{}).Where(`id = ?`, userId).First(&u)
-	err = d.DB.Model(&u).Association(`Relations`).
-		Find(&f)
-	if err != nil {
-		log.LogrusObj.Error(err)
-		return
-	}
-
-	return
-}
-
-// ListFollower 展示关注者，粉丝，关注我的人
-func (d *UserDao) ListFollower(userId int64) (f []*User, err error) {
-	u := new(User)
-	f = make([]*User, 0)
-	d.DB.Model(&User{}).Where(`id = ?`, userId).First(&u)
-	err = d.DB.Model(&f).Association(`Relations`).
-		Find(&u)
-	if err != nil {
-		log.LogrusObj.Error(err)
-		return
-	}
-
-	return
-}
-
 // GetUserById 根据 id 获取用户
 func (d *UserDao) GetUserById(uId uint) (user *User, err error) {
 	err = d.DB.Model(&User{}).Where("id=?", uId).

@@ -45,14 +45,7 @@ func loading() {
 	tryInitES(context.Background())
 	tryInitWeb3Listener(context.Background())
 	tryInitMilvus(context.Background())
-	//kafka.InitKafka()
-	//track.InitJaeger()
 	fmt.Println("加载配置完成...")
-	//go scriptStarting()
-}
-
-func scriptStarting() {
-	// 启动一些脚本
 }
 
 // tryInitRabbitMQ RabbitMQ 不可用时不阻塞启动，但放弃延迟队列能力

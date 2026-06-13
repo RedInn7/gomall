@@ -46,34 +46,6 @@ func (d *PromoDao) ListAll() ([]*PromoRule, error) {
 	return rows, err
 }
 
-// ListActiveRules 取当前生效、范围匹配的规则集合。
-//
-//	scope=PromoScopeAll：忽略 scopeRefIDs，仅拉全场规则；
-//	scope=Category / Product：同时拉全场 + 该 scope 下 ref id 在 scopeRefIDs 内的；
-//
-// 引擎在 service 层把购物车里出现过的 category_id / product_id 组装好后一次性传进来，
-// 避免在 DAO 多次查 DB。
-func (d *PromoDao) ListActiveRules(now time.Time, scope int, scopeRefIDs []int64) ([]*PromoRule, error) {
-	q := d.DB.Where("status = ? AND start_at <= ? AND end_at >= ?",
-		PromoStatusActive, now, now)
-
-	switch scope {
-	case PromoScopeAll:
-		q = q.Where("scope = ?", PromoScopeAll)
-	default:
-		if len(scopeRefIDs) == 0 {
-			q = q.Where("scope = ?", PromoScopeAll)
-		} else {
-			q = q.Where("scope = ? OR (scope = ? AND scope_ref_id IN ?)",
-				PromoScopeAll, scope, scopeRefIDs)
-		}
-	}
-
-	var rows []*PromoRule
-	err := q.Order("id ASC").Find(&rows).Error
-	return rows, err
-}
-
 // ListActiveForCart 同时考虑类目和商品两种 scope。供引擎一次拉齐。
 func (d *PromoDao) ListActiveForCart(now time.Time, categoryIDs, productIDs []int64) ([]*PromoRule, error) {
 	q := d.DB.Where("status = ? AND start_at <= ? AND end_at >= ?",
@@ -137,7 +109,7 @@ func (d *PromoDao) RestoreBudget(tx *gorm.DB, ruleID uint, amount int64) error {
 }
 
 // Stop 运营手动停用一条规则。Stop 后正在进行中的订单不影响，
-// 新订单不再命中（ListActiveRules 已经按 status=active 过滤）。
+// 新订单不再命中（ListActiveForCart 已经按 status=active 过滤）。
 func (d *PromoDao) Stop(id uint) error {
 	return d.DB.Model(&PromoRule{}).
 		Where("id = ?", id).
