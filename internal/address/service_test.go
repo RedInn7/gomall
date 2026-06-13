@@ -14,7 +14,6 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/types"
 )
 
 // 收货地址领域的白盒测试：sqlite in-memory 直连 dao 层。
@@ -71,28 +70,20 @@ func TestAddress_CreateUpdateDeleteRoundTrip(t *testing.T) {
 	}
 
 	// AddressShow 返回 DataListResp，Total 与条数一致
-	showResp, err := srv.AddressShow(ctx)
+	listResp, err := srv.AddressShow(ctx)
 	if err != nil {
 		t.Fatalf("AddressShow: %v", err)
-	}
-	listResp, ok := showResp.(*types.DataListResp)
-	if !ok {
-		t.Fatalf("AddressShow resp type = %T", showResp)
 	}
 	if listResp.Total != 1 {
 		t.Fatalf("AddressShow total = %d, want 1", listResp.Total)
 	}
 
 	// 修改：电话与地址都换掉，返回值是更新后的列表
-	updResp, err := srv.AddressUpdate(ctx, &AddressServiceReq{
+	updList, err := srv.AddressUpdate(ctx, &AddressServiceReq{
 		Id: created.ID, Name: "李四", Phone: "13900000002", Address: "北京市海淀区中关村大街 2 号",
 	})
 	if err != nil {
 		t.Fatalf("AddressUpdate: %v", err)
-	}
-	updList, ok := updResp.(*types.DataListResp)
-	if !ok {
-		t.Fatalf("AddressUpdate resp type = %T", updResp)
 	}
 	items, ok := updList.Item.([]*AddressResp)
 	if !ok {
@@ -140,13 +131,9 @@ func TestAddress_ListOrderedByCreatedAtDesc(t *testing.T) {
 	}
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: uid})
-	resp, err := GetAddressSrv().AddressList(ctx, &AddressListReq{})
+	items, err := GetAddressSrv().AddressList(ctx, &AddressListReq{})
 	if err != nil {
 		t.Fatalf("AddressList: %v", err)
-	}
-	items, ok := resp.([]*AddressResp)
-	if !ok {
-		t.Fatalf("AddressList resp type = %T", resp)
 	}
 	if len(items) != 3 {
 		t.Fatalf("AddressList len = %d, want 3", len(items))
@@ -198,11 +185,11 @@ func TestAddress_CrossUserIsolation(t *testing.T) {
 	}
 
 	// 他人的列表为空
-	resp, err := srv.AddressShow(intruderCtx)
+	lr, err := srv.AddressShow(intruderCtx)
 	if err != nil {
 		t.Fatalf("AddressShow: %v", err)
 	}
-	if lr := resp.(*types.DataListResp); lr.Total != 0 {
+	if lr.Total != 0 {
 		t.Fatalf("他人列表 total = %d, want 0", lr.Total)
 	}
 

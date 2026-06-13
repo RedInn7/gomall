@@ -11,7 +11,6 @@ import (
 
 	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/types"
 )
 
 // 轮播图领域的白盒测试：sqlite in-memory 直连 dao 层。
@@ -59,13 +58,9 @@ func TestCarousel_ListReturnsSeededRows(t *testing.T) {
 		}
 	}
 
-	resp, err := GetCarouselSrv().ListCarousel(context.Background(), &ListCarouselReq{})
+	lr, err := GetCarouselSrv().ListCarousel(context.Background(), &ListCarouselReq{})
 	if err != nil {
 		t.Fatalf("ListCarousel: %v", err)
-	}
-	lr, ok := resp.(*types.DataListResp)
-	if !ok {
-		t.Fatalf("resp type = %T", resp)
 	}
 	if lr.Total != 2 {
 		t.Fatalf("total = %d, want 2", lr.Total)
@@ -101,11 +96,11 @@ func TestCarousel_ListEmptyTable(t *testing.T) {
 	_, cleanup := setupSQLiteForCarousel(t)
 	defer cleanup()
 
-	resp, err := GetCarouselSrv().ListCarousel(context.Background(), &ListCarouselReq{})
+	lr, err := GetCarouselSrv().ListCarousel(context.Background(), &ListCarouselReq{})
 	if err != nil {
 		t.Fatalf("ListCarousel: %v", err)
 	}
-	if lr := resp.(*types.DataListResp); lr.Total != 0 {
+	if lr.Total != 0 {
 		t.Fatalf("total = %d, want 0", lr.Total)
 	}
 }

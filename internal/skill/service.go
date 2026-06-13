@@ -23,8 +23,8 @@ func GetSkillProductSrv() *SkillProductSrv {
 	return SkillProductSrvIns
 }
 
-// InitSkillGoods 初始化秒杀商品并预热缓存
-func (s *SkillProductSrv) InitSkillGoods(ctx context.Context) (resp interface{}, err error) {
+// InitSkillGoods 初始化秒杀商品并预热缓存。成功不回传数据，data 为 null。
+func (s *SkillProductSrv) InitSkillGoods(ctx context.Context) (resp []*SkillProduct, err error) {
 	spList := make([]*SkillProduct, 0)
 	for i := 1; i < 10; i++ {
 		spList = append(spList, &SkillProduct{
@@ -38,7 +38,7 @@ func (s *SkillProductSrv) InitSkillGoods(ctx context.Context) (resp interface{},
 	err = NewSkillGoodsDao(ctx).BatchCreate(spList)
 	if err != nil {
 		log.LogrusObj.Infoln(err)
-		return
+		return nil, err
 	}
 
 	// 落库的同时写入缓存
@@ -46,7 +46,7 @@ func (s *SkillProductSrv) InitSkillGoods(ctx context.Context) (resp interface{},
 		jsonBytes, errx := json.Marshal(spList[i])
 		if errx != nil {
 			log.LogrusObj.Infoln(errx)
-			return
+			return nil, errx
 		}
 		jsonString := string(jsonBytes)
 		_, errx = cache.RedisClient.LPush(ctx, cache.SkillProductListKey, jsonString).Result()
@@ -56,16 +56,18 @@ func (s *SkillProductSrv) InitSkillGoods(ctx context.Context) (resp interface{},
 		}
 	}
 
-	return
+	return nil, nil
 }
 
-// ListSkillGoods 秒杀商品列表
+// ListSkillGoods 秒杀商品列表。
+// 返回值异构：缓存命中时为 []string（原始 JSON 串），缓存未命中回源 DB 时为
+// []*SkillProduct（结构化对象）。两条分支类型不同，故保留 interface{}。
 func (s *SkillProductSrv) ListSkillGoods(ctx context.Context) (resp interface{}, err error) {
 	rc := cache.RedisClient
 	skillProductList, err := rc.LRange(ctx, cache.SkillProductListKey, 0, -1).Result()
 	if err != nil {
 		log.LogrusObj.Infoln(err)
-		return
+		return nil, err
 	}
 
 	if len(skillProductList) == 0 {
@@ -79,7 +81,7 @@ func (s *SkillProductSrv) ListSkillGoods(ctx context.Context) (resp interface{},
 			jsonBytes, errx := json.Marshal(skillGoods[i])
 			if errx != nil {
 				log.LogrusObj.Infoln(errx)
-				return
+				return nil, errx
 			}
 			jsonString := string(jsonBytes)
 			_, errx = rc.LPush(ctx, cache.SkillProductListKey, jsonString).Result()
@@ -97,27 +99,27 @@ func (s *SkillProductSrv) ListSkillGoods(ctx context.Context) (resp interface{},
 }
 
 // GetSkillGoods 秒杀商品详情
-func (s *SkillProductSrv) GetSkillGoods(ctx context.Context, req *GetSkillProductReq) (resp interface{}, err error) {
+func (s *SkillProductSrv) GetSkillGoods(ctx context.Context, req *GetSkillProductReq) (resp string, err error) {
 	rc := cache.RedisClient
 	resp, err = rc.Get(ctx,
 		fmt.Sprintf(cache.SkillProductKey, req.ProductId)).Result()
 	if err != nil {
 		log.LogrusObj.Infoln(err)
-		return
+		return "", err
 	}
 
-	return
+	return resp, nil
 }
 
 // SkillProduct 秒杀下单
-func (s *SkillProductSrv) SkillProduct(ctx context.Context, req *SkillProductReq) (resp interface{}, err error) {
+func (s *SkillProductSrv) SkillProduct(ctx context.Context, req *SkillProductReq) (resp string, err error) {
 	rc := cache.RedisClient
 	resp, err = rc.Get(ctx,
 		fmt.Sprintf(cache.SkillProductKey, req.ProductId)).Result()
 	if err != nil {
 		log.LogrusObj.Infoln(err)
-		return
+		return "", err
 	}
 
-	return
+	return resp, nil
 }

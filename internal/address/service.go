@@ -22,7 +22,8 @@ func GetAddressSrv() *AddressSrv {
 	return AddressSrvIns
 }
 
-func (s *AddressSrv) AddressCreate(ctx context.Context, req *AddressCreateReq) (resp interface{}, err error) {
+// AddressCreate 新增收货地址。成功不回传地址体（保持既有 API 契约：data 为 null）。
+func (s *AddressSrv) AddressCreate(ctx context.Context, req *AddressCreateReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -38,44 +39,43 @@ func (s *AddressSrv) AddressCreate(ctx context.Context, req *AddressCreateReq) (
 	err = addressDao.CreateAddress(address)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
-	return
+	return nil, nil
 }
 
-func (s *AddressSrv) AddressShow(ctx context.Context) (resp interface{}, err error) {
+func (s *AddressSrv) AddressShow(ctx context.Context) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	address, err := NewAddressDao(ctx).GetAddressByuId(u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	resp = &types.DataListResp{
+	return &types.DataListResp{
 		Item:  address,
 		Total: int64(len(address)),
-	}
-
-	return
+	}, nil
 }
 
-func (s *AddressSrv) AddressList(ctx context.Context, req *AddressListReq) (resp interface{}, err error) {
+func (s *AddressSrv) AddressList(ctx context.Context, req *AddressListReq) ([]*AddressResp, error) {
 	u, _ := ctl.GetUserInfo(ctx)
-	resp, err = NewAddressDao(ctx).
+	resp, err := NewAddressDao(ctx).
 		ListAddressByUid(u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
-	return
+	return resp, nil
 }
 
-func (s *AddressSrv) AddressDelete(ctx context.Context, req *AddressDeleteReq) (resp interface{}, err error) {
+// AddressDelete 删除收货地址。成功不回传数据（保持既有 API 契约：data 为 null）。
+func (s *AddressSrv) AddressDelete(ctx context.Context, req *AddressDeleteReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -84,13 +84,13 @@ func (s *AddressSrv) AddressDelete(ctx context.Context, req *AddressDeleteReq) (
 	err = NewAddressDao(ctx).DeleteAddressById(req.Id, u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	return
+	return nil, nil
 }
 
-func (s *AddressSrv) AddressUpdate(ctx context.Context, req *AddressServiceReq) (resp interface{}, err error) {
+func (s *AddressSrv) AddressUpdate(ctx context.Context, req *AddressServiceReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -106,19 +106,16 @@ func (s *AddressSrv) AddressUpdate(ctx context.Context, req *AddressServiceReq) 
 	err = addressDao.UpdateAddressById(req.Id, u.Id, address)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
-	var addresses []*AddressResp
-	addresses, err = addressDao.ListAddressByUid(u.Id)
+	addresses, err := addressDao.ListAddressByUid(u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	resp = &types.DataListResp{
+	return &types.DataListResp{
 		Item:  addresses,
 		Total: int64(len(addresses)),
-	}
-
-	return
+	}, nil
 }
