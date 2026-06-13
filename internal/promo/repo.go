@@ -109,7 +109,7 @@ func (d *PromoDao) RestoreBudget(tx *gorm.DB, ruleID uint, amount int64) error {
 }
 
 // Stop 运营手动停用一条规则。Stop 后正在进行中的订单不影响，
-// 新订单不再命中（ListActiveRules 已经按 status=active 过滤）。
+// 新订单不再命中（ListActiveForCart 已经按 status=active 过滤）。
 func (d *PromoDao) Stop(id uint) error {
 	return d.DB.Model(&PromoRule{}).
 		Where("id = ?", id).
