@@ -117,7 +117,11 @@ func (s *UserSrv) UserLogin(ctx context.Context, req *UserServiceReq) (*UserToke
 // UserInfoUpdate 用户修改信息
 func (s *UserSrv) UserInfoUpdate(ctx context.Context, req *UserInfoUpdateReq) (*UserInfoResp, error) {
 	// 找到用户
-	u, _ := ctl.GetUserInfo(ctx)
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
 	userDao := NewUserDao(ctx)
 	user, err := userDao.GetUserById(u.Id)
 	if err != nil {
