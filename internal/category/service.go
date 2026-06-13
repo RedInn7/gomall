@@ -22,11 +22,11 @@ func GetCategorySrv() *CategorySrv {
 }
 
 // CategoryList 列举分类
-func (s *CategorySrv) CategoryList(ctx context.Context, req *ListCategoryReq) (resp interface{}, err error) {
+func (s *CategorySrv) CategoryList(ctx context.Context, req *ListCategoryReq) (*types.DataListResp, error) {
 	categories, err := NewCategoryDao(ctx).ListCategory()
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	cResp := make([]*ListCategoryResp, 0)
 	for _, v := range categories {
@@ -37,10 +37,8 @@ func (s *CategorySrv) CategoryList(ctx context.Context, req *ListCategoryReq) (r
 		})
 	}
 
-	resp = &types.DataListResp{
+	return &types.DataListResp{
 		Item:  cResp,
 		Total: int64(len(cResp)),
-	}
-
-	return
+	}, nil
 }

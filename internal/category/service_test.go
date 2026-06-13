@@ -13,7 +13,6 @@ import (
 
 	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/types"
 )
 
 // 商品分类领域的白盒测试：sqlite in-memory 直连 dao 层。
@@ -62,13 +61,9 @@ func TestCategory_ListMapsDTO(t *testing.T) {
 		}
 	}
 
-	resp, err := GetCategorySrv().CategoryList(context.Background(), &ListCategoryReq{})
+	lr, err := GetCategorySrv().CategoryList(context.Background(), &ListCategoryReq{})
 	if err != nil {
 		t.Fatalf("CategoryList: %v", err)
-	}
-	lr, ok := resp.(*types.DataListResp)
-	if !ok {
-		t.Fatalf("resp type = %T", resp)
 	}
 	if lr.Total != 2 {
 		t.Fatalf("total = %d, want 2", lr.Total)
@@ -101,11 +96,10 @@ func TestCategory_ListEmptyTable(t *testing.T) {
 	_, cleanup := setupSQLiteForCategory(t)
 	defer cleanup()
 
-	resp, err := GetCategorySrv().CategoryList(context.Background(), &ListCategoryReq{})
+	lr, err := GetCategorySrv().CategoryList(context.Background(), &ListCategoryReq{})
 	if err != nil {
 		t.Fatalf("CategoryList: %v", err)
 	}
-	lr := resp.(*types.DataListResp)
 	if lr.Total != 0 {
 		t.Fatalf("total = %d, want 0", lr.Total)
 	}

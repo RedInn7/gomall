@@ -32,16 +32,15 @@ func GetUserSrv() *UserSrv {
 }
 
 // UserRegister 用户注册
-func (s *UserSrv) UserRegister(ctx context.Context, req *UserRegisterReq) (resp interface{}, err error) {
+func (s *UserSrv) UserRegister(ctx context.Context, req *UserRegisterReq) (*UserInfoResp, error) {
 	userDao := NewUserDao(ctx)
 	_, exist, err := userDao.ExistOrNotByUserName(req.UserName)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	if exist {
-		err = errors.New("用户已经存在了")
-		return
+		return nil, errors.New("用户已经存在了")
 	}
 	user := &User{
 		NickName: req.NickName,
@@ -52,13 +51,13 @@ func (s *UserSrv) UserRegister(ctx context.Context, req *UserRegisterReq) (resp 
 	// 加密密码
 	if err = user.SetPassword(req.Password); err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	// 加密money
 	money, err := user.EncryptMoney(req.Key)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	user.Money = money
 	// 默认头像走的local
@@ -72,14 +71,14 @@ func (s *UserSrv) UserRegister(ctx context.Context, req *UserRegisterReq) (resp 
 	err = userDao.CreateUser(user)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	return
+	return nil, nil
 }
 
 // UserLogin 用户登陆函数
-func (s *UserSrv) UserLogin(ctx context.Context, req *UserServiceReq) (resp interface{}, err error) {
+func (s *UserSrv) UserLogin(ctx context.Context, req *UserServiceReq) (*UserTokenData, error) {
 	var user *User
 	userDao := NewUserDao(ctx)
 	user, exist, err := userDao.ExistOrNotByUserName(req.UserName)
@@ -108,17 +107,15 @@ func (s *UserSrv) UserLogin(ctx context.Context, req *UserServiceReq) (resp inte
 		CreateAt: user.CreatedAt.Unix(),
 	}
 
-	resp = &UserTokenData{
+	return &UserTokenData{
 		User:         userResp,
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
-	}
-
-	return
+	}, nil
 }
 
 // UserInfoUpdate 用户修改信息
-func (s *UserSrv) UserInfoUpdate(ctx context.Context, req *UserInfoUpdateReq) (resp interface{}, err error) {
+func (s *UserSrv) UserInfoUpdate(ctx context.Context, req *UserInfoUpdateReq) (*UserInfoResp, error) {
 	// 找到用户
 	u, _ := ctl.GetUserInfo(ctx)
 	userDao := NewUserDao(ctx)
@@ -138,11 +135,11 @@ func (s *UserSrv) UserInfoUpdate(ctx context.Context, req *UserInfoUpdateReq) (r
 		return nil, err
 	}
 
-	return
+	return nil, nil
 }
 
 // UserAvatarUpload 更新头像
-func (s *UserSrv) UserAvatarUpload(ctx context.Context, file multipart.File, fileSize int64, req *UserServiceReq) (resp interface{}, err error) {
+func (s *UserSrv) UserAvatarUpload(ctx context.Context, file multipart.File, fileSize int64, req *UserServiceReq) (*UserInfoResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -174,11 +171,11 @@ func (s *UserSrv) UserAvatarUpload(ctx context.Context, file multipart.File, fil
 		return nil, err
 	}
 
-	return
+	return nil, nil
 }
 
 // SendEmail 发送邮件
-func (s *UserSrv) SendEmail(ctx context.Context, req *SendEmailServiceReq) (resp interface{}, err error) {
+func (s *UserSrv) SendEmail(ctx context.Context, req *SendEmailServiceReq) (*UserInfoResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -211,28 +208,28 @@ func (s *UserSrv) SendEmail(ctx context.Context, req *SendEmailServiceReq) (resp
 	mailText := fmt.Sprintf(consts.EmailOperationMap[req.OperationType], address)
 	if err = sender.Send(mailText, req.Email, "FanOneMall"); err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	return
+	return nil, nil
 }
 
 // Valid 验证内容
-func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (resp interface{}, err error) {
+func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserInfoResp, error) {
 	var userId uint
 	var email string
 	var passwordDigest string
 	var operationType uint
 	// 验证token
 	if req.Token == "" {
-		err = errors.New("token输入值为空")
+		err := errors.New("token输入值为空")
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	claims, err := jwt.ParseEmailToken(req.Token)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	} else {
 		userId = claims.UserID
 		email = claims.Email
@@ -245,7 +242,7 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (resp in
 	user, err := userDao.GetUserById(userId)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	switch operationType {
@@ -257,7 +254,7 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (resp in
 		if passwordDigest == "" {
 			err = errors.New("token 缺少密码摘要")
 			log.LogrusObj.Error(err)
-			return
+			return nil, err
 		}
 		user.PasswordDigest = passwordDigest
 	default:
@@ -267,10 +264,10 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (resp in
 	err = userDao.UpdateUserById(userId, user)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	resp = &UserInfoResp{
+	return &UserInfoResp{
 		ID:       user.ID,
 		UserName: user.UserName,
 		NickName: user.NickName,
@@ -278,24 +275,23 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (resp in
 		Status:   user.Status,
 		Avatar:   user.AvatarURL(),
 		CreateAt: user.CreatedAt.Unix(),
-	}
-
-	return
+	}, nil
 }
 
 // UserInfoShow 用户信息展示
-func (s *UserSrv) UserInfoShow(ctx context.Context) (resp interface{}, err error) {
+func (s *UserSrv) UserInfoShow(ctx context.Context) (*UserInfoResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	user, err := NewUserDao(ctx).GetUserById(u.Id)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
-	resp = &UserInfoResp{
+
+	return &UserInfoResp{
 		ID:       user.ID,
 		UserName: user.UserName,
 		NickName: user.NickName,
@@ -303,12 +299,10 @@ func (s *UserSrv) UserInfoShow(ctx context.Context) (resp interface{}, err error
 		Status:   user.Status,
 		Avatar:   user.AvatarURL(),
 		CreateAt: user.CreatedAt.Unix(),
-	}
-
-	return
+	}, nil
 }
 
-func (s *UserSrv) UserFollow(ctx context.Context, req *UserFollowingReq) (resp interface{}, err error) {
+func (s *UserSrv) UserFollow(ctx context.Context, req *UserFollowingReq) (*UserInfoResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -316,10 +310,10 @@ func (s *UserSrv) UserFollow(ctx context.Context, req *UserFollowingReq) (resp i
 	}
 	err = NewUserDao(ctx).FollowUser(u.Id, req.Id)
 
-	return
+	return nil, err
 }
 
-func (s *UserSrv) UserUnFollow(ctx context.Context, req *UserUnFollowingReq) (resp interface{}, err error) {
+func (s *UserSrv) UserUnFollow(ctx context.Context, req *UserUnFollowingReq) (*UserInfoResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -327,5 +321,5 @@ func (s *UserSrv) UserUnFollow(ctx context.Context, req *UserUnFollowingReq) (re
 	}
 	err = NewUserDao(ctx).UnFollowUser(u.Id, req.Id)
 
-	return
+	return nil, err
 }
