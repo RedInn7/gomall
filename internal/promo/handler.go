@@ -10,17 +10,14 @@ import (
 	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
-	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 // PromoCalculateHandler 公开接口（不强制登录）：
 // 前端把当前购物车快照传过来，引擎返回最优一条规则与减免金额。
 func PromoCalculateHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req PromoCalculateReq
-		if err := c.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+		req, ok := response.Bind[PromoCalculateReq](c)
+		if !ok {
 			return
 		}
 		items := make([]CartItem, 0, len(req.Items))
@@ -39,10 +36,10 @@ func PromoCalculateHandler() gin.HandlerFunc {
 					"满减预算已用完", e.PromoBudgetExhausted))
 				return
 			}
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, resp))
+		response.OK(c, resp)
 	}
 }
 
@@ -51,28 +48,26 @@ func AdminListPromoRulesHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		rows, err := GetPromoSrv().ListRules(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, rows))
+		response.OK(c, rows)
 	}
 }
 
 // AdminCreatePromoRuleHandler admin 创建规则
 func AdminCreatePromoRuleHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req PromoRuleCreateReq
-		if err := c.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+		req, ok := response.Bind[PromoRuleCreateReq](c)
+		if !ok {
 			return
 		}
-		r, err := GetPromoSrv().CreateRule(c.Request.Context(), &req)
+		r, err := GetPromoSrv().CreateRule(c.Request.Context(), req)
 		if err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, r))
+		response.OK(c, r)
 	}
 }
 
@@ -86,9 +81,9 @@ func AdminStopPromoRuleHandler() gin.HandlerFunc {
 			return
 		}
 		if err := GetPromoSrv().StopRule(c.Request.Context(), uint(id)); err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"id": id, "stopped": true}))
+		response.OK(c, gin.H{"id": id, "stopped": true})
 	}
 }

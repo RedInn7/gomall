@@ -23,11 +23,10 @@ func PreorderShowHandler() gin.HandlerFunc {
 		}
 		resp, err := GetPreorderSrv().ShowPreorder(ctx.Request.Context(), pid)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -40,20 +39,18 @@ func PreorderDepositHandler() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		var req PreorderDepositReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[PreorderDepositReq](ctx)
+		if !ok {
 			return
 		}
 		req.ProductID = pid
 
-		resp, err := GetPreorderSrv().PayDeposit(ctx.Request.Context(), &req)
+		resp, err := GetPreorderSrv().PayDeposit(ctx.Request.Context(), req)
 		if err != nil {
 			respondPreorderErr(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -66,20 +63,18 @@ func PreorderFinalHandler() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		var req PreorderFinalReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[PreorderFinalReq](ctx)
+		if !ok {
 			return
 		}
 		req.OrderID = oid
 
-		resp, err := GetPreorderSrv().PayFinal(ctx.Request.Context(), &req)
+		resp, err := GetPreorderSrv().PayFinal(ctx.Request.Context(), req)
 		if err != nil {
 			respondPreorderErr(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -92,20 +87,18 @@ func PreorderCancelHandler() gin.HandlerFunc {
 		if !ok {
 			return
 		}
-		var req PreorderCancelReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[PreorderCancelReq](ctx)
+		if !ok {
 			return
 		}
 		req.OrderID = oid
 
-		resp, err := GetPreorderSrv().CancelPreorderInDepositWindow(ctx.Request.Context(), &req)
+		resp, err := GetPreorderSrv().CancelPreorderInDepositWindow(ctx.Request.Context(), req)
 		if err != nil {
 			respondPreorderErr(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 

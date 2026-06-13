@@ -1,13 +1,11 @@
 package admin
 
 import (
-	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/RedInn7/gomall/internal/shared/response"
-	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/service/search"
 )
 
@@ -17,27 +15,27 @@ func AdminListUsersHandler() gin.HandlerFunc {
 		size, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
 		resp, err := GetAdminSrv().ListAllUsers(c.Request.Context(), page, size)
 		if err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, resp))
+		response.OK(c, resp)
 	}
 }
 
 func AdminPromoteUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req struct {
+		type promoteReq struct {
 			UserId uint `json:"user_id" form:"user_id" binding:"required"`
 		}
-		if err := c.ShouldBind(&req); err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+		req, ok := response.Bind[promoteReq](c)
+		if !ok {
 			return
 		}
 		if err := GetAdminSrv().PromoteToAdmin(c.Request.Context(), req.UserId); err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"promoted": req.UserId}))
+		response.OK(c, gin.H{"promoted": req.UserId})
 	}
 }
 
@@ -45,10 +43,10 @@ func AdminPromoteUserHandler() gin.HandlerFunc {
 func BootstrapAdminHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if err := GetAdminSrv().BootstrapPromoteSelf(c.Request.Context()); err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"ok": true}))
+		response.OK(c, gin.H{"ok": true})
 	}
 }
 
@@ -58,9 +56,9 @@ func AdminBackfillProductIndexHandler() gin.HandlerFunc {
 		batch, _ := strconv.Atoi(c.DefaultQuery("batch", "200"))
 		n, err := search.BackfillFromDB(c.Request.Context(), batch)
 		if err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, gin.H{"indexed": n}))
+		response.OK(c, gin.H{"indexed": n})
 	}
 }

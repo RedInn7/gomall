@@ -42,15 +42,13 @@ type GroupbuyShowResp struct {
 // GroupbuyCreateHandler 团长发起拼团。
 func GroupbuyCreateHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req GroupbuyCreateReq
-		if err := c.ShouldBindJSON(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+		req, ok := response.BindJSON[GroupbuyCreateReq](c)
+		if !ok {
 			return
 		}
 		u, err := ctl.GetUserInfo(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
 
@@ -65,7 +63,7 @@ func GroupbuyCreateHandler() gin.HandlerFunc {
 			c.JSON(http.StatusOK, groupbuyErrorResponse(c, err))
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, resp))
+		response.OK(c, resp)
 	}
 }
 
@@ -74,7 +72,7 @@ func GroupbuyJoinHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		groupID, err := parseGroupID(c)
 		if err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
 		var req GroupbuyJoinReq
@@ -83,7 +81,7 @@ func GroupbuyJoinHandler() gin.HandlerFunc {
 
 		u, err := ctl.GetUserInfo(c.Request.Context())
 		if err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
 
@@ -95,7 +93,7 @@ func GroupbuyJoinHandler() gin.HandlerFunc {
 			c.JSON(http.StatusOK, groupbuyErrorResponse(c, err))
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, resp))
+		response.OK(c, resp)
 	}
 }
 
@@ -104,7 +102,7 @@ func GroupbuyShowHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		groupID, err := parseGroupID(c)
 		if err != nil {
-			c.JSON(http.StatusOK, response.ErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
 		g, members, err := GetGroupbuySrv().ShowGroup(c.Request.Context(), groupID)
@@ -113,7 +111,7 @@ func GroupbuyShowHandler() gin.HandlerFunc {
 			c.JSON(http.StatusOK, groupbuyErrorResponse(c, err))
 			return
 		}
-		c.JSON(http.StatusOK, ctl.RespSuccess(c, GroupbuyShowResp{Group: g, Members: members}))
+		response.OK(c, GroupbuyShowResp{Group: g, Members: members})
 	}
 }
 

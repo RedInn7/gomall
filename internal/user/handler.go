@@ -9,16 +9,13 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/e"
-	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 func UserRegisterHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req UserRegisterReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[UserRegisterReq](ctx)
+		if !ok {
 			return
 		}
 
@@ -30,13 +27,12 @@ func UserRegisterHandler() gin.HandlerFunc {
 		}
 
 		l := GetUserSrv()
-		resp, err := l.UserRegister(ctx.Request.Context(), &req)
+		resp, err := l.UserRegister(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -54,11 +50,10 @@ func UserLoginHandler() gin.HandlerFunc {
 		l := GetUserSrv()
 		resp, err := l.UserLogin(ctx.Request.Context(), &req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -79,7 +74,7 @@ func UserUpdateHandler() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, response.ErrorResponse(ctx, err))
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -100,7 +95,7 @@ func ShowUserInfoHandler() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, response.ErrorResponse(ctx, err))
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -129,7 +124,7 @@ func UploadAvatarHandler() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, response.ErrorResponse(ctx, err))
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -151,7 +146,7 @@ func SendEmailHandler() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, response.ErrorResponse(ctx, err))
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -172,7 +167,7 @@ func UserFollowingHandler() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, response.ErrorResponse(ctx, err))
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -193,7 +188,7 @@ func UserUnFollowingHandler() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, response.ErrorResponse(ctx, err))
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -213,6 +208,6 @@ func ValidEmailHandler() gin.HandlerFunc {
 			ctx.JSON(http.StatusInternalServerError, response.ErrorResponse(ctx, err))
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
