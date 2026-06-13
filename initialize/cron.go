@@ -18,7 +18,9 @@ import (
 func InitCron() {
 	c := cron.New(cron.WithSeconds())
 	orderService := new(order.OrderTaskService)
-	_, err := c.AddFunc("* */5 * * * *", func() {
+	// @every 5m 而非 "* */5 * * * *"：后者在 WithSeconds 下是「分钟能被 5 整除时每秒触发」，
+	// 即 60×/5min，是项目里已知的 cron 陷阱（见下方 GroupbuyExpire 注释）。
+	_, err := c.AddFunc("@every 5m", func() {
 		defer func() {
 			if r := recover(); r != nil {
 				util.LogrusObj.Errorf("Cron 任务发生 Panic: %v", r)
@@ -28,6 +30,21 @@ func InitCron() {
 	})
 	if err != nil {
 		panic(fmt.Sprintf("Cron 初始化失败: %v", err))
+	}
+
+	// 库存预占对账兜底：每 5min 重算 Redis reserved 与 DB WaitPay 订单的差额，
+	// 回收「Redis 占了、DB 无订单」的孤儿预占（崩溃在双写之间留下、其它关单路径
+	// 都救不回来的永久泄漏）。任务内部采两次样取交集，避开建单在途的假阳性。
+	_, err = c.AddFunc("@every 5m", func() {
+		defer func() {
+			if r := recover(); r != nil {
+				util.LogrusObj.Errorf("StockReconcile Cron Panic: %v", r)
+			}
+		}()
+		orderService.RunStockReservationReconcile()
+	})
+	if err != nil {
+		panic(fmt.Sprintf("StockReconcile Cron 初始化失败: %v", err))
 	}
 
 	redPacketService := new(redpacket.RedPacketTaskService)
