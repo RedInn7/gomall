@@ -31,13 +31,13 @@ func OrderTicketKey(ticket string) string {
 	return fmt.Sprintf("order:ticket:%s", ticket)
 }
 
-// AsyncOrderTask 投递到 MQ 的消息体
+// AsyncOrderTask 投递到 MQ 的消息体。
+// 不携带金额：单价由 consumer 落库时从商品表权威反查，客户端金额一律不进入计费链路。
 type AsyncOrderTask struct {
 	Ticket    string `json:"ticket"`
 	UserID    uint   `json:"user_id"`
 	ProductID uint   `json:"product_id"`
 	Num       uint   `json:"num"`
-	Money     int    `json:"money"`
 	AddressID uint   `json:"address_id"`
 	BossID    uint   `json:"boss_id"`
 }
@@ -142,7 +142,6 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (Order
 		UserID:    u.Id,
 		ProductID: req.ProductID,
 		Num:       req.Num,
-		Money:     req.Money,
 		AddressID: req.AddressID,
 		BossID:    req.BossID,
 	}
