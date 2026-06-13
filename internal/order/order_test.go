@@ -151,9 +151,9 @@ func TestOrderCreate_AppliesBestPromo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrderCreate: %v", err)
 	}
-	order, ok := resp.(*Order)
-	if !ok {
-		t.Fatalf("resp type %T", resp)
+	order := resp
+	if order == nil {
+		t.Fatalf("resp is nil")
 	}
 
 	if order.PromoRuleID != rule.ID {
@@ -211,7 +211,7 @@ func TestOrderCreate_NoApplicableRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrderCreate: %v", err)
 	}
-	order := resp.(*Order)
+	order := resp
 
 	if order.PromoRuleID != 0 {
 		t.Fatalf("PromoRuleID = %d, want 0", order.PromoRuleID)
@@ -263,7 +263,7 @@ func TestOrderCreate_PicksBestAmongMultipleRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrderCreate: %v", err)
 	}
-	order := resp.(*Order)
+	order := resp
 
 	if order.PromoRuleID != discountRule.ID {
 		t.Fatalf("PromoRuleID = %d, want %d (9 折)", order.PromoRuleID, discountRule.ID)
@@ -309,7 +309,7 @@ func TestOrderCreate_BudgetExhaustedDowngrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OrderCreate 应降级而非报错: %v", err)
 	}
-	order := resp.(*Order)
+	order := resp
 
 	if order.PromoRuleID != 0 {
 		t.Fatalf("降级失败 PromoRuleID = %d, want 0", order.PromoRuleID)
