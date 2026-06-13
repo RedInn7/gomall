@@ -8,45 +8,37 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/shared/response"
-	"github.com/RedInn7/gomall/pkg/utils/ctl"
-	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 // CreateProductHandler 创建商品
 func CreateProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req ProductCreateReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[ProductCreateReq](ctx)
+		if !ok {
 			return
 		}
 
 		form, err := ctx.MultipartForm()
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
 		files := form.File["image"]
 		l := GetProductSrv()
-		resp, err := l.ProductCreate(ctx.Request.Context(), files, &req)
+		resp, err := l.ProductCreate(ctx.Request.Context(), files, req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
 // ListProductsHandler 商品列表
 func ListProductsHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req ProductListReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[ProductListReq](ctx)
+		if !ok {
 			return
 		}
 		if req.PageSize == 0 {
@@ -54,85 +46,73 @@ func ListProductsHandler() gin.HandlerFunc {
 		}
 
 		l := GetProductSrv()
-		resp, err := l.ProductList(ctx.Request.Context(), &req)
+		resp, err := l.ProductList(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
 // ShowProductHandler 商品详情
 func ShowProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req ProductShowReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[ProductShowReq](ctx)
+		if !ok {
 			return
 		}
 
 		l := GetProductSrv()
-		resp, err := l.ProductShow(ctx.Request.Context(), &req)
+		resp, err := l.ProductShow(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
 // DeleteProductHandler 删除商品
 func DeleteProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req ProductDeleteReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[ProductDeleteReq](ctx)
+		if !ok {
 			return
 		}
 
 		l := GetProductSrv()
-		resp, err := l.ProductDelete(ctx.Request.Context(), &req)
+		resp, err := l.ProductDelete(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
 // UpdateProductHandler 更新商品
 func UpdateProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req ProductUpdateReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[ProductUpdateReq](ctx)
+		if !ok {
 			return
 		}
 
 		l := GetProductSrv()
-		resp, err := l.ProductUpdate(ctx.Request.Context(), &req)
+		resp, err := l.ProductUpdate(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
 func ListProductImgHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req ListProductImgReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[ListProductImgReq](ctx)
+		if !ok {
 			return
 		}
 		if req.ID == 0 {
@@ -142,12 +122,11 @@ func ListProductImgHandler() gin.HandlerFunc {
 		}
 
 		l := GetProductSrv()
-		resp, err := l.ProductImgList(ctx.Request.Context(), &req)
+		resp, err := l.ProductImgList(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
