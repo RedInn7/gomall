@@ -124,6 +124,33 @@ func ReleaseReservation(ctx context.Context, productID uint, n int64) error {
 	return nil
 }
 
+// ScanReservedProductIDs 扫出当前所有存在 reserved 桶的商品 ID，供对账兜底枚举。
+// 用 SCAN 增量遍历而非 KEYS，避免大库存下阻塞 Redis 主线程。
+func ScanReservedProductIDs(ctx context.Context) ([]uint, error) {
+	const pattern = "stock:reserved:*"
+	var (
+		ids    []uint
+		cursor uint64
+	)
+	for {
+		keys, next, err := RedisClient.Scan(ctx, cursor, pattern, 200).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range keys {
+			var pid uint
+			if _, perr := fmt.Sscanf(k, "stock:reserved:%d", &pid); perr == nil {
+				ids = append(ids, pid)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return ids, nil
+}
+
 // GetStockSnapshot 读两个桶的当前值，用于巡检/对账
 func GetStockSnapshot(ctx context.Context, productID uint) (available, reserved int64, err error) {
 	a, e1 := RedisClient.Get(ctx, StockAvailableKey(productID)).Int64()
