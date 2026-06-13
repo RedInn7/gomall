@@ -17,10 +17,6 @@ func NewCartDao(ctx context.Context) *CartDao {
 	return &CartDao{dao.NewDBClient(ctx)}
 }
 
-func NewCartDaoByDB(db *gorm.DB) *CartDao {
-	return &CartDao{db}
-}
-
 // CreateCart 创建 cart pId(商品 id)、uId(用户id)、bId(店家id)
 func (d *CartDao) CreateCart(pId, uId, bId uint) (cart *Cart, status int, err error) {
 	// 查询有无此条商品
