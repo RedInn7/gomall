@@ -3,12 +3,13 @@ package order
 import (
 	"context"
 	"errors"
+	"time"
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -28,31 +29,94 @@ func (s *OrderTaskService) RunOrderTimeoutCheck() {
 	}
 
 	for _, order := range orders {
-		err := baseDao.DB.Transaction(func(tx *gorm.DB) error {
-			txOrderDao := NewOrderDaoByDB(tx)
-			txProductDao := product.NewProductDaoWithDB(tx)
-			success, err := txOrderDao.CloseOrderWithCheck(order.OrderNum)
-			if err != nil {
-				return err
-			}
-			if !success {
-				return errors.New("关单失败")
-			}
-			success, err = txProductDao.RollbackStock(order.ProductID, order.Num)
-			if err != nil {
-				return err
-			}
-			if !success {
-				return errors.New("回滚失败")
-			}
-			return nil
-		})
-		if err != nil {
-			util.LogrusObj.Errorf("关单失败，orderNum:%v,err:%v\n", order.OrderNum, err)
+		// 走与 MQ 延迟取消(CancelUnpaidOrder)完全相同的幂等逻辑：
+		// 关单 + 写 order.cancelled 事件 + 释放 Redis reserved 预占。
+		// 这是 DB 驱动的兜底：建单成功后 PublishOrderCancelDelay 若因崩溃丢消息，
+		// 这里仍能扫到 WaitPay 订单补偿关单并退还预占。
+		// 不再回写 product.Num —— 未支付订单从未真正扣减过 DB 库存，回写会虚高
+		// （与旧实现的关键差异，旧实现既漏退 Redis 又错误地抬高 DB 水位）。
+		if err := CancelUnpaidOrder(order.OrderNum); err != nil {
+			util.LogrusObj.Errorf("关单失败 orderNum=%v err=%v", order.OrderNum, err)
 			continue
 		}
-		util.LogrusObj.Infof("orderNum:%v关单成功", order.OrderNum)
+		util.LogrusObj.Infof("orderNum:%v 关单成功", order.OrderNum)
 	}
+}
+
+// stockReconcileGrace 对账两次采样之间的静默期：必须远大于建单临界区
+// （ReserveStock -> DB commit 通常亚秒级），让「建单在途」的预占在二次采样时
+// 已落库，避免把它误判成泄漏而错误回收。取 5s 留足余量。
+const stockReconcileGrace = 5 * time.Second
+
+// RunStockReservationReconcile 对账 Redis reserved 桶与 DB 未支付订单，回收泄漏的预占。
+//
+// 为什么需要它：下单是「先写 Redis reserved，再提交 DB 订单」的双写，二者没有跨系统
+// 原子性。进程在两步之间崩溃会留下「Redis 占了、DB 无订单」的孤儿预占；这种单子既没有
+// 订单行（GetTimeoutOrders 扫不到）、也没有延迟消息，任何关单路径都救不回来，库存被永久
+// 占死。本任务按商品重算 reserved 应有水位（Σ WaitPay 订单 Num），把多出来的退回 available。
+//
+// 只回收「多占」（reserved > Σ订单），绝不反向给 reserved 补量 —— 少占可能是 Redis 丢数据，
+// 盲目从 available 搬运会超卖。为躲开「建单在途」假阳性，采两次样取交集（min）：真泄漏两次
+// 都在，在途预占第二次已落 DB 而消失。
+func (s *OrderTaskService) RunStockReservationReconcile() {
+	ctx := context.Background()
+	leak1, err := s.sampleReservationLeak(ctx)
+	if err != nil {
+		util.LogrusObj.Errorf("StockReconcile 首次采样失败: %v", err)
+		return
+	}
+	if len(leak1) == 0 {
+		return
+	}
+	time.Sleep(stockReconcileGrace)
+	leak2, err := s.sampleReservationLeak(ctx)
+	if err != nil {
+		util.LogrusObj.Errorf("StockReconcile 二次采样失败: %v", err)
+		return
+	}
+
+	for pid, l1 := range leak1 {
+		leaked := l1
+		if l2 := leak2[pid]; l2 < leaked {
+			leaked = l2 // 取两次采样交集，过滤掉只在某一次出现的在途预占
+		}
+		if leaked <= 0 {
+			continue
+		}
+		if err := cache.ReleaseReservation(ctx, pid, leaked); err != nil {
+			util.LogrusObj.Errorf("StockReconcile 释放泄漏预占失败 product=%d n=%d err=%v", pid, leaked, err)
+			continue
+		}
+		util.LogrusObj.Warnf("StockReconcile 回收泄漏预占 product=%d n=%d（reserved 超出 WaitPay 订单口径）", pid, leaked)
+	}
+}
+
+// sampleReservationLeak 采一次样：对每个存在 reserved 桶的商品，算 reserved - Σ(WaitPay Num)，
+// 正值即疑似泄漏。返回 map[productID]leak(>0)。
+func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]int64, error) {
+	pids, err := cache.ScanReservedProductIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(pids) == 0 {
+		return nil, nil
+	}
+	dbSum, err := NewOrderDao(ctx).SumWaitPayNumByProduct()
+	if err != nil {
+		return nil, err
+	}
+	leak := make(map[uint]int64)
+	for _, pid := range pids {
+		_, reserved, err := cache.GetStockSnapshot(ctx, pid)
+		if err != nil {
+			util.LogrusObj.Errorf("StockReconcile 读 reserved 失败 product=%d err=%v", pid, err)
+			continue
+		}
+		if diff := reserved - dbSum[pid]; diff > 0 {
+			leak[pid] = diff
+		}
+	}
+	return leak, nil
 }
 
 // RunAutoConfirmReceive 对长时间未确认收货的订单兜底自动 Completed。
