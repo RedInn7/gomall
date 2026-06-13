@@ -1,34 +1,27 @@
 package order
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/shared/response"
-	"github.com/RedInn7/gomall/pkg/utils/ctl"
-	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 // EnqueueOrderHandler 异步下单：reserve 库存 + 投 MQ，立即返回 ticket
 func EnqueueOrderHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req OrderCreateReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[OrderCreateReq](ctx)
+		if !ok {
 			return
 		}
 
 		l := GetOrderSrv()
-		resp, err := l.OrderEnqueue(ctx.Request.Context(), &req)
+		resp, err := l.OrderEnqueue(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
@@ -39,43 +32,34 @@ func OrderStatusHandler() gin.HandlerFunc {
 		l := GetOrderSrv()
 		resp, err := l.OrderStatus(ctx.Request.Context(), ticket)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
 
 func CreateOrderHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req OrderCreateReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[OrderCreateReq](ctx)
+		if !ok {
 			return
 		}
 
 		l := GetOrderSrv()
-		resp, err := l.OrderCreate(ctx.Request.Context(), &req)
+		resp, err := l.OrderCreate(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
-		return
+		response.OK(ctx, resp)
 	}
 }
 
 func ListOrdersHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req OrderListReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[OrderListReq](ctx)
+		if !ok {
 			return
 		}
 		if req.PageSize == 0 {
@@ -83,24 +67,19 @@ func ListOrdersHandler() gin.HandlerFunc {
 		}
 
 		l := GetOrderSrv()
-		resp, err := l.OrderList(ctx.Request.Context(), &req)
+		resp, err := l.OrderList(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
-		return
+		response.OK(ctx, resp)
 	}
 }
 
 func ListOrdersHandlerOld() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req OrderListReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[OrderListReq](ctx)
+		if !ok {
 			return
 		}
 		if req.PageSize == 0 {
@@ -108,57 +87,46 @@ func ListOrdersHandlerOld() gin.HandlerFunc {
 		}
 
 		l := GetOrderSrv()
-		resp, err := l.OrderListOld(ctx.Request.Context(), &req)
+		resp, err := l.OrderListOld(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
-		return
+		response.OK(ctx, resp)
 	}
 }
 
 // ShowOrderHandler 订单详情
 func ShowOrderHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req OrderShowReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[OrderShowReq](ctx)
+		if !ok {
 			return
 		}
 
 		l := GetOrderSrv()
-		resp, err := l.OrderShow(ctx.Request.Context(), &req)
+		resp, err := l.OrderShow(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
-		return
+		response.OK(ctx, resp)
 	}
 }
 
 func DeleteOrderHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
-		var req OrderDeleteReq
-		if err := ctx.ShouldBind(&req); err != nil {
-			// 参数校验
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+		req, ok := response.Bind[OrderDeleteReq](ctx)
+		if !ok {
 			return
 		}
 
 		l := GetOrderSrv()
-		resp, err := l.OrderDelete(ctx.Request.Context(), &req)
+		resp, err := l.OrderDelete(ctx.Request.Context(), req)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			response.Fail(ctx, err)
 			return
 		}
-		ctx.JSON(http.StatusOK, ctl.RespSuccess(ctx, resp))
+		response.OK(ctx, resp)
 	}
 }
