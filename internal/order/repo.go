@@ -44,6 +44,28 @@ func (d *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, finalC
 		}).Error
 }
 
+// SumWaitPayNumByProduct 汇总每个商品当前 WaitPay 订单的预占数量(Σ Num)。
+// 这是 Redis reserved 桶的对账基准：DB 订单是真相，reserved 不该超过这个口径，
+// 超出的部分即为崩溃在「写 Redis、提交 DB」之间留下的孤儿预占。
+func (d *OrderDao) SumWaitPayNumByProduct() (map[uint]int64, error) {
+	var rows []struct {
+		ProductID uint
+		Total     int64
+	}
+	if err := d.DB.Model(&Order{}).
+		Select("product_id, SUM(num) AS total").
+		Where("type = ?", consts.OrderWaitPay).
+		Group("product_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	m := make(map[uint]int64, len(rows))
+	for _, r := range rows {
+		m[r.ProductID] = r.Total
+	}
+	return m, nil
+}
+
 // ListOrderByCondition 获取订单List
 func (d *OrderDao) ListOrderByCondition(uId uint, req *OrderListReq) (r *OrderListResp, err error) {
 	req.BasePage.Normalize()
