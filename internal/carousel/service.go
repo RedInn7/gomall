@@ -22,17 +22,15 @@ func GetCarouselSrv() *CarouselSrv {
 }
 
 // ListCarousel 列表
-func (s *CarouselSrv) ListCarousel(ctx context.Context, req *ListCarouselReq) (resp interface{}, err error) {
+func (s *CarouselSrv) ListCarousel(ctx context.Context, req *ListCarouselReq) (*types.DataListResp, error) {
 	carousels, err := NewCarouselDao(ctx).ListCarousel()
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	resp = &types.DataListResp{
+	return &types.DataListResp{
 		Item:  carousels,
 		Total: int64(len(carousels)),
-	}
-
-	return
+	}, nil
 }

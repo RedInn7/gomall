@@ -19,7 +19,6 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/types"
 )
 
 // 购物车域的 DB 闭环测试：sqlite in-memory，覆盖加购（首次/重复/超上限）、
@@ -227,13 +226,9 @@ func TestCartList_AssemblesDTO(t *testing.T) {
 		t.Fatalf("load cart: %v", err)
 	}
 
-	resp, err := GetCartSrv().CartList(ctx, &CartListReq{})
+	dl, err := GetCartSrv().CartList(ctx, &CartListReq{})
 	if err != nil {
 		t.Fatalf("CartList: %v", err)
-	}
-	dl, ok := resp.(*types.DataListResp)
-	if !ok {
-		t.Fatalf("resp type = %T", resp)
 	}
 	if dl.Total != 1 {
 		t.Fatalf("total = %d, want 1", dl.Total)
@@ -268,8 +263,8 @@ func TestCartList_AssemblesDTO(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CartList(other): %v", err)
 	}
-	if lr := otherResp.(*types.DataListResp); lr.Total != 0 {
-		t.Fatalf("他人列表 total = %d, want 0", lr.Total)
+	if otherResp.Total != 0 {
+		t.Fatalf("他人列表 total = %d, want 0", otherResp.Total)
 	}
 }
 

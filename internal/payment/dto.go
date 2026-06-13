@@ -5,6 +5,10 @@ type PaymentDownReq struct {
 	Key     string `form:"key" json:"key" binding:"required"`
 }
 
+// PayDownResp 余额支付成功返回体。当前成功路径不回传字段，data 恒为 null，
+// 仅用于给 PayDown 一个具体返回类型以替换 interface{}。
+type PayDownResp struct{}
+
 // CryptoNonceReq 申请一次性签名 nonce，用 query 传 order_id
 type CryptoNonceReq struct {
 	OrderId uint `form:"order_id" json:"order_id" binding:"required"`

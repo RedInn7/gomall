@@ -28,7 +28,7 @@ func GetFavoriteSrv() *FavoriteSrv {
 }
 
 // FavoriteList 商品收藏夹
-func (s *FavoriteSrv) FavoriteList(ctx context.Context, req *FavoritesServiceReq) (resp interface{}, err error) {
+func (s *FavoriteSrv) FavoriteList(ctx context.Context, req *FavoritesServiceReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -37,7 +37,7 @@ func (s *FavoriteSrv) FavoriteList(ctx context.Context, req *FavoritesServiceReq
 	favorites, total, err := NewFavoritesDao(ctx).ListFavoriteByUserId(u.Id, req.PageSize, req.PageNum)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	for i := range favorites {
 		if conf.Config.System.UploadModel == consts.UploadModelLocal {
@@ -45,16 +45,14 @@ func (s *FavoriteSrv) FavoriteList(ctx context.Context, req *FavoritesServiceReq
 		}
 	}
 
-	resp = &types.DataListResp{
+	return &types.DataListResp{
 		Item:  favorites,
 		Total: total,
-	}
-
-	return
+	}, nil
 }
 
 // FavoriteCreate 创建收藏夹
-func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq) (resp interface{}, err error) {
+func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq) (*Favorite, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -65,7 +63,7 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 	if exist {
 		err = errors.New("已经存在了")
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	userDao := user.NewUserDao(ctx)
@@ -73,20 +71,20 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 	util.LogrusObj.Infof("user: %+v\n", curUser)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	bossDao := user.NewUserDaoByDB(userDao.DB)
 	boss, err := bossDao.GetUserById(req.BossId)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	product, err := product.NewProductDao(ctx).GetProductById(req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	favorite := &Favorite{
@@ -100,14 +98,14 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 	err = fDao.CreateFavorite(favorite)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	return
+	return nil, nil
 }
 
 // FavoriteDelete 删除收藏夹，仅允许操作当前登录用户自己的收藏
-func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *FavoriteDeleteReq) (resp interface{}, err error) {
+func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *FavoriteDeleteReq) (*Favorite, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -118,7 +116,7 @@ func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *FavoriteDeleteReq
 	exist, err = favoriteDao.FavoriteExistOrNot(u.Id, req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	if !exist {
 		return nil, errors.New("不存在对应收藏夹")
@@ -126,8 +124,8 @@ func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *FavoriteDeleteReq
 	err = favoriteDao.DeleteFavoriteByUserIdAndProductId(u.Id, req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	return
+	return nil, nil
 }

@@ -33,7 +33,8 @@ func GetPaymentSrv() *PaymentSrv {
 }
 
 // PayDown 支付操作。BossID/ProductID/Num/Money 全部从订单取，不读 req。
-func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp interface{}, err error) {
+// 成功不回传数据，data 为 null。
+func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *PayDownResp, err error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
@@ -187,7 +188,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp int
 
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	// TX 已经把 product.Num 真正扣减了；同步把 Redis reserved 桶减掉
@@ -197,5 +198,5 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp int
 		}
 	}
 
-	return
+	return nil, nil
 }

@@ -25,8 +25,8 @@ func GetCartSrv() *CartSrv {
 	return CartSrvIns
 }
 
-// CartCreate 创建购物车
-func (s *CartSrv) CartCreate(ctx context.Context, req *CartCreateReq) (resp interface{}, err error) {
+// CartCreate 创建购物车。成功时不回传数据（保持既有 API 契约：data 为 null）。
+func (s *CartSrv) CartCreate(ctx context.Context, req *CartCreateReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -36,21 +36,20 @@ func (s *CartSrv) CartCreate(ctx context.Context, req *CartCreateReq) (resp inte
 	_, err = product.NewProductDao(ctx).GetProductById(req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	// 创建购物车
 	cartDao := NewCartDao(ctx)
 	_, status, _ := cartDao.CreateCart(req.ProductId, u.Id, req.BossID)
 	if status == e.ErrorProductMoreCart {
-		err = errors.New(e.GetMsg(status))
-		return
+		return nil, errors.New(e.GetMsg(status))
 	}
-	return
+	return nil, nil
 }
 
 // CartList 购物车
-func (s *CartSrv) CartList(ctx context.Context, req *CartListReq) (resp interface{}, err error) {
+func (s *CartSrv) CartList(ctx context.Context, req *CartListReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -59,45 +58,41 @@ func (s *CartSrv) CartList(ctx context.Context, req *CartListReq) (resp interfac
 	carts, err := NewCartDao(ctx).ListCartByUserId(u.Id)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	resp = &types.DataListResp{
+	return &types.DataListResp{
 		Item:  carts, // 列表暂不分页
 		Total: int64(len(carts)),
-	}
-
-	return
+	}, nil
 }
 
-// CartUpdate 修改购物车信息
-func (s *CartSrv) CartUpdate(ctx context.Context, req *UpdateCartServiceReq) (resp interface{}, err error) {
+// CartUpdate 修改购物车信息。成功时不回传数据（保持既有 API 契约：data 为 null）。
+func (s *CartSrv) CartUpdate(ctx context.Context, req *UpdateCartServiceReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	err = NewCartDao(ctx).UpdateCartNumById(req.Id, u.Id, req.Num)
-	if err != nil {
+	if err = NewCartDao(ctx).UpdateCartNumById(req.Id, u.Id, req.Num); err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	return
+	return nil, nil
 }
 
-// CartDelete 删除购物车
-func (s *CartSrv) CartDelete(ctx context.Context, req *CartDeleteReq) (resp interface{}, err error) {
+// CartDelete 删除购物车。成功时不回传数据（保持既有 API 契约：data 为 null）。
+func (s *CartSrv) CartDelete(ctx context.Context, req *CartDeleteReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	err = NewCartDao(ctx).DeleteCartById(req.Id, u.Id)
-	if err != nil {
+	if err = NewCartDao(ctx).DeleteCartById(req.Id, u.Id); err != nil {
 		util.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
-	return
+	return nil, nil
 }

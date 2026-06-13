@@ -22,7 +22,6 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	logpkg "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
-	"github.com/RedInn7/gomall/types"
 )
 
 // 收藏夹域的 DB 闭环测试：sqlite in-memory，覆盖收藏创建（含重复收藏拒绝）、
@@ -181,9 +180,9 @@ func TestFavoriteList_AssemblesCrossDomainDTO(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FavoriteList: %v", err)
 	}
-	dl, ok := resp.(*types.DataListResp)
-	if !ok {
-		t.Fatalf("resp type = %T", resp)
+	dl := resp
+	if dl == nil {
+		t.Fatalf("resp is nil")
 	}
 	if dl.Total != 1 {
 		t.Fatalf("total = %d, want 1", dl.Total)
