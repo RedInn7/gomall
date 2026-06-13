@@ -64,7 +64,11 @@ func (s *AddressSrv) AddressShow(ctx context.Context) (*types.DataListResp, erro
 }
 
 func (s *AddressSrv) AddressList(ctx context.Context, req *AddressListReq) ([]*AddressResp, error) {
-	u, _ := ctl.GetUserInfo(ctx)
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
 	resp, err := NewAddressDao(ctx).
 		ListAddressByUid(u.Id)
 	if err != nil {
