@@ -3,7 +3,6 @@ package conf
 import (
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/viper"
 )
@@ -179,14 +178,3 @@ func mustHaveSecrets(c *Conf) {
 	}
 }
 
-func GetExpiresTime() int64 {
-	if Config.Cache.CacheExpires == 0 {
-		return int64(30 * time.Minute) // 默认 30min
-	}
-
-	if Config.Cache.CacheExpires == -1 {
-		return -1 // Redis.KeepTTL = -1
-	}
-
-	return int64(time.Duration(Config.Cache.CacheExpires) * time.Minute)
-}

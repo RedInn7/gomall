@@ -16,10 +16,6 @@ func NewCategoryDao(ctx context.Context) *CategoryDao {
 	return &CategoryDao{dao.NewDBClient(ctx)}
 }
 
-func NewCategoryDaoByDB(db *gorm.DB) *CategoryDao {
-	return &CategoryDao{db}
-}
-
 // ListCategory 分类列表
 func (d *CategoryDao) ListCategory() (r []*Category, err error) {
 	err = d.DB.Model(&Category{}).Find(&r).Error

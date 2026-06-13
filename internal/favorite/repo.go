@@ -16,10 +16,6 @@ func NewFavoritesDao(ctx context.Context) *FavoritesDao {
 	return &FavoritesDao{dao.NewDBClient(ctx)}
 }
 
-func NewFavoritesDaoByDB(db *gorm.DB) *FavoritesDao {
-	return &FavoritesDao{db}
-}
-
 // ListFavoriteByUserId 通过 user_id 获取收藏夹列表
 func (d *FavoritesDao) ListFavoriteByUserId(uId uint, pageSize, pageNum int) (r []*FavoriteListResp, total int64, err error) {
 	// 总数
@@ -75,11 +71,6 @@ func (d *FavoritesDao) FavoriteExistOrNot(uId uint, pid uint) (exist bool, err e
 		return
 	}
 	return count > 0, nil
-}
-
-// DeleteFavoriteById 删除收藏夹
-func (d *FavoritesDao) DeleteFavoriteById(fId uint) error {
-	return d.DB.Where("id=?", fId).Delete(&Favorite{}).Error
 }
 
 func (d *FavoritesDao) DeleteFavoriteByUserIdAndProductId(userId uint, productId uint) error {
