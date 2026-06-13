@@ -127,10 +127,7 @@ func TestProductService_ProductListPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProductList: %v", err)
 	}
-	list, ok := resp.(*types.DataListResp)
-	if !ok {
-		t.Fatalf("resp type %T", resp)
-	}
+	list := resp
 	if list.Total != 3 {
 		t.Fatalf("total = %d, want 3", list.Total)
 	}
@@ -155,7 +152,7 @@ func TestProductService_ProductListPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProductList page2: %v", err)
 	}
-	items = resp.(*types.DataListResp).Item.([]*ProductResp)
+	items = resp.Item.([]*ProductResp)
 	if len(items) != 1 {
 		t.Fatalf("page2 len = %d, want 1", len(items))
 	}
@@ -167,7 +164,7 @@ func TestProductService_ProductListPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProductList all: %v", err)
 	}
-	if total := resp.(*types.DataListResp).Total; total != 4 {
+	if total := resp.Total; total != 4 {
 		t.Fatalf("total = %d, want 4", total)
 	}
 }
@@ -191,10 +188,7 @@ func TestProductService_ProductShowFillsAndServesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProductShow: %v", err)
 	}
-	first, ok := resp.(*ProductResp)
-	if !ok {
-		t.Fatalf("resp type %T", resp)
-	}
+	first := resp
 	if first.ID != p.ID || first.Name != "show-item" || first.Num != 9 {
 		t.Fatalf("回源结果不一致: %+v", first)
 	}
@@ -215,7 +209,7 @@ func TestProductService_ProductShowFillsAndServesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProductShow second: %v", err)
 	}
-	if got := resp.(*ProductResp).Name; got != "show-item" {
+	if got := resp.Name; got != "show-item" {
 		t.Fatalf("第二次读应命中缓存旧值 show-item, got %q", got)
 	}
 
@@ -227,7 +221,7 @@ func TestProductService_ProductShowFillsAndServesCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProductShow third: %v", err)
 	}
-	if got := resp.(*ProductResp).Name; got != "renamed" {
+	if got := resp.Name; got != "renamed" {
 		t.Fatalf("删缓存后应回源新值 renamed, got %q", got)
 	}
 }

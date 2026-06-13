@@ -12,7 +12,7 @@ import (
 )
 
 // ProductSearch ES 可用时走 ES 模糊搜索；不可用时退化到 DB SearchProduct。
-func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (resp interface{}, err error) {
+func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (resp *types.DataListResp, err error) {
 	if es.EsClient != nil {
 		docs, total, esErr := SearchProducts(ctx, req)
 		if esErr == nil {
@@ -45,7 +45,7 @@ func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (resp int
 	products, count, err := product.NewProductDao(ctx).SearchProduct(req.Info, req.BasePage)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 
 	pRespList := make([]*product.ProductResp, 0)

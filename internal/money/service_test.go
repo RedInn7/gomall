@@ -94,13 +94,12 @@ func TestMoney_ShowDecryptsBalance(t *testing.T) {
 	u := seedUserWithMoney(t, db, "u-money-show", "12345", key)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: u.ID})
-	resp, err := GetMoneySrv().MoneyShow(ctx, &MoneyShowReq{Key: key})
+	got, err := GetMoneySrv().MoneyShow(ctx, &MoneyShowReq{Key: key})
 	if err != nil {
 		t.Fatalf("MoneyShow: %v", err)
 	}
-	got, ok := resp.(*MoneyShowResp)
-	if !ok {
-		t.Fatalf("resp type = %T", resp)
+	if got == nil {
+		t.Fatalf("resp is nil")
 	}
 	if got.UserID != u.ID || got.UserName != "u-money-show" {
 		t.Fatalf("用户信息映射不一致: %+v", got)

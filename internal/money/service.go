@@ -24,29 +24,28 @@ func GetMoneySrv() *MoneySrv {
 }
 
 // MoneyShow 展示用户的金额
-func (s *MoneySrv) MoneyShow(ctx context.Context, req *MoneyShowReq) (resp interface{}, err error) {
+func (s *MoneySrv) MoneyShow(ctx context.Context, req *MoneyShowReq) (*MoneyShowResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	user, err := user.NewUserDao(ctx).GetUserById(u.Id)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
 	money, err := user.DecryptMoney(req.Key)
 	if err != nil {
 		log.LogrusObj.Error(err)
-		return
+		return nil, err
 	}
-	resp = &MoneyShowResp{
+
+	return &MoneyShowResp{
 		UserID:    user.ID,
 		UserName:  user.UserName,
 		UserMoney: formatYuan(money),
-	}
-
-	return
+	}, nil
 }
 
 func formatYuan(cents int64) string {
