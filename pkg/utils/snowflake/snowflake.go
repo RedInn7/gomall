@@ -19,7 +19,3 @@ func InitSnowflake(machineID int64) {
 func GenSnowflakeID() int64 {
 	return node.Generate().Int64()
 }
-
-func GenSnowflakeIDStr() string {
-	return node.Generate().String()
-}
