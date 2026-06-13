@@ -14,6 +14,7 @@ conf/config.ini
 .idea
 # Dependency directories (remove the comment below to include it)
 # vendor/
+node_modules
 config/locales/config.yaml
 go.sum
 ci
@@ -26,6 +27,9 @@ config/locales/config.yaml
 
 # tools
 /tools
+
+# 压测运行时生成的 token，由 stressTest/setup_token.sh 重建
+stressTest/config.json
 
 # macOS
 .DS_Store
