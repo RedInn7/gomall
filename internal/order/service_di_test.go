@@ -51,7 +51,7 @@ func TestOrderCreate_PromoDownDegrades(t *testing.T) {
 	if err != nil {
 		t.Fatalf("promo 故障不应阻断下单: %v", err)
 	}
-	order := resp.(*Order)
+	order := resp
 	if order.PromoRuleID != 0 || order.PromoDiscountCents != 0 {
 		t.Fatalf("降级订单不应带满减字段: rule=%d discount=%d", order.PromoRuleID, order.PromoDiscountCents)
 	}
@@ -99,7 +99,7 @@ func TestOrderCreate_BudgetExhaustedFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("预算耗尽应降级而非失败: %v", err)
 	}
-	order := resp.(*Order)
+	order := resp
 	if order.PromoRuleID != 0 || order.PromoDiscountCents != 0 || order.FinalCents != 10000 {
 		t.Fatalf("预算耗尽订单应回落原价: rule=%d discount=%d final=%d",
 			order.PromoRuleID, order.PromoDiscountCents, order.FinalCents)

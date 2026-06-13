@@ -115,16 +115,16 @@ type OrderEnqueueResp struct {
 }
 
 // OrderEnqueue 异步下单：reserve 库存 + 写 ticket + 投 MQ
-func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (resp interface{}, err error) {
+func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (OrderEnqueueResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
-		return nil, err
+		return OrderEnqueueResp{}, err
 	}
 
 	if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
 		util.LogrusObj.Errorf("async enqueue reserve stock failed product=%d num=%d err=%v", req.ProductID, req.Num, err)
-		return nil, err
+		return OrderEnqueueResp{}, err
 	}
 
 	ticket := fmt.Sprintf("%d", snowflake.GenSnowflakeID())
@@ -134,7 +134,7 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (resp 
 		if relErr := cache.ReleaseReservation(ctx, req.ProductID, int64(req.Num)); relErr != nil {
 			util.LogrusObj.Errorf("release reservation on ticket write failure failed: %v", relErr)
 		}
-		return nil, err
+		return OrderEnqueueResp{}, err
 	}
 
 	task := AsyncOrderTask{
@@ -152,7 +152,7 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (resp 
 		if relErr := cache.ReleaseReservation(ctx, req.ProductID, int64(req.Num)); relErr != nil {
 			util.LogrusObj.Errorf("release reservation on marshal failure failed: %v", relErr)
 		}
-		return nil, err
+		return OrderEnqueueResp{}, err
 	}
 
 	if err = defaultAsyncProducer.Publish(ctx, body); err != nil {
@@ -164,24 +164,24 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (resp 
 			Status: OrderTicketStatusFailed,
 			Reason: "publish failed",
 		}, OrderTicketTTL)
-		return nil, err
+		return OrderEnqueueResp{}, err
 	}
 
 	return OrderEnqueueResp{Ticket: ticket, Status: OrderTicketStatusPending}, nil
 }
 
 // OrderStatus 读 ticket 状态
-func (s *OrderSrv) OrderStatus(ctx context.Context, ticket string) (resp interface{}, err error) {
+func (s *OrderSrv) OrderStatus(ctx context.Context, ticket string) (OrderTicketStatus, error) {
 	if ticket == "" {
-		return nil, errors.New("ticket 不能为空")
+		return OrderTicketStatus{}, errors.New("ticket 不能为空")
 	}
 	st, ok, err := defaultTicketStore.Get(ctx, ticket)
 	if err != nil {
 		util.LogrusObj.Errorf("order status read ticket failed: %v", err)
-		return nil, err
+		return OrderTicketStatus{}, err
 	}
 	if !ok {
-		return nil, errors.New("ticket 不存在或已过期")
+		return OrderTicketStatus{}, errors.New("ticket 不存在或已过期")
 	}
 	return st, nil
 }
