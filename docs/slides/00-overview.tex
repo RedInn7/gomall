@@ -1,0 +1,421 @@
+\input{preamble}
+
+\title{业务全景与端到端主线}
+\subtitle{gomall 一次购物穿过的 15 个域 —— 怎么连 / 怎么读 / 卡在哪}
+\author{gomall · 业务侧 deck}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{frame}{今日大纲}
+\tableofcontents
+\end{frame}
+
+% =====================================================================
+\section{业务全景：gomall 到底在做什么}
+% =====================================================================
+
+\begin{frame}{先认人：一笔订单背后站着 5 个角色}
+\begin{itemize}
+  \item \textbf{C 端用户}：进门 $\to$ 逛 $\to$ 下单 $\to$ 收货。只关心\textbf{快、对、不丢}。
+  \item \textbf{商家（Boss）}：订单是"我能不能发货"的唯一源头；货卖出去钱要到账。
+  \item \textbf{运营}：办活动拉量 —— 优惠券 / 满减 / 秒杀 / 拼团 / 预售，预算不能被刷穿。
+  \item \textbf{客服}：用户来问"我的钱去哪了 / 货到哪了"，得有一条能查的状态线。
+  \item \textbf{SRE}：大促洪峰别把库存卖超、别把数据库打挂，挂了要能降级。
+\end{itemize}
+\vspace{2mm}
+\keypoint{这套 deck 按\textbf{业务域}垂直切成 15 份，每份讲透一个域。\\
+本份是横向的"地图"：把 15 个域串成用户真实走过的一条线。}
+\srcnote{README.md \S 业务全景 / \S 业务承诺(SLO)}
+\end{frame}
+
+\begin{frame}{业务全景图：一次购物穿过的 8 个环节}
+\resizebox{0.97\textwidth}{!}{%
+\begin{tikzpicture}[node distance=7mm and 11mm,font=\scriptsize]
+  \node[node-box,minimum width=20mm] (s1) {进门\\{\tiny\color{cAccent}deck 01}};
+  \node[node-box,right=of s1,minimum width=20mm] (s2) {逛\\{\tiny\color{cAccent}deck 02 / 03}};
+  \node[node-box,right=of s2,minimum width=20mm] (s3) {心动\\{\tiny\color{cAccent}购物车 deck 04}};
+  \node[node-box,right=of s3,minimum width=20mm] (s4) {优惠\\{\tiny\color{cAccent}deck 08/13/14/15}};
+  \node[node-box,node-warn,below=14mm of s4,minimum width=20mm] (s5) {下单\\{\tiny\color{cAccent}deck 04}};
+  \node[node-box,left=of s5,minimum width=20mm] (s6) {支付\\{\tiny\color{cAccent}deck 05 / 06}};
+  \node[node-box,left=of s6,minimum width=20mm] (s7) {履约\\{\tiny\color{cAccent}deck 09}};
+  \node[node-box,left=of s7,minimum width=20mm] (s8) {售后\\{\tiny\color{cAccent}deck 12 / refund}};
+  \draw[arrow] (s1) -- (s2);
+  \draw[arrow] (s2) -- (s3);
+  \draw[arrow] (s3) -- (s4);
+  \draw[arrow] (s4) -- node[right,font=\tiny]{下单} (s5);
+  \draw[arrow] (s5) -- (s6);
+  \draw[arrow] (s6) -- (s7);
+  \draw[arrow] (s7) -- (s8);
+  % 横切关注点
+  \node[node-box,node-bad,below=10mm of s7,minimum width=78mm,font=\tiny] (cc)
+    {贯穿全局：库存防超卖(07) · Outbox 一致性(11) · 流量治理(10) · 优雅降级};
+\end{tikzpicture}}
+\par\smallskip
+{\centering\srcnote{routes/router.go:58--81 各域自注册 RegisterRoutes(public, authed, admin)}\par}
+\end{frame}
+
+\begin{frame}{15 份 deck 索引：域 $\to$ 在哪深讲}
+\scriptsize
+\begin{tabular}{@{}cll@{}}
+\toprule
+\# & 业务域 & 一句话 \\
+\midrule
+01 & 用户与鉴权 & 注册 / 登录 / JWT 双 token / RBAC \\
+02 & 商品展示 & list / show / Cache Aside + HTTP cache \\
+03 & 商品搜索 & LIKE $\to$ ES $\to$ ES+Milvus 混合召回 \\
+04 & 购物车$\to$下单 & 库存预扣 + DB+outbox 同事务（\textbf{主线核心}）\\
+05 / 06 & 支付（法币 / Web3）& 余额加密 + 熔断幂等 / Escrow + 链上对账 \\
+07 & 库存防超卖 & 两桶 Lua（available / reserved）+ Saga 回滚 \\
+08 / 13 & 营销 / 满减引擎 & 券 / 秒杀 / 红包 / 满减最优解 \\
+09 & 订单生命周期 & 状态机 + 延迟关单双保险 \\
+10 / 11 & 流量治理 / 一致性 & 限流熔断削峰 / Outbox + Saga \\
+12 & 商家后台 & merchant 三层鉴权 + 可观测性 \\
+14 / 15 & 拼团 / 预售 & 成团状态机 / 定金尾款两段付 \\
+\bottomrule
+\end{tabular}
+\par\smallskip
+\srcnote{docs/slides/README.md \S deck 索引；本表为 15 份现有 deck 的横向汇总}
+\end{frame}
+
+% =====================================================================
+\section{端到端主线：一次成功购物的"黄金路径"}
+% =====================================================================
+
+\begin{frame}{黄金路径：7 跳，每一跳都可能掉链子}
+\begin{enumerate}
+  \item \textbf{登录} —— 拿到 JWT，后续每个请求带着它过鉴权中间件。
+  \item \textbf{看商品} —— 详情走 Cache Aside，热点不打穿 DB。
+  \item \textbf{加购 / 选地址} —— 没地址下不了单，默认地址兜底。
+  \item \textbf{下单} —— 算优惠 $\to$ 预扣库存 $\to$ 一个事务落订单+事件。
+  \item \textbf{支付} —— 扣余额 + 改状态 + 真正消库存，同事务发"已支付"事件。
+  \item \textbf{发货 / 收货} —— 状态机推进，每一步只允许合法迁移。
+  \item \textbf{结清} —— 订单 Completed；中途不付钱则 15 分钟自动关单。
+\end{enumerate}
+\vspace{1mm}
+\keypoint{这条线横跨 user / product / cart / promo / order / inventory / payment 七个包，\\
+任何一跳的失败都不能让用户"钱货两失" —— 这是整套设计的第一性原则。}
+\srcnote{internal/order/service.go:63 OrderCreate 是这条线的中枢}
+\end{frame}
+
+\begin{frame}{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
+\resizebox{0.93\textwidth}{0.62\textheight}{%
+\begin{tikzpicture}[font=\scriptsize]
+  % actor heads
+  \node[node-box,minimum width=20mm] (u)   at (0,0)  {用户};
+  \node[node-box,minimum width=22mm] (api) at (3.2,0){订单服务\\OrderCreate};
+  \node[node-box,node-ok,minimum width=20mm]   (r)  at (6.6,0) {Redis\\库存两桶};
+  \node[node-box,node-warn,minimum width=22mm] (db) at (10,0)  {MySQL 事务\\order+outbox};
+  \node[node-box,minimum width=20mm] (mq)  at (13.4,0){Publisher\\$\to$ MQ};
+  % lifelines
+  \foreach \n in {u,api,r,db,mq} {\draw[lifeline] (\n.south) -- ++(0,-6.6);}
+  % messages
+  \draw[arrow] ($(u.south)+(0,-0.6)$)   -- node[above,font=\tiny]{POST /orders/create（幂等）} ($(api.south)+(0,-0.6)$);
+  % self: 算满减(事务外)
+  \draw[arrow] ($(api.south)+(0,-1.3)$) -- ++(1.1,0) -- ++(0,-0.45) -- ($(api.south)+(0,-1.75)$);
+  \node[font=\tiny,anchor=west] at ($(api.south)+(1.2,-1.5)$) {算满减(事务外,可降级)};
+  \draw[arrow] ($(api.south)+(0,-2.4)$) -- node[above,font=\tiny]{ReserveStock} ($(r.south)+(0,-2.4)$);
+  \draw[arrow-bad] ($(r.south)+(0,-3.0)$) -- node[below,font=\tiny]{不够即拒单} ($(api.south)+(0,-3.0)$);
+  \draw[arrow] ($(api.south)+(0,-3.7)$) -- node[above,font=\tiny]{BEGIN：写单+扣预算+写 outbox(pending)} ($(db.south)+(0,-3.7)$);
+  \draw[arrow] ($(db.south)+(0,-4.3)$)  -- node[below,font=\tiny]{COMMIT} ($(api.south)+(0,-4.3)$);
+  \draw[arrow-bad] ($(api.south)+(0,-4.9)$) -- node[above,font=\tiny]{失败 $\to$ ReleaseReservation 补偿} ($(r.south)+(0,-4.9)$);
+  \draw[arrow] ($(api.south)+(0,-5.6)$) -- node[below,font=\tiny]{返回订单(待付款)} ($(u.south)+(0,-5.6)$);
+  \draw[arrow-async] ($(db.south)+(0,-6.2)$) -- node[above,font=\tiny]{异步扫 pending $\to$ publish} ($(mq.south)+(0,-6.2)$);
+\end{tikzpicture}}
+\par
+{\centering\srcnote{internal/order/service.go:110 Reserve · :117 Tx · :145 outbox · :159 释放补偿 · :172 延迟关单}\par}
+\end{frame}
+
+\begin{frame}[fragile]{下单中枢的关键代码：顺序就是设计}
+\begin{lstlisting}[language=Go,caption={internal/order/service.go OrderCreate 主体}]
+// 1) 满减在事务外算：纯读路径，失败降级为无折扣，绝不阻断下单
+promoApply, promoErr := s.promo.CalculateBestDiscount(ctx, cartItems)
+
+// 2) Redis 预扣库存：available -> reserved，失败直接拒单，连 DB 都不碰
+if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
+    return nil, err
+}
+
+// 3) 同一个事务：写订单 + 扣满减预算 + 写 outbox 事件（原子一致）
+err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+    NewOrderDaoByDB(tx).CreateOrder(order)
+    s.promo.ApplyDiscountInTx(tx, order.ID, order.PromoRuleID, order.PromoDiscountCents)
+    return outbox.NewOutboxDaoByDB(tx).Insert("order", "OrderCreated", ...)
+})
+if err != nil { // 4) 事务失败：把第 2 步预扣的库存还回去
+    cache.ReleaseReservation(ctx, req.ProductID, int64(req.Num))
+}
+\end{lstlisting}
+\srcnote{internal/order/service.go:63--178 OrderCreate（节选，行内顺序与原文一致）}
+\end{frame}
+
+\begin{frame}{支付这一跳：钱和库存在这里才真正落定}
+\begin{itemize}
+  \item 下单时库存只是 \textbf{reserved（预占）}，钱还没动 —— 订单状态 \texttt{WaitPay}。
+  \item 支付成功才在\textbf{一个事务里}：扣用户余额 $\to$ 加商家余额 $\to$ 改状态 \texttt{WaitShip} $\to$ 写 \texttt{order.paid} 事件。
+  \item 事务提交后同步 \texttt{CommitReservation}：把 reserved 真正消掉，库存数字才最终减少。
+\end{itemize}
+\vspace{1mm}
+\begin{tikzpicture}[node distance=4mm and 9mm,font=\scriptsize]
+  \node[node-box] (a) {余额校验\\+支付密码};
+  \node[node-box,right=of a,node-warn] (b) {事务：扣付款方\\+加收款方+改状态+写事件};
+  \node[node-box,right=of b,node-ok] (c) {CommitReservation\\reserved $\to$ 真实出库};
+  \draw[arrow] (a) -- (b);
+  \draw[arrow] (b) -- (c);
+\end{tikzpicture}
+\par\smallskip
+\srcnote{internal/payment/service.go:36 PayDown；repository/cache/inventory.go:98 CommitReservation}
+\end{frame}
+
+\begin{frame}[fragile]{支付事务体：钱、货、状态、事件一把梭}
+\begin{lstlisting}[language=Go,caption={internal/payment/service.go PayDown 事务体（节选）}]
+err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
+    order, _ := orderpkg.NewOrderDaoByDB(tx).GetOrderById(req.OrderId, uId)
+    if order.Type != consts.OrderWaitPay {     // 幂等：非待付款拒绝重复支付
+        return errors.New("订单状态非未支付")
+    }
+    // 扣买家余额（AES 密文解密校验支付密码）+ 加商家余额
+    userDao.UpdateUserById(uId, buyer)          // 买家 - totalMoney
+    userDao.UpdateUserById(bossID, boss)        // 商家 + totalMoney
+    order.Type = consts.OrderWaitShip           // 状态推进：待付款 -> 待发货
+    orderpkg.NewOrderDaoByDB(tx).UpdateOrderById(req.OrderId, uId, order)
+    return outbox.NewOutboxDaoByDB(tx).Insert(  // order.paid 事件同事务落库
+        "order", "OrderPaid", "order.paid", order.ID, events.OrderPaid{...})
+})
+// 事务提交后：把 Redis reserved 桶真正消掉，库存数字最终减少
+cache.CommitReservation(ctx, paidProductID, int64(paidNum))
+\end{lstlisting}
+\srcnote{internal/payment/service.go:54 Tx · :63 幂等校验 · :148 状态推进 · :177 order.paid · :196 CommitReservation}
+\end{frame}
+
+% =====================================================================
+\section{贯穿全局的 4 个硬骨头}
+% =====================================================================
+
+\begin{frame}[fragile]{硬骨头 1：库存防超卖 —— 为什么不用 \texttt{UPDATE WHERE stock>0}}
+\begin{itemize}
+  \item 高并发下行锁排队 + 尾延迟爆炸；下单链路最怕在事务里等锁。
+  \item gomall 把库存搬到 Redis，用 \textbf{两个桶}：\texttt{available}（可卖）/ \texttt{reserved}（已占）。
+  \item 预扣 / 提交 / 释放都是 \textbf{单个 Lua 脚本原子完成}，一次 RTT，天然不超卖。
+\end{itemize}
+\begin{lstlisting}[language=LuaRedis,caption={reserveScript：available 与 reserved 两个 key 原子流转}]
+-- KEYS[1]=available 桶  KEYS[2]=reserved 桶  ARGV[1]=n
+local avail = redis.call('GET', KEYS[1])
+if avail == false then return -2 end           -- 库存未初始化
+if tonumber(avail) < tonumber(ARGV[1]) then
+    return -1                                  -- 不够，拒单
+end
+redis.call('DECRBY', KEYS[1], ARGV[1])         -- available -= n
+redis.call('INCRBY', KEYS[2], ARGV[1])         -- reserved  += n
+return 1
+\end{lstlisting}
+\srcnote{repository/cache/inventory.go:32 reserveScript · :78 ReserveStock 封装 · :98/:113 Commit/Release（deck 07 详解）}
+\end{frame}
+
+\begin{frame}{硬骨头 2：Outbox —— 解决"订单存了但消息丢了"}
+\textbf{双写问题}：先 \texttt{INSERT order} 再 \texttt{publish MQ}，两个动作不在一个事务里。\\
+进程在中间崩 = 订单有了、下游（搜索/统计/履约）永远收不到通知。
+\vspace{1mm}
+\resizebox{0.9\textwidth}{!}{%
+\begin{tikzpicture}[node distance=8mm and 14mm,font=\scriptsize]
+  \node[node-box,minimum width=24mm] (api) {API Goroutine};
+  \node[node-box,below=of api,node-warn,minimum width=38mm] (tx)
+    {DB 事务\\INSERT order\\INSERT outbox(pending)};
+  \node[node-box,right=of tx,minimum width=24mm] (pub) {Publisher\\扫 pending};
+  \node[node-box,right=of pub,node-ok,minimum width=20mm] (mq) {RabbitMQ};
+  \draw[arrow] (api) -- (tx);
+  \draw[arrow-async] (tx) -- node[above,font=\tiny,sloped]{异步} (pub);
+  \draw[arrow,transform canvas={yshift=2mm}]  (pub) -- node[above,font=\tiny]{publish} (mq);
+  \draw[arrow,transform canvas={yshift=-2mm}] (mq) -- node[below,font=\tiny]{ack $\to$ MarkSent} (pub);
+\end{tikzpicture}}
+\par\smallskip
+\keypoint{订单与事件\textbf{同生共死}写进一个事务；投递交给独立 publisher 重试。\\
+至少一次投递 + 下游幂等消费 = 事件不丢。}
+\srcnote{internal/shared/outbox/repo.go:26 Insert · :44 FetchBatch · :53 MarkSent；initialize/outbox.go:15 启动}
+\end{frame}
+
+\begin{frame}{硬骨头 3：优雅降级 —— 核心稳如磐石，边缘随时可弃}
+\begin{tabular}{@{}lll@{}}
+\toprule
+能力 & 挂了会怎样 & gomall 的选择 \\
+\midrule
+满减计算 & 算不出折扣 & 降级为\textbf{无折扣}，照样下单 \\
+满减预算 & 预算抢光 & 事务内\textbf{改写为无折扣}，不报错 \\
+RabbitMQ & 延迟关单不可用 & Redis ZSet 定时扫描\textbf{兜底关单} \\
+ES / Milvus & 搜索退化 & 退回 \textbf{DB LIKE} 路径 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\keypoint{判断标准只有一句：\textbf{它是不是"用户付钱拿货"的必经环节}？\\
+是 $\to$ 进事务、保原子；不是 $\to$ 失败降级，绝不阻断 happy path。}
+\srcnote{internal/order/service.go:78 满减降级 · :126 预算耗尽降级；cmd/main.go:69--102 ES/Milvus 静默跳过}
+\end{frame}
+
+\begin{frame}{硬骨头 4：流量治理 —— 大促洪峰怎么扛}
+\begin{itemize}
+  \item \textbf{限流}：每 IP 令牌桶 100 RPS / 突发 200，挡爬虫与脚本。
+  \item \textbf{幂等}：下单走 \texttt{middleware.Idempotency()}，用户狂点也只成一单。
+  \item \textbf{削峰}：\texttt{/orders/enqueue} 投 MQ，前端拿 ticket 轮询，把洪峰摊平。
+\end{itemize}
+\vspace{1mm}
+\keypoint{压测实证：幂等中间件下 \textbf{755K 次重放请求 $\to$ 恰好 1 笔订单}，
+首单成功后续请求由 Lua 读 done 态返回，\textbf{50K RPS / p95 2.33ms}。}
+\srcnote{routes/router.go:41 令牌桶；internal/order/routes.go 幂等+enqueue；stressTest/REPORT.md \S 幂等中间件}
+\end{frame}
+
+% =====================================================================
+\section{订单状态机：把 7 跳串成一条可查的线}
+% =====================================================================
+
+\begin{frame}{订单不是一个布尔值，是一台状态机}
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[node distance=9mm and 13mm,font=\scriptsize]
+  \node[node-state,node-state-normal] (wp) {待付款};
+  \node[node-state,node-state-normal,right=of wp] (ws) {待发货};
+  \node[node-state,node-state-normal,right=of ws] (wr) {待收货};
+  \node[node-state,node-state-normal,right=of wr] (cp) {已完成};
+  \node[node-state,node-state-transition,below=of wp] (cl) {已关闭};
+  \node[node-state,node-state-alert,below=of wr] (rf) {退款中};
+  \node[node-state,node-state-transition,right=of rf] (rd) {已退款};
+  \draw[arrow] (wp) -- node[above,font=\tiny]{支付} (ws);
+  \draw[arrow] (ws) -- node[above,font=\tiny]{发货} (wr);
+  \draw[arrow] (wr) -- node[above,font=\tiny]{收货} (cp);
+  \draw[arrow-bad] (wp) -- node[right,font=\tiny]{15min 未付} (cl);
+  \draw[arrow-alert] (wr) -- node[right,font=\tiny]{申请退款} (rf);
+  \draw[arrow-alert] (cp) to[out=-90,in=0] (rf);
+  \draw[arrow] (rf) -- node[above,font=\tiny]{同意} (rd);
+\end{tikzpicture}}
+\par\smallskip
+\keypoint{每一次状态变更都走 \texttt{CanTransit} 校验，非法迁移直接报错 ——\\
+"已完成"的订单不可能跳回"待付款"，客服查到的状态永远自洽。}
+\srcnote{consts/order.go 状态常量；internal/order/state.go:21 orderStateTransitions 转换表}
+\end{frame}
+
+\begin{frame}{谁来推状态：用户 / 商家 / 系统三方驱动}
+\begin{tabular}{@{}llll@{}}
+\toprule
+迁移 & 触发方 & 入口 & 权限 \\
+\midrule
+待付款$\to$待发货 & 用户 & 支付成功 & 登录 \\
+待发货$\to$待收货 & 商家 & ShipOrder & admin RBAC \\
+待收货$\to$已完成 & 用户 & ConfirmReceive & 登录 \\
+待付款$\to$已关闭 & 系统 & 延迟关单 & MQ / Cron \\
+*$\to$退款中 & 用户/客服 & refund & 登录 \\
+\bottomrule
+\end{tabular}
+\vspace{2mm}
+\keypoint{"系统"这一行最容易被忽略：没人点按钮，
+靠 RabbitMQ 延迟消息 + Redis ZSet 扫描\textbf{双保险}把僵尸订单关掉、库存还回。}
+\srcnote{internal/order/shipping.go:36 ShipOrder · :73 ConfirmReceive；internal/order/cancel.go:19 CancelUnpaidOrder}
+\end{frame}
+
+% =====================================================================
+\section{怎么读这套 deck：路线与角色}
+% =====================================================================
+
+\begin{frame}{阅读路线图：主干一条线，支线随用随查}
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[node distance=6mm and 9mm,font=\scriptsize]
+  \node[node-box,node-ok] (d1) {01 鉴权};
+  \node[node-box,node-ok,right=of d1] (d2) {02 展示};
+  \node[node-box,node-ok,right=of d2] (d4) {04 下单};
+  \node[node-box,node-ok,right=of d4] (d5) {05 支付};
+  \node[node-box,node-ok,right=of d5] (d9) {09 生命周期};
+  \draw[arrow] (d1) -- (d2);
+  \draw[arrow] (d2) -- (d4);
+  \draw[arrow] (d4) -- (d5);
+  \draw[arrow] (d5) -- (d9);
+  % 支线
+  \node[node-box,below=12mm of d4] (d7) {07 库存};
+  \node[node-box,left=of d7] (d11) {11 一致性};
+  \node[node-box,right=of d7] (d8) {08/13 营销};
+  \node[node-box,right=of d8] (d10) {10 流量};
+  \draw[arrow-async] (d4) -- (d7);
+  \draw[arrow-async] (d4) to[out=-150,in=60] (d11);
+  \draw[arrow-async] (d4) to[out=-30,in=120] (d8);
+  \node[font=\tiny,cGray] at ($(d7)+(0,-1.0)$) {（下单为枢纽，需要深究时下钻到支线）};
+\end{tikzpicture}}
+\par\smallskip
+\keypoint{第一遍：沿绿色主干 01$\to$02$\to$04$\to$05$\to$09 走一遍，建立全局。\\
+第二遍：哪块想深究，从 04 下钻到 07 / 11 / 08 / 10。}
+\srcnote{各 deck 末页"配套 deck"指向相邻域}
+\end{frame}
+
+\begin{frame}{按角色取你最关心的几份}
+\begin{itemize}
+  \item \textbf{后端新人}：01 $\to$ 02 $\to$ 04，把"一个请求怎么从路由走到 DB"吃透。
+  \item \textbf{做交易的}：04 下单 + 05/06 支付 + 09 生命周期，这是钱货闭环。
+  \item \textbf{做营销的}：08 营销 + 13 满减引擎 + 14 拼团 + 15 预售，看预算与防刷。
+  \item \textbf{SRE / 架构}：07 库存 + 10 流量 + 11 一致性，三份是系统抗压的底座。
+  \item \textbf{面试备战}：每份末尾的 Q\&A 两页 + 本份"硬骨头 4 连"。
+\end{itemize}
+\vspace{1mm}
+\keypoint{不必从头读到尾。先用本份建立地图，再按你的角色挑 3$\sim$4 份深读，\\
+读完任意一份都能回到这张全景图定位自己在哪。}
+\srcnote{docs/slides/ 共 15 份 + 本总览；docs/blog/ 同主题深度补充}
+\end{frame}
+
+\begin{frame}{这套架构的一句话总结}
+\keypoint{\textbf{核心链路（扣库存 + 落单 + 收钱）必须稳如磐石，
+周边能力（优惠 / 通知 / 搜索 / 关单）全部可降级。}}
+\vspace{3mm}
+顺序即设计：
+\begin{itemize}
+  \item 能在事务外做的绝不进事务 —— 满减、库存预扣。
+  \item 进了事务就保证原子 —— 订单 + 优惠预算 + outbox 事件。
+  \item 事务外的副作用必须能补偿 —— 库存释放、延迟关单。
+\end{itemize}
+\vspace{2mm}
+\srcnote{internal/order/service.go:63--178 OrderCreate 一函数浓缩全部原则}
+\end{frame}
+
+% =====================================================================
+\appendix
+% =====================================================================
+
+\begin{frame}{面试 Q\&A（1/2）}
+\small
+\textbf{Q1}：为什么库存预扣放 Redis 而不放 DB 事务里？\\
+\hspace{4mm}A：DB 行锁在高并发下排队、尾延迟爆炸；Redis 两桶 Lua 一次 RTT 原子完成，下单链路不被锁拖住。失败由 ReleaseReservation 补偿 + 对账兜底。
+\vspace{1mm}
+
+\textbf{Q2}：下单为什么要 outbox，不直接发 MQ？\\
+\hspace{4mm}A：直接发会有双写问题 —— 订单落库与消息投递不在一个事务，中间崩溃就丢事件。outbox 把事件写进同一个 DB 事务，再由 publisher 至少一次投递。
+\vspace{1mm}
+
+\textbf{Q3}：满减算挂了为什么不直接报错？\\
+\hspace{4mm}A：优惠是锦上添花，不是下单前提。SLO 承诺保护 happy path，所以算失败、预算耗尽都降级为无折扣，用户照样能成交。
+\end{frame}
+
+\begin{frame}{面试 Q\&A（2/2）}
+\small
+\textbf{Q4}：事务提交后才发 MQ 延迟关单，万一 MQ 挂了订单永远不关？\\
+\hspace{4mm}A：双保险。RabbitMQ 延迟队列为主，Redis ZSet（OrderTimeKey，15min 过期分）定时扫描兜底，MQ 不可用也能关单释放库存。
+\vspace{1mm}
+
+\textbf{Q5}：支付成功后库存是怎么真正减少的？\\
+\hspace{4mm}A：下单只 reserved（预占）；支付事务改完状态后同步 CommitReservation，把 reserved 真正消掉。未支付被关单则 ReleaseReservation 还回 available。
+\vspace{1mm}
+
+\textbf{Q6}：游标分页相比深分页到底强多少？\\
+\hspace{4mm}A：压测里订单列表游标+缓存 58,406 RPS / p95 5ms，旧版深分页 8.3 RPS / p95 15.95s —— 吞吐约 7,000$\times$、p95 约 3,200$\times$。
+\end{frame}
+
+\begin{frame}{代码位置一览}
+\begin{description}\setlength{\itemsep}{0.2mm}
+  \item[登录 / 鉴权]\srcnote{internal/user/service.go:82 UserLogin；pkg/utils/jwt/jwt.go:25 GenerateToken；middleware/jwt.go:16 AuthMiddleware}
+  \item[商品 / 购物车]\srcnote{internal/product/service.go:40 ProductShow；internal/cart/service.go:29 CartCreate}
+  \item[下单中枢]\srcnote{internal/order/service.go:63--178 OrderCreate（满减:110 Reserve · 117 Tx · 145 outbox · 159 补偿 · 172 延迟关单）}
+  \item[库存两桶]\srcnote{repository/cache/inventory.go:78 Reserve · 98 Commit · 113 Release}
+  \item[满减引擎]\srcnote{internal/promo/service.go:162 CalculateBestDiscount · 234 ApplyDiscountInTx}
+  \item[Outbox]\srcnote{internal/shared/outbox/repo.go:26 Insert · 44 FetchBatch · 53 MarkSent；initialize/outbox.go:15 InitOutboxPublisher}
+  \item[支付 / 履约]\srcnote{internal/payment/service.go:36 PayDown；internal/order/shipping.go:36 ShipOrder · 73 ConfirmReceive}
+  \item[状态机 / 关单]\srcnote{internal/order/state.go:21 orderStateTransitions；internal/order/cancel.go:19 CancelUnpaidOrder}
+\end{description}
+\vspace{1mm}
+\keypoint{配套：先读本份建立地图，再下钻 deck 04 / 05 / 07 / 09 / 11。}
+\end{frame}
+
+\end{document}
