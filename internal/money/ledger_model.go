@@ -12,8 +12,13 @@ const (
 
 // 流水业务类型，用于对账时区分资金来源。
 const (
-	BizTypeOrderPay = "order_pay"
+	BizTypeOrderPay  = "order_pay"
+	BizTypeStripePay = "stripe_pay"
 )
+
+// StripeClearingUserID 平台 Stripe 清算账户的 user_id。Stripe 支付的资金来自外部卡组织，
+// 买家不从内部钱包扣款，故复式记账的 debit 对手方记在该清算账户上，保持 SUM(debit)=SUM(credit)。
+const StripeClearingUserID uint = 0
 
 // AccountTransaction 复式记账资金流水台账。
 //
