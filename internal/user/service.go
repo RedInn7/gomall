@@ -53,8 +53,13 @@ func (s *UserSrv) UserRegister(ctx context.Context, req *UserRegisterReq) (*User
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	// 加密money
-	money, err := user.EncryptMoney(req.Key)
+	// 设置支付密码摘要（与余额加密分离：摘要用于支付前校验，余额用服务端密钥加密）
+	if err = user.SetMoneyPassword(req.Key); err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
+	// 用服务端密钥加密初始余额
+	money, err := user.EncryptMoney()
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
@@ -82,8 +87,11 @@ func (s *UserSrv) UserLogin(ctx context.Context, req *UserServiceReq) (*UserToke
 	var user *User
 	userDao := NewUserDao(ctx)
 	user, exist, err := userDao.ExistOrNotByUserName(req.UserName)
-	if !exist { // 如果查询不到，返回相应的错误
+	if err != nil { // 真实 DB / 基础设施错误，不能伪装成"用户不存在"，也避免后续 nil 解引用
 		log.LogrusObj.Error(err)
+		return nil, err
+	}
+	if !exist { // 如果查询不到，返回相应的错误
 		return nil, errors.New("用户不存在")
 	}
 
@@ -253,7 +261,14 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserIn
 	case consts.EmailOperationBinding:
 		user.Email = email
 	case consts.EmailOperationNoBinding:
+		// 解绑：把 email 置空。GORM 的 struct Updates 会跳过零值，导致解绑变成静默 no-op，
+		// 这里用 Select("email") 显式持久化空字符串。
 		user.Email = ""
+		if err = userDao.UpdateUserColumns(userId, map[string]interface{}{"email": ""}); err != nil {
+			log.LogrusObj.Error(err)
+			return nil, err
+		}
+		goto buildResp
 	case consts.EmailOperationUpdatePassword:
 		if passwordDigest == "" {
 			err = errors.New("token 缺少密码摘要")
@@ -270,6 +285,8 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserIn
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
+
+buildResp:
 
 	return &UserInfoResp{
 		ID:       user.ID,

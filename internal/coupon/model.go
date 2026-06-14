@@ -1,6 +1,7 @@
 package coupon
 
 import (
+	"errors"
 	"time"
 
 	"github.com/RedInn7/gomall/internal/shared/dbmodel"
@@ -14,6 +15,9 @@ const (
 	UserCouponStatusUsed    = 2
 	UserCouponStatusExpired = 3
 )
+
+// ErrPerUserLimitReached 用户已达到该批次的领券上限（DB 层守卫返回此错误）。
+var ErrPerUserLimitReached = errors.New("已领取上限")
 
 // CouponBatch 优惠券批次/活动
 type CouponBatch struct {
