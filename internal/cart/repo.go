@@ -2,6 +2,7 @@ package cart
 
 import (
 	"context"
+	"errors"
 
 	"gorm.io/gorm"
 
@@ -21,8 +22,8 @@ func NewCartDao(ctx context.Context) *CartDao {
 func (d *CartDao) CreateCart(pId, uId, bId uint) (cart *Cart, status int, err error) {
 	// 查询有无此条商品
 	cart, err = d.GetCartById(pId, uId, bId)
-	// 空的，第一次加入
-	if err == gorm.ErrRecordNotFound {
+	// 空的，第一次加入。用 errors.Is 兼容被包装的 not-found 错误
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		cart = &Cart{
 			UserID:    uId,
 			ProductID: pId,
