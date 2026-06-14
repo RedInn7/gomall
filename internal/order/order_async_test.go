@@ -218,13 +218,18 @@ func TestAsyncOrder_EnqueuePublishFailReleasesReserve(t *testing.T) {
 func TestAsyncOrder_ConsumerSuccessWritesTicketOK(t *testing.T) {
 	cleanup := setupTestRedisForService(t)
 	defer cleanup()
+	db, dcleanup := setupSQLiteForOrder(t)
+	defer dcleanup()
 	ensureSnowflake()
+
+	// consumer 落库前要从商品表反查权威单价，故必须种一个有合法定价的商品。
+	p := seedProductPriced(t, db, "async-ok", 1000, 5)
 
 	prod, store, restore := installAsyncTestDeps(t)
 	defer restore()
 	_ = prod
 
-	// 内存版 writer：直接给 order 设一个 ID，不碰 DB
+	// 内存版 writer：直接给 order 设一个 ID，不碰 DB 写入（价格反查仍走真实 DB）
 	var captured *Order
 	SetAsyncOrderWriter(func(_ context.Context, _ AsyncOrderTask, order *Order) error {
 		order.ID = 4242
@@ -235,7 +240,7 @@ func TestAsyncOrder_ConsumerSuccessWritesTicketOK(t *testing.T) {
 	task := AsyncOrderTask{
 		Ticket:    "tkt-ok-1",
 		UserID:    1,
-		ProductID: 1,
+		ProductID: p.ID,
 		Num:       1,
 	}
 	body, _ := json.Marshal(task)
@@ -244,6 +249,10 @@ func TestAsyncOrder_ConsumerSuccessWritesTicketOK(t *testing.T) {
 	}
 	if captured == nil || captured.OrderNum == 0 {
 		t.Fatal("order not constructed")
+	}
+	// 单价必须来自商品表（1000 分），证明异步链路也不再吃客户端金额
+	if captured.Money != 1000 {
+		t.Fatalf("order money = %d, want 1000 (服务端反查单价)", captured.Money)
 	}
 
 	st, ok, _ := store.Get(context.Background(), task.Ticket)
@@ -258,13 +267,15 @@ func TestAsyncOrder_ConsumerSuccessWritesTicketOK(t *testing.T) {
 func TestAsyncOrder_ConsumerFailureReleasesReserveAndMarksFailed(t *testing.T) {
 	cleanup := setupTestRedisForService(t)
 	defer cleanup()
+	db, dcleanup := setupSQLiteForOrder(t)
+	defer dcleanup()
 	ensureSnowflake()
 
-	const pid = 7003
-	if err := cache.InitStock(context.Background(), pid, 8); err != nil {
-		t.Fatalf("init stock: %v", err)
-	}
-	// 先让 enqueue 阶段完成预扣
+	// 种一个定价合法的商品：让价格反查通过，从而由 writer 的 db boom 触发失败路径，
+	// 保持本用例聚焦"写库失败 → 释放预扣 + 失败 ticket"的语义（而非卡在价格反查）。
+	p := seedProductPriced(t, db, "async-fail", 1000, 8)
+	pid := p.ID
+	// 先让 enqueue 阶段完成预扣（seedProductPriced 已 InitStock 到 8）
 	if err := cache.ReserveStock(context.Background(), pid, 2); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}

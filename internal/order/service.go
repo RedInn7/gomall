@@ -3,6 +3,10 @@ package order
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,13 +71,20 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 		return nil, err
 	}
 
-	unitCents := int64(req.Money)
+	// 单价以服务端商品表为准，不取 req.Money：金额是安全敏感字段，客户端可任意改写，
+	// 信它等于把定价权交给买家（money=1 即可 1 分钱下单）。这里一次反查同时拿到单价与
+	// 类目；商品不存在或定价非法直接拒单，绝不回退到 req.Money（回退即重新打开漏洞）。
+	unitCents, categoryID, err := resolveProductPricing(ctx, req.ProductID)
+	if err != nil {
+		util.LogrusObj.Errorf("resolve product pricing failed product=%d err=%v", req.ProductID, err)
+		return nil, err
+	}
 	qty := int64(req.Num)
 	subtotalCents := unitCents * qty
 
 	// 满减计算先于事务发生：纯读路径，DB 慢一点也不影响事务保持时间。
-	// 走 Product DAO 反查 CategoryID —— 老客户端不传类目信息，由服务端兜底。
-	cartItems := buildPromoCartItems(ctx, req.ProductID, unitCents, qty)
+	// CategoryID 已由上面的权威反查一并取出，引擎无需再查库。
+	cartItems := buildPromoCartItems(req.ProductID, categoryID, unitCents, qty)
 	promoApply, promoErr := s.promo.CalculateBestDiscount(ctx, cartItems)
 	if promoErr != nil {
 		// 失败降级：CalculateBestDiscount 不应阻断下单（SLO 承诺：不影响 happy path）。
@@ -239,22 +250,58 @@ func (s *OrderSrv) OrderShow(ctx context.Context, req *OrderShowReq) (*OrderList
 	return order, nil
 }
 
-// buildPromoCartItems 给满减引擎拼一行 CartItem。
-// 老客户端 OrderCreateReq 没有 CategoryID，服务端回查 Product 兜底；
-// 商品不存在 / DB 失败时降级返回不带类目的 cartItem，引擎仅匹配商品级 / 全场规则。
-func buildPromoCartItems(ctx context.Context, productID uint, unitCents, qty int64) []promo.CartItem {
-	item := promo.CartItem{
-		ProductID: int64(productID),
-		UnitCents: unitCents,
-		Quantity:  qty,
-	}
+// buildPromoCartItems 给满减引擎拼一行 CartItem。单价与类目均由调用方从权威反查传入，
+// 这里只做纯拼装，不再触库——避免与 resolveProductPricing 重复查询同一商品。
+func buildPromoCartItems(productID uint, categoryID, unitCents, qty int64) []promo.CartItem {
+	return []promo.CartItem{{
+		ProductID:  int64(productID),
+		CategoryID: categoryID,
+		UnitCents:  unitCents,
+		Quantity:   qty,
+	}}
+}
+
+// resolveProductPricing 从商品表反查权威单价（分）与类目，作为下单计费的唯一价格来源。
+// 取价优先级：DiscountPrice（用户实付价）→ Price（原价兜底）。任一步失败都返回 error，
+// 由调用方拒单；绝不静默回退到客户端传入的金额，否则等于把篡改后的价格重新放行。
+func resolveProductPricing(ctx context.Context, productID uint) (unitCents int64, categoryID int64, err error) {
 	pdao := product.NewProductDao(ctx)
-	if pdao != nil && pdao.DB != nil {
-		if p, err := pdao.GetProductById(productID); err == nil && p != nil {
-			item.CategoryID = int64(p.CategoryID)
-		}
+	if pdao == nil || pdao.DB == nil {
+		return 0, 0, errors.New("product dao 不可用，无法核定单价")
 	}
-	return []promo.CartItem{item}
+	p, perr := pdao.GetProductById(productID)
+	if perr != nil || p == nil {
+		return 0, 0, fmt.Errorf("商品不存在或查询失败 product=%d: %w", productID, perr)
+	}
+	cents, ok := yuanToCents(p.DiscountPrice)
+	if !ok || cents <= 0 {
+		cents, ok = yuanToCents(p.Price)
+	}
+	if !ok || cents <= 0 {
+		return 0, 0, fmt.Errorf("商品定价非法 product=%d discount=%q price=%q", productID, p.DiscountPrice, p.Price)
+	}
+	return cents, int64(p.CategoryID), nil
+}
+
+// resolveUnitCents 仅取权威单价（分），异步消费侧不需要类目时用它。
+func resolveUnitCents(ctx context.Context, productID uint) (int64, error) {
+	cents, _, err := resolveProductPricing(ctx, productID)
+	return cents, err
+}
+
+// yuanToCents 把「元」字符串（如 "99.50"）转成「分」。商品价以两位小数的元为单位存储，
+// 与订单的分口径不同，这里统一换算。解析失败或为负返回 ok=false，交由上层兜底/拒单。
+func yuanToCents(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	yuan, err := strconv.ParseFloat(s, 64)
+	if err != nil || yuan < 0 {
+		return 0, false
+	}
+	// Round 抵消二进制浮点误差（99.50*100 可能算出 9949.999...）。
+	return int64(math.Round(yuan * 100)), true
 }
 
 // OrderDelete 软删订单。成功时不回传订单体（保持既有 API 契约：data 为 null），

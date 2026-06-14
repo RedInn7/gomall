@@ -2,6 +2,7 @@ package order
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -81,15 +82,18 @@ func ensureSnowflakeForOrder() {
 }
 
 // seedOrderProduct 建一个 BossID=1 / CategoryID=10 / 库存 50 的商品，并初始化 Redis 库存桶。
-// 单价 / 名字交给调用方在 product 上额外设置。
+// 单价以 priceCents（分）写入商品的 DiscountPrice（元字符串）——下单链路从商品表反查单价，
+// 测试必须把权威价种到商品上，而不能再靠 req.Money 传入。
 func seedOrderProduct(t *testing.T, db *gorm.DB, name string, priceCents int64) *product.Product {
 	t.Helper()
+	yuan := fmt.Sprintf("%.2f", float64(priceCents)/100)
 	p := &product.Product{
-		Name:       name,
-		CategoryID: 10,
-		Num:        50,
-		BossID:     1,
-		Price:      "0", // 仅满足 not-null；引擎只看入参 unitCents
+		Name:          name,
+		CategoryID:    10,
+		Num:           50,
+		BossID:        1,
+		Price:         yuan,
+		DiscountPrice: yuan,
 	}
 	if err := db.Create(p).Error; err != nil {
 		t.Fatalf("create product: %v", err)
@@ -97,7 +101,28 @@ func seedOrderProduct(t *testing.T, db *gorm.DB, name string, priceCents int64) 
 	if err := cache.InitStock(context.Background(), p.ID, int64(p.Num)); err != nil {
 		t.Fatalf("init stock: %v", err)
 	}
-	_ = priceCents // 单价交给下单 req.Money 传入，这里仅占位避免被误删
+	return p
+}
+
+// seedProductPriced 建一个指定单价（priceCents 分）与库存 stock 的商品，并初始化 Redis 库存桶。
+// 供异步消费测试使用：那里需要精确控制库存，不能套用 seedOrderProduct 固定 50 的默认值。
+func seedProductPriced(t *testing.T, db *gorm.DB, name string, priceCents, stock int64) *product.Product {
+	t.Helper()
+	yuan := fmt.Sprintf("%.2f", float64(priceCents)/100)
+	p := &product.Product{
+		Name:          name,
+		CategoryID:    10,
+		Num:           int(stock),
+		BossID:        1,
+		Price:         yuan,
+		DiscountPrice: yuan,
+	}
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("create product: %v", err)
+	}
+	if err := cache.InitStock(context.Background(), p.ID, stock); err != nil {
+		t.Fatalf("init stock: %v", err)
+	}
 	return p
 }
 
