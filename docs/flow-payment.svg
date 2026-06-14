@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760"
+     font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif">
+
+  <!-- ============ 共享 defs（与设计系统一致） ============ -->
+  <defs>
+    <!-- 层级渐变 -->
+    <linearGradient id="gClient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="gGate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="gTrade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/><stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="gProduct" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="gPromo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fb923c"/><stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="gUser" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c084fc"/><stop offset="1" stop-color="#9333ea"/>
+    </linearGradient>
+    <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="gMQ" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#d97706"/>
+    </linearGradient>
+    <!-- 阴影 -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <!-- 核心组件发光 -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- 实线箭头(同步主流量) -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"/>
+    </marker>
+    <!-- 虚线箭头(异步/MQ/旁路) -->
+    <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <!-- ============ 背景 ============ -->
+  <rect x="0" y="0" width="1200" height="760" fill="#0d1117"/>
+
+  <!-- ============ 标题区 ============ -->
+  <g>
+    <text x="40" y="48" fill="#ffffff" font-size="26" font-weight="700">支付结算流程（资金台账 + 折后实付）</text>
+    <text x="40" y="74" fill="rgba(255,255,255,0.55)" font-size="14">
+      余额支付：扣款 / 入账 / 复式记账 / 扣库存 / 改单 / 发件箱 —— 同一 DB 事务原子提交；旁路为 Web3 链上支付
+    </text>
+  </g>
+
+  <!-- ============ 图例 ============ -->
+  <g transform="translate(760,30)">
+    <rect x="0" y="0" width="400" height="56" rx="10" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+    <line x1="16" y1="20" x2="52" y2="20" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="60" y="24" fill="rgba(255,255,255,0.7)" font-size="12">同步主流程</text>
+    <line x1="160" y1="20" x2="196" y2="20" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrowA)"/>
+    <text x="204" y="24" fill="rgba(255,255,255,0.7)" font-size="12">异步 / 旁路</text>
+    <rect x="16" y="36" width="14" height="10" rx="2" fill="url(#gTrade)"/>
+    <text x="36" y="45" fill="rgba(255,255,255,0.7)" font-size="11">交易/资金</text>
+    <rect x="110" y="36" width="14" height="10" rx="2" fill="url(#gData)"/>
+    <text x="130" y="45" fill="rgba(255,255,255,0.7)" font-size="11">数据/链上</text>
+    <rect x="210" y="36" width="14" height="10" rx="2" fill="url(#gMQ)"/>
+    <text x="230" y="45" fill="rgba(255,255,255,0.7)" font-size="11">MQ/发件箱</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- Group Box: 同一事务原子边界 -->
+  <!-- ====================================================== -->
+  <g>
+    <rect x="32" y="150" width="836" height="492" rx="14" fill="rgba(96,165,250,0.05)" stroke="rgba(96,165,250,0.25)" stroke-dasharray="6,4"/>
+    <text x="52" y="176" fill="rgba(96,165,250,0.85)" font-size="13" letter-spacing="2">DB TRANSACTION · 原子边界（任一步失败整体回滚）</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 主流程节点（同步） · 两列泳道排布 -->
+  <!-- 左列 x=70..330(w=260) ; 右列 x=380..640 -->
+  <!-- ====================================================== -->
+
+  <!-- N1 用户发起支付 (客户端) -->
+  <g>
+    <rect x="70" y="100" width="260" height="58" rx="8" fill="url(#gClient)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="88" y="124" fill="rgba(255,255,255,0.65)" font-size="11">[Client] PayDown 请求</text>
+    <text x="88" y="145" fill="#fff" font-size="16" font-weight="700">① 用户发起支付</text>
+  </g>
+
+  <!-- N2 开启 DB 事务 -->
+  <g>
+    <rect x="70" y="200" width="260" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="88" y="224" fill="rgba(255,255,255,0.65)" font-size="11">[MySQL] Transaction begin</text>
+    <text x="88" y="245" fill="#fff" font-size="16" font-weight="700">② 开启 DB 事务</text>
+  </g>
+
+  <!-- N3 LockTwoUsersForUpdate -->
+  <g>
+    <rect x="70" y="300" width="260" height="62" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="88" y="324" fill="rgba(255,255,255,0.65)" font-size="11">[Lock] SELECT ... FOR UPDATE</text>
+    <text x="88" y="344" fill="#fff" font-size="15" font-weight="700">③ LockTwoUsersForUpdate</text>
+    <text x="88" y="358" fill="rgba(255,255,255,0.75)" font-size="11">买卖双方行锁 · 统一升序防死锁</text>
+  </g>
+
+  <!-- N4 CheckMoneyPassword -->
+  <g>
+    <rect x="70" y="404" width="260" height="62" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="88" y="428" fill="rgba(255,255,255,0.65)" font-size="11">[User] CheckMoneyPassword</text>
+    <text x="88" y="448" fill="#fff" font-size="15" font-weight="700">④ 支付密码校验</text>
+    <text x="88" y="462" fill="rgba(255,255,255,0.75)" font-size="11">与服务端密钥解密分离 · 不串账户</text>
+  </g>
+
+  <!-- N5 买家扣款 + debit -->
+  <g>
+    <rect x="70" y="508" width="260" height="70" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="88" y="532" fill="rgba(255,255,255,0.65)" font-size="11">[Money] 扣款 + 流水</text>
+    <text x="88" y="552" fill="#fff" font-size="15" font-weight="700">⑤ 买家扣款（FinalCents）</text>
+    <text x="88" y="568" fill="rgba(255,255,255,0.75)" font-size="11">取折后实付 + 写一条 debit 流水</text>
+  </g>
+
+  <!-- N6 卖家入账 + credit (右列起点) -->
+  <g>
+    <rect x="392" y="508" width="260" height="70" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="410" y="532" fill="rgba(255,255,255,0.65)" font-size="11">[Money] 入账 + 流水（复式记账）</text>
+    <text x="410" y="552" fill="#fff" font-size="15" font-weight="700">⑥ 卖家入账（credit）</text>
+    <text x="410" y="568" fill="rgba(255,255,255,0.75)" font-size="11">account_transaction · (ref_order_id,direction) 唯一防重</text>
+  </g>
+
+  <!-- N7 CommitReservation 扣库存 -->
+  <g>
+    <rect x="392" y="404" width="260" height="62" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="410" y="428" fill="rgba(255,255,255,0.65)" font-size="11">[Product] DeductStock</text>
+    <text x="410" y="448" fill="#fff" font-size="15" font-weight="700">⑦ 扣库存（落库）</text>
+    <text x="410" y="462" fill="rgba(255,255,255,0.75)" font-size="11">条件 UPDATE 一步到位 · 防超卖</text>
+  </g>
+
+  <!-- N8 改订单状态为已支付 -->
+  <g>
+    <rect x="392" y="300" width="260" height="62" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="410" y="324" fill="rgba(255,255,255,0.65)" font-size="11">[Order] MarkOrderPaidWithCheck</text>
+    <text x="410" y="344" fill="#fff" font-size="15" font-weight="700">⑧ 改订单状态 → 已支付</text>
+    <text x="410" y="358" fill="rgba(255,255,255,0.75)" font-size="11">WaitPay 守卫塞进 WHERE · 杜绝重付</text>
+  </g>
+
+  <!-- N9 写 outbox order.paid -->
+  <g>
+    <rect x="392" y="200" width="260" height="58" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="410" y="224" fill="rgba(255,255,255,0.65)" font-size="11">[Outbox] order.paid</text>
+    <text x="410" y="245" fill="#fff" font-size="16" font-weight="700">⑨ 写 outbox 事件</text>
+  </g>
+
+  <!-- N10 提交事务 -->
+  <g>
+    <rect x="392" y="100" width="260" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="410" y="124" fill="rgba(255,255,255,0.65)" font-size="11">[MySQL] COMMIT</text>
+    <text x="410" y="145" fill="#fff" font-size="16" font-weight="700">⑩ 提交事务（原子落地）</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 异步：CommitReservation Redis + RabbitMQ 投递 -->
+  <!-- ====================================================== -->
+
+  <!-- A1 Redis CommitReservation -->
+  <g>
+    <rect x="700" y="404" width="240" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="716" y="428" fill="rgba(255,255,255,0.65)" font-size="11">[Redis] CommitReservation</text>
+    <text x="716" y="448" fill="#fff" font-size="15" font-weight="700">reserved 桶扣减</text>
+    <text x="716" y="462" fill="rgba(255,255,255,0.75)" font-size="11">提交后同步 Redis 预占</text>
+  </g>
+
+  <!-- A2 RabbitMQ OrderPaid -->
+  <g>
+    <rect x="700" y="100" width="240" height="58" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)" />
+    <text x="716" y="124" fill="rgba(255,255,255,0.65)" font-size="11">[RabbitMQ] publisher</text>
+    <text x="716" y="145" fill="#fff" font-size="16" font-weight="700">投递 OrderPaid</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- Group Box: Web3 加密支付旁路 -->
+  <!-- ====================================================== -->
+  <g>
+    <rect x="980" y="200" width="196" height="466" rx="14" fill="rgba(52,211,153,0.05)" stroke="rgba(52,211,153,0.22)" stroke-dasharray="6,4"/>
+    <text x="998" y="226" fill="rgba(52,211,153,0.85)" font-size="13" letter-spacing="1">WEB3 加密支付旁路</text>
+  </g>
+
+  <!-- W1 IssueNonce / VerifyAndPark -->
+  <g>
+    <rect x="998" y="244" width="160" height="74" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="1012" y="268" fill="rgba(255,255,255,0.65)" font-size="11">[Web3] nonce + 签名</text>
+    <text x="1012" y="288" fill="#fff" font-size="14" font-weight="700">VerifyAndPark</text>
+    <text x="1012" y="306" fill="rgba(255,255,255,0.75)" font-size="11">EIP-191 校验 · 防重放</text>
+  </g>
+
+  <!-- W2 Escrow 合约 -->
+  <g>
+    <rect x="998" y="334" width="160" height="64" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="1012" y="358" fill="rgba(255,255,255,0.65)" font-size="11">[Contract]</text>
+    <text x="1012" y="378" fill="#fff" font-size="14" font-weight="700">Escrow 合约</text>
+    <text x="1012" y="392" fill="rgba(255,255,255,0.75)" font-size="11">托管转账 pending</text>
+  </g>
+
+  <!-- W3 EVM 监听 -->
+  <g>
+    <rect x="998" y="414" width="160" height="64" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="1012" y="438" fill="rgba(255,255,255,0.65)" font-size="11">[Listener]</text>
+    <text x="1012" y="458" fill="#fff" font-size="14" font-weight="700">EVM 链上监听</text>
+    <text x="1012" y="472" fill="rgba(255,255,255,0.75)" font-size="11">confirm 后 DEL pending</text>
+  </g>
+
+  <!-- W4 链上对账 -->
+  <g>
+    <rect x="998" y="494" width="160" height="74" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="1012" y="518" fill="rgba(255,255,255,0.65)" font-size="11">[Reconcile]</text>
+    <text x="1012" y="538" fill="#fff" font-size="14" font-weight="700">链上对账</text>
+    <text x="1012" y="556" fill="rgba(255,255,255,0.75)" font-size="11">金额同取 FinalCents</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 连线（实线 = 同步主流程；不穿盒） -->
+  <!-- 左列向下：N1→N2→N3→N4→N5 -->
+  <!-- ====================================================== -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <line x1="200" y1="158" x2="200" y2="200" marker-end="url(#arrow)"/>
+    <line x1="200" y1="258" x2="200" y2="300" marker-end="url(#arrow)"/>
+    <line x1="200" y1="362" x2="200" y2="404" marker-end="url(#arrow)"/>
+    <line x1="200" y1="466" x2="200" y2="508" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- 跨列：N5(底) → 折线 → N6(底) -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <path d="M330,543 L361,543 L361,543 L392,543" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- 右列向上：N6→N7→N8→N9→N10 -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <line x1="522" y1="508" x2="522" y2="466" marker-end="url(#arrow)"/>
+    <line x1="522" y1="404" x2="522" y2="362" marker-end="url(#arrow)"/>
+    <line x1="522" y1="300" x2="522" y2="258" marker-end="url(#arrow)"/>
+    <line x1="522" y1="200" x2="522" y2="158" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 连线（虚线 = 异步 / 提交后旁路） -->
+  <!-- ====================================================== -->
+  <g fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5">
+    <!-- N7 扣库存(落库) -> Redis CommitReservation (提交后同步桶) -->
+    <line x1="652" y1="435" x2="700" y2="435" marker-end="url(#arrowA)"/>
+    <!-- N10 提交事务 -> RabbitMQ 投递 OrderPaid -->
+    <line x1="652" y1="129" x2="700" y2="129" marker-end="url(#arrowA)"/>
+  </g>
+
+  <!-- Web3 旁路虚线：N1 用户发起 → W1，W1→W2→W3→W4，W4 链上对账回灌 N8 改单 -->
+  <g fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5">
+    <path d="M330,118 L900,118 L900,281 L1078,281 L1078,244" marker-end="url(#arrowA)"/>
+    <line x1="1078" y1="318" x2="1078" y2="334" marker-end="url(#arrowA)"/>
+    <line x1="1078" y1="398" x2="1078" y2="414" marker-end="url(#arrowA)"/>
+    <line x1="1078" y1="478" x2="1078" y2="494" marker-end="url(#arrowA)"/>
+    <!-- 对账确认后驱动改单 → 已支付（回到主流程 N8 右侧） -->
+    <path d="M998,531 L672,531 L672,331" marker-end="url(#arrowA)"/>
+  </g>
+
+  <!-- 线上标签 -->
+  <g font-size="11" fill="rgba(255,255,255,0.6)">
+    <text x="676" y="124" >async pub</text>
+    <text x="660" y="430" >sync 桶</text>
+    <text x="612" y="112" >加密支付</text>
+    <text x="700" y="546" >confirm 回灌改单</text>
+  </g>
+
+  <!-- 底部强调条 -->
+  <g>
+    <rect x="32" y="664" width="836" height="40" rx="8" fill="rgba(96,165,250,0.10)" stroke="rgba(96,165,250,0.30)"/>
+    <text x="52" y="689" fill="#dbeafe" font-size="13" font-weight="700">
+      原子保证：扣款 ⑤ / 入账 ⑥ / 扣库存 ⑦ / 改单 ⑧ / 发件箱 ⑨ 同处一个事务 —— 要么全成，要么整体回滚，绝无半成品资金态
+    </text>
+  </g>
+
+</svg>

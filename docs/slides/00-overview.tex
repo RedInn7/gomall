@@ -81,6 +81,130 @@
 \end{frame}
 
 % =====================================================================
+\section{系统架构：分层拓扑与领域地图}
+% =====================================================================
+
+\begin{frame}{gomall 整体架构：一条请求从客户端落到数据层}
+\resizebox{0.97\textwidth}{0.70\textheight}{%
+\begin{tikzpicture}[font=\scriptsize,node distance=3mm and 6mm]
+  % --- 客户端层 ---
+  \node[node-box,minimum width=24mm] (web) {Web};
+  \node[node-box,right=of web,minimum width=24mm] (mob) {Mobile};
+  \node[draw=cGray,dashed,rounded corners=3pt,inner sep=2mm,fit=(web)(mob),
+        label={[font=\tiny,cGray]left:客户端}] (cli) {};
+
+  % --- 接入层：Gin Router + 中间件链 ---
+  \node[node-box,below=10mm of cli.south,minimum width=110mm,minimum height=10mm]
+        (gw) {Gin Router \quad｜\quad
+              中间件链：JWT $\to$ RBAC $\to$ 限流 $\to$ 熔断 $\to$ 幂等 $\to$ Jaeger 链路};
+
+  % --- 服务层：四个域分组 ---
+  \node[node-box,node-warn,below=11mm of gw.south west,anchor=north west,
+        minimum width=26mm,minimum height=16mm] (svcTrade)
+        {交易\\[1pt]{\tiny cart · order · payment}\\{\tiny refund · money}};
+  \node[node-box,node-ok,right=of svcTrade,minimum width=26mm,minimum height=16mm]
+        (svcProd) {商品\\[1pt]{\tiny product · search}\\{\tiny category}};
+  \node[node-box,fill=cAccent!12,draw=cAccent,right=of svcProd,
+        minimum width=26mm,minimum height=16mm] (svcMkt)
+        {营销\\[1pt]{\tiny coupon · skill}\\{\tiny redpacket · promo}};
+  \node[node-box,right=of svcMkt,minimum width=26mm,minimum height=16mm] (svcUser)
+        {用户\\[1pt]{\tiny user · address}\\{\tiny admin}};
+  \node[draw=cMain,dashed,rounded corners=3pt,inner sep=2.2mm,
+        fit=(svcTrade)(svcUser),
+        label={[font=\tiny,cGray]left:服务层}] (svc) {};
+
+  % --- 旁路：Outbox + MQ ---
+  \node[node-box,fill=cMute,right=10mm of svc.east,minimum width=24mm,
+        minimum height=15mm] (mq) {Outbox\\$\to$ RabbitMQ\\{\tiny 旁路异步}};
+
+  % --- 数据层 ---
+  \node[node-box,node-ok,below=11mm of svcTrade.south,anchor=north,
+        minimum width=24mm] (mysql) {MySQL\\{\tiny 主从读写分离}};
+  \node[node-box,node-ok,right=of mysql,minimum width=20mm] (redis) {Redis\\{\tiny 库存·缓存}};
+  \node[node-box,node-ok,right=of redis,minimum width=18mm] (es) {ES\\{\tiny 全文检索}};
+  \node[node-box,node-ok,right=of es,minimum width=18mm] (milvus) {Milvus\\{\tiny 向量召回}};
+  \node[node-box,node-ok,right=of milvus,minimum width=18mm] (web3) {Web3\\{\tiny 链上对账}};
+  \node[draw=cGray,dashed,rounded corners=3pt,inner sep=2.2mm,
+        fit=(mysql)(web3),label={[font=\tiny,cGray]left:数据层}] (data) {};
+
+  % --- 同步实线 ---
+  \draw[arrow] (cli.south) -- (gw.north);
+  \draw[arrow] (gw.south) -- (svc.north);
+  \draw[arrow] (svc.south) -- (data.north);
+  % --- 异步虚线：Outbox -> MQ -> 下游 ---
+  \draw[arrow-async] (svc.east) -- node[above,font=\tiny]{outbox} (mq.west);
+  \draw[arrow-async] (mq.south) |- node[right,font=\tiny,pos=0.25]{投递} (data.east);
+\end{tikzpicture}}
+\par\smallskip
+{\centering\small 核心链路同步落库收钱，事件经 Outbox 旁路异步散给搜索 / 统计 / 履约，主线不被下游拖慢。\par}
+\srcnote{routes/router.go 中间件链 + 各域 RegisterRoutes；实线=同步请求，虚线=Outbox 旁路异步投递}
+\end{frame}
+
+\begin{frame}{DDD 领域地图：22 个域按 bounded context 垂直切片}
+\resizebox{0.97\textwidth}{0.68\textheight}{%
+\begin{tikzpicture}[font=\scriptsize,node distance=2.5mm and 5mm,
+    dom/.style={draw=cMain,rounded corners=2pt,minimum height=6mm,
+      minimum width=17mm,align=center,font=\tiny}]
+  % --- 交易上下文 ---
+  \node[dom,node-warn] (order)   {order};
+  \node[dom,node-warn,right=of order] (cart) {cart};
+  \node[dom,node-warn,below=of order] (pay) {payment};
+  \node[dom,node-warn,right=of pay] (refund) {refund};
+  \node[draw=cMain,dashed,rounded corners=3pt,inner sep=2mm,
+        fit=(order)(cart)(pay)(refund),
+        label={[font=\tiny,cMain]above:交易}] (ctxTrade) {};
+
+  % --- 商品上下文 ---
+  \node[dom,node-ok,right=14mm of cart] (product) {product};
+  \node[dom,node-ok,right=of product] (category) {category};
+  \node[dom,node-ok,below=of product] (search) {search};
+  \node[draw=cOK,dashed,rounded corners=3pt,inner sep=2mm,
+        fit=(product)(category)(search),
+        label={[font=\tiny,cOK]above:商品}] (ctxProd) {};
+
+  % --- 营销上下文 ---
+  \node[dom,fill=cAccent!12,draw=cAccent,below=16mm of order] (promo) {promo};
+  \node[dom,fill=cAccent!12,draw=cAccent,right=of promo] (coupon) {coupon};
+  \node[dom,fill=cAccent!12,draw=cAccent,below=of promo] (skill) {skill};
+  \node[dom,fill=cAccent!12,draw=cAccent,right=of skill] (redpacket) {redpacket};
+  \node[draw=cAccent,dashed,rounded corners=3pt,inner sep=2mm,
+        fit=(promo)(coupon)(skill)(redpacket),
+        label={[font=\tiny,cAccent]above:营销}] (ctxMkt) {};
+
+  % --- 用户上下文 ---
+  \node[dom,right=22mm of ctxMkt.east,anchor=west] (user) {user};
+  \node[dom,right=of user] (address) {address};
+  \node[dom,below=of user] (admin) {admin};
+  \node[draw=cMain,dashed,rounded corners=3pt,inner sep=2mm,
+        fit=(user)(address)(admin),
+        label={[font=\tiny,cMain]above:用户}] (ctxUser) {};
+
+  % --- 横切层 ---
+  \node[node-box,fill=cMute,below=8mm of ctxMkt.south west,anchor=north west,
+        minimum width=58mm,minimum height=7mm,font=\tiny] (cross)
+        {横切：shared / outbox（事件一致性）\quad｜\quad money（资金台账，复式记账）};
+
+  % --- 基础设施底座 ---
+  \node[node-box,node-ok,below=6mm of cross.south,anchor=north,
+        minimum width=130mm,minimum height=7mm,font=\tiny] (infra)
+        {基础设施底座：MySQL \quad·\quad Redis \quad·\quad RabbitMQ \quad·\quad ES \quad·\quad Milvus};
+
+  % --- 关键跨域依赖边 ---
+  \draw[arrow] (order.east) to[out=20,in=160]
+        node[above,font=\tiny,pos=0.5]{扣库存} (product.west);
+  \draw[arrow] (order.south) -- node[left,font=\tiny,pos=0.6]{算优惠} (promo.north);
+  \draw[arrow] (pay.south west) to[out=-150,in=180]
+        node[left,font=\tiny,pos=0.4]{资金} (cross.west);
+  \draw[arrow] (pay.east) to[out=0,in=180]
+        node[above,font=\tiny,pos=0.55]{账户} (user.west);
+  \draw[arrow-async] (search.north) -- node[right,font=\tiny]{索引} (product.south);
+\end{tikzpicture}}
+\par\smallskip
+{\centering\small 按域垂直切片，跨域只经属主领域的服务方法调用；product 与 search 已斩环（search 单向订阅 product 索引事件）。\par}
+\srcnote{docs/architecture/DDD\_MIGRATION.md 域划分；跨域边见图中实线箭头}
+\end{frame}
+
+% =====================================================================
 \section{端到端主线：一次成功购物的"黄金路径"}
 % =====================================================================
 

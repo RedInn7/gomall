@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760"
+     font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif">
+
+  <!-- ============ 共享 defs（与设计系统一致） ============ -->
+  <defs>
+    <linearGradient id="gClient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="gGate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="gTrade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/><stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="gProduct" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="gPromo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fb923c"/><stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="gUser" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c084fc"/><stop offset="1" stop-color="#9333ea"/>
+    </linearGradient>
+    <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="gMQ" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#d97706"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <!-- ============ 背景 ============ -->
+  <rect x="0" y="0" width="1200" height="760" fill="#0d1117"/>
+
+  <!-- ============ 标题区 ============ -->
+  <g>
+    <text x="40" y="48" fill="#ffffff" font-size="26" font-weight="700">订单生命周期（下单 → 支付 → 履约 → 关单兜底）</text>
+    <text x="40" y="74" fill="rgba(255,255,255,0.55)" font-size="14">
+      状态机：待支付 → 待发货 → 待收货 → 完成；旁路为 RabbitMQ TTL 延迟关单 + Cron 二次保险
+    </text>
+  </g>
+
+  <!-- ============ 图例 ============ -->
+  <g transform="translate(760,30)">
+    <rect x="0" y="0" width="400" height="56" rx="10" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+    <line x1="16" y1="20" x2="52" y2="20" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="60" y="24" fill="rgba(255,255,255,0.7)" font-size="12">同步状态流转</text>
+    <line x1="170" y1="20" x2="206" y2="20" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrowA)"/>
+    <text x="214" y="24" fill="rgba(255,255,255,0.7)" font-size="12">异步关单兜底</text>
+    <rect x="16" y="36" width="14" height="10" rx="2" fill="url(#gTrade)"/>
+    <text x="36" y="45" fill="rgba(255,255,255,0.7)" font-size="11">订单状态</text>
+    <rect x="100" y="36" width="14" height="10" rx="2" fill="url(#gData)"/>
+    <text x="120" y="45" fill="rgba(255,255,255,0.7)" font-size="11">Redis/DB</text>
+    <rect x="190" y="36" width="14" height="10" rx="2" fill="url(#gMQ)"/>
+    <text x="210" y="45" fill="rgba(255,255,255,0.7)" font-size="11">RabbitMQ</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- Group Box: 下单原子步骤（OrderCreate 内部展开） -->
+  <!-- ====================================================== -->
+  <g>
+    <rect x="32" y="116" width="290" height="540" rx="14" fill="rgba(96,165,250,0.05)" stroke="rgba(96,165,250,0.22)" stroke-dasharray="6,4"/>
+    <text x="50" y="140" fill="rgba(96,165,250,0.85)" font-size="13" letter-spacing="1">下单 OrderCreate · 落库链路</text>
+  </g>
+
+  <!-- C1 校验地址归属 -->
+  <g>
+    <rect x="52" y="156" width="250" height="56" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="68" y="179" fill="rgba(255,255,255,0.65)" font-size="11">[Address] EnsureOwned</text>
+    <text x="68" y="200" fill="#fff" font-size="15" font-weight="700">① 校验地址归属</text>
+  </g>
+
+  <!-- C2 ReserveStock -->
+  <g>
+    <rect x="52" y="240" width="250" height="64" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="68" y="263" fill="rgba(255,255,255,0.65)" font-size="11">[Redis] ReserveStock (Lua)</text>
+    <text x="68" y="284" fill="#fff" font-size="15" font-weight="700">② 预扣库存</text>
+    <text x="68" y="298" fill="rgba(255,255,255,0.75)" font-size="11">available → reserved · 失败拒单</text>
+  </g>
+
+  <!-- C3 snowflake 订单号 -->
+  <g>
+    <rect x="52" y="332" width="250" height="56" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="68" y="355" fill="rgba(255,255,255,0.65)" font-size="11">[Snowflake] GenSnowflakeID</text>
+    <text x="68" y="376" fill="#fff" font-size="15" font-weight="700">③ 生成订单号</text>
+  </g>
+
+  <!-- C4 落库 + outbox -->
+  <g>
+    <rect x="52" y="416" width="250" height="70" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="68" y="439" fill="rgba(255,255,255,0.65)" font-size="11">[MySQL Tx] CreateOrder + Outbox</text>
+    <text x="68" y="460" fill="#fff" font-size="15" font-weight="700">④ 落库 + 写 outbox</text>
+    <text x="68" y="475" fill="rgba(255,255,255,0.75)" font-size="11">order.created · 同事务原子</text>
+  </g>
+
+  <!-- C5 失败补偿提示 -->
+  <g>
+    <rect x="52" y="514" width="250" height="56" rx="8" fill="rgba(251,146,60,0.12)" stroke="rgba(251,146,60,0.4)" stroke-width="1.2"/>
+    <text x="68" y="537" fill="rgba(255,255,255,0.65)" font-size="11">[Compensate] 事务失败时</text>
+    <text x="68" y="557" fill="#fde68a" font-size="14" font-weight="700">⤺ 释放预占库存（回 available）</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 主状态机泳道（同步） -->
+  <!-- 节点 x=400 列，纵向状态机；中点 cx=520 -->
+  <!-- ====================================================== -->
+
+  <!-- S1 待支付 -->
+  <g>
+    <rect x="400" y="156" width="240" height="60" rx="30" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="520" y="183" fill="rgba(255,255,255,0.65)" font-size="11" text-anchor="middle">[State] OrderWaitPay</text>
+    <text x="520" y="203" fill="#fff" font-size="17" font-weight="700" text-anchor="middle">待支付</text>
+  </g>
+
+  <!-- S2 支付成功 -->
+  <g>
+    <rect x="400" y="262" width="240" height="64" rx="14" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="520" y="286" fill="rgba(255,255,255,0.65)" font-size="11" text-anchor="middle">[Payment] PayDown 事务提交</text>
+    <text x="520" y="306" fill="#fff" font-size="16" font-weight="700" text-anchor="middle">支付成功</text>
+    <text x="520" y="320" fill="rgba(255,255,255,0.7)" font-size="11" text-anchor="middle">见「支付结算流程」</text>
+  </g>
+
+  <!-- S3 待发货 -->
+  <g>
+    <rect x="400" y="372" width="240" height="60" rx="30" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="520" y="399" fill="rgba(255,255,255,0.65)" font-size="11" text-anchor="middle">[State] WaitDeliver</text>
+    <text x="520" y="419" fill="#fff" font-size="17" font-weight="700" text-anchor="middle">待发货</text>
+  </g>
+
+  <!-- S4 待收货 -->
+  <g>
+    <rect x="400" y="478" width="240" height="60" rx="30" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="520" y="505" fill="rgba(255,255,255,0.65)" font-size="11" text-anchor="middle">[State] WaitReceive</text>
+    <text x="520" y="525" fill="#fff" font-size="17" font-weight="700" text-anchor="middle">待收货</text>
+  </g>
+
+  <!-- S5 完成 -->
+  <g>
+    <rect x="400" y="584" width="240" height="60" rx="30" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)" />
+    <text x="520" y="611" fill="rgba(255,255,255,0.65)" font-size="11" text-anchor="middle">[State] Finished</text>
+    <text x="520" y="631" fill="#fff" font-size="17" font-weight="700" text-anchor="middle">完成</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 右侧：关单兜底旁路（异步） -->
+  <!-- ====================================================== -->
+  <g>
+    <rect x="720" y="116" width="456" height="540" rx="14" fill="rgba(251,191,36,0.05)" stroke="rgba(251,191,36,0.22)" stroke-dasharray="6,4"/>
+    <text x="738" y="140" fill="rgba(251,191,36,0.85)" font-size="13" letter-spacing="1">超时关单兜底 · RabbitMQ TTL + Cron</text>
+  </g>
+
+  <!-- D1 ZAdd + PublishOrderDelay -->
+  <g>
+    <rect x="740" y="156" width="200" height="74" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="756" y="180" fill="rgba(255,255,255,0.65)" font-size="11">[Redis ZAdd + MQ Pub]</text>
+    <text x="756" y="200" fill="#fff" font-size="15" font-weight="700">下单即发延迟任务</text>
+    <text x="756" y="218" fill="rgba(255,255,255,0.75)" font-size="11">PublishOrderDelay · TTL 30min</text>
+  </g>
+
+  <!-- D2 order.delay.queue (TTL) -->
+  <g>
+    <rect x="960" y="156" width="200" height="74" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="976" y="180" fill="rgba(255,255,255,0.65)" font-size="11">[Queue] order.delay.queue</text>
+    <text x="976" y="200" fill="#fff" font-size="15" font-weight="700">延迟队列（TTL）</text>
+    <text x="976" y="218" fill="rgba(255,255,255,0.75)" font-size="11">x-dead-letter-exchange 转发</text>
+  </g>
+
+  <!-- D3 过期 → dead queue -->
+  <g>
+    <rect x="960" y="262" width="200" height="74" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="976" y="286" fill="rgba(255,255,255,0.65)" font-size="11">[DLX] order.dead.exchange</text>
+    <text x="976" y="306" fill="#fff" font-size="15" font-weight="700">到期 → 死信路由</text>
+    <text x="976" y="324" fill="rgba(255,255,255,0.75)" font-size="11">order.dead.queue 待消费</text>
+  </g>
+
+  <!-- D4 延迟消费者关单 -->
+  <g>
+    <rect x="740" y="262" width="200" height="74" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="756" y="286" fill="rgba(255,255,255,0.65)" font-size="11">[Consumer] 延迟关单</text>
+    <text x="756" y="306" fill="#fff" font-size="15" font-weight="700">超时未付 → 关单</text>
+    <text x="756" y="324" fill="rgba(255,255,255,0.75)" font-size="11">释放库存预占</text>
+  </g>
+
+  <!-- D5 DLX/DLQ 毒丸隔离 -->
+  <g>
+    <rect x="740" y="372" width="420" height="74" rx="8" fill="rgba(251,146,60,0.10)" stroke="rgba(251,146,60,0.4)" stroke-width="1.2"/>
+    <text x="756" y="396" fill="rgba(255,255,255,0.65)" font-size="11">[DLQ] 失败隔离策略</text>
+    <text x="756" y="416" fill="#fde68a" font-size="15" font-weight="700">按投递次数进 DLX/DLQ · 不无限 requeue</text>
+    <text x="756" y="434" fill="rgba(255,255,255,0.75)" font-size="11">首次失败 Nack 重投一次；Redelivered 再失败 → RouteToDLQ 隔离毒丸</text>
+  </g>
+
+  <!-- D6 Cron 兜底扫描 -->
+  <g>
+    <rect x="740" y="478" width="420" height="74" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="756" y="502" fill="rgba(255,255,255,0.65)" font-size="11">[Cron] 二次保险</text>
+    <text x="756" y="522" fill="#fff" font-size="15" font-weight="700">定时扫描 ZSet 超时订单 → 兜底关单</text>
+    <text x="756" y="540" fill="rgba(255,255,255,0.75)" font-size="11">MQ 丢消息 / 消费失败时的最终一致兜底</text>
+  </g>
+
+  <!-- D7 关单终态 -->
+  <g>
+    <rect x="740" y="584" width="420" height="60" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <text x="756" y="608" fill="rgba(255,255,255,0.65)" font-size="11">[State] OrderClosed</text>
+    <text x="756" y="629" fill="#fff" font-size="16" font-weight="700">已关闭（终态 · 库存已释放）</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 连线：下单内部链路（实线，C1→C2→C3→C4） -->
+  <!-- ====================================================== -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <line x1="177" y1="212" x2="177" y2="240" marker-end="url(#arrow)"/>
+    <line x1="177" y1="304" x2="177" y2="332" marker-end="url(#arrow)"/>
+    <line x1="177" y1="388" x2="177" y2="416" marker-end="url(#arrow)"/>
+  </g>
+  <!-- C4 落库完成 → 进入主状态机「待支付」 -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <path d="M302,451 L351,451 L351,186 L400,186" marker-end="url(#arrow)"/>
+  </g>
+  <!-- C4 失败 → C5 补偿（虚线） -->
+  <g fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5">
+    <line x1="177" y1="486" x2="177" y2="514" marker-end="url(#arrowA)"/>
+  </g>
+
+  <!-- 主状态机纵向流转（实线） S1→S2→S3→S4→S5 -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <line x1="520" y1="216" x2="520" y2="262" marker-end="url(#arrow)"/>
+    <line x1="520" y1="326" x2="520" y2="372" marker-end="url(#arrow)"/>
+    <line x1="520" y1="432" x2="520" y2="478" marker-end="url(#arrow)"/>
+    <line x1="520" y1="538" x2="520" y2="584" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 连线：关单兜底旁路（虚线） -->
+  <!-- ====================================================== -->
+  <g fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5">
+    <!-- 待支付 → 下单即发延迟任务 -->
+    <line x1="640" y1="186" x2="740" y2="186" marker-end="url(#arrowA)"/>
+    <!-- D1 → D2 进入延迟队列 -->
+    <line x1="940" y1="193" x2="960" y2="193" marker-end="url(#arrowA)"/>
+    <!-- D2 → D3 TTL 到期转死信 -->
+    <line x1="1060" y1="230" x2="1060" y2="262" marker-end="url(#arrowA)"/>
+    <!-- D3 → D4 死信被消费者拉取 -->
+    <line x1="960" y1="299" x2="940" y2="299" marker-end="url(#arrowA)"/>
+    <!-- D4 → D5 失败隔离 -->
+    <line x1="840" y1="336" x2="840" y2="372" marker-end="url(#arrowA)"/>
+    <!-- D5 → D6 Cron 兜底 -->
+    <line x1="950" y1="446" x2="950" y2="478" marker-end="url(#arrowA)"/>
+    <!-- D6 → D7 关单终态 -->
+    <line x1="950" y1="552" x2="950" y2="584" marker-end="url(#arrowA)"/>
+  </g>
+  <!-- 关单回灌主状态机：D4 关单 → 待支付节点（释放库存、置为已关闭） -->
+  <g fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5">
+    <path d="M740,310 L690,310 L690,210 L640,210" marker-end="url(#arrowA)"/>
+  </g>
+
+  <!-- 线上标签 -->
+  <g font-size="11" fill="rgba(255,255,255,0.6)">
+    <text x="648" y="180" >async</text>
+    <text x="696" y="206" >关单回灌</text>
+    <text x="966" y="252" >TTL 到期</text>
+  </g>
+
+  <!-- 底部强调条 -->
+  <g>
+    <rect x="32" y="664" width="1144" height="40" rx="8" fill="rgba(251,191,36,0.10)" stroke="rgba(251,191,36,0.30)"/>
+    <text x="52" y="689" fill="#fde68a" font-size="13" font-weight="700">
+      双保险关单：RabbitMQ TTL 延迟队列负责实时关单（毒丸进 DLX/DLQ 不无限 requeue），Cron 定时扫描兜底丢消息 —— 超时订单一定被关、库存一定回收
+    </text>
+  </g>
+
+</svg>
