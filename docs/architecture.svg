@@ -379,43 +379,57 @@
     <text x="64" y="672" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">数据 / 基础设施 DATA &amp; INFRA</text>
     <!-- MySQL -->
     <g>
-      <rect x="70" y="684" width="190" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-mysql" x="86" y="702" width="26" height="26"/>
-      <text x="120" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[RDBMS]</text>
-      <text x="120" y="724" fill="#ffffff" font-size="15" font-weight="700">MySQL 主从</text>
-      <text x="120" y="739" fill="rgba(255,255,255,0.7)" font-size="10">read/write split</text>
+      <rect x="70" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-mysql" x="84" y="702" width="24" height="24"/>
+      <text x="116" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[RDBMS]</text>
+      <text x="116" y="724" fill="#ffffff" font-size="15" font-weight="700">MySQL 主从</text>
+      <text x="116" y="739" fill="rgba(255,255,255,0.7)" font-size="10">read/write split</text>
     </g>
     <!-- Redis -->
     <g>
-      <rect x="278" y="684" width="214" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-redis" x="294" y="702" width="26" height="26"/>
-      <text x="328" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Cache]</text>
-      <text x="328" y="724" fill="#ffffff" font-size="15" font-weight="700">Redis</text>
-      <text x="328" y="739" fill="rgba(255,255,255,0.7)" font-size="10">缓存 + Lua 原子扣库存</text>
+      <rect x="249" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-redis" x="263" y="702" width="24" height="24"/>
+      <text x="295" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Cache]</text>
+      <text x="295" y="724" fill="#ffffff" font-size="15" font-weight="700">Redis</text>
+      <text x="295" y="739" fill="rgba(255,255,255,0.7)" font-size="9.5">缓存 + Lua 扣库存</text>
     </g>
     <!-- ElasticSearch -->
     <g>
-      <rect x="510" y="684" width="190" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-es" x="526" y="702" width="26" height="26"/>
-      <text x="560" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Search]</text>
-      <text x="560" y="724" fill="#ffffff" font-size="15" font-weight="700">ElasticSearch</text>
-      <text x="560" y="739" fill="rgba(255,255,255,0.7)" font-size="10">全文检索倒排</text>
+      <rect x="428" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-es" x="442" y="702" width="24" height="24"/>
+      <text x="474" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Search]</text>
+      <text x="474" y="724" fill="#ffffff" font-size="14" font-weight="700">ElasticSearch</text>
+      <text x="474" y="739" fill="rgba(255,255,255,0.7)" font-size="10">全文检索倒排</text>
     </g>
     <!-- Milvus -->
     <g>
-      <rect x="718" y="684" width="190" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-milvus" x="734" y="702" width="26" height="26"/>
-      <text x="768" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Vector]</text>
-      <text x="768" y="724" fill="#ffffff" font-size="15" font-weight="700">Milvus</text>
-      <text x="768" y="739" fill="rgba(255,255,255,0.7)" font-size="10">向量库 · 语义召回</text>
+      <rect x="607" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-milvus" x="621" y="702" width="24" height="24"/>
+      <text x="653" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Vector]</text>
+      <text x="653" y="724" fill="#ffffff" font-size="15" font-weight="700">Milvus</text>
+      <text x="653" y="739" fill="rgba(255,255,255,0.7)" font-size="9.5">向量库 · 语义召回</text>
     </g>
     <!-- Web3 / EVM -->
     <g>
-      <rect x="926" y="684" width="210" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-web3" x="942" y="702" width="26" height="26"/>
-      <text x="976" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Chain]</text>
-      <text x="976" y="724" fill="#ffffff" font-size="15" font-weight="700">Web3 / EVM 链</text>
-      <text x="976" y="739" fill="rgba(255,255,255,0.7)" font-size="10">链上托管 / 对账</text>
+      <rect x="786" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-web3" x="800" y="702" width="24" height="24"/>
+      <text x="832" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Chain]</text>
+      <text x="832" y="724" fill="#ffffff" font-size="14" font-weight="700">Web3 / EVM</text>
+      <text x="832" y="739" fill="rgba(255,255,255,0.7)" font-size="10">链上托管 / 对账</text>
+    </g>
+    <!-- Stripe (third-party payment) -->
+    <g>
+      <rect x="965" y="684" width="169" height="62" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <!-- 银行卡 glyph (inline): 圆角卡 + 磁条色带 + 小方块 -->
+      <g transform="translate(979,701)">
+        <rect x="0" y="2" width="24" height="17" rx="2.4" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+        <rect x="0" y="5.6" width="24" height="3.4" fill="#ffffff"/>
+        <rect x="3" y="12.2" width="6" height="3.6" rx="0.8" fill="#ffffff"/>
+        <path d="M13 14 h7" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" stroke-opacity="0.8"/>
+      </g>
+      <text x="1011" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Payment]</text>
+      <text x="1011" y="724" fill="#ffffff" font-size="15" font-weight="700">Stripe</text>
+      <text x="1011" y="739" fill="rgba(255,255,255,0.7)" font-size="9.5">三方支付 · Checkout</text>
     </g>
   </g>
 
@@ -470,20 +484,20 @@
 
   <!-- · Service domains → Redis (Cache-Aside, solid) · -->
   <g>
-    <!-- Product(cx634 bottom y530) → Redis (cx385 top y684) -->
-    <path d="M555,530 L555,640 L385,640 L385,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <!-- Product(cx555 bottom y530) → Redis (cx333 top y684) -->
+    <path d="M555,530 L555,640 L333,640 L333,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
     <g>
-      <rect x="392" y="631" width="92" height="18" rx="4" fill="#0d1117"/>
-      <text x="438" y="644" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">Cache-Aside</text>
+      <rect x="340" y="631" width="92" height="18" rx="4" fill="#0d1117"/>
+      <text x="386" y="644" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">Cache-Aside</text>
     </g>
   </g>
 
   <!-- · search → ElasticSearch / Milvus (solid) · -->
   <g>
-    <!-- search box cx709 bottom y456 → ES (cx605 top y684) -->
-    <path d="M695,456 L695,520 L605,520 L605,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <!-- search → Milvus (cx813 top y684) -->
-    <path d="M725,456 L725,540 L813,540 L813,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <!-- search box cx709 bottom y456 → ES (cx512 top y684) -->
+    <path d="M695,456 L695,520 L512,520 L512,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <!-- search → Milvus (cx691 top y684) -->
+    <path d="M725,456 L725,540 L691,540 L691,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
     <g>
       <rect x="566" y="511" width="78" height="18" rx="4" fill="#0d1117"/>
       <text x="605" y="524" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">索引/检索</text>
@@ -514,11 +528,30 @@
 
   <!-- · payment → Web3/EVM (on-chain settle, dashed) · -->
   <g>
-    <!-- payment box (cx382 bottom y456) → Web3 (cx1031 top y684), routed along bottom right -->
-    <path d="M412,440 L412,460 L460,460 L460,556 L1031,556 L1031,684" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
+    <!-- payment box (cx382 bottom y456) → Web3 (cx870 top y684), routed along bottom right -->
+    <path d="M412,440 L412,460 L460,460 L460,556 L870,556 L870,684" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
     <g>
       <rect x="610" y="547" width="96" height="18" rx="4" fill="#0d1117"/>
       <text x="658" y="560" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">链上对账</text>
+    </g>
+  </g>
+
+  <!-- · payment ⇄ Stripe : 平行双线(请求/回调). 仅用三处空档穿越,不压任何框:
+         A) x≈458/466 = Trade(右452)↔Product(左470) 竖直空档
+         B) y≈536/544 = 服务域底(530)↔User/MQ 带顶(548) 横向空档
+         C) x≈803/811 = User域(右798)↔MQ框(左816) 竖直空档,下穿到数据行上方 y≈636/644 走廊 · -->
+  <g>
+    <!-- payment 右侧 → Stripe 顶部 (Checkout, 同步创建会话) -->
+    <path d="M440,428 L456,428 L456,536 L803,536 L803,636 L1041,636 L1041,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <g>
+      <rect x="585" y="527" width="68" height="18" rx="4" fill="#0d1117"/>
+      <text x="619" y="540" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">Checkout</text>
+    </g>
+    <!-- Stripe 顶部 → payment 右侧 (webhook 异步回调) -->
+    <path d="M1057,684 L1057,644 L811,644 L811,544 L466,544 L466,444 L440,444" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
+    <g>
+      <rect x="864" y="635" width="62" height="18" rx="4" fill="#0d1117"/>
+      <text x="895" y="648" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">webhook</text>
     </g>
   </g>
 
