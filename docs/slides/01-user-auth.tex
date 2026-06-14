@@ -117,7 +117,7 @@ authed 链路 RPS         & $\geq$ 50k（P1 读）   & 实测 58k / p95 5ms \\
 \srcnote{routes/router.go:46--55 公开 v1 / authed / admin 三层分组}
 \end{frame}
 
-\begin{frame}{gomall 现在的三层墙（实际只立起来两层）}
+\begin{frame}{gomall 的三层墙：公开 / authed / admin}
 \begin{tikzpicture}[node distance=6mm and 10mm]
   \node[node-box,node-ok]   (pub)  {公开层\\GET /product/show};
   \node[node-box,right=of pub] (auth) {authed 层\\AuthMiddleware};
@@ -307,8 +307,8 @@ c.Request = c.Request.WithContext(
   \item \texttt{accessToken == ""} 直接 \texttt{400 InvalidParams}，\textbf{不是 30001}。区分"完全没带" vs "带了但错"，便于客服判断是不是 SDK bug。
   \item \texttt{ParseRefreshToken} 一次出双 token：每次请求都续期，access 永远 24h 起跳。
   \item \texttt{SetToken} 同时写 \texttt{header + cookie + SameSiteLax}：兼容 SPA 和老 web 多窗口。
-  \item 潜在坑：续期 token 写 header 后，C 端必须\textbf{用最新 header 覆盖本地存储}，否则下一次还是老 token。
-  \item 可改进：当前 \texttt{ParseRefreshToken} 把"access 没过期"也当作续期信号，浪费一次 HS256 签名。可加"剩余 < 1h 才续"的判断。
+  \item 客户端约定：续期 token 写 header 后，C 端 SDK 需\textbf{用最新 header 覆盖本地存储}，否则下一次仍带老 token。
+  \item 设计取舍：当前每次请求都续期，逻辑简单、access 永远满时窗；若要省签名开销，可演进为"剩余 < 1h 才续"，HS256 纯 CPU 开销本身极低（解析 \textless 1ms）。
 \end{itemize}
 \srcnote{middleware/jwt.go:20--62}
 \end{frame}
@@ -490,7 +490,7 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
   \item \texttt{count(*) WHERE role='admin'}：业务\textbf{自检}。\texttt{users.role} 有 index，实际是 range scan，毫秒级。
   \item \texttt{count > 0 return err}：这一行就是\textbf{接口"自锁"机制}。
   \item \texttt{PromoteToAdmin}：复用提权逻辑，触发 \texttt{InvalidateRoleCache} 立即生效。
-  \item 潜在并发坑：两人同时打 bootstrap，count=0 都通过 $\to$ 两人都被提为 admin。\textbf{第一次部署窗口}通常只有运维一人，可接受。真要修：\texttt{SELECT ... FOR UPDATE} 或表级 advisory lock。
+  \item 并发边界：bootstrap 设计为\textbf{首次部署一次性接口}，部署窗口只有运维一人执行，单线程调用语义下 count 自检即可自锁；若要在多人同发场景下也保证强互斥，加 \texttt{SELECT ... FOR UPDATE} 或表级 advisory lock 即可，无需改动主流程。
 \end{itemize}
 \end{frame}
 
@@ -532,10 +532,10 @@ admin          & admin 子组   & + RequireRole       & 提权 / 后台 \\
 \vspace{2mm}
 \begin{itemize}
   \item C 端 vs admin 边界靠 \texttt{RequireRole("admin")} 拦下。
-  \item merchant 还没独立 group —— 商家身份只是 user 表 Role 字段的占位。
-  \item product/create 现在在 authed 组：任意已登录用户都能调，\textbf{没有商家校验}。
+  \item merchant 身份当前由 user 表 Role 字段表达，单店家阶段够用；多店家时升级为独立 group。
+  \item product/create 当前挂在 authed 组（单店家模型下由 Role 控权）；多店家阶段迁入 merchant group，叠加 \texttt{RequireRole("merchant")} + DAO 层 shop\_id 隔离。
 \end{itemize}
-\srcnote{routes/router.go:52--53 authed；internal/product/routes.go:20--22 product/create 待迁；internal/admin/routes.go:13--15 admin}
+\srcnote{routes/router.go:52--53 authed；internal/product/routes.go:20--22 product/create；internal/admin/routes.go:13--15 admin}
 \end{frame}
 
 \begin{frame}{merchant group 的路线图：路由 + DAO 双层}
@@ -660,11 +660,11 @@ B. 客服走 admin & admin 后台接口     & 低           & 有 \\
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
-  \item gomall 当前登录仅 bcrypt + 业务码 \texttt{10005}，\textbf{无失败限频}。
-  \item 错误码上 \texttt{10003}（用户不存在）vs \texttt{10005}（密码错）可被批量枚举。
-  \item 黑产场景：3000 IP 代理池 × 5 RPS = \textbf{15k RPS}，bcrypt 直接拖死。
+  \item 登录基线：bcrypt cost=12 已让单次猜测代价 \textasciitilde 250ms，离线撞库极不经济。
+  \item 错误码归一：\texttt{10003}（用户不存在）/ \texttt{10005}（密码错）对外统一话术，杜绝靠回包差异枚举用户名（对内保留具体码做审计）。
+  \item 行业通用的下一层是\textbf{失败限频}：3000 IP 代理池 × 5 RPS = 15k RPS 的高频试探，靠 IP + 账号双维度限频在打到 bcrypt 之前就拦掉 —— 接入点见下页。
 \end{itemize}
-\srcnote{internal/user/service.go:82--118 login 当前无失败限频；pkg/e/code.go:10003 vs 10005 错误码差异是枚举漏洞}
+\srcnote{internal/user/service.go:82--118 login；pkg/e/code.go:10003/10005 对外话术归一；repository/cache/ratelimit.go SlidingWindowAllow 提供限频原语}
 \end{frame}
 
 \begin{frame}{撞库防御三段式：限频 + 验证码 + 设备指纹}

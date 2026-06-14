@@ -143,7 +143,7 @@ LIKE \texttt{'\%X\%'} 能走索引？ & 否（前缀通配） \\
   \item 对照：同库 \texttt{/product/show} 走主键命中 \textbf{62{,}226 RPS / p95 3ms} —— \textbf{2{,}500 倍差距}。
   \item 业务感知：列表页转圈 2.5s，用户直接退出，转化率掉 15--30\%。
 \end{itemize}
-\srcnote{stressTest/REPORT.md：product 956K 行 / 364MB；/product/list 24.5 RPS / 2.50s 反例；/product/show 62{,}226 RPS / 3ms 锚点}
+\srcnote{stressTest/REPORT.md：product 956K 行 / 364MB；/product/list 24.5 RPS / 2.50s（含全表 count）；/product/show 62{,}226 RPS / 3ms 锚点}
 \end{frame}
 
 \begin{frame}{LIKE 缺的三件事，全是业务能力}
@@ -407,7 +407,7 @@ func StartProductIndexer(ctx context.Context) error {
   \item \textbf{name/title/info 是 \texttt{text}}：参与分词 + 倒排 —— 商家上架\textbf{写的文案直接决定能不能被搜到}。
   \item \textbf{price 是 \texttt{keyword}}：不分词，整串做 filter / exact match。价格不会被"分词"成"99" + "元"。
   \item \textbf{category\_id / boss\_id 是 \texttt{long}}：按类目 / 按店铺筛，硬过滤。
-  \item \textbf{on\_sale 是 \texttt{boolean}}：\textbf{下架商品要从结果里隐藏} —— 客诉里"为什么搜到下架商品"基本都是这里没维护好。
+  \item \textbf{on\_sale 是 \texttt{boolean}}：\textbf{下架商品要从结果里隐藏} —— 这个字段的索引同步状态，决定了"搜到下架商品"这类客诉是否出现，是 indexer 维护的重点。
   \item \textbf{analyzer=standard}：未装 IK 分词器时的 fallback，保证集群裸装也能跑通。
 \end{itemize}
 \end{frame}
@@ -822,7 +822,7 @@ DB 兜底     & ES 客户端为 nil $\to$ LIKE        & service/search/product\_
   \item \textbf{运营}：\texttt{name\^{}3} 字段加权 / 融合权重 / function\_score 三档旋钮齐备。
   \item \textbf{客服 / SRE}：ES / Milvus / Embedding 三档降级，主流程永不 5xx。
   \item 同库 PK 查询能跑 \textbf{62{,}226 RPS / p95 3ms} (product/show)，证明慢的是\textbf{查询类型}（LIKE / count），不是数据库本身。
-  \item 反例 \texttt{/product/list} 全表 count 实测 \textbf{24.5 RPS / p95 2.50s}，验证"搬到 ES"是必选项。
+  \item 对照 \texttt{/product/list} 全表 count 实测 \textbf{24.5 RPS / p95 2.50s}，印证"搜索搬到 ES"是必选项。
 \end{itemize}
 \vspace{1mm}
 \keypoint{副本系统判据：\textbf{副本旧一点点不要命，副本错乱才要命}。outbox 把 "上架成功" 和 "可搜" 解耦，是 5min SLA 的工程根据。}

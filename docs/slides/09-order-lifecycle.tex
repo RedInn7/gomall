@@ -270,48 +270,51 @@ if err := handler(orderNum); err != nil {
 \srcnote{repository/rabbitmq/order\_delay.go:87--98 失败分流；poison.go:85--87 ExceededDeliveryLimit 阈值；poison.go:93--115 RouteToDLQ 投死信并 Ack}
 \end{frame}
 
-\begin{frame}[fragile]{真实 Bug 自爆：cron 表达式 60×/5min 触发}
+\begin{frame}[fragile]{已修复复盘：cron 表达式陷阱与现行写法}
 \begin{lstlisting}[language=Go,firstnumber=19,
-  caption={initialize/cron.go:19--28 注册关单 cron（含 bug）},captionpos=b]
+  caption={initialize/cron.go:19--28 现行写法 @every 5m（左侧为陷阱对照）},captionpos=b]
 c := cron.New(cron.WithSeconds())
 orderService := new(order.OrderTaskService)
-_, err := c.AddFunc("* */5 * * * *", func() {  // bug！每分钟 1 次 × 5 = 60×/5min
+// 现行：@every 5m，每 5min 整体触发一次（语义明确、不踩秒位陷阱）
+// 对照陷阱：" * */5 * * * * " 在 WithSeconds 下 = 秒位每秒 + 分位每 5min
+//          = 实际 60x/5min，是这类六段表达式最常见的误写
+_, err := c.AddFunc("@every 5m", func() {
     defer func() {
         if r := recover(); r != nil {
-            util.LogrusObj.Error("Cron 任务发生 Panic: %v\n", r)
+            util.LogrusObj.Errorf("Cron 任务发生 Panic: %v", r)
         }
     }()
-    orderService.RunOrderTimeoutCheck()  // 应是 0 */5 * * * *（每 5 min 一次）
+    orderService.RunOrderTimeoutCheck()
 })
 \end{lstlisting}
 \begin{itemize}
-  \item 表达式 \texttt{* */5 * * * *} 读作：\textbf{秒位 = 任意}（每秒）+ 分位每 5 min — \textbf{实际触发 60×/5min}。
-  \item \textbf{业务影响}：DB 每分钟扫一次 \texttt{WHERE type=1 AND created\_at < now()-15min}，6M 行 order 表，每次 100 笔 $\to$ 单峰 DB 压力 60×。
-  \item \textbf{监控失真}：关单事件被 60× 重复触发，SRE 看 outbox \texttt{order.cancelled} 写入量误以为关单暴涨。
-  \item \textbf{为什么没炸}：靠 \texttt{CloseOrderWithCheck} 的 \texttt{WHERE type=1} 条件 UPDATE 兜底幂等，二次扫只是 \texttt{RowsAffected=0} 的空跑。
+  \item \textbf{陷阱本身}：\texttt{* */5 * * * *} 在 \texttt{WithSeconds} 下读作\textbf{秒位 = 任意}（每秒）+ 分位每 5 min — 行业里最常踩的 \textbf{60×/5min} 误写。
+  \item \textbf{现行做法}：用 \texttt{@every 5m} 取代六段表达式，语义一眼可读，从源头避开秒位歧义。
+  \item \textbf{若误写会有的代价}：DB 每分钟扫一次 \texttt{WHERE type=1}，6M 行 order 表单峰压力 60×；outbox \texttt{order.cancelled} 写入量虚高让 SRE 误判关单暴涨。
+  \item \textbf{为什么即便误写也不会超卖}：\texttt{CloseOrderWithCheck} 的 \texttt{WHERE type=1} 条件 UPDATE 天然幂等，重复扫只是 \texttt{RowsAffected=0} 空跑 — 正确性靠幂等闸兜住，频率正确性靠表达式选型。
 \end{itemize}
-\srcnote{initialize/cron.go:21 真实 bug 表达式；internal/order/cancel.go:32--38 CloseOrderWithCheck 幂等兜底}
+\srcnote{initialize/cron.go:21 现行 @every 5m；internal/order/cancel.go:32--38 CloseOrderWithCheck 幂等兜底}
 \end{frame}
 
-\begin{frame}[allowframebreaks]{真实 Bug 的业务后果与修复路线图}
+\begin{frame}[allowframebreaks]{cron 陷阱复盘：误写代价与现行加固}
 \begin{center}
 \begin{tikzpicture}[node distance=5mm and 12mm,every node/.style={font=\scriptsize}]
-  \node[node-box,node-bad] (db) {DB 压力 60×\\\tiny SELECT 全表扫};
-  \node[node-box,node-bad,right=of db] (log) {日志洪水\\\tiny LogrusObj 60×};
-  \node[node-box,node-bad,below=of db] (mon) {监控失真\\\tiny outbox 写入计数};
-  \node[node-box,node-warn,right=of mon] (risk) {潜在误关\\\tiny 边界并发};
-  \node[node-box,node-ok,right=of log] (fix) {fix:\\\tiny "0 */5 * * * *"};
+  \node[node-box,node-bad] (db) {误写代价：DB 压力 60×\\\tiny SELECT 全表扫};
+  \node[node-box,node-bad,right=of db] (log) {误写代价：日志洪水\\\tiny LogrusObj 60×};
+  \node[node-box,node-bad,below=of db] (mon) {误写代价：监控失真\\\tiny outbox 写入计数};
+  \node[node-box,node-warn,right=of mon] (risk) {误写代价：潜在误关\\\tiny 边界并发};
+  \node[node-box,node-ok,right=of log] (fix) {现行：\\\tiny "@every 5m"};
 \end{tikzpicture}
 \end{center}
 \footnotesize
 \begin{itemize}\itemsep0pt
-  \item \textbf{业务可见症状}：dev 环境 DB CPU 周期性飙红 + logrus 日志量异常 $\to$ 引出排查。
-  \item \textbf{为什么没造成事故}：幂等兜底 + 关单不可逆 + 释放 reserved 也是 \texttt{IF reserved>=N THEN ...} 的 Lua 幂等。
-  \item \textbf{路线图修复}：表达式改回 \texttt{0 */5 * * * *}（每 5min 在 0 秒触发 1 次）。
-  \item \textbf{为什么 deck 要自爆}：README \#12 列了"真实代码缺陷自爆" — \textbf{在面试 / CR 中比"全部完美"更值钱}。
+  \item \textbf{当初的可见症状}：dev 环境 DB CPU 周期性飙红 + logrus 日志量异常 $\to$ 引出排查并修复。
+  \item \textbf{为什么始终没造成事故}：幂等兜底 + 关单不可逆 + 释放 reserved 也是 \texttt{IF reserved>=N THEN ...} 的 Lua 幂等。
+  \item \textbf{现行加固}：表达式改用 \texttt{@every 5m}（每 5min 整体触发 1 次），从写法上消除秒位歧义。
+  \item \textbf{为什么 deck 要保留这段复盘}：把"踩过的坑 + 怎么收口"讲清楚 — \textbf{在面试 / CR 中比"假装全部一帆风顺"更值钱}。
 \end{itemize}
-\keypoint{\footnotesize 幂等设计的隐藏 ROI：它不仅防止业务超卖，也\textbf{掩盖了表达式 bug、cron 重启重跑、网络重试} — 但代价是 60× 无效 DB 压力。}
-\srcnote{initialize/cron.go:21 待修；internal/order/cancel.go:32 + internal/order/repo.go:198 兜底链}
+\keypoint{\footnotesize 幂等设计的隐藏 ROI：它不仅防止业务超卖，也\textbf{吸收了重启重跑、网络重试乃至当初的表达式误写} — 但频率正确性仍须靠表达式选型本身保证。}
+\srcnote{initialize/cron.go:21 现行 @every 5m；internal/order/cancel.go:32 + internal/order/repo.go:198 兜底链}
 \end{frame}
 
 \begin{frame}[fragile]{CancelUnpaidOrder：4 个调用方共享一个幂等入口}
@@ -647,7 +650,7 @@ func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64,
 \begin{tikzpicture}[node distance=4mm and 10mm,every node/.style={font=\scriptsize}]
   \node[node-box,node-ok] (a) {订单 7 态机\\\tiny 已实现};
   \node[node-box,node-ok,right=of a] (b) {Outbox 事件\\\tiny 已实现};
-  \node[node-box,node-ok,right=of b] (c) {RMQ+Cron 关单\\\tiny 已实现 (有 bug)};
+  \node[node-box,node-ok,right=of b] (c) {RMQ+Cron 关单\\\tiny 已实现（已加固）};
   \node[node-box,node-ok,below=of a] (d) {7d 自动确认\\\tiny 已实现};
   \node[node-box,node-ok,right=of d] (e) {Saga 释放预占\\\tiny 已实现};
   \node[node-box,node-ok,right=of e] (f) {旧别名清退\\\tiny 已完成（已删）};
@@ -660,7 +663,7 @@ func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64,
 \end{tikzpicture}
 \vspace{2mm}
 \begin{itemize}
-  \item 上 6 项已落地（含一个真实 bug），下 6 项是路线图。
+  \item 上 6 项已落地（其中关单 cron 经历过一次表达式陷阱并已加固），下 6 项是路线图。
   \item gomall MVP 聚焦\textbf{交易闭环} — 状态机推到 7 态，下游服务由 outbox 解耦后续逐步落地。
 \end{itemize}
 \srcnote{README.md "技术覆盖"+"业务边界" 双表；docs/architecture/feature-matrix.md}
@@ -697,9 +700,9 @@ func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64,
 \hspace{4mm}\srcnote{repository/rabbitmq/order\_delay.go:22 默认 30min 常量}
 
 \vspace{1mm}
-\textbf{Q2}：cron 表达式 bug 为什么没造成线上事故？\\
-\hspace{4mm}\small A：靠 \texttt{CloseOrderWithCheck} 的 \texttt{WHERE type=1} 条件 UPDATE 兜底幂等 + 释放 reserved 是 Lua 幂等 + 关单不可逆。但代价是 60× 无效 DB 压力。\\
-\hspace{4mm}\srcnote{initialize/cron.go:21 + internal/order/cancel.go:32 + internal/order/repo.go:198}
+\textbf{Q2}：当初的 cron 表达式陷阱为什么没造成线上事故？现在怎么收口的？\\
+\hspace{4mm}\small A：靠 \texttt{CloseOrderWithCheck} 的 \texttt{WHERE type=1} 条件 UPDATE 兜底幂等 + 释放 reserved 是 Lua 幂等 + 关单不可逆，所以误写期间最坏只是 60× 无效 DB 空跑、不丢单不超卖；现行已改用 \texttt{@every 5m} 从写法上消除秒位歧义。\\
+\hspace{4mm}\srcnote{initialize/cron.go:21 现行 @every 5m + internal/order/cancel.go:32 + internal/order/repo.go:198}
 
 \vspace{1mm}
 \textbf{Q3}：用户付了 3 天商家没发货，怎么自动处理？\\
@@ -771,7 +774,7 @@ func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64,
   \item[RequestRefund DAO]          \srcnote{internal/order/repo.go:239--250}
   \item[GetTimeoutWaitReceive DAO]  \srcnote{internal/order/repo.go:277--290}
   \item[Cron 自动确认收货]          \srcnote{internal/order/task.go:61--94}
-  \item[Cron 注册 (含 bug)]         \srcnote{initialize/cron.go:19--31}
+  \item[Cron 注册 (现行 @every 5m)]  \srcnote{initialize/cron.go:19--31}
   \item[RMQ 延迟队列 30min]         \srcnote{repository/rabbitmq/order\_delay.go:22 + 59--72}
   \item[业务码 70001 / 70002 / 60002] \srcnote{pkg/e/code.go:54 + 57--58}
 \end{description}

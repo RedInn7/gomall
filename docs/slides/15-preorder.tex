@@ -667,7 +667,7 @@ SKU 维度预售 & 同款不同色 / 尺寸独立配置 & 预售配置加 sku\_i
 \srcnote{docs/architecture/feature-matrix.md 路线图分级表；deck 08 满减引擎}
 \end{frame}
 
-\begin{frame}{诚实自爆：当前实现的取舍点}
+\begin{frame}{当前实现的工程取舍点}
 \begin{itemize}\small
   \item \textbf{1 单 1 件硬约束}：当前 PayDeposit 强制 \texttt{Num=1}，多件下单需走普通链路。理由：预售场景下用户决策粒度天然是"单件商品"，多件并发付款会引入 SKU + 库存配对复杂度。多件预售留路线图。
   \item \textcolor{cOK}{\textbf{[已落地]}} \textbf{cron 没收兜底}：\texttt{initialize/cron.go} 加 \texttt{@every 1h} job 调 \texttt{ForfeitDepositsForUnpaidFinals}，service 内部已含"扫表 + 单笔事务 + 单条 ERROR log"。规避 6 段表达式 60×/min 陷阱（同 deck 14）。
