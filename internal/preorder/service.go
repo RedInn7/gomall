@@ -12,6 +12,7 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/address"
+	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -134,7 +135,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 			return e
 		}
 
-		if e := debitUser(tx, u.Id, bossID, req.Key, pp.DepositCents); e != nil {
+		if e := debitUser(tx, u.Id, bossID, req.Key, pp.DepositCents, ord.ID, money.BizTypePreorderDeposit); e != nil {
 			return e
 		}
 
@@ -215,7 +216,7 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*Pre
 
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		// 1) 扣尾款
-		if e := debitUser(tx, u.Id, ord.BossID, req.Key, pp.FinalCents); e != nil {
+		if e := debitUser(tx, u.Id, ord.BossID, req.Key, pp.FinalCents, ord.ID, money.BizTypePreorderFinal); e != nil {
 			return e
 		}
 
@@ -308,7 +309,7 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *Pr
 
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		// 1) 全额退还定金到用户
-		if e := refundUser(tx, u.Id, ord.BossID, req.Key, pp.DepositCents); e != nil {
+		if e := refundUser(tx, u.Id, ord.BossID, req.Key, pp.DepositCents, ord.ID, money.BizTypePreorderRefund); e != nil {
 			return e
 		}
 		// 2) 状态机重置：preorder_stage 1->0, type WaitPay->Closed
@@ -473,11 +474,16 @@ func (s *PreorderSrv) ShowPreorder(ctx context.Context, productID uint) (*Preord
 
 // debitUser 把 amountCents 从 user 划到 boss，保持与 payment.go::PayDown 口径一致。
 // 抽出来是为了在 PayDeposit / PayFinal 共用，避免两份 AES 重复代码。
-func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64) error {
+//
+// 余额密文落库不可对账，故在同一事务内为这笔买家→卖家的资金转移追加成对台账流水：
+// 买家 debit + 卖家 credit，bizType 区分定金 / 尾款两阶段。balance_after 记各方变更后余额，
+// (ref_order_id, direction, biz_type) 唯一索引兜底，事务失败一起回滚。
+func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, refOrderID uint, bizType string) error {
 	if amountCents <= 0 {
 		return nil
 	}
 	userDao := user.NewUserDaoByDB(tx)
+	ledgerDao := money.NewLedgerDaoByDB(tx)
 	// 加行锁读买家行，先校验支付密码，再做服务端密钥的余额读改写
 	u, err := userDao.GetUserByIdForUpdate(userID)
 	if err != nil {
@@ -493,12 +499,17 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64) 
 	if userMoney-amountCents < 0 {
 		return errors.New("金额不足")
 	}
-	u.Money = strconv.FormatInt(userMoney-amountCents, 10)
+	buyerBalanceAfter := userMoney - amountCents
+	u.Money = strconv.FormatInt(buyerBalanceAfter, 10)
 	u.Money, err = u.EncryptMoney()
 	if err != nil {
 		return err
 	}
 	if err := userDao.UpdateUserById(userID, u); err != nil {
+		return err
+	}
+	// 买家扣款流水：与余额变动同事务追加
+	if err := ledgerDao.AppendTransaction(userID, refOrderID, money.DirectionDebit, amountCents, buyerBalanceAfter, bizType); err != nil {
 		return err
 	}
 
@@ -511,20 +522,30 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64) 
 	if err != nil {
 		return err
 	}
-	boss.Money = strconv.FormatInt(bossMoney+amountCents, 10)
+	bossBalanceAfter := bossMoney + amountCents
+	boss.Money = strconv.FormatInt(bossBalanceAfter, 10)
 	boss.Money, err = boss.EncryptMoney()
 	if err != nil {
 		return err
 	}
-	return userDao.UpdateUserById(bossID, boss)
+	if err := userDao.UpdateUserById(bossID, boss); err != nil {
+		return err
+	}
+	// 卖家入账流水：方向与买家相反，与买家流水配对保持 SUM(debit)=SUM(credit)
+	return ledgerDao.AppendTransaction(bossID, refOrderID, money.DirectionCredit, amountCents, bossBalanceAfter, bizType)
 }
 
 // refundUser 反向：boss 划回 user。仅供"定金期内取消"使用。
-func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64) error {
+//
+// 退款是定金的反向转移（卖家→买家），同一事务内追加成对台账流水：卖家 debit + 买家 credit，
+// bizType=preorder_refund。该 biz_type 与定金 / 尾款不同，故同一订单上退款流水与定金 debit
+// 不冲突；(ref_order_id, direction, biz_type) 唯一索引兜底，事务失败一起回滚。
+func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, refOrderID uint, bizType string) error {
 	if amountCents <= 0 {
 		return nil
 	}
 	userDao := user.NewUserDaoByDB(tx)
+	ledgerDao := money.NewLedgerDaoByDB(tx)
 	// 退款由买家发起，先校验买家支付密码
 	u, err := userDao.GetUserByIdForUpdate(userID)
 	if err != nil {
@@ -546,7 +567,8 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64)
 		// 商家钱不够退：业务上不可能（商家入账即冻结），出现说明账本异常
 		return errors.New("商家余额异常，退款失败")
 	}
-	boss.Money = strconv.FormatInt(bossMoney-amountCents, 10)
+	bossBalanceAfter := bossMoney - amountCents
+	boss.Money = strconv.FormatInt(bossBalanceAfter, 10)
 	boss.Money, err = boss.EncryptMoney()
 	if err != nil {
 		return err
@@ -554,15 +576,24 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64)
 	if err := userDao.UpdateUserById(bossID, boss); err != nil {
 		return err
 	}
+	// 卖家退款出账流水
+	if err := ledgerDao.AppendTransaction(bossID, refOrderID, money.DirectionDebit, amountCents, bossBalanceAfter, bizType); err != nil {
+		return err
+	}
 
 	userMoney, err := u.DecryptMoney()
 	if err != nil {
 		return err
 	}
-	u.Money = strconv.FormatInt(userMoney+amountCents, 10)
+	buyerBalanceAfter := userMoney + amountCents
+	u.Money = strconv.FormatInt(buyerBalanceAfter, 10)
 	u.Money, err = u.EncryptMoney()
 	if err != nil {
 		return err
 	}
-	return userDao.UpdateUserById(userID, u)
+	if err := userDao.UpdateUserById(userID, u); err != nil {
+		return err
+	}
+	// 买家退款入账流水：与卖家出账配对保持 SUM(debit)=SUM(credit)
+	return ledgerDao.AppendTransaction(userID, refOrderID, money.DirectionCredit, amountCents, buyerBalanceAfter, bizType)
 }

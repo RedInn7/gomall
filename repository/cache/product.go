@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 const (
@@ -80,8 +83,11 @@ func SetProductDetail(ctx context.Context, id uint, val interface{}) error {
 }
 
 // SetProductNotFound 为不存在的商品写一个短 TTL 的空值标记，挡住缓存穿透。
+// 用 SET NX：仅当 key 不存在时才写空值标记。否则在"回源发现不存在"与
+// "另一并发请求刚把真实详情写入缓存"竞争时，无条件 SET 会把真实值覆盖成空值，
+// 最长 ProductNullTTL 内读到错误的 not found。
 func SetProductNotFound(ctx context.Context, id uint) error {
-	return RedisClient.Set(ctx, ProductDetailKey(id), productNullValue, ProductNullTTL).Err()
+	return RedisClient.SetNX(ctx, ProductDetailKey(id), productNullValue, ProductNullTTL).Err()
 }
 
 // DelProductDetail 删缓存
@@ -107,14 +113,41 @@ func UnlockProduct(ctx context.Context, id uint) {
 	RedisClient.Del(ctx, ProductLockKey(id))
 }
 
+const (
+	// doubleDeleteTimeout 第二次删除的独立超时，避免 Redis 故障时 goroutine 长期阻塞。
+	doubleDeleteTimeout = 2 * time.Second
+	// doubleDeleteMaxInflight 延迟删除在飞 goroutine 上限。Redis 慢/不可达时 goroutine
+	// 会随 sleep 堆积，超过上限直接放弃本次延迟删，防止无界堆积拖垮进程。
+	doubleDeleteMaxInflight = 1024
+)
+
+// doubleDeleteInflight 当前在飞的延迟删除数量。
+var doubleDeleteInflight atomic.Int64
+
 // DoubleDeleteAsync 延迟双删：写库后已经做了第一次删除，这里在 interval 后再删一次，
 // 用于覆盖"读旧值的并发请求把旧值塞回缓存"的窗口。
+// 第二次删除带独立超时 context 并记录错误；在飞数量超过上限时放弃本次延迟删，
+// 避免 Redis 故障下裸 goroutine 无界堆积。
 func DoubleDeleteAsync(id uint, interval time.Duration) {
 	if interval <= 0 {
 		interval = ProductDelayInterval
 	}
+	if doubleDeleteInflight.Add(1) > doubleDeleteMaxInflight {
+		doubleDeleteInflight.Add(-1)
+		if log.LogrusObj != nil {
+			log.LogrusObj.Warnf("double delete dropped, inflight over limit: product=%d", id)
+		}
+		return
+	}
 	go func() {
+		defer doubleDeleteInflight.Add(-1)
 		time.Sleep(interval)
-		_ = RedisClient.Del(context.Background(), ProductDetailKey(id)).Err()
+		ctx, cancel := context.WithTimeout(context.Background(), doubleDeleteTimeout)
+		defer cancel()
+		if err := RedisClient.Del(ctx, ProductDetailKey(id)).Err(); err != nil {
+			if log.LogrusObj != nil {
+				log.LogrusObj.Errorf("double delete failed: product=%d err=%v", id, err)
+			}
+		}
 	}()
 }
