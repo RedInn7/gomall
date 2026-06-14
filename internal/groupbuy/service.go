@@ -11,6 +11,7 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -21,6 +22,12 @@ import (
 
 // 拼团默认时效。业务承诺：截单线 24h，运营可在 routes 入口覆盖。
 const DefaultGroupbuyTTL = 24 * time.Hour
+
+// GroupbuyMinPriceBps 拼团价相对商品原价的最低占比（基点，10000=100%）。
+// 拼团价由团长在客户端传入，必须服务端封顶 + 兜底：上界=商品原价（不得高于零售价），
+// 下界=原价 * 该比例（默认 50%，挡住 price_cents=1 的薅羊毛）。运营要更低折扣调此常量，
+// 真正的活动折扣应落到服务端拼团活动配置表，而非信客户端。
+const GroupbuyMinPriceBps = 5000
 
 // 业务错误：service 层向 handler / cron 返回，由 handler 翻成 81001-81004
 // 业务码与客服话术（pkg/e/msg.go）。
@@ -85,6 +92,19 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 		ttl = DefaultGroupbuyTTL
 	}
 
+	// 卖家与价格上下界都以商品表为准：boss_id 决定货款打给谁，绝不能信客户端；拼团价是团长
+	// 在客户端传的，必须服务端封顶（不得高于零售价）+ 兜底（不得低于零售价 * MinPriceBps），
+	// 否则团长传 price_cents=1 即可让全团 1 分钱成交。
+	retailCents, bossID, err := product.NewProductDao(ctx).ResolvePricing(productID)
+	if err != nil {
+		util.LogrusObj.Errorf("groupbuy resolve product failed leader=%d product=%d err=%v", leaderID, productID, err)
+		return nil, err
+	}
+	floorCents := retailCents * GroupbuyMinPriceBps / 10000
+	if priceCents > retailCents || priceCents < floorCents {
+		return nil, fmt.Errorf("拼团价 %d 分越界，须落在 [%d, %d] 分（商品原价 %d 分）", priceCents, floorCents, retailCents, retailCents)
+	}
+
 	// 1. 预扣 1 份库存
 	if err := cache.ReserveStock(ctx, productID, 1); err != nil {
 		util.LogrusObj.Errorf("groupbuy reserve stock leader=%d product=%d err=%v", leaderID, productID, err)
@@ -105,7 +125,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 	leaderOrder := &orderpkg.Order{
 		UserID:    leaderID,
 		ProductID: productID,
-		BossID:    bossID,
+		BossID:    bossID, // 卖家以商品表为准，忽略客户端传入的 bossID 参数
 		AddressID: addressID,
 		Num:       1,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
@@ -113,7 +133,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 		Money:     priceCents,
 	}
 
-	err := dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := NewGroupbuyDaoByDB(tx).CreateGroup(g); e != nil {
 			return e
 		}
@@ -189,6 +209,14 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		return nil, ErrGroupbuyDuplicateJoin
 	}
 
+	// 卖家以团绑定的商品为准，忽略客户端传入的 bossID：参团下单同样不能让买家指定收款方。
+	// 价格则直接用 g.PriceCents（建团时已服务端校验落库），不经客户端。
+	bossID, err = product.NewProductDao(ctx).ResolveBossID(g.ProductID)
+	if err != nil {
+		util.LogrusObj.Errorf("groupbuy join resolve boss failed user=%d product=%d err=%v", userID, g.ProductID, err)
+		return nil, err
+	}
+
 	// 1. 预扣 1 份库存
 	if err = cache.ReserveStock(ctx, g.ProductID, 1); err != nil {
 		util.LogrusObj.Errorf("groupbuy join reserve stock user=%d product=%d err=%v", userID, g.ProductID, err)
@@ -198,7 +226,7 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 	order := &orderpkg.Order{
 		UserID:    userID,
 		ProductID: g.ProductID,
-		BossID:    bossID,
+		BossID:    bossID, // 已由商品表反查覆盖
 		AddressID: addressID,
 		Num:       1,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),

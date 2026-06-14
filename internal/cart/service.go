@@ -32,8 +32,9 @@ func (s *CartSrv) CartCreate(ctx context.Context, req *CartCreateReq) (*types.Da
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	// 判断有无这个商品
-	_, err = product.NewProductDao(ctx).GetProductById(req.ProductId)
+	// 判断有无这个商品，并以商品表的卖家为准：购物车里的 boss_id 不能信客户端，
+	// 否则脏数据会顺着结算链路把货款引到错误的卖家。
+	p, err := product.NewProductDao(ctx).GetProductById(req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
@@ -41,7 +42,7 @@ func (s *CartSrv) CartCreate(ctx context.Context, req *CartCreateReq) (*types.Da
 
 	// 创建购物车
 	cartDao := NewCartDao(ctx)
-	_, status, _ := cartDao.CreateCart(req.ProductId, u.Id, req.BossID)
+	_, status, _ := cartDao.CreateCart(req.ProductId, u.Id, p.BossID)
 	if status == e.ErrorProductMoreCart {
 		return nil, errors.New(e.GetMsg(status))
 	}
