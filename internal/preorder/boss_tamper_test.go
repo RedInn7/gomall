@@ -46,7 +46,7 @@ func TestPreorder_PayDepositIgnoresTamperedBoss(t *testing.T) {
 	if e := db.First(&boss, fx.BossID).Error; e != nil {
 		t.Fatalf("load boss: %v", e)
 	}
-	bossMoney, e := boss.DecryptMoney(fx.Key)
+	bossMoney, e := boss.DecryptMoney()
 	if e != nil {
 		t.Fatalf("decrypt boss money: %v", e)
 	}
