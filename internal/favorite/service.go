@@ -74,14 +74,16 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 		return nil, err
 	}
 
-	bossDao := user.NewUserDaoByDB(userDao.DB)
-	boss, err := bossDao.GetUserById(req.BossId)
+	// 先查商品：收藏夹里的卖家以商品表为准，忽略 req.BossId。虽然收藏当前不参与计费，
+	// 但存错的 boss 会污染下游（卖家维度统计 / 后续加购下单），按同一信任边界规则收口。
+	prod, err := product.NewProductDao(ctx).GetProductById(req.ProductId)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
 
-	product, err := product.NewProductDao(ctx).GetProductById(req.ProductId)
+	bossDao := user.NewUserDaoByDB(userDao.DB)
+	boss, err := bossDao.GetUserById(prod.BossID)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
@@ -91,8 +93,8 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 		UserID:    u.Id,
 		User:      *curUser,
 		ProductID: req.ProductId,
-		Product:   *product,
-		BossID:    req.BossId,
+		Product:   *prod,
+		BossID:    prod.BossID,
 		Boss:      *boss,
 	}
 	err = fDao.CreateFavorite(favorite)
