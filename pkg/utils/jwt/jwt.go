@@ -64,31 +64,56 @@ func ParseToken(token string) (*Claims, error) {
 	return nil, err
 }
 
+// parseTokenAllowExpired 解析 token，仅容忍过期错误（ValidationErrorExpired）。
+// 签名错误、格式错误等非过期校验失败仍作为错误返回。
+func parseTokenAllowExpired(token string) (*Claims, error) {
+	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		return secret(), nil
+	})
+	if tokenClaims != nil {
+		if claims, ok := tokenClaims.Claims.(*Claims); ok {
+			if tokenClaims.Valid {
+				return claims, nil
+			}
+			// token 无效，判断是否仅为过期
+			var ve *jwt.ValidationError
+			if errors.As(err, &ve) && ve.Errors == jwt.ValidationErrorExpired {
+				// 仅过期，claims 仍然可信（签名已通过），允许返回
+				return claims, nil
+			}
+		}
+	}
+	return nil, err
+}
+
 // ParseRefreshToken 验证用户token
 func ParseRefreshToken(accessToken, rToken string) (newAToken, newRToken string, err error) {
-	accessClaim, err := ParseToken(accessToken)
+	// 解析 access token，允许仅过期错误（取出 claims 用于续签）
+	// 非过期的验证失败（如签名错误）仍视为致命错误
+	accessClaim, err := parseTokenAllowExpired(accessToken)
 	if err != nil {
 		log.LogrusObj.Infoln("[debug1]err==", err)
 		return
 	}
 
+	if accessClaim.ExpiresAt != nil && time.Now().Before(accessClaim.ExpiresAt.Time) {
+		// access_token 未过期，直接续签两个 token
+		return GenerateToken(accessClaim.ID, accessClaim.Username)
+	}
+
+	// access_token 已过期，必须校验 refresh_token（严格校验，包含过期检查）
 	refreshClaim, err := ParseToken(rToken)
 	if err != nil {
 		log.LogrusObj.Infoln("[debug2]err==", err)
 		return
 	}
 
-	if accessClaim.ExpiresAt != nil && time.Now().Before(accessClaim.ExpiresAt.Time) {
-		// 如果 access_token 没过期,每一次请求都刷新 refresh_token 和 access_token
-		return GenerateToken(accessClaim.ID, accessClaim.Username)
-	}
-
 	if refreshClaim.ExpiresAt != nil && time.Now().Before(refreshClaim.ExpiresAt.Time) {
-		// 如果 access_token 过期了,但是 refresh_token 没过期, 刷新 refresh_token 和 access_token
+		// access_token 过期但 refresh_token 有效，续签
 		return GenerateToken(accessClaim.ID, accessClaim.Username)
 	}
 
-	// 如果两者都过期了,重新登陆
+	// 两者都过期，需要重新登陆
 	return "", "", errors.New("身份过期，重新登陆")
 }
 
