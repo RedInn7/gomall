@@ -71,27 +71,37 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 		num := order.Num
 		paidProductID = productID
 		paidNum = num
-		totalMoney := order.Money * int64(num)
+		// 实付口径：命中满减时以折后实付 FinalCents 为准，否则单价 * 件数。
+		// 之前一律用 order.Money*num（折前价）会把满减优惠吞掉，买家被多扣。
+		payable := order.Money * int64(num)
+		if order.FinalCents > 0 {
+			payable = order.FinalCents
+		}
 
 		userDao := user.NewUserDaoByDB(tx)
-		buyer, err := userDao.GetUserById(uId)
+		// 先校验支付密码（与余额加密分离），再做加行锁的余额读改写
+		buyer, err := userDao.GetUserByIdForUpdate(uId)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
+		}
+		if !buyer.CheckMoneyPassword(req.Key) {
+			log.LogrusObj.Error(user.ErrMoneyKeyIncorrect)
+			return user.ErrMoneyKeyIncorrect
 		}
 
-		userMoney, err := buyer.DecryptMoney(req.Key)
+		userMoney, err := buyer.DecryptMoney()
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
-		if userMoney-totalMoney < 0 {
+		if userMoney-payable < 0 {
 			log.LogrusObj.Error("金额不足")
 			return errors.New("金额不足")
 		}
 
-		buyer.Money = strconv.FormatInt(userMoney-totalMoney, 10)
-		buyer.Money, err = buyer.EncryptMoney(req.Key)
+		buyer.Money = strconv.FormatInt(userMoney-payable, 10)
+		buyer.Money, err = buyer.EncryptMoney()
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
@@ -103,19 +113,20 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 
-		boss, err := userDao.GetUserById(bossID)
+		boss, err := userDao.GetUserByIdForUpdate(bossID)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 
-		bossMoney, err := boss.DecryptMoney(req.Key)
+		// 商家余额同样用服务端密钥解密——绝不能用买家支付密码，否则跨账户串密钥
+		bossMoney, err := boss.DecryptMoney()
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
-		boss.Money = strconv.FormatInt(bossMoney+totalMoney, 10)
-		boss.Money, err = boss.EncryptMoney(req.Key)
+		boss.Money = strconv.FormatInt(bossMoney+payable, 10)
+		boss.Money, err = boss.EncryptMoney()
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
@@ -133,23 +144,26 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			log.LogrusObj.Error(err)
 			return err
 		}
-		if prod.Num-num < 0 {
+		// 原子扣减库存：条件 UPDATE 一步到位，消除"读-判断-写"并发超卖
+		ok, err := product.NewProductDaoWithDB(tx).DeductStock(productID, num)
+		if err != nil {
+			log.LogrusObj.Error(err)
+			return err
+		}
+		if !ok {
 			log.LogrusObj.Error("存在超卖问题")
 			return errors.New("存在超卖问题")
 		}
-		prod.Num -= num
-		err = productDao.UpdateProduct(productID, prod)
-		if err != nil { // 更新商品数量减少失败，回滚
-			log.LogrusObj.Error(err)
-			return err
-		}
 
-		// 更新订单状态
-		order.Type = consts.OrderWaitShip
-		err = orderpkg.NewOrderDaoByDB(tx).UpdateOrderById(req.OrderId, uId, order)
+		// 更新订单状态：条件 UPDATE 把 WaitPay 守卫塞进 WHERE，杜绝重复支付
+		paidOK, err := orderpkg.NewOrderDaoByDB(tx).MarkOrderPaidWithCheck(req.OrderId, uId)
 		if err != nil { // 更新订单失败，回滚
 			log.LogrusObj.Error(err)
 			return err
+		}
+		if !paidOK {
+			log.LogrusObj.Error("订单状态已变更，无法重复支付")
+			return errors.New("订单状态已变更，无法重复支付")
 		}
 
 		productUser := product.Product{

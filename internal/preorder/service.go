@@ -204,23 +204,17 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*Pre
 			return e
 		}
 
-		// 2) 真扣商品库存（DB 层面）。沿用 payment.go 的"读 -> 减 -> 更新"路径；
-		//    高并发由更上层 Redis reserved 桶兜底，这里 product.Num 是历史水位。
-		productDao := product.NewProductDaoByDB(tx)
-		prod, e := productDao.GetProductById(ord.ProductID)
+		// 2) 真扣商品库存（DB 层面），原子条件 UPDATE 消除并发超卖。
+		ok, e := product.NewProductDaoWithDB(tx).DeductStock(ord.ProductID, ord.Num)
 		if e != nil {
 			return e
 		}
-		if prod.Num-ord.Num < 0 {
+		if !ok {
 			return errors.New("存在超卖问题")
-		}
-		prod.Num -= ord.Num
-		if e := productDao.UpdateProduct(ord.ProductID, prod); e != nil {
-			return e
 		}
 
 		// 3) 状态机推进：preorder_stage 1->2, type WaitPay->WaitShip
-		ok, e := NewPreorderDaoByDB(tx).MarkFinalPaid(tx, ord.ID, now)
+		ok, e = NewPreorderDaoByDB(tx).MarkFinalPaid(tx, ord.ID, now)
 		if e != nil {
 			return e
 		}
@@ -469,11 +463,15 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64) 
 		return nil
 	}
 	userDao := user.NewUserDaoByDB(tx)
-	u, err := userDao.GetUserById(userID)
+	// 加行锁读买家行，先校验支付密码，再做服务端密钥的余额读改写
+	u, err := userDao.GetUserByIdForUpdate(userID)
 	if err != nil {
 		return err
 	}
-	userMoney, err := u.DecryptMoney(key)
+	if !u.CheckMoneyPassword(key) {
+		return user.ErrMoneyKeyIncorrect
+	}
+	userMoney, err := u.DecryptMoney()
 	if err != nil {
 		return err
 	}
@@ -481,7 +479,7 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64) 
 		return errors.New("金额不足")
 	}
 	u.Money = strconv.FormatInt(userMoney-amountCents, 10)
-	u.Money, err = u.EncryptMoney(key)
+	u.Money, err = u.EncryptMoney()
 	if err != nil {
 		return err
 	}
@@ -489,16 +487,17 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64) 
 		return err
 	}
 
-	boss, err := userDao.GetUserById(bossID)
+	boss, err := userDao.GetUserByIdForUpdate(bossID)
 	if err != nil {
 		return err
 	}
-	bossMoney, err := boss.DecryptMoney(key)
+	// 商家余额同样用服务端密钥解密，绝不能用买家支付密码
+	bossMoney, err := boss.DecryptMoney()
 	if err != nil {
 		return err
 	}
 	boss.Money = strconv.FormatInt(bossMoney+amountCents, 10)
-	boss.Money, err = boss.EncryptMoney(key)
+	boss.Money, err = boss.EncryptMoney()
 	if err != nil {
 		return err
 	}
@@ -511,11 +510,20 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64)
 		return nil
 	}
 	userDao := user.NewUserDaoByDB(tx)
-	boss, err := userDao.GetUserById(bossID)
+	// 退款由买家发起，先校验买家支付密码
+	u, err := userDao.GetUserByIdForUpdate(userID)
 	if err != nil {
 		return err
 	}
-	bossMoney, err := boss.DecryptMoney(key)
+	if !u.CheckMoneyPassword(key) {
+		return user.ErrMoneyKeyIncorrect
+	}
+
+	boss, err := userDao.GetUserByIdForUpdate(bossID)
+	if err != nil {
+		return err
+	}
+	bossMoney, err := boss.DecryptMoney()
 	if err != nil {
 		return err
 	}
@@ -524,7 +532,7 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64)
 		return errors.New("商家余额异常，退款失败")
 	}
 	boss.Money = strconv.FormatInt(bossMoney-amountCents, 10)
-	boss.Money, err = boss.EncryptMoney(key)
+	boss.Money, err = boss.EncryptMoney()
 	if err != nil {
 		return err
 	}
@@ -532,16 +540,12 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64)
 		return err
 	}
 
-	u, err := userDao.GetUserById(userID)
-	if err != nil {
-		return err
-	}
-	userMoney, err := u.DecryptMoney(key)
+	userMoney, err := u.DecryptMoney()
 	if err != nil {
 		return err
 	}
 	u.Money = strconv.FormatInt(userMoney+amountCents, 10)
-	u.Money, err = u.EncryptMoney(key)
+	u.Money, err = u.EncryptMoney()
 	if err != nil {
 		return err
 	}
