@@ -345,6 +345,104 @@ func TestCartDelete_RemovesOwnRowOnly(t *testing.T) {
 	}
 }
 
+func TestCartUpdate_RejectsZeroAndNegativeNum(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForCart(t)
+	defer cleanup()
+
+	const ownerID, bossID = uint(110), uint(210)
+	p := seedCartProduct(t, db, bossID)
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: ownerID})
+	if _, err := GetCartSrv().CartCreate(ctx, &CartCreateReq{ProductId: p.ID, BossID: bossID}); err != nil {
+		t.Fatalf("CartCreate: %v", err)
+	}
+	var row Cart
+	if err := db.Where("user_id=?", ownerID).First(&row).Error; err != nil {
+		t.Fatalf("load cart: %v", err)
+	}
+
+	// num=0（uint 类型，传入 0）应被拒绝
+	_, err := GetCartSrv().CartUpdate(ctx, &UpdateCartServiceReq{Id: row.ID, Num: 0})
+	if err == nil {
+		t.Fatal("num=0 应报错")
+	}
+	// 数据不变
+	var after Cart
+	db.First(&after, row.ID)
+	if after.Num != 1 {
+		t.Fatalf("num 不应变更, got %d", after.Num)
+	}
+}
+
+func TestCartUpdate_RejectsExceedingMaxNum(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForCart(t)
+	defer cleanup()
+
+	const ownerID, bossID = uint(111), uint(211)
+	p := seedCartProduct(t, db, bossID)
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: ownerID})
+	if _, err := GetCartSrv().CartCreate(ctx, &CartCreateReq{ProductId: p.ID, BossID: bossID}); err != nil {
+		t.Fatalf("CartCreate: %v", err)
+	}
+	var row Cart
+	if err := db.Where("user_id=?", ownerID).First(&row).Error; err != nil {
+		t.Fatalf("load cart: %v", err)
+	}
+
+	// 超过 max_num（默认 10）应被拒绝
+	_, err := GetCartSrv().CartUpdate(ctx, &UpdateCartServiceReq{Id: row.ID, Num: row.MaxNum + 1})
+	if err == nil {
+		t.Fatalf("超过 max_num=%d 应报错", row.MaxNum)
+	}
+	if err.Error() != e.GetMsg(e.ErrorProductMoreCart) {
+		t.Fatalf("err = %q, want %q", err.Error(), e.GetMsg(e.ErrorProductMoreCart))
+	}
+
+	// 数量不应越过上限
+	var after Cart
+	db.First(&after, row.ID)
+	if after.Num != 1 {
+		t.Fatalf("越上限时数量不应变更, got %d", after.Num)
+	}
+}
+
+func TestCartUpdate_AcceptsValidNum(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForCart(t)
+	defer cleanup()
+
+	const ownerID, bossID = uint(112), uint(212)
+	p := seedCartProduct(t, db, bossID)
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: ownerID})
+	if _, err := GetCartSrv().CartCreate(ctx, &CartCreateReq{ProductId: p.ID, BossID: bossID}); err != nil {
+		t.Fatalf("CartCreate: %v", err)
+	}
+	var row Cart
+	if err := db.Where("user_id=?", ownerID).First(&row).Error; err != nil {
+		t.Fatalf("load cart: %v", err)
+	}
+
+	// 刚好 max_num 应当接受
+	if _, err := GetCartSrv().CartUpdate(ctx, &UpdateCartServiceReq{Id: row.ID, Num: row.MaxNum}); err != nil {
+		t.Fatalf("num=max_num 应当成功: %v", err)
+	}
+	var after Cart
+	db.First(&after, row.ID)
+	if after.Num != row.MaxNum {
+		t.Fatalf("num = %d, want %d", after.Num, row.MaxNum)
+	}
+
+	// 回到 1 也应当接受（下限）
+	if _, err := GetCartSrv().CartUpdate(ctx, &UpdateCartServiceReq{Id: row.ID, Num: 1}); err != nil {
+		t.Fatalf("num=1 应当成功: %v", err)
+	}
+	db.First(&after, row.ID)
+	if after.Num != 1 {
+		t.Fatalf("num = %d, want 1", after.Num)
+	}
+}
+
 func initLogForTest() {
 	if logpkg.LogrusObj == nil {
 		l := logrus.New()
