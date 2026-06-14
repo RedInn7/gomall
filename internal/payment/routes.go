@@ -25,4 +25,11 @@ func RegisterRoutes(public, authed, admin *gin.RouterGroup) {
 	authed.POST("paydown/crypto",
 		middleware.Idempotency(),
 		CryptoPaydownHandler())
+
+	// Stripe 托管支付：登录后创建 Checkout Session，跳转 Stripe 完成支付
+	authed.POST("paydown/stripe",
+		middleware.Idempotency(),
+		StripeCheckoutHandler())
+	// Stripe webhook：公开端点（无登录），靠签名校验来源；支付完成后由它兜底结算订单
+	public.POST("webhooks/stripe", StripeWebhookHandler())
 }
