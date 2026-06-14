@@ -55,12 +55,28 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 		return err
 	}
 
+	// 单价以商品表为准，不信投递消息里的金额——异步链路同样不能把定价权交给客户端。
+	// 反查失败属于不可落单的硬错误：释放预扣库存、写失败 ticket，与下方写库失败同路处理。
+	unitCents, priceErr := resolveUnitCents(ctx, task.ProductID)
+	if priceErr != nil {
+		util.LogrusObj.Errorf("async order resolve price failed ticket=%s product=%d err=%v",
+			task.Ticket, task.ProductID, priceErr)
+		if relErr := cache.ReleaseReservation(ctx, task.ProductID, int64(task.Num)); relErr != nil {
+			util.LogrusObj.Errorf("release reservation on price resolve failure failed: %v", relErr)
+		}
+		_ = defaultTicketStore.Put(ctx, task.Ticket, OrderTicketStatus{
+			Status: OrderTicketStatusFailed,
+			Reason: priceErr.Error(),
+		}, OrderTicketTTL)
+		return priceErr
+	}
+
 	order := &Order{
 		UserID:    task.UserID,
 		ProductID: task.ProductID,
 		BossID:    task.BossID,
 		Num:       int(task.Num),
-		Money:     int64(task.Money),
+		Money:     unitCents,
 		Type:      consts.OrderWaitPay,
 		AddressID: task.AddressID,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
