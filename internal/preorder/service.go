@@ -94,6 +94,14 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 		return nil, newCodedError(e.ErrPreorderNotInDepositWindow)
 	}
 
+	// 卖家（定金的收款方）以商品表为准，忽略 req.BossID：定金会打进 boss 钱包，
+	// 信客户端的 boss_id 等于让买家把货款转给任意账户。
+	bossID, err := product.NewProductDao(ctx).ResolveBossID(req.ProductID)
+	if err != nil {
+		util.LogrusObj.Errorf("preorder resolve boss failed product=%d err=%v", req.ProductID, err)
+		return nil, err
+	}
+
 	// 2) Redis reserve（available -> reserved）；预售单数固定 1（业务约束：1 单 1 件）
 	if err := cache.ReserveStock(ctx, req.ProductID, 1); err != nil {
 		util.LogrusObj.Errorf("preorder reserve stock failed product=%d err=%v", req.ProductID, err)
@@ -108,7 +116,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
 		ord.UserID = u.Id
 		ord.ProductID = req.ProductID
-		ord.BossID = req.BossID
+		ord.BossID = bossID // 卖家以商品表为准，忽略 req.BossID
 		ord.AddressID = req.AddressID
 		ord.Num = 1
 		ord.Money = pp.DepositCents + pp.FinalCents // 累计金额；分两次扣
@@ -119,7 +127,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 			return e
 		}
 
-		if e := debitUser(tx, u.Id, req.BossID, req.Key, pp.DepositCents); e != nil {
+		if e := debitUser(tx, u.Id, bossID, req.Key, pp.DepositCents); e != nil {
 			return e
 		}
 
