@@ -549,6 +549,41 @@ func (d *LedgerDao) AppendTransaction(userID, refOrderID uint,
 \srcnote{internal/money/ledger\_model.go:29--31 唯一索引；internal/payment/service.go:177 MarkOrderPaidWithCheck}
 \end{frame}
 
+\begin{frame}{资金台账全景：所有动钱路径都进复式记账台账}
+\centering
+\resizebox{0.96\textwidth}{!}{%
+\begin{tikzpicture}[node distance=10mm and 18mm,font=\scriptsize]
+  % 中心台账
+  \node[node-box,node-warn,minimum width=30mm,minimum height=14mm]
+    (led) {复式记账台账\\\texttt{account\_transaction}\\debit / credit · append-only};
+  % 五类动钱来源
+  \node[node-box,node-ok,above left=14mm and 30mm of led] (pay)
+    {入账\\钱包/Stripe/USDC/ETH 四通道};
+  \node[node-box,node-bad,left=of led]                    (rf)
+    {退款\\退款获批回流};
+  \node[node-box,node-ok,below left=14mm and 30mm of led] (pre)
+    {预售\\定金/尾款/退款};
+  \node[node-box,node-ok,above right=14mm and 30mm of led] (rp)
+    {红包\\发/抢/退};
+  \node[node-box,node-ok,below right=14mm and 30mm of led] (gb)
+    {拼团\\加入/成团/散团};
+  % 汇入箭头，边上标流水方向与 biz_type
+  \draw[arrow]     (pay) -- node[above,sloped,font=\tiny]
+    {买家 debit + 卖家 credit · order\_pay/stripe\_pay/web3\_pay} (led);
+  \draw[arrow-bad] (rf)  -- node[above,font=\tiny]
+    {买家 credit + 卖家 debit · refund} (led);
+  \draw[arrow]     (pre) -- node[below,sloped,font=\tiny]
+    {debit/credit · preorder\_*} (led);
+  \draw[arrow]     (rp)  -- node[above,sloped,font=\tiny]
+    {debit/credit · redpacket} (led);
+  \draw[arrow]     (gb)  -- node[below,sloped,font=\tiny]
+    {debit/credit · groupbuy} (led);
+\end{tikzpicture}}
+\vspace{1mm}
+\keypoint{每次余额变动同事务追加不可变流水，对手方记平台清算账户，\texttt{SUM(debit)=SUM(credit)} 可对账。}
+\srcnote{internal/money/ledger\_model.go:7--36；internal/payment/service.go:120--157；internal/preorder、redpacket、groupbuy 各自同事务 AppendTransaction}
+\end{frame}
+
 % ============================================================
 \section{第三方支付：业务边界与熔断的运营 SOP}
 % ============================================================
