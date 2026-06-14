@@ -2,7 +2,7 @@
 
 用 Go + Gin 写的电商后端，从浏览、下单、支付、履约，到优惠券、Web3 支付、向量检索都有。
 
-每个模块配了压测报告（`stressTest/REPORT.md`）、一套 Beamer slides（`docs/slides/`，12 份）和一篇博客（`docs/blog/`），把当初为什么这么设计也写下来了。
+每个模块配了压测报告（`stressTest/REPORT.md`）、一套 Beamer slides（`docs/slides/`，15 份 + 一份总览）和一篇博客（`docs/blog/`），把当初为什么这么设计也写下来了。
 
 ---
 
@@ -10,7 +10,7 @@
 
 不是 toy demo。重点是把真实电商里那些"该怎么选"的地方讲清楚。
 
-一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码加上 12 份 slides、11 篇博客，把这些连同压测数字和待办一块写了下来。
+一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码加上 15 份 slides、12 篇博客，把这些连同压测数字和待办一块写了下来。
 
 适合工作一到三年的后端拿来练手，也适合准备答辩、面试，或者面试官拿来看候选人的系统设计深度。
 
@@ -26,7 +26,7 @@
 | **客服** | 用户怒投诉时能不能给个交代 | 完整业务码表 + 客服话术（70001 限流 / 70002 熔断 / 50001 缺货 / RP-EMPTY 红包抢完）|
 | **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Jaeger 链路追踪 / Skywalking / 静默降级 / Web3 链上对账 |
 
-12 份业务侧 deck 就是按这个全景拆开讲的（见下表）。
+这些业务侧 deck 就是按这个全景拆开讲的（见下表）。
 
 ---
 
@@ -40,7 +40,7 @@
 
 ### 领域地图（DDD 垂直切片）
 
-22 个业务域按 bounded context 分组，每个域一个 `internal/<域>/` 包五件套内聚；`shared/outbox`、`money` 台账等横切下沉，基础设施作底座。跨域写一律经属主领域的服务方法落库，`product` 与 `search` 的环已斩为单向。
+20 个业务域按 bounded context 分组，每个域一个 `internal/<域>/` 包五件套内聚；`shared/outbox`、`money` 台账等横切下沉，基础设施作底座。跨域写一律经属主领域的服务方法落库，`product` 与 `search` 的环已斩为单向。
 
 ![gomall 领域地图](docs/architecture-domains.svg)
 
@@ -177,7 +177,7 @@
 - 拆包是创建红包时一次性算好的 `[]int64` 数组 → RPUSH 进 Redis LIST
 - 抢红包 Lua：`HEXISTS 防重领 + LPOP 拿一份 + HSET 记账`，全原子
 
-`SplitRedPacket` + `claimScript` 在 `repository/cache/redpacket.go`。
+`SplitRedPacket` + `claimRedPacketScript` 在 `repository/cache/redpacket.go`。
 
 ### 6 · SlidingWindow ZSet：比 fixed window 准
 
@@ -324,7 +324,7 @@ func tryInitES(ctx context.Context) {
 
 ---
 
-## 业务侧 Deck（12 份，按业务域拆）
+## 业务侧 Deck（15 份 + 总览，按业务域拆）
 
 | # | 主题 | 文件 |
 |---|------|------|
@@ -340,6 +340,11 @@ func tryInitES(ctx context.Context) {
 | 10 | 流量治理 | `docs/slides/10-traffic-governance.{tex,pdf}` |
 | 11 | Outbox 与一致性 | `docs/slides/11-consistency.{tex,pdf}` |
 | 12 | 商家后台 + 可观测性 | `docs/slides/12-merchant-ops.{tex,pdf}` |
+| 13 | 满减促销引擎 | `docs/slides/13-promo-engine.{tex,pdf}` |
+| 14 | 拼团 | `docs/slides/14-groupbuy.{tex,pdf}` |
+| 15 | 预售（定金 / 尾款） | `docs/slides/15-preorder.{tex,pdf}` |
+
+另有一份总览 `docs/slides/00-overview.{tex,pdf}` 串起全局。
 
 每份 deck 约 40-50 页、≥ 6 TikZ、≥ 18 处 `file:line` 真实代码引用、≥ 5 段关键代码 + 逐行讲解、≥ 2 处来自 `stressTest/REPORT.md` 的实测数字。
 
@@ -354,7 +359,7 @@ cd docs/slides
 ./build.sh --master    # 合订本 master.pdf
 ```
 
-配套博客（11 篇）：`docs/blog/01-*.md` ~ `11-*.md`。
+配套博客（12 篇）：`docs/blog/01-*.md` ~ `11-*.md`。
 特性现状路线图：`docs/architecture/feature-matrix.md`。
 
 ---
@@ -438,8 +443,8 @@ gomall
 ├── contracts           # Solidity 合约（Web3 Escrow）
 ├── docs
 │   ├── architecture    # feature matrix / DDD 迁移手册 / 路线图
-│   ├── blog            # 11 篇博客长文
-│   ├── slides          # 12 份 Beamer Deck（v2 expanded, 580+ 页）
+│   ├── blog            # 12 篇博客长文
+│   ├── slides          # 15 份 Beamer Deck + 00 总览
 │   └── slides-pipeline # 历史需求 / 方案 / 验收文档
 ├── initialize          # cron / inventory / outbox / search / web3 启动
 ├── internal            # 领域代码（每域一包：handler / service / repo / model / dto）
@@ -474,7 +479,7 @@ gomall
 
 ## 配置
 
-`config/locales/config.yaml`（拷贝 `config.yaml.example` 改）。
+`config/locales/config.yaml`（拷贝 `config.example.yaml` 改）。
 
 ```yaml
 system:
@@ -512,7 +517,7 @@ encryptSecret:
   phoneSecret: "PhoneSecret"
 ```
 
-完整字段看 `config/locales/config.yaml.example`。
+完整字段看 `config/locales/config.example.yaml`。
 
 ---
 
@@ -526,7 +531,7 @@ encryptSecret:
 | mysql driver | v1.5.0 |
 | redis | v9.0.4 |
 | dbresolver | v1.4.1 |
-| jwt-go | v3.2.0 |
+| golang-jwt/jwt | v4.5.2 |
 | crypto | v0.48.0 |
 | logrus | v1.9.3 |
 | go-ethereum | v1.17.3 |
