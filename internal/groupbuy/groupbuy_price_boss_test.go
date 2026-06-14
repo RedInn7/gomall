@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
+	"github.com/RedInn7/gomall/internal/address"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -33,13 +34,23 @@ func setupGroupbuyDB(t *testing.T) (*gorm.DB, func()) {
 		t.Skipf("sqlite 不可用（CGO 关闭？）：%v", err)
 	}
 	if err := db.AutoMigrate(
-		&user.User{}, &orderpkg.Order{}, &product.Product{},
+		&user.User{}, &orderpkg.Order{}, &product.Product{}, &address.Address{},
 		&GroupbuyGroup{}, &GroupbuyMember{}, &outbox.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
 	prev := dao.SetTestDB(db)
 	return db, func() { dao.SetTestDB(prev) }
+}
+
+// seedGroupbuyAddress 给 userID 建一条收货地址并返回 id：建团/参团现在校验地址归属。
+func seedGroupbuyAddress(t *testing.T, db *gorm.DB, userID uint) uint {
+	t.Helper()
+	a := &address.Address{UserID: userID, Name: "收货人", Phone: "13800000000", Address: "测试地址"}
+	if err := db.Create(a).Error; err != nil {
+		t.Fatalf("create address: %v", err)
+	}
+	return a.ID
 }
 
 func setupGroupbuyRedis(t *testing.T) func() {
@@ -96,9 +107,10 @@ func TestCreateGroup_AuthoritativeBossAndPriceClamp(t *testing.T) {
 	p := seedGroupbuyProduct(t, db, "100.00", realBoss, 10) // 原价 10000 分，floor=5000 分
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
+	addr := seedGroupbuyAddress(t, db, 42)
 
 	// 合法拼团价 8000 分（在 [5000,10000] 内）；boss_id 篡改成攻击者 999
-	resp, err := GetGroupbuySrv().CreateGroup(ctx, 42, p.ID, 3, 8000, 0, 999, 1)
+	resp, err := GetGroupbuySrv().CreateGroup(ctx, 42, p.ID, 3, 8000, 0, 999, addr)
 	if err != nil {
 		t.Fatalf("CreateGroup（合法价）应成功: %v", err)
 	}
@@ -136,14 +148,16 @@ func TestJoinGroup_AuthoritativeBoss(t *testing.T) {
 	p := seedGroupbuyProduct(t, db, "100.00", realBoss, 10)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
-	created, err := GetGroupbuySrv().CreateGroup(ctx, 42, p.ID, 3, 8000, 0, realBoss, 1)
+	leaderAddr := seedGroupbuyAddress(t, db, 42)
+	joinerAddr := seedGroupbuyAddress(t, db, 50)
+	created, err := GetGroupbuySrv().CreateGroup(ctx, 42, p.ID, 3, 8000, 0, realBoss, leaderAddr)
 	if err != nil {
 		t.Fatalf("CreateGroup: %v", err)
 	}
 
-	// 第二名用户参团，boss_id 篡改成 999
+	// 第二名用户参团，boss_id 篡改成 999；用属于自己的地址
 	joinCtx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 50})
-	joined, err := GetGroupbuySrv().JoinGroup(joinCtx, 50, created.GroupID, 999, 1)
+	joined, err := GetGroupbuySrv().JoinGroup(joinCtx, 50, created.GroupID, 999, joinerAddr)
 	if err != nil {
 		t.Fatalf("JoinGroup: %v", err)
 	}
