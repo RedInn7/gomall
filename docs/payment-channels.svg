@@ -1,0 +1,428 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760"
+     font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif">
+
+  <!-- ============ 共享 defs（与 flow-payment.svg 设计系统一致，原样复制） ============ -->
+  <defs>
+    <!-- 层级渐变 -->
+    <linearGradient id="gClient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="gGate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="gTrade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/><stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="gProduct" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="gPromo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fb923c"/><stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="gUser" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c084fc"/><stop offset="1" stop-color="#9333ea"/>
+    </linearGradient>
+    <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="gMQ" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#d97706"/>
+    </linearGradient>
+    <!-- 阴影 -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <!-- 核心组件发光 -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- 实线箭头(同步主流量) -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"/>
+    </marker>
+    <!-- 虚线箭头(异步/MQ/旁路) -->
+    <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+
+    <!-- ===== Component Icons (24x24, white) ===== -->
+    <!-- MySQL: 数据库圆柱 + 海豚尾鳍点睛 -->
+    <symbol id="ic-mysql" viewBox="0 0 24 24">
+      <g fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round">
+        <ellipse cx="11" cy="5.2" rx="6.6" ry="2.4"/>
+        <path d="M4.4 5.2 V15 c0 1.33 2.96 2.4 6.6 2.4 s6.6-1.07 6.6-2.4 V5.2"/>
+        <path d="M4.4 10.1 c0 1.33 2.96 2.4 6.6 2.4 s6.6-1.07 6.6-2.4" stroke-opacity="0.65"/>
+      </g>
+      <path d="M16.4 14.2 c2.2 0.2 3.4 1.6 4.2 3.4 c-1.7-0.7-2.6-0.5-3.4-0.2 c0.5-1.1 0.1-2.2-0.8-3.2 z" fill="#ffffff"/>
+    </symbol>
+    <!-- Redis: 堆叠立方(三层菱形) -->
+    <symbol id="ic-redis" viewBox="0 0 24 24">
+      <g fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round">
+        <path d="M2.6 7.2 L12 3.4 L21.4 7.2 L12 11 Z"/>
+        <path d="M2.6 12 L12 15.8 L21.4 12"/>
+        <path d="M2.6 16.6 L12 20.4 L21.4 16.6"/>
+      </g>
+      <circle cx="12" cy="7.2" r="1.1" fill="#ffffff"/>
+    </symbol>
+    <!-- RabbitMQ: 消息队列(信封 + 流转箭头) -->
+    <symbol id="ic-rabbitmq" viewBox="0 0 24 24">
+      <rect x="3" y="6" width="14" height="10" rx="1.6" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+      <path d="M3.6 7 L10 11.4 L16.4 7" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M16 18.6 h4 m0 0 l-2-2 m2 2 l-2 2" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <!-- ElasticSearch: 放大镜(检索) -->
+    <symbol id="ic-es" viewBox="0 0 24 24">
+      <circle cx="10" cy="10" r="6" fill="none" stroke="#ffffff" stroke-width="1.7"/>
+      <path d="M14.6 14.6 L20 20" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+      <path d="M7.4 10 h5.2 M10 7.4 v5.2" stroke="#ffffff" stroke-width="1.3" stroke-opacity="0.7"/>
+    </symbol>
+    <!-- Milvus: 向量散点(近邻连边) -->
+    <symbol id="ic-milvus" viewBox="0 0 24 24">
+      <g stroke="#ffffff" stroke-width="1.3" stroke-opacity="0.7">
+        <path d="M6 7 L12 12 M18 6 L12 12 M5 17 L12 12 M17 17 L12 12"/>
+      </g>
+      <g fill="#ffffff">
+        <circle cx="6" cy="7" r="1.7"/><circle cx="18" cy="6" r="1.7"/>
+        <circle cx="5" cy="17" r="1.7"/><circle cx="17" cy="17" r="1.7"/>
+        <circle cx="12" cy="12" r="2.2"/>
+      </g>
+    </symbol>
+    <!-- Web3 / EVM: 以太坊菱形 -->
+    <symbol id="ic-web3" viewBox="0 0 24 24">
+      <g fill="#ffffff">
+        <path d="M12 2 L18.4 12 L12 15.6 L5.6 12 Z" fill-opacity="0.95"/>
+        <path d="M12 2 L18.4 12 L12 9.4 Z" fill-opacity="0.6"/>
+        <path d="M12 16.9 L18.4 13.2 L12 22 L5.6 13.2 Z"/>
+      </g>
+    </symbol>
+    <!-- Web Portal: 浏览器窗口 -->
+    <symbol id="ic-web" viewBox="0 0 24 24">
+      <rect x="3" y="4.5" width="18" height="15" rx="1.8" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+      <path d="M3 8.6 H21" stroke="#ffffff" stroke-width="1.6"/>
+      <g fill="#ffffff"><circle cx="5.6" cy="6.5" r="0.8"/><circle cx="8" cy="6.5" r="0.8"/></g>
+    </symbol>
+    <!-- Mobile App: 手机 -->
+    <symbol id="ic-mobile" viewBox="0 0 24 24">
+      <rect x="7" y="3" width="10" height="18" rx="2.2" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+      <path d="M10.4 18 h3.2" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+    </symbol>
+    <!-- Gateway: 盾形(网关/中间件) -->
+    <symbol id="ic-gateway" viewBox="0 0 24 24">
+      <path d="M12 2.6 L20 5.4 V11 c0 5.2-3.4 8.2-8 10.4 C7.4 19.2 4 16.2 4 11 V5.4 Z" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M8.6 11.6 L11 14 L15.4 9" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <!-- Outbox: 发件箱(箱 + 上行箭头) -->
+    <symbol id="ic-outbox" viewBox="0 0 24 24">
+      <path d="M3.5 12 H8 l1.4 2.2 h4.2 L15 12 h5.5 V19 a1.4 1.4 0 0 1-1.4 1.4 H4.9 A1.4 1.4 0 0 1 3.5 19 Z" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M12 9.6 V2.8 m0 0 L9.4 5.4 M12 2.8 l2.6 2.6" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+
+    <!-- ===== 本图新增：银行卡 glyph（Stripe 卡支付，圆角矩形 + 横条） ===== -->
+    <symbol id="ic-card" viewBox="0 0 24 24">
+      <rect x="2.5" y="5" width="19" height="14" rx="2.2" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+      <rect x="2.5" y="8.4" width="19" height="3" fill="#ffffff" fill-opacity="0.9"/>
+      <path d="M5.5 15.4 h5" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-opacity="0.8"/>
+    </symbol>
+  </defs>
+
+  <!-- ============ 背景 ============ -->
+  <rect x="0" y="0" width="1200" height="760" fill="#0d1117"/>
+
+  <!-- ============ 标题区 ============ -->
+  <g>
+    <text x="40" y="48" fill="#ffffff" font-size="26" font-weight="700">gomall · 4 条支付通道 → 统一结算</text>
+    <text x="40" y="74" fill="rgba(255,255,255,0.55)" font-size="14">
+      钱包 / Stripe 法币 / USDC 稳定币 / ETH 原生币 —— 入口各异，最终都汇入同一套原子结算事务
+    </text>
+  </g>
+
+  <!-- ============ 图例 ============ -->
+  <g transform="translate(760,28)">
+    <rect x="0" y="0" width="408" height="60" rx="10" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+    <line x1="16" y1="20" x2="52" y2="20" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="60" y="24" fill="rgba(255,255,255,0.7)" font-size="12">同步直达</text>
+    <line x1="142" y1="20" x2="178" y2="20" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrowA)"/>
+    <text x="186" y="24" fill="rgba(255,255,255,0.7)" font-size="12">异步 / 回调</text>
+    <rect x="16" y="38" width="13" height="9" rx="2" fill="url(#gTrade)"/>
+    <text x="35" y="46" fill="rgba(255,255,255,0.7)" font-size="11">钱包</text>
+    <rect x="86" y="38" width="13" height="9" rx="2" fill="url(#gGate)"/>
+    <text x="105" y="46" fill="rgba(255,255,255,0.7)" font-size="11">Stripe</text>
+    <rect x="166" y="38" width="13" height="9" rx="2" fill="url(#gData)"/>
+    <text x="185" y="46" fill="rgba(255,255,255,0.7)" font-size="11">USDC / ETH 链上</text>
+    <rect x="312" y="38" width="13" height="9" rx="2" fill="url(#gMQ)"/>
+    <text x="331" y="46" fill="rgba(255,255,255,0.7)" font-size="11">MQ / 消费者</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 左侧 4 条通道（各一个 Group Box）                       -->
+  <!-- 通道盒统一宽 360；x=32                                  -->
+  <!-- ① 钱包  y=110  ② Stripe y=242  ③ USDC y=374  ④ ETH y=470 -->
+  <!-- ====================================================== -->
+
+  <!-- ====== 通道 ① 内建钱包（gTrade 蓝，同步直达） ====== -->
+  <g>
+    <rect x="32" y="110" width="360" height="116" rx="14" fill="rgba(96,165,250,0.06)" stroke="rgba(96,165,250,0.30)" stroke-dasharray="6,4"/>
+    <text x="50" y="134" fill="rgba(96,165,250,0.9)" font-size="13" font-weight="700" letter-spacing="1">通道 ① · 内建钱包</text>
+    <text x="226" y="134" fill="rgba(255,255,255,0.5)" font-size="11">余额支付 · 同事务扣款</text>
+
+    <!-- 1a 支付密码校验 -->
+    <g>
+      <rect x="50" y="148" width="150" height="60" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="66" y="170" fill="rgba(255,255,255,0.7)" font-size="10">[User] CheckMoneyPassword</text>
+      <text x="66" y="190" fill="#fff" font-size="14" font-weight="700">支付密码校验</text>
+    </g>
+    <!-- 1b 钱包扣款落库 -->
+    <g>
+      <rect x="224" y="148" width="150" height="60" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-mysql" x="238" y="160" width="18" height="18"/>
+      <text x="262" y="170" fill="rgba(255,255,255,0.7)" font-size="10">[Money] 同事务扣款</text>
+      <text x="240" y="194" fill="#fff" font-size="14" font-weight="700">买家钱包扣款</text>
+    </g>
+    <!-- 1a -> 1b -->
+    <line x1="200" y1="178" x2="224" y2="178" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ====== 通道 ② Stripe（gGate 青蓝，第三方法币，webhook 异步） ====== -->
+  <g>
+    <rect x="32" y="242" width="360" height="116" rx="14" fill="rgba(56,189,248,0.06)" stroke="rgba(56,189,248,0.30)" stroke-dasharray="6,4"/>
+    <text x="50" y="266" fill="rgba(56,189,248,0.95)" font-size="13" font-weight="700" letter-spacing="1">通道 ② · Stripe（第三方法币）</text>
+    <text x="50" y="282" fill="rgba(255,255,255,0.5)" font-size="11">法币 / 卡 / 钱包等动态支付方式 · 托管页 + webhook 验签</text>
+
+    <!-- 2a 创建 Checkout Session -->
+    <g>
+      <rect x="50" y="290" width="100" height="58" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="64" y="312" fill="rgba(255,255,255,0.75)" font-size="10">[API]</text>
+      <text x="62" y="328" fill="#fff" font-size="12" font-weight="700">创建 Checkout</text>
+      <text x="62" y="342" fill="rgba(255,255,255,0.8)" font-size="10">Session</text>
+    </g>
+    <!-- 2b 托管页支付 -->
+    <g>
+      <rect x="172" y="290" width="100" height="58" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-card" x="186" y="300" width="18" height="18"/>
+      <text x="210" y="312" fill="rgba(255,255,255,0.75)" font-size="10">[托管页]</text>
+      <text x="184" y="330" fill="#fff" font-size="12" font-weight="700">用户卡支付</text>
+      <text x="184" y="344" fill="rgba(255,255,255,0.8)" font-size="10">Stripe Hosted</text>
+    </g>
+    <!-- 2c webhook 验签回调 -->
+    <g>
+      <rect x="294" y="290" width="80" height="58" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-gateway" x="324" y="298" width="18" height="18"/>
+      <text x="306" y="328" fill="#fff" font-size="12" font-weight="700">webhook</text>
+      <text x="306" y="343" fill="rgba(255,255,255,0.8)" font-size="10">验签回调</text>
+    </g>
+    <!-- 2a -> 2b -> 2c -->
+    <g fill="none" stroke="#38bdf8" stroke-width="2">
+      <line x1="150" y1="319" x2="172" y2="319" marker-end="url(#arrow)"/>
+      <line x1="272" y1="319" x2="294" y2="319" marker-end="url(#arrow)"/>
+    </g>
+  </g>
+
+  <!-- ====== 通道 ③ USDC（gData 绿，稳定币） ====== -->
+  <g>
+    <rect x="32" y="374" width="360" height="84" rx="14" fill="rgba(52,211,153,0.06)" stroke="rgba(52,211,153,0.28)" stroke-dasharray="6,4"/>
+    <text x="50" y="396" fill="rgba(52,211,153,0.95)" font-size="13" font-weight="700" letter-spacing="1">通道 ③ · USDC 稳定币</text>
+    <text x="218" y="396" fill="rgba(255,255,255,0.5)" font-size="11">稳定币 1:1，开箱即用</text>
+
+    <!-- 3a 钱包签名 -->
+    <g>
+      <rect x="50" y="406" width="142" height="42" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-web3" x="62" y="416" width="20" height="20"/>
+      <text x="90" y="423" fill="rgba(255,255,255,0.75)" font-size="10">[Web3] EIP-191</text>
+      <text x="90" y="438" fill="#fff" font-size="13" font-weight="700">钱包签名</text>
+    </g>
+    <!-- 3b 链上转 USDC -->
+    <g>
+      <rect x="214" y="406" width="160" height="42" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="228" y="423" fill="rgba(255,255,255,0.75)" font-size="10">[ERC-20] 6 位精度 · 与法币 1:1</text>
+      <text x="228" y="438" fill="#fff" font-size="13" font-weight="700">链上转 USDC</text>
+    </g>
+    <line x1="192" y1="427" x2="214" y2="427" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ====== 通道 ④ ETH（gData 绿，原生币） ====== -->
+  <g>
+    <rect x="32" y="470" width="360" height="84" rx="14" fill="rgba(52,211,153,0.06)" stroke="rgba(52,211,153,0.28)" stroke-dasharray="6,4"/>
+    <text x="50" y="492" fill="rgba(52,211,153,0.95)" font-size="13" font-weight="700" letter-spacing="1">通道 ④ · ETH 原生币</text>
+    <text x="218" y="492" fill="rgba(255,255,255,0.5)" font-size="11">需喂价换算 wei</text>
+
+    <!-- 4a 钱包签名 -->
+    <g>
+      <rect x="50" y="502" width="142" height="42" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-web3" x="62" y="512" width="20" height="20"/>
+      <text x="90" y="519" fill="rgba(255,255,255,0.75)" font-size="10">[Web3] EIP-191</text>
+      <text x="90" y="534" fill="#fff" font-size="13" font-weight="700">钱包签名</text>
+    </g>
+    <!-- 4b 链上转 ETH -->
+    <g>
+      <rect x="214" y="502" width="160" height="42" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="228" y="519" fill="rgba(255,255,255,0.75)" font-size="10">[原生币] 喂价 · 法币→wei</text>
+      <text x="228" y="534" fill="#fff" font-size="13" font-weight="700">链上转 ETH</text>
+    </g>
+    <line x1="192" y1="523" x2="214" y2="523" fill="none" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 中段：USDC / ETH 共用的「链上确认链路」                  -->
+  <!-- escrow 合约 → listener → web3.payment.confirmed → 消费者  -->
+  <!-- 竖向排布于 x=430..652, y=406..570                       -->
+  <!-- ====================================================== -->
+  <g>
+    <rect x="426" y="392" width="232" height="186" rx="14" fill="rgba(52,211,153,0.05)" stroke="rgba(52,211,153,0.22)" stroke-dasharray="6,4"/>
+    <text x="444" y="414" fill="rgba(52,211,153,0.85)" font-size="12" font-weight="700" letter-spacing="1">链上确认链路（USDC / ETH 共用）</text>
+
+    <!-- C1 escrow 合约 -->
+    <g>
+      <rect x="444" y="424" width="196" height="36" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-web3" x="456" y="431" width="18" height="18"/>
+      <text x="482" y="446" fill="#fff" font-size="13" font-weight="700">escrow 合约 · PaymentConfirmed</text>
+    </g>
+    <!-- C2 listener 监听 -->
+    <g>
+      <rect x="444" y="472" width="196" height="36" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="458" y="495" fill="#fff" font-size="13" font-weight="700">listener 监听 PaymentConfirmed</text>
+    </g>
+    <!-- C3 写 web3.payment.confirmed -->
+    <g>
+      <rect x="444" y="520" width="196" height="36" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <use href="#ic-outbox" x="456" y="527" width="18" height="18"/>
+      <text x="482" y="542" fill="#fff" font-size="12" font-weight="700">写 web3.payment.confirmed</text>
+    </g>
+    <!-- C1 -> C2 -> C3（同步链上确认，实线） -->
+    <g fill="none" stroke="#38bdf8" stroke-width="2">
+      <line x1="542" y1="460" x2="542" y2="472" marker-end="url(#arrow)"/>
+      <line x1="542" y1="508" x2="542" y2="520" marker-end="url(#arrow)"/>
+    </g>
+  </g>
+
+  <!-- 消费者结算（链上确认链路出口，异步驱动统一结算） -->
+  <g>
+    <rect x="426" y="600" width="232" height="48" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+    <use href="#ic-rabbitmq" x="440" y="612" width="20" height="20"/>
+    <text x="468" y="620" fill="rgba(255,255,255,0.7)" font-size="10">[Consumer] web3.payment.confirmed</text>
+    <text x="468" y="638" fill="#fff" font-size="14" font-weight="700">消费者结算（异步驱动）</text>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 右侧：统一结算大盒（gTrade）                            -->
+  <!-- x=712 width=456 y=110 height=538                       -->
+  <!-- ====================================================== -->
+  <g>
+    <rect x="712" y="110" width="456" height="538" rx="16" fill="url(#gTrade)" stroke="rgba(255,255,255,0.20)" stroke-width="1.4" filter="url(#shadow)"/>
+    <!-- 标题条 -->
+    <rect x="712" y="110" width="456" height="64" rx="16" fill="rgba(13,17,23,0.30)"/>
+    <rect x="712" y="150" width="456" height="24" fill="rgba(13,17,23,0.30)"/>
+    <text x="736" y="142" fill="#ffffff" font-size="19" font-weight="700">统一结算（同一事务原子）</text>
+    <text x="736" y="166" fill="rgba(255,255,255,0.8)" font-size="12">4 条通道最终都汇到这套结算 · 任一步失败整体回滚</text>
+
+    <!-- 结算步骤列表 -->
+    <g font-size="13" fill="#ffffff">
+      <!-- 行 1 -->
+      <g>
+        <rect x="736" y="196" width="408" height="50" rx="9" fill="rgba(13,17,23,0.22)" stroke="rgba(255,255,255,0.18)"/>
+        <circle cx="760" cy="221" r="11" fill="rgba(255,255,255,0.16)"/>
+        <text x="760" y="225" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">1</text>
+        <text x="782" y="216" font-weight="700">标记订单已付（WaitPay 守卫）</text>
+        <text x="782" y="234" fill="rgba(255,255,255,0.78)" font-size="11">守卫塞进 WHERE，重复回调改不动已付单 · 杜绝重付</text>
+      </g>
+      <!-- 行 2 -->
+      <g>
+        <rect x="736" y="254" width="408" height="42" rx="9" fill="rgba(13,17,23,0.22)" stroke="rgba(255,255,255,0.18)"/>
+        <circle cx="760" cy="275" r="11" fill="rgba(255,255,255,0.16)"/>
+        <text x="760" y="279" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">2</text>
+        <use href="#ic-mysql" x="780" y="264" width="20" height="20"/>
+        <text x="808" y="280" font-weight="700">扣库存（条件 UPDATE · 防超卖）</text>
+      </g>
+      <!-- 行 3 -->
+      <g>
+        <rect x="736" y="304" width="408" height="42" rx="9" fill="rgba(13,17,23,0.22)" stroke="rgba(255,255,255,0.18)"/>
+        <circle cx="760" cy="325" r="11" fill="rgba(255,255,255,0.16)"/>
+        <text x="760" y="329" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">3</text>
+        <text x="782" y="330" font-weight="700">商品归属转移（买家入库）</text>
+      </g>
+      <!-- 行 4 -->
+      <g>
+        <rect x="736" y="354" width="408" height="58" rx="9" fill="rgba(13,17,23,0.22)" stroke="rgba(255,255,255,0.18)"/>
+        <circle cx="760" cy="383" r="11" fill="rgba(255,255,255,0.16)"/>
+        <text x="760" y="387" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">4</text>
+        <text x="782" y="378" font-weight="700">卖家入账 + 复式记账流水</text>
+        <text x="782" y="397" fill="rgba(255,255,255,0.78)" font-size="11">credit 卖家 / debit 清算账户 · 账目恒等</text>
+      </g>
+      <!-- 行 5 -->
+      <g>
+        <rect x="736" y="420" width="408" height="42" rx="9" fill="rgba(13,17,23,0.22)" stroke="rgba(255,255,255,0.18)"/>
+        <circle cx="760" cy="441" r="11" fill="rgba(255,255,255,0.16)"/>
+        <text x="760" y="445" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">5</text>
+        <use href="#ic-outbox" x="780" y="430" width="20" height="20"/>
+        <text x="808" y="446" font-weight="700">写 outbox event：order.paid</text>
+      </g>
+      <!-- 行 6 -->
+      <g>
+        <rect x="736" y="470" width="408" height="42" rx="9" fill="rgba(13,17,23,0.22)" stroke="rgba(255,255,255,0.18)"/>
+        <circle cx="760" cy="491" r="11" fill="rgba(255,255,255,0.16)"/>
+        <text x="760" y="495" fill="#fff" font-size="12" font-weight="700" text-anchor="middle">6</text>
+        <use href="#ic-redis" x="780" y="480" width="20" height="20"/>
+        <text x="808" y="496" font-weight="700">CommitReservation（提交预占）</text>
+      </g>
+    </g>
+
+    <!-- 幂等保证强调条 -->
+    <g>
+      <rect x="736" y="528" width="408" height="96" rx="11" fill="rgba(13,17,23,0.34)" stroke="rgba(255,255,255,0.22)"/>
+      <text x="756" y="554" fill="#ffffff" font-size="13" font-weight="700">幂等保证</text>
+      <text x="756" y="578" fill="rgba(255,255,255,0.9)" font-size="12">· WaitPay 守卫 → 重复支付 / 重复回调不重复结算</text>
+      <text x="756" y="600" fill="rgba(255,255,255,0.9)" font-size="12">· (order_id, direction) 唯一索引 → 复式流水不重复落账</text>
+      <text x="756" y="618" fill="rgba(255,255,255,0.65)" font-size="11">钱包 / Stripe / USDC / ETH 四路殊途同归，结算逻辑只有一套</text>
+    </g>
+  </g>
+
+  <!-- ====================================================== -->
+  <!-- 连线：各通道 → 统一结算（实线=同步，虚线 arrowA=异步）   -->
+  <!-- 统一结算盒左缘 x=712；接入点 y 错开，避免重叠            -->
+  <!-- ====================================================== -->
+
+  <!-- ① 钱包：同步实线直达（出口在 1b 右缘 x=374,y=178） -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <path d="M374,178 L540,178 L540,210 L712,210" marker-end="url(#arrow)"/>
+  </g>
+  <text x="548" y="172" fill="rgba(255,255,255,0.6)" font-size="11">同步直达</text>
+
+  <!-- ② Stripe：webhook 验签后异步进结算（出口 2c 右缘 x=374,y=319） -->
+  <g fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5">
+    <path d="M374,319 L560,319 L560,232 L712,232" marker-end="url(#arrowA)"/>
+  </g>
+  <text x="566" y="312" fill="rgba(255,255,255,0.6)" font-size="11">webhook 异步</text>
+
+  <!-- ③ USDC：链上转账 → 链上确认链路（3b 底 → escrow 合约顶） -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <path d="M294,448 L294,464 L542,464 L542,424" marker-end="url(#arrow)"/>
+  </g>
+  <!-- ④ ETH：链上转账 → 链上确认链路（4b 底 → escrow 合约顶，从左侧并入） -->
+  <g fill="none" stroke="#38bdf8" stroke-width="2">
+    <path d="M294,544 L294,584 L412,584 L412,442 L444,442" marker-end="url(#arrow)"/>
+  </g>
+  <text x="300" y="466" fill="rgba(255,255,255,0.55)" font-size="10">USDC 转账确认</text>
+  <text x="300" y="600" fill="rgba(255,255,255,0.55)" font-size="10">ETH 转账确认</text>
+
+  <!-- 链上确认链路 C3 → 消费者结算（异步） -->
+  <g fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5">
+    <line x1="542" y1="556" x2="542" y2="600" marker-end="url(#arrowA)"/>
+  </g>
+
+  <!-- 消费者结算 → 统一结算（异步进入） -->
+  <g fill="none" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5">
+    <path d="M658,624 L685,624 L685,500 L712,500" marker-end="url(#arrowA)"/>
+  </g>
+  <text x="664" y="540" fill="rgba(255,255,255,0.6)" font-size="11">异步结算</text>
+
+  <!-- ====================================================== -->
+  <!-- 底部强调条                                              -->
+  <!-- ====================================================== -->
+  <g>
+    <rect x="32" y="664" width="626" height="60" rx="10" fill="rgba(96,165,250,0.10)" stroke="rgba(96,165,250,0.30)"/>
+    <text x="52" y="690" fill="#dbeafe" font-size="13" font-weight="700">殊途同归：4 条通道入口形态各异（余额 / 卡 / 稳定币 / 原生币）</text>
+    <text x="52" y="712" fill="rgba(219,234,254,0.85)" font-size="12">但「标记已付 + 扣库存 + 归属转移 + 双账记账 + outbox + 提交预占」始终是同一套原子事务，幂等收口。</text>
+  </g>
+
+</svg>
