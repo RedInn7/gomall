@@ -156,6 +156,11 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 		if e := tx.Create(member).Error; e != nil {
 			return e
 		}
+		// 加入即收款：团长发起也是一次加入，扣其钱包，钱进平台托管账户。
+		// 与 group / 订单 / member 同事务，失败整体回滚，杜绝"建团但没扣到钱"。
+		if e := collectToEscrow(tx, leaderID, priceCents, leaderOrder.ID); e != nil {
+			return e
+		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"groupbuy", "GroupbuyCreated", "groupbuy.created", g.ID,
 			events.GroupbuyCreated{
@@ -270,6 +275,12 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 			return e
 		}
 
+		// 加入即收款：扣成员钱包（拼团价口径 g.PriceCents），钱进平台托管账户。
+		// 与抢名额 / 订单 / member 同事务，失败整体回滚，库存预扣由外层 Saga 释放。
+		if e := collectToEscrow(tx, userID, g.PriceCents, order.ID); e != nil {
+			return e
+		}
+
 		// 读最新 count，用于响应 + 判定是否成团
 		freshGroup, e := NewGroupbuyDaoByDB(tx).GetGroupByID(groupID)
 		if e != nil {
@@ -370,9 +381,22 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			return e
 		}
 
-		// 成员订单 WaitGroup → WaitShip。逐条 UPDATE 保证条件 WHERE 命中状态，
-		// 任一失败回滚整个成团操作，cron 重新拉起。
+		// 成员订单 WaitGroup → WaitShip，并在同事务内把该成员的托管款结算给卖家。
+		// 关键：先结算资金、再翻状态。只有钱真的从托管账户划到卖家，订单才允许进 WaitShip，
+		// 从源头堵住"没收钱就发货"。任一失败回滚整个成团操作，cron 重新拉起。
+		orderDao := orderpkg.NewOrderDaoByDB(tx)
 		for _, m := range members {
+			o, e := orderDao.GetOrderByIdOnly(uint(m.OrderID))
+			if e != nil {
+				return e
+			}
+			if o == nil || o.ID == 0 {
+				return fmt.Errorf("成员订单缺失 orderID=%d", m.OrderID)
+			}
+			// 结算托管款给卖家（o.Money 即加入时收的拼团价），(ref, credit, groupbuy_settle) 幂等。
+			if e = settleToSeller(tx, o.BossID, o.Money, o.ID); e != nil {
+				return e
+			}
 			res := tx.Model(&orderpkg.Order{}).
 				Where("id=? AND type=?", m.OrderID, consts.OrderWaitGroup).
 				Update("type", consts.OrderWaitShip)
@@ -459,6 +483,7 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 		if e != nil {
 			return e
 		}
+		orderDao := orderpkg.NewOrderDaoByDB(tx)
 		for _, m := range members {
 			res := tx.Model(&orderpkg.Order{}).
 				Where("id=? AND type=?", m.OrderID, consts.OrderWaitGroup).
@@ -468,8 +493,21 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 			}
 			// RowsAffected=0 不报错：可能已被其它路径关掉；
 			// 但对应的库存预扣也已由那条路径归还，这里不重复释放。
-			if res.RowsAffected > 0 {
-				closedCount++
+			if res.RowsAffected == 0 {
+				continue
+			}
+			closedCount++
+			// 本次真正关闭的订单：把加入时收的托管款原路退回成员，与关单同事务。
+			// (ref, credit, groupbuy_refund) 唯一索引 + 预检幂等，重复散团不重复退款。
+			o, e2 := orderDao.GetOrderByIdOnly(uint(m.OrderID))
+			if e2 != nil {
+				return e2
+			}
+			if o == nil || o.ID == 0 {
+				return fmt.Errorf("成员订单缺失 orderID=%d", m.OrderID)
+			}
+			if e2 = refundFromEscrow(tx, o.UserID, o.Money, o.ID); e2 != nil {
+				return e2
 			}
 		}
 		if e = NewGroupbuyDaoByDB(tx).UpdateMembersStatus(groupID, GroupbuyMemberRefunded); e != nil {

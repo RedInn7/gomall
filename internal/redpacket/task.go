@@ -16,8 +16,10 @@ type RedPacketTaskService struct{}
 // RunRedPacketExpireCheck 扫描过期未抢完的红包，回收剩余金额给发包人。
 //  1. DB 查 status=active 且 expire_at <= now
 //  2. Redis LPOP 全部剩余金额并清空 list
-//  3. DB 事务：red_packet.status=refunded + outbox(red_packet.expired)
-//  4. 下游钱包消费 red_packet.expired 回退发包人金额
+//  3. DB 事务：red_packet.status=refunded + 剩余金额从 escrow 退回发包人钱包(同事务写台账) + outbox(red_packet.expired)
+//
+// 资金在第 3 步同事务原子落地（settleRefundTx）：发包人 credit / 清算 debit，
+// ref=红包 id，幂等由台账唯一索引兜底；red_packet.expired 事件仅作通知。
 func (s *RedPacketTaskService) RunRedPacketExpireCheck() {
 	ctx := context.Background()
 	rpDao := NewRedPacketDao(ctx)
@@ -41,6 +43,10 @@ func (s *RedPacketTaskService) RunRedPacketExpireCheck() {
 			}
 			if left <= 0 {
 				return nil
+			}
+			// 剩余金额从 escrow 退回发包人钱包，与状态切换同事务原子落地。
+			if e := settleRefundTx(tx, rp.ID, rp.UserID, left); e != nil {
+				return e
 			}
 			return outbox.NewOutboxDaoByDB(tx).Insert(
 				"red_packet", "RedPacketExpired", "red_packet.expired", rp.ID,

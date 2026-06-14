@@ -21,8 +21,14 @@ const (
 	BizTypePreorderDeposit = "preorder_deposit" // 预售定金
 	BizTypePreorderFinal   = "preorder_final"   // 预售尾款
 	BizTypePreorderRefund  = "preorder_refund"  // 预售定金退还
-	BizTypeRedPacket       = "redpacket"        // 红包发/抢/退
+	BizTypeRedPacket       = "redpacket"        // 红包域汇总语义（保留兼容引用）
 	BizTypeGroupBuy        = "groupbuy"         // 拼团支付 / 散团退款
+	// 红包资金链拆三个子业务，避免共用 (ref_order_id,direction) 时跨阶段/跨领取人冲突：
+	// 发包 ref=红包 id，退回 ref=红包 id，二者方向相同（escrow credit / debit）若同 biz_type 会撞唯一键，
+	// 故分开；领包 ref=领取记录 id（每个领取人一行，天然唯一），与发/退的红包 id 空间隔离。
+	BizTypeRedPacketSend   = "redpacket_send"   // 发包：发包人 debit / 平台清算 credit，ref=红包 id
+	BizTypeRedPacketClaim  = "redpacket_claim"  // 领包：领取人 credit / 平台清算 debit，ref=领取记录 id
+	BizTypeRedPacketRefund = "redpacket_refund" // 过期回收：发包人 credit / 平台清算 debit，ref=红包 id
 )
 
 // ExternalClearingUserID 平台对外资金清算账户的 user_id（0 = 系统账户）。
