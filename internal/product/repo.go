@@ -75,9 +75,11 @@ func (d *ProductDao) DeleteProduct(pId, uId uint) error {
 // 显式映射列名走 map 更新：gorm 对 struct 的 Updates 会跳过零值字段，
 // 导致下架（on_sale=false）、库存清零（num=0）这类零值写入静默丢失。
 // 字段集合与调用方组装的可更新字段一一对应，boss 维度与图片路径不在此处变更。
-func (d *ProductDao) UpdateProduct(pId uint, product *Product) error {
-	return d.DB.Model(&Product{}).
-		Where("id=?", pId).
+// uId 为商品归属 boss，WHERE 同时过滤 boss_id 防止越权覆盖他人商品（IDOR）。
+// 返回受影响行数：0 表示商品不存在或调用方不是归属 boss，调用方据此拒绝请求。
+func (d *ProductDao) UpdateProduct(pId, uId uint, product *Product) (int64, error) {
+	res := d.DB.Model(&Product{}).
+		Where("id=? AND boss_id=?", pId, uId).
 		Updates(map[string]interface{}{
 			"name":           product.Name,
 			"category_id":    product.CategoryID,
@@ -87,7 +89,8 @@ func (d *ProductDao) UpdateProduct(pId uint, product *Product) error {
 			"discount_price": product.DiscountPrice,
 			"num":            product.Num,
 			"on_sale":        product.OnSale,
-		}).Error
+		})
+	return res.RowsAffected, res.Error
 }
 
 // SearchProduct 搜索商品
