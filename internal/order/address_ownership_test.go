@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	"github.com/RedInn7/gomall/repository/cache"
 )
 
 // TestOrderCreate_RejectsForeignAddress 回归用例：用别人的 address_id 下单被拒。
@@ -42,11 +43,17 @@ func TestOrderEnqueue_RejectsForeignAddress(t *testing.T) {
 	_, _, restore := installAsyncTestDeps(t)
 	defer restore()
 
+	const pid = 7001
+	// 必须给商品初始化库存：否则去掉地址校验后流程会先卡在"库存未初始化"而报错，
+	// 断言便误判通过（假绿）。种上库存，让本用例真正卡在地址归属校验上。
+	if err := cache.InitStock(context.Background(), pid, 5); err != nil {
+		t.Fatalf("init stock: %v", err)
+	}
 	victimAddr := seedOrderAddress(t, db, 7)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 8})
 	if _, err := GetOrderSrv().OrderEnqueue(ctx, &OrderCreateReq{
-		ProductID: 7001,
+		ProductID: pid,
 		Num:       1,
 		AddressID: victimAddr,
 	}); err == nil {
