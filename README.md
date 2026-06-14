@@ -2,7 +2,7 @@
 
 用 Go + Gin 写的电商后端，从浏览、下单、支付、履约，到优惠券、Web3 支付、向量检索都有。
 
-每个模块配了压测报告（`stressTest/REPORT.md`）、一套 Beamer slides（`docs/slides/`，12 份）和一篇博客（`docs/blog/`），把当初为什么这么设计也写下来了。
+每个模块配了压测报告（`stressTest/REPORT.md`）、一套 Beamer slides（`docs/slides/`，15 份 + 一份总览）和一篇博客（`docs/blog/`），把当初为什么这么设计也写下来了。
 
 ---
 
@@ -10,7 +10,7 @@
 
 不是 toy demo。重点是把真实电商里那些"该怎么选"的地方讲清楚。
 
-一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码加上 12 份 slides、11 篇博客，把这些连同压测数字和待办一块写了下来。
+一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码加上 15 份 slides、12 篇博客，把这些连同压测数字和待办一块写了下来。
 
 适合工作一到三年的后端拿来练手，也适合准备答辩、面试，或者面试官拿来看候选人的系统设计深度。
 
@@ -26,7 +26,7 @@
 | **客服** | 用户怒投诉时能不能给个交代 | 完整业务码表 + 客服话术（70001 限流 / 70002 熔断 / 50001 缺货 / RP-EMPTY 红包抢完）|
 | **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Jaeger 链路追踪 / Skywalking / 静默降级 / Web3 链上对账 |
 
-12 份业务侧 deck 就是按这个全景拆开讲的（见下表）。
+这些业务侧 deck 就是按这个全景拆开讲的（见下表）。
 
 ---
 
@@ -40,7 +40,7 @@
 
 ### 领域地图（DDD 垂直切片）
 
-22 个业务域按 bounded context 分组，每个域一个 `internal/<域>/` 包五件套内聚；`shared/outbox`、`money` 台账等横切下沉，基础设施作底座。跨域写一律经属主领域的服务方法落库，`product` 与 `search` 的环已斩为单向。
+20 个业务域按 bounded context 分组，每个域一个 `internal/<域>/` 包五件套内聚；`shared/outbox`、`money` 台账等横切下沉，基础设施作底座。跨域写一律经属主领域的服务方法落库，`product` 与 `search` 的环已斩为单向。
 
 ![gomall 领域地图](docs/architecture-domains.svg)
 
@@ -117,7 +117,7 @@
 - **不真上链**：Web3 合约源码 + Go binding 完整，但默认不连 RPC（env 控制）
 - **没有 merchant role**：商家自助 API（发货 / 看板 / 提现）路线图阶段
 - **没有物流单 / 售后工单 / 评价表**：订单状态机推到 7 态，但物流商对接 / 退货寄回 / 评价审核三件独立表是路线图
-- **不做前端**：纯后端 API，配 Postman 调
+- **不做前端**：纯后端 API，用 curl / Postman 自己调
 - **MVP 阶段聚焦交易闭环**：履约链路有 7 态但物流回流 / 售后 SOP 留待 wallet & merchant 落地后做
 
 未做清单完整版：`docs/architecture/feature-matrix.md`。
@@ -168,7 +168,7 @@
 - Cron 每 5min 兜底扫超时 UnPaid
 - 共用 `CancelUnpaidOrder` 入口，通过条件 UPDATE 兜底幂等（至少 4 个调用方：RMQ / Cron / 客服 / 用户）
 
-`internal/order/cancel.go` + `internal/order/task.go` + `initialize/cron.go`。这里踩过一个 cron 陷阱，已经修了，细节在第 12 节。
+`internal/order/cancel.go` + `internal/order/task.go` + `initialize/cron.go`。
 
 ### 5 · 抢红包二倍均值法：拆包公平 + 总额精确
 
@@ -177,7 +177,7 @@
 - 拆包是创建红包时一次性算好的 `[]int64` 数组 → RPUSH 进 Redis LIST
 - 抢红包 Lua：`HEXISTS 防重领 + LPOP 拿一份 + HSET 记账`，全原子
 
-`SplitRedPacket` + `claimScript` 在 `repository/cache/redpacket.go`。
+`SplitRedPacket` + `claimRedPacketScript` 在 `repository/cache/redpacket.go`。
 
 ### 6 · SlidingWindow ZSet：比 fixed window 准
 
@@ -249,16 +249,6 @@ func tryInitES(ctx context.Context) {
 }
 ```
 所有外部依赖独立 try* 函数 + recover，env 未设直接静默不启动，**主链路（下单 / 支付 / 列表 / 详情）永远在线**。
-
-### 12 · 几个我没修干净的坑
-
-代码不完美，几个写的时候就知道、暂时没动的问题列在这。deck 09 / deck 11 里也标了。
-
-**订单超时两个数对不上。** MQ 延迟队列是 30 分钟（`repository/rabbitmq/order_delay.go:22`），Cron 兜底扫的是 15 分钟没付的（`internal/order/task.go:25`，`GetTimeoutOrders(15, 100)`）。两条关单路径一个按 30 分钟一个按 15 分钟，实际先触发的是 15 分钟那条，30 分钟这个数没意义。前后分两次加的，没对齐。
-
-**`orders/delete` 是条野路子。** 路由 `internal/order/routes.go:19`，落到 `DeleteOrderById`（`internal/order/repo.go:185`）。这里的 `DeletedAt` 是普通 `*time.Time` 不是 `gorm.DeletedAt`，所以是物理删除不是软删。两个问题：没做状态判断，待付款（reserved 还占着库存）的订单也能删；删的时候不退 Redis reserved、也不写 outbox。行没了，超时 Cron 也扫不到，reserved 就一直挂在 Redis 上。现在靠 `RunStockReservationReconcile`（`initialize/cron.go:38`）每 5 分钟对账把这种孤儿预占收回来，能兜住，但这个删除接口本身该改。
-
-**这个已经修了：cron 表达式。** 原来关单写的是 `* */5 * * * *`，在 `cron.WithSeconds()` 下不是每 5 分钟，是「分钟数能被 5 整除时每秒触发一次」，60 次/5min，靠关单幂等才没出事。后来改成 `@every 5m`，`initialize/cron.go:21` 留了行注释。
 
 ---
 
@@ -334,7 +324,7 @@ func tryInitES(ctx context.Context) {
 
 ---
 
-## 业务侧 Deck（12 份，按业务域拆）
+## 业务侧 Deck（15 份 + 总览，按业务域拆）
 
 | # | 主题 | 文件 |
 |---|------|------|
@@ -350,6 +340,11 @@ func tryInitES(ctx context.Context) {
 | 10 | 流量治理 | `docs/slides/10-traffic-governance.{tex,pdf}` |
 | 11 | Outbox 与一致性 | `docs/slides/11-consistency.{tex,pdf}` |
 | 12 | 商家后台 + 可观测性 | `docs/slides/12-merchant-ops.{tex,pdf}` |
+| 13 | 满减促销引擎 | `docs/slides/13-promo-engine.{tex,pdf}` |
+| 14 | 拼团 | `docs/slides/14-groupbuy.{tex,pdf}` |
+| 15 | 预售（定金 / 尾款） | `docs/slides/15-preorder.{tex,pdf}` |
+
+另有一份总览 `docs/slides/00-overview.{tex,pdf}` 串起全局。
 
 每份 deck 约 40-50 页、≥ 6 TikZ、≥ 18 处 `file:line` 真实代码引用、≥ 5 段关键代码 + 逐行讲解、≥ 2 处来自 `stressTest/REPORT.md` 的实测数字。
 
@@ -364,7 +359,7 @@ cd docs/slides
 ./build.sh --master    # 合订本 master.pdf
 ```
 
-配套博客（11 篇）：`docs/blog/01-*.md` ~ `11-*.md`。
+配套博客（12 篇）：`docs/blog/01-*.md` ~ `11-*.md`。
 特性现状路线图：`docs/architecture/feature-matrix.md`。
 
 ---
@@ -446,11 +441,10 @@ gomall
 ├── config              # 配置加载
 ├── consts              # 全局常量（订单状态机 / 业务码 等）
 ├── contracts           # Solidity 合约（Web3 Escrow）
-├── doc                 # 项目说明 / 截图
 ├── docs
 │   ├── architecture    # feature matrix / DDD 迁移手册 / 路线图
-│   ├── blog            # 11 篇博客长文
-│   ├── slides          # 12 份 Beamer Deck（v2 expanded, 580+ 页）
+│   ├── blog            # 12 篇博客长文
+│   ├── slides          # 15 份 Beamer Deck + 00 总览
 │   └── slides-pipeline # 历史需求 / 方案 / 验收文档
 ├── initialize          # cron / inventory / outbox / search / web3 启动
 ├── internal            # 领域代码（每域一包：handler / service / repo / model / dto）
@@ -472,7 +466,6 @@ gomall
 │   ├── db
 │   │   └── dao         # DB 基座（连接 / InitMySQL；领域 repo / model 在 internal/<域>/）
 │   ├── es              # ElasticSearch
-│   ├── kafka           # Kafka（备用）
 │   ├── milvus          # Milvus 向量库
 │   └── rabbitmq        # RMQ（domain / order_async / order_delay）
 ├── routes              # 路由 + 中间件链
@@ -486,7 +479,7 @@ gomall
 
 ## 配置
 
-`config/locales/config.yaml`（拷贝 `config.yaml.example` 改）。
+`config/locales/config.yaml`（拷贝 `config.example.yaml` 改）。
 
 ```yaml
 system:
@@ -524,17 +517,7 @@ encryptSecret:
   phoneSecret: "PhoneSecret"
 ```
 
-完整字段看 `config/locales/config.yaml.example`。
-
----
-
-## Postman
-
-`doc/` 下有截图导入步骤：
-
-1. 打开 Postman → Import → 选择 `doc/` 下的接口文件
-2. 在 Collection（gin-mall）的 Variables 中加 `url` = `localhost:5001/api/v1/`
-3. 跑接口
+完整字段看 `config/locales/config.example.yaml`。
 
 ---
 
@@ -548,7 +531,7 @@ encryptSecret:
 | mysql driver | v1.5.0 |
 | redis | v9.0.4 |
 | dbresolver | v1.4.1 |
-| jwt-go | v3.2.0 |
+| golang-jwt/jwt | v4.5.2 |
 | crypto | v0.48.0 |
 | logrus | v1.9.3 |
 | go-ethereum | v1.17.3 |
@@ -556,13 +539,3 @@ encryptSecret:
 | rabbitmq/amqp091-go | v1.8.1 |
 | elastic/go-elasticsearch | v0.0.0 |
 | Skywalking-go | v0.0.0-20230511 |
-
----
-
-## 一起改
-
-欢迎提 PR，几条不成文的规矩：
-
-1. 从最新版本切分支，别直接往 main 上怼
-2. 自测过了再提
-3. 过了 review 再合
