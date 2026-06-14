@@ -264,9 +264,14 @@ func emitProductChanged(ctx context.Context, productID uint, op string) {
 
 // ProductUpdate 更新商品，延迟双删保证缓存一致性
 //  1. 先删缓存
-//  2. 写库
+//  2. 写库（WHERE id=? AND boss_id=? 防止越权覆盖他人商品）
 //  3. 异步等 500ms 再删一次（覆盖并发读取旧值后写回的窗口）
 func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (*Product, error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
 	product := &Product{
 		Name:          req.Name,
 		CategoryID:    req.CategoryID,
@@ -278,8 +283,13 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (
 		OnSale:        req.OnSale,
 	}
 	_ = cache.DelProductDetail(ctx, req.ID)
-	err := NewProductDao(ctx).UpdateProduct(req.ID, product)
+	affected, err := NewProductDao(ctx).UpdateProduct(req.ID, u.Id, product)
 	if err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
+	if affected == 0 {
+		err = errors.New("商品不存在或无权修改")
 		log.LogrusObj.Error(err)
 		return nil, err
 	}

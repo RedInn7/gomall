@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	_ "github.com/apache/skywalking-go"
 
@@ -35,7 +38,7 @@ func loading() {
 		panic(err)
 	}
 	cache.InitCache()
-	snowflake.InitSnowflake(1)
+	snowflake.InitSnowflake(snowflakeNodeID())
 	initialize.InitCron()
 	initialize.InitInventory(context.Background())
 	tryInitRabbitMQ()
@@ -46,6 +49,24 @@ func loading() {
 	tryInitWeb3Listener(context.Background())
 	tryInitMilvus(context.Background())
 	fmt.Println("加载配置完成...")
+}
+
+// snowflakeNodeID 从环境变量 SNOWFLAKE_NODE_ID（或 NODE_ID）读取雪花算法节点 ID，
+// 多实例部署时每个副本配置不同值以避免 ID 碰撞，缺省为 0。
+func snowflakeNodeID() int64 {
+	for _, envKey := range []string{"SNOWFLAKE_NODE_ID", "NODE_ID"} {
+		if raw := strings.TrimSpace(os.Getenv(envKey)); raw != "" {
+			n, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil {
+				util.LogrusObj.Warnf("snowflakeNodeID: invalid %s=%q, fallback to 0: %v", envKey, raw, err)
+				return 0
+			}
+			util.LogrusObj.Infof("snowflakeNodeID: using node id %d from env %s", n, envKey)
+			return n
+		}
+	}
+	util.LogrusObj.Infoln("snowflakeNodeID: SNOWFLAKE_NODE_ID / NODE_ID not set, defaulting to 0")
+	return 0
 }
 
 // tryInitRabbitMQ RabbitMQ 不可用时不阻塞启动，但放弃延迟队列能力

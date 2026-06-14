@@ -124,12 +124,13 @@ func seedPreorder(t *testing.T, db *gorm.DB, depositWindow, finalWindow time.Dur
 	// 与生产口径不一致，但本测试目标是状态机 + 库存，不是 AES 正确性，独立单测覆盖即可。
 	// 为了让 EncryptMoney/DecryptMoney 可逆，这里手动用一次 EncryptMoney 写入。
 	buyer := &user.User{UserName: "u-preorder", Money: "1000000"}
-	buyer.Money, _ = buyer.EncryptMoney(key)
+	_ = buyer.SetMoneyPassword(key)
+	buyer.Money, _ = buyer.EncryptMoney()
 	if err := db.Create(buyer).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	boss := &user.User{UserName: "boss-preorder", Money: "100"}
-	boss.Money, _ = boss.EncryptMoney(key)
+	boss.Money, _ = boss.EncryptMoney()
 	if err := db.Create(boss).Error; err != nil {
 		t.Fatalf("create boss: %v", err)
 	}
@@ -197,12 +198,13 @@ func TestPreorder_OutOfDepositWindowRejected(t *testing.T) {
 	now := time.Now()
 	buyer := &user.User{UserName: "u-out", Money: "1000000"}
 	key := "abc123"
-	buyer.Money, _ = buyer.EncryptMoney(key)
+	_ = buyer.SetMoneyPassword(key)
+	buyer.Money, _ = buyer.EncryptMoney()
 	if err := db.Create(buyer).Error; err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 	boss := &user.User{UserName: "boss-out", Money: "0"}
-	boss.Money, _ = boss.EncryptMoney(key)
+	boss.Money, _ = boss.EncryptMoney()
 	if err := db.Create(boss).Error; err != nil {
 		t.Fatalf("create boss: %v", err)
 	}
@@ -474,7 +476,7 @@ func TestPreorder_CancelInDepositWindowRefundsAndReleases(t *testing.T) {
 	if err := db.First(&u, fx.UserID).Error; err != nil {
 		t.Fatalf("load user: %v", err)
 	}
-	money, err := u.DecryptMoney(fx.Key)
+	money, err := u.DecryptMoney()
 	if err != nil {
 		t.Fatalf("decrypt: %v", err)
 	}

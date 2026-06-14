@@ -10,9 +10,9 @@ import (
 type Favorite struct {
 	dbmodel.Model
 	User      user.User       `gorm:"ForeignKey:UserID"`
-	UserID    uint            `gorm:"not null"`
+	UserID    uint            `gorm:"not null;uniqueIndex:uidx_user_product"`
 	Product   product.Product `gorm:"ForeignKey:ProductID"`
-	ProductID uint            `gorm:"not null"`
+	ProductID uint            `gorm:"not null;uniqueIndex:uidx_user_product"`
 	Boss      user.User       `gorm:"ForeignKey:BossID"`
 	BossID    uint            `gorm:"not null"`
 }
