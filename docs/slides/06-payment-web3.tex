@@ -499,6 +499,52 @@ Disputed     & 售后争议        & 买家或卖家 \texttt{dispute} \\
 \srcnote{service/web3/listener.go:303--311 outbox.Insert 写入 web3.payment.confirmed}
 \end{frame}
 
+\begin{frame}{金额口径事故：满减订单走链上付款被多扣}
+\textbf{业务场景}：买家命中"满 100 减 20"活动，下单页显示实付 \$80，订单库里
+\texttt{FinalCents=8000}、\texttt{PromoRuleID} 已写入。买家选了 Web3 通道付款。
+\begin{itemize}
+  \item \textbf{出事的地方}：Web3 路径计费写死 \texttt{order.Money $\times$ order.Num} —— 这是\textbf{折前总价} \$100，
+  完全没看 \texttt{FinalCents}。outbox 事件 \texttt{web3.payment.pending} 的 \texttt{Amount} 落了 10000 分。
+  \item \textbf{业务后果}：满减优惠\textbf{静默蒸发}，链上据这个金额向买家钱包要 \$100。买家明明看到 \$80，
+  实际被要 \$100，多扣 \$20 —— 而且是用户自付 gas 的链上转账，扣错了退起来比法币更麻烦。
+  \item \textbf{为什么只 Web3 中招}：法币 \texttt{/paydown} 路径\textbf{早就}按 \texttt{FinalCents} 折后实付扣款，
+  Web3 是后开的通道，漏接了这段口径，成了\textbf{漏网的那一条}。
+\end{itemize}
+\vspace{1mm}
+\small \textbf{工程教训}：一笔订单两条支付路径（法币 / 链上），\textbf{金额口径必须强制对齐}。
+任何一条新通道复用订单数据时，都得问一句"折后实付这件事它处理了吗"。
+\srcnote{internal/payment/service\_crypto.go:132--135 修复前写死折前价的位置}
+\srcnote{internal/payment/service.go:79--82 法币路径早已取 FinalCents（对照基准）}
+\end{frame}
+
+\begin{frame}[fragile]{修法：两条路径统一取 FinalCents 折后实付}
+\textbf{修法}：与法币路径一字不差地对齐 —— 命中满减（\texttt{PromoRuleID} 非 0）就取折后实付，
+否则才回落单价 $\times$ 件数。
+\begin{lstlisting}[language=Go,firstnumber=128,
+  caption={\srcnote{internal/payment/service\_crypto.go:128--146 VerifyAndPark 计费口径}}]
+// 实付口径与余额支付路径保持一致：命中满减时以折后实付为准。
+totalAmount := order.Money * int64(order.Num)   // 折前：单价 * 件数
+if order.PromoRuleID != 0 {                      // 命中满减
+    totalAmount = order.FinalCents               // 取折后实付
+}
+// ... 同一事务内写 outbox ...
+events.Web3PaymentPending{
+    OrderID: order.ID, Num: order.Num,
+    Amount:  totalAmount,        // 链上据此扣款的金额
+    WalletAddr: walletAddr, ChainID: req.ChainID,
+}
+\end{lstlisting}
+\small \textbf{逐行}：
+\begin{itemize}\setlength{\itemsep}{0pt}
+  \item \texttt{order.Money $\times$ order.Num}：无活动订单的默认口径，单价乘件数；
+  \item \textbf{判据用 \texttt{PromoRuleID} 而非 \texttt{FinalCents > 0}}：满减立减到 0 / 100\% 折扣时
+  \texttt{FinalCents==0} 是\textbf{合法实付}，用 \texttt{>0} 判会误判成未命中、回退全价（埋第二个坑）；
+  \item \texttt{Amount: totalAmount}：链上 listener 与商家对账都读这个值，口径错则全链路错。
+\end{itemize}
+\srcnote{internal/payment/service\_crypto.go:130--131 判据选 PromoRuleID 的原因（代码注释）}
+\srcnote{service/events/events.go:99--109 Web3PaymentPending.Amount 单位为分}
+\end{frame}
+
 \begin{frame}[fragile]{Escrow.sol 关键路径：fundWithOrderID}
 \begin{lstlisting}[language=Java,firstnumber=74,
   caption={\srcnote{contracts/Escrow.sol:74--82 fundWithOrderID}}]

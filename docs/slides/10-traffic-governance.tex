@@ -134,7 +134,7 @@ P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
   \end{itemize}
   \item 这层是\textbf{兜底闸门}，业务侧精细限流挂掉时至少不会被压死。
 \end{itemize}
-\srcnote{routes/router.go:41 TokenBucket(rate.Limit(100), 200)；middleware/ratelimit.go:23--50}
+\srcnote{routes/router.go:41 TokenBucket(rate.Limit(100), 200)；middleware/ratelimit.go:35--78}
 \end{frame}
 
 \begin{frame}{为什么 100 RPS / 200 burst：基线 64k 反推}
@@ -169,30 +169,57 @@ P3 信息 & /category/list, 轮播图   & 全局 + CDN   & 不需要 \\
   \item burst 决定能否吸收\textbf{瞬时尖刺}（首屏并发 / 用户狂点）。
   \item 业务含义：\textbf{允许尖刺 / 拒绝高水位}—— 真用户偶尔狂点不痛、爬虫稳态 5 QPS 触不到这层，但配合 IP 黑名单可以拦。
 \end{itemize}
-\srcnote{middleware/ratelimit.go:23--50 golang.org/x/time/rate 实现}
+\srcnote{middleware/ratelimit.go:35--78 golang.org/x/time/rate 实现}
+\end{frame}
+
+\begin{frame}{业务困局：限流器自己把整机内存吃光}
+\begin{itemize}
+  \item 每个新源 IP 第一次进来，都会在 \texttt{limiters} map 里新建一个 \texttt{rate.Limiter} 条目。
+  \item 原实现\textbf{只增不删}：IP 用完就不管了，条目永久留在 map 里。
+  \item 业务侧后果（长跑算账）：
+  \begin{itemize}
+    \item 公网攻击 / 扫描 / CDN 回源每天带来\textbf{百万级不重复 IP}；
+    \item 一周累计上千万条目 $\to$ map 占用涨到 GB 级 $\to$ \textbf{进程 OOM 被内核杀掉}；
+    \item 限流中间件\textbf{本该护住整机}，结果自己成了拖垮整机的那一个。
+  \end{itemize}
+  \item 隐蔽点：压测 / 灰度短时间看不出来，\textbf{只有真大促长时间高基数 IP 才暴雷}，最难复现。
+  \item 修法：给每个条目记 \texttt{lastSeen}，后台 janitor 每分钟扫一遍，\textbf{踢掉超过 10 分钟没访问的}，让 map 容量恒定有界。
+\end{itemize}
+\srcnote{middleware/ratelimit.go:19--24 TTL 常量；26--29 entry 带 lastSeen；51--65 janitor}
 \end{frame}
 
 \begin{frame}[fragile]{TokenBucket 中间件实现 (逐行)}
-\begin{lstlisting}[language=Go,firstnumber=23,basicstyle=\ttfamily\tiny,
-  caption={\srcnote{middleware/ratelimit.go:23--50}}]
+\begin{lstlisting}[language=Go,firstnumber=35,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{middleware/ratelimit.go:35--78}}]
 func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
     var mu sync.Mutex
-    limiters := make(map[string]*rate.Limiter)
+    limiters := make(map[string]*tokenBucketEntry) // 1) 带 lastSeen
     get := func(ip string) *rate.Limiter {
         mu.Lock(); defer mu.Unlock()
-        if l, ok := limiters[ip]; ok { return l }
-        l := rate.NewLimiter(rps, burst); limiters[ip] = l; return l
-    }
-    return func(c *gin.Context) {
-        if !get(c.ClientIP()).Allow() {
-            c.JSON(200, gin.H{"status": e.ErrRateLimitExceeded})
-            c.Abort(); return
+        e, ok := limiters[ip]
+        if !ok {
+            e = &tokenBucketEntry{limiter: rate.NewLimiter(rps, burst)}
+            limiters[ip] = e
         }
-        c.Next()
+        e.lastSeen = time.Now()                    // 2) 每次访问刷新
+        return e.limiter
     }
+    go func() {                                    // 3) 后台 janitor
+        ticker := time.NewTicker(tokenBucketCleanupInterval)
+        for range ticker.C {
+            now := time.Now(); mu.Lock()
+            for ip, e := range limiters {
+                if now.Sub(e.lastSeen) > tokenBucketIdleTTL {
+                    delete(limiters, ip)           // 4) 回收空闲条目
+                }
+            }
+            mu.Unlock()
+        }
+    }()
+    return func(c *gin.Context) { /* Allow() 不过 -> 200+70001 */ }
 }
 \end{lstlisting}
-\scriptsize ① map 按 IP 隔离（NAT 出口共享一个桶是已知代价）；② 每 IP 一个 \texttt{rate.Limiter}；③ \texttt{Allow()} 非阻塞，不留排队队列；④ 拒了直接 200+70001（不发 5xx，详见熔断章节）；⑤ 进程内 map 是单机代价，多实例要换 Redis token bucket。
+\scriptsize (1) 条目从裸 \texttt{*rate.Limiter} 换成带 \texttt{lastSeen} 的 \texttt{tokenBucketEntry}；(2) 每次取用都刷新 \texttt{lastSeen}（活跃 IP 永不被误删）；(3) 起一个 ticker goroutine 每分钟清扫；(4) 超过 \texttt{tokenBucketIdleTTL}（10min）未访问的条目删除 $\to$ \textbf{map 容量随活跃 IP 数有界、不再无界增长 OOM}；(5) 清扫和取用共用同一把锁，无竞态；(6) 进程内 map 是单机代价，多实例要换 Redis token bucket。
 \end{frame}
 
 % ============================================================
@@ -324,7 +351,7 @@ return {1, count + 1}
   \item CircuitBreaker 的业务含义：\textbf{我代下游回答你不行，免得你等 30 秒还白等}。
   \item P0 SLO 99.95\% 的预算 4h22min/年，雪崩一次烧完。
 \end{itemize}
-\srcnote{internal/payment/routes.go:14--21 paydown 接 CB；middleware/circuitbreaker.go:44--136}
+\srcnote{internal/payment/routes.go:14--21 paydown 接 CB；middleware/circuitbreaker.go:45--140}
 \end{frame}
 
 \begin{frame}{熔断保护的不是自己，是下游 + 自己 + 用户}
@@ -355,14 +382,30 @@ return {1, count + 1}
 \vspace{1mm}
 \small \textbf{Closed}：放行所有，连续 5 次失败 $\to$ Open。
 \textbf{Open}：直接返回 70002，10s 后试探。
-\textbf{HalfOpen}：放 3 个探测，全成功 $\to$ Closed；任一失败 $\to$ Open。\\
-非对称信任：\textbf{进 Open 容易、回 Closed 难}—— 资金链路的正确取舍。
-\srcnote{middleware/circuitbreaker.go:76--128 allow + report}
+\textbf{HalfOpen}：放 3 个探测，\textbf{3 个全成功}才 $\to$ Closed；任一失败立即 $\to$ Open。\\
+非对称信任：\textbf{进 Open 容易、回 Closed 难}—— 抖动期不靠偶发成功放全量，是资金链路的正确取舍。
+\srcnote{middleware/circuitbreaker.go:77--130 allow + report；123 halfOpenSuccess 判据}
+\end{frame}
+
+\begin{frame}{业务困局：半开期一个偶发成功就放全量流量}
+\begin{itemize}
+  \item 熔断 Open 后 10s 进 HalfOpen，放 3 个探测请求去问下游"你好了没"。
+  \item 原判据有 bug：\textbf{只要其中一个探测成功，就立刻回 Closed} 放全量流量。
+  \item 为什么这是灾难（抖动期算账）：
+  \begin{itemize}
+    \item 下游正在网络抖动 / 半死不活，成功率可能只有 30\%；
+    \item 3 个探测里\textbf{碰巧第一个成功} $\to$ 误判"下游已恢复" $\to$ 全量 100k QPS 瞬间压回去；
+    \item 半死的下游被这波全量\textbf{再次打垮} $\to$ 又熔断 $\to$ 又探测碰运气 $\to$ 反复横跳，永远恢复不了。
+  \end{itemize}
+  \item 正确判据：HalfOpen 期间\textbf{放行的探测必须全部成功}（连续成功达到 \texttt{HalfOpenMaxReq}）才回 Closed；任一失败立即回 Open。
+  \item 修法：新增 \texttt{halfOpenSuccess} 计数，\textbf{只数成功的探测}，与"已放行数 \texttt{halfOpenReq}"分开统计。
+\end{itemize}
+\srcnote{middleware/circuitbreaker.go:36 halfOpenSuccess 字段；120--128 report 判据}
 \end{frame}
 
 \begin{frame}[fragile]{CircuitBreaker.allow 状态转移 (逐行)}
-\begin{lstlisting}[language=Go,firstnumber=76,basicstyle=\ttfamily\tiny,
-  caption={\srcnote{middleware/circuitbreaker.go:76--106 allow}}]
+\begin{lstlisting}[language=Go,firstnumber=77,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{middleware/circuitbreaker.go:77--108 allow}}]
 func (cb *circuitBreaker) allow() error {
     switch circuitState(cb.state.Load()) {
     case stateClosed: return nil                          // 1) 关闭态零开销
@@ -371,26 +414,31 @@ func (cb *circuitBreaker) allow() error {
             return errCircuitOpen                         // 2) Open 期间一律拒
         }
         cb.mu.Lock(); defer cb.mu.Unlock()
-        if circuitState(cb.state.Load()) == stateOpen {   // 3) 锁内 double-check
+        if circuitState(cb.state.Load()) == stateOpen && /* 3) 锁内 double-check */
+            time.Now().UnixNano()-cb.openedAt.Load() >= int64(cb.opt.OpenTimeout) {
             cb.state.Store(int32(stateHalfOpen))
-            cb.halfOpenReq.Store(0)
+            cb.halfOpenReq.Store(0); cb.halfOpenSuccess.Store(0) // 4) 双计数清零
         }
-        fallthrough                                       // 4) 进入 HalfOpen
+        if circuitState(cb.state.Load()) == stateHalfOpen {
+            if cb.halfOpenReq.Add(1) > cb.opt.HalfOpenMaxReq {
+                return errCircuitOpen                     // 5) 探测名额超限退回
+            }
+            return nil
+        }
+        return errCircuitOpen
     case stateHalfOpen:
-        if cb.halfOpenReq.Add(1) > cb.opt.HalfOpenMaxReq {
-            return errCircuitOpen                         // 5) 探测超限退回
-        }
+        if cb.halfOpenReq.Add(1) > cb.opt.HalfOpenMaxReq { return errCircuitOpen }
         return nil
     }
     return nil
 }
 \end{lstlisting}
-\scriptsize ① Closed 仅 atomic load（业务无感）；② Open 内不查时间就拒（10ms 内回 70002，对比 30s 超时是 3000$\times$ 提升）；③ Open$\to$HalfOpen 锁内 double-check；④ HalfOpen 用原子 Add 限并发；⑤ 热路径无 mutex（不能因为治理把自己变成瓶颈）。
+\scriptsize (1) Closed 仅 atomic load（业务无感）；(2) Open 内不查时间就拒（10ms 内回 70002，对比 30s 超时是 3000$\times$ 提升）；(3) Open$\to$HalfOpen 锁内 double-check；(4) 进 HalfOpen 同时把\textbf{已放行数与成功数双双清零}（成功数是本轮修复新增）；(5) HalfOpen 只放 \texttt{HalfOpenMaxReq} 个探测，超额一律拒。
 \end{frame}
 
-\begin{frame}[fragile]{report：决定下一刻是 Closed 还是 Open}
-\begin{lstlisting}[language=Go,firstnumber=108,basicstyle=\ttfamily\tiny,
-  caption={\srcnote{middleware/circuitbreaker.go:108--128 report}}]
+\begin{frame}[fragile]{report：必须全部探测成功才回 Closed}
+\begin{lstlisting}[language=Go,firstnumber=110,basicstyle=\ttfamily\tiny,
+  caption={\srcnote{middleware/circuitbreaker.go:110--130 report}}]
 func (cb *circuitBreaker) report(failed bool) {
     switch circuitState(cb.state.Load()) {
     case stateClosed:
@@ -400,15 +448,18 @@ func (cb *circuitBreaker) report(failed bool) {
             }
         } else { cb.failures.Store(0) }   // 成功重置
     case stateHalfOpen:
-        if failed { cb.tripOpen()         // 任一失败 -> Open
-        } else if cb.halfOpenReq.Load() >= cb.opt.HalfOpenMaxReq {
-            cb.state.Store(int32(stateClosed)) // 全成功 -> Closed
+        if failed {
+            cb.tripOpen()                 // 任一失败 -> 立即回 Open
+        } else if cb.halfOpenSuccess.Add(1) >= cb.opt.HalfOpenMaxReq {
+            cb.mu.Lock()                  // 成功数累计达阈值 -> 回 Closed
+            cb.state.Store(int32(stateClosed))
             cb.failures.Store(0)
+            cb.mu.Unlock()
         }
     }
 }
 \end{lstlisting}
-\scriptsize ① Closed 累加失败计数；② 成功重置避免偶发抖动跳闸；③ HalfOpen \textbf{非对称}—— 任一失败立即回 Open，必须全成功才回 Closed；④ "进 Open 容易、回 Closed 难"对资金链路合适：宁保守不再打死下游，业务上"宁可多熔一会、也不能再雪崩"。
+\scriptsize (1) Closed 累加失败计数；(2) 成功重置避免偶发抖动跳闸；(3) \textbf{本轮修复点}：HalfOpen 回 Closed 的判据从"已放行数 \texttt{halfOpenReq} 到阈值"改成"\textbf{成功数 \texttt{halfOpenSuccess} 到阈值}"，即放行的探测\textbf{全部成功}才闭合；(4) 任一探测失败立即 \texttt{tripOpen} 回 Open；(5) "进 Open 容易、回 Closed 难"对资金链路合适：抖动期\textbf{绝不靠一个偶发成功就放全量}，避免半死下游被再次打垮。
 \end{frame}
 
 \begin{frame}{熔断 + 幂等的三角配对：Open 返回 200 + 70002}
@@ -428,7 +479,7 @@ func (cb *circuitBreaker) report(failed bool) {
   \item 客户端拿 70002 指数退避（1s/2s/4s）；重试必须带原 Idempotency-Key。
   \item paydown 同时挂 CB + Idempotency 不是巧合：缺一边 $\to$ 重复扣款；缺另一边 $\to$ 雪崩。
 \end{itemize}
-\srcnote{internal/payment/routes.go:14--21；middleware/circuitbreaker.go:57--65；pkg/e/code.go:58}
+\srcnote{internal/payment/routes.go:14--21；middleware/circuitbreaker.go:58--66；pkg/e/code.go:58}
 \end{frame}
 
 % ============================================================
@@ -631,7 +682,7 @@ func (s *OrderSrv) OrderEnqueue(ctx, req) (interface{}, error) {
   \end{itemize}
   \item 关键：\textbf{70002 = 设计内的"已知不可用"} $\neq$ "系统挂了"。客服话术要让用户感到\textbf{平台主动控制}，不是\textbf{失控}。
 \end{itemize}
-\srcnote{internal/payment/routes.go:14--21；middleware/circuitbreaker.go:57--65}
+\srcnote{internal/payment/routes.go:14--21；middleware/circuitbreaker.go:58--66}
 \end{frame}
 
 % ============================================================
@@ -761,7 +812,7 @@ SlidingWindow 精度 & 误差 $\le$ 5\%      & 实测 \textbf{2.2\%} \\
   \item CB-B 守"支付聚合服务"整体：三家全挂时止血。
   \item CB-A 守"订单服务"整体：极端场景退化只读，让用户至少能看到订单列表。
 \end{itemize}
-\srcnote{middleware/circuitbreaker.go:44--136 单实例 CB; internal/payment/routes.go:14--21 仅 CB-A 接入}
+\srcnote{middleware/circuitbreaker.go:45--140 单实例 CB; internal/payment/routes.go:14--21 仅 CB-A 接入}
 \end{frame}
 
 \begin{frame}{级联防护的两个隐藏陷阱}
@@ -772,7 +823,7 @@ SlidingWindow 精度 & 误差 $\le$ 5\%      & 实测 \textbf{2.2\%} \\
   对策：兜底路径\textbf{不能}计入 CB-B 的失败计数；report 时按 status code 维度分桶。
   \item gomall 当前只挂了 CB-A（paydown），CB-B / CB-C 是把单实例 CB 复制到下游服务上的扩展模式。
 \end{itemize}
-\srcnote{middleware/circuitbreaker.go:69 失败判定 = 5xx 或 c.Errors; 兜底路径需要在 handler 内吞掉 5xx 改成 200+stale}
+\srcnote{middleware/circuitbreaker.go:70 失败判定 = 5xx 或 c.Errors; 兜底路径需要在 handler 内吞掉 5xx 改成 200+stale}
 \end{frame}
 
 \begin{frame}{网关层选型：Kong / APISIX / Nginx Ingress / 自研}
@@ -807,7 +858,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 \end{tabular}\par
 \vspace{2mm}
 {\small gomall 选\textbf{滑动窗口 ZSet}（sliding-log 变种）跑秒杀，因为业务上要\textbf{精确反黑产}；选\textbf{令牌桶}跑全局，因为允许首屏突发。}
-\srcnote{middleware/ratelimit.go:23--50 token-bucket; repository/cache/ratelimit.go:18--34 sliding-log}
+\srcnote{middleware/ratelimit.go:35--78 token-bucket; repository/cache/ratelimit.go:18--34 sliding-log}
 \end{frame}
 
 \begin{frame}{熔断打开后：兜底数据让"不可用"变"降级可用"}
@@ -877,7 +928,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 
 \vspace{2mm}
 \textbf{Q5}：为什么熔断返回 200 不返回 503？客服怎么用？\\
-\hspace{4mm}\small A：app 端老网关不能优雅处理 5xx；统一业务码 70002 = 客户端只用维护一套 status switch、客服直接对照话术表。监控不要按 4xx/5xx 算错误率，必须看 status。代码 \texttt{middleware/circuitbreaker.go:57--65}；客服话术 \texttt{pkg/e/msg.go:52}。
+\hspace{4mm}\small A：app 端老网关不能优雅处理 5xx；统一业务码 70002 = 客户端只用维护一套 status switch、客服直接对照话术表。监控不要按 4xx/5xx 算错误率，必须看 status。代码 \texttt{middleware/circuitbreaker.go:58--66}；客服话术 \texttt{pkg/e/msg.go:52}。
 
 \vspace{2mm}
 \textbf{Q6}：黑产薅券 ROI 怎么算 SlidingWindow 的收益？\\
@@ -886,7 +937,7 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 
 \begin{frame}{面试 Q\&A (下)}
 \textbf{Q7}：多层熔断会不会"探测雪崩"？怎么办？\\
-\hspace{4mm}\small A：会。外层 CB 的 OpenTimeout 要长于内层（30s vs 10s）错开 HalfOpen 探测窗口；同时兜底路径不应计入失败计数，否则 cache 过期会让外层跟着 Open。代码 \texttt{middleware/circuitbreaker.go:69 失败判定}。
+\hspace{4mm}\small A：会。外层 CB 的 OpenTimeout 要长于内层（30s vs 10s）错开 HalfOpen 探测窗口；同时兜底路径不应计入失败计数，否则 cache 过期会让外层跟着 Open。代码 \texttt{middleware/circuitbreaker.go:70 失败判定}。
 
 \vspace{2mm}
 \textbf{Q8}：全链路压测怎么避免污染真实数据？\\
@@ -901,9 +952,9 @@ gomall 现状    & gin in-proc & 进程内 & IP / 用户 & 单体直连 \\
 \footnotesize
 \begin{description}
   \item[router 挂载点] \srcnote{routes/router.go:41 全局令牌桶；internal/product/routes.go:15--16；internal/redpacket/routes.go:20--25；internal/payment/routes.go:14--21；internal/skill/routes.go:17--24}
-  \item[TokenBucket] \srcnote{middleware/ratelimit.go:23--50}
+  \item[TokenBucket] \srcnote{middleware/ratelimit.go:35--78（含 51--65 janitor 回收空闲限流器）}
   \item[SlidingWindow] \srcnote{middleware/ratelimit.go:60--107 + repository/cache/ratelimit.go:18--34}
-  \item[CircuitBreaker] \srcnote{middleware/circuitbreaker.go:44--136}
+  \item[CircuitBreaker] \srcnote{middleware/circuitbreaker.go:45--140（半开回 Closed 需全部探测成功，123）}
   \item[HTTPCache] \srcnote{middleware/httpcache.go:47--100}
   \item[OrderEnqueue] \srcnote{internal/order/async.go:118--171}
   \item[业务码] \srcnote{pkg/e/code.go:23, 35--39, 49, 54, 57--58 / msg.go:51--52}

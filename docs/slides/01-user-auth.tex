@@ -899,6 +899,29 @@ func (u *User) CheckPassword(pwd string) bool {
 \end{frame}
 
 
+\begin{frame}[fragile]{用户域其它能力：关注关系的脏边治理}
+\textbf{业务困局}：用户 A 关注一个不存在的 user id（前端传错 / 接口被刷），旧代码\textbf{吞掉"查目标用户"的错误}，对主键为 0 的零值 \texttt{User\{\}} 直接写关系表 \(\to\) 关系图里多出一条指向 id=0 的\textbf{幽灵关注边}：展开关注列表出现空白用户、计数虚高、后续 join 拿到脏数据。
+\begin{lstlisting}[language=Go,firstnumber=67,
+  caption={\srcnote{internal/user/repo.go:67--84 loadRelationUsers}}]
+func (d *UserDao) loadRelationUsers(uId, followerId uint) (u, f *User, err error) {
+    u, f = new(User), new(User)
+    if err = d.DB.Model(&User{}).Where(`id = ?`, uId).First(&u).Error; err != nil {
+        if errors.Is(err, gorm.ErrRecordNotFound) {
+            return nil, nil, ErrUserNotExist   // 目标不存在即拒绝，不写关系表
+        }
+        log.LogrusObj.Error(err); return nil, nil, err
+    }
+    // followerId 同样先校验存在性，任一端缺失都不落库
+    ...
+}
+\end{lstlisting}
+\begin{itemize}\footnotesize
+  \item 修法：关注 / 取关前\textbf{先校验两端用户查询的 error}，命中 \texttt{ErrRecordNotFound} 即返回 \texttt{ErrUserNotExist}，不再对零值 \texttt{User} 执行 \texttt{Association.Append}。
+  \item \texttt{FollowUser} / \texttt{UnFollowUser} 收口到同一加载函数，校验逻辑只写一处，关系写入永远基于已存在的真实用户。
+\end{itemize}
+\srcnote{internal/user/repo.go:30--46 FollowUser；:49--63 UnFollowUser；:67--84 loadRelationUsers；internal/user/service.go:326--346 UserFollow/UserUnFollow}
+\end{frame}
+
 \begin{frame}{审计日志：admin 操作必须留痕}
 \begin{itemize}
   \item 当前 admin 3 个接口（promote / backfill / users），\textbf{无审计写入}。
