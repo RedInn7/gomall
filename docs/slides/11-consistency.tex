@@ -456,7 +456,7 @@ C 端用户  & 改价后 $\leq 5$ 分钟看到新价 & $\leq 1$ s（延迟双删
 
 \vspace{1mm}
 {\small \textbf{业务承诺}：缓存延迟双删 $\leq 1$ s 内全部生效（实测 500 ms 抹掉所有 race）。}
-\srcnote{repository/cache/product.go:14--17 常量定义}
+\srcnote{repository/cache/product.go:17--18 常量定义}
 \end{frame}
 
 \begin{frame}{延迟双删时序图}
@@ -472,12 +472,12 @@ C 端用户  & 改价后 $\leq 5$ 分钟看到新价 & $\leq 1$ s（延迟双删
   \draw[arrow,bend right=20](0,-30mm) to node[above,font=\tiny\color{cAccent}]{3.500ms 后再 DEL} (30mm,-30mm);
   \node[font=\tiny] at (45mm,-40mm) {第二次 DEL 抹掉 race 写回的旧值，窗口收敛到亚秒级};
 \end{tikzpicture}
-\srcnote{repository/cache/product.go:64--74 \texttt{DoubleDeleteAsync}}
+\srcnote{repository/cache/product.go:112--120 \texttt{DoubleDeleteAsync}}
 \end{frame}
 
 \begin{frame}[fragile]{双删 + 击穿保护：源码}
-\begin{lstlisting}[language=Go,firstnumber=55,
-  caption={\srcnote{repository/cache/product.go:55--74}}]
+\begin{lstlisting}[language=Go,firstnumber=102,
+  caption={\srcnote{repository/cache/product.go:102--120}}]
 // TryProductLock SETNX 抢回源锁，避免缓存击穿时多个请求同时回源
 func TryProductLock(ctx context.Context, id uint) (bool, error) {
     return RedisClient.SetNX(ctx, ProductLockKey(id), "1", ProductLockTTL).Result()
@@ -586,6 +586,89 @@ func DoubleDeleteAsync(id uint, interval time.Duration) {
 \end{frame}
 
 % ============================================================
+\section{可靠性补强：幂等卡死与 MQ 自愈}
+% ============================================================
+
+\begin{frame}[fragile]{困局一：幂等记录卡在 processing 永不可重试}
+\textbf{业务困局}：下单 / 支付带 \texttt{Idempotency-Key}，中间件先置 processing，业务跑完再推进到 done。若这步\textbf{提交失败}（Redis 抖动 / 请求 ctx 已取消），旧实现只打日志 —— 记录永久停在 processing，同 Key 再来一律返回 60002，\textbf{直到 TTL 过期才解锁}。此时业务副作用\textbf{已落库}、2xx \textbf{已返回}，既不能忽略也不能盲目重放，用户视角是"付款反复被挡、单子既没成也不能重下"。
+\begin{lstlisting}[language=Go,firstnumber=122,
+  caption={\srcnote{middleware/idempotency.go:122--134}}]
+func commitIdempotencyResult(key, result string) {
+    for i := 0; i < idempotencyCommitRetries; i++ {
+        ctx, cancel := context.WithTimeout(context.Background(), idempotencyCleanupTimeout)
+        err := cache.CommitIdempotencyResult(ctx, key, result)
+        cancel()
+        if err == nil { return }
+        log.LogrusObj.Errorln("idempotency commit error:", err)
+    }
+    releaseIdempotencyLock(key) // 回退 init，优先保证客户端可重试
+}
+\end{lstlisting}
+\small \textbf{修复}：提交失败改为后台独立 context 带超时重试若干次；仍失败则把记录\textbf{回退到 init}，让客户端用同一 Key 安全重试，而非滞留 processing。
+\srcnote{middleware/idempotency.go:19--23 重试常量；repository/cache/idempotency.go:87--90 回退 init}
+\end{frame}
+
+\begin{frame}{困局二：毒丸消息无限 requeue 打爆队列}
+\textbf{业务困局}：消费失败时 \texttt{Nack(requeue=true)} 会把消息退回队首立刻重投。若是\textbf{不可恢复}的毒丸消息（body 解析失败 / 未知 routing key），它会被无限回灌：
+\begin{itemize}
+  \item 单条坏消息把消费者 100\% CPU 占住，正常消息全部饿死 $\to$ 满减预算不退、延迟关单停摆。
+  \item 旧实现靠"判断 error 类型"决定是否丢弃，脆弱：业务把所有错误都判成可重试，兜底就失效。
+\end{itemize}
+\textbf{修复}：改成\textbf{按投递次数}判定。优先读 broker 维护的 \texttt{x-death} header（跨重启可靠的死信计数），退化用 \texttt{Redelivered}；次数达阈值就显式投到独立 DLX/DLQ 并打 error 告警，再 Ack 原消息 —— 即便错误分类失灵也不会无界回灌。
+\begin{itemize}
+  \item 用独立 \texttt{domain.dlx} / \texttt{domain.dlq}，不给存量业务队列加 \texttt{x-dead-letter-exchange} 参数，避免 broker 406 \texttt{PRECONDITION\_FAILED}。
+  \item 投 DLQ 本身失败时\textbf{不 Ack}，退回 \texttt{Nack(requeue)} 靠下一轮兜底，守住 at-least-once 不丢。
+\end{itemize}
+\srcnote{repository/rabbitmq/poison.go:54--87 计数与超限判定；:93--115 RouteToDLQ}
+\end{frame}
+
+\begin{frame}{毒丸消息超阈值进 DLQ 的流转}
+\begin{center}
+\resizebox{0.96\textwidth}{!}{%
+\begin{tikzpicture}[node distance=8mm and 12mm,font=\scriptsize]
+  \node[node-box] (q) {业务队列\\order.dead / promo.release};
+  \node[node-box,right=of q] (c) {消费者\\deliver};
+  \node[node-box,right=of c,node-warn] (chk) {投递次数\\$\geq$ 阈值?};
+  \node[node-box,above=of chk,node-ok] (ok) {Ack\\处理成功};
+  \node[node-box,below=of chk] (nack) {Nack requeue\\退避重投};
+  \node[node-box,right=of chk,node-bad] (dlq) {domain.dlq\\+ error 告警};
+  \node[node-box,below=of dlq] (ops) {运维排查\\人工补偿};
+  \draw[arrow] (q) -- (c);
+  \draw[arrow] (c) -- (chk);
+  \draw[arrow] (c) -- node[right,font=\tiny]{nil} (ok);
+  \draw[arrow] (chk) -- node[left,font=\tiny]{否 / 首投失败} (nack);
+  \draw[arrow,bend left=20] (nack.west) to (q.south);
+  \draw[arrow-alert] (chk) -- node[above,font=\tiny]{是 / 毒丸} (dlq);
+  \draw[arrow] (dlq) -- (ops);
+\end{tikzpicture}}
+\end{center}
+\vspace{1mm}
+\small \textbf{两条进 DLQ 的路径}：消费侧错误分类判为不可恢复（poison）\textbf{或}投递次数超阈值兜底。两路统一进独立 DLQ，不混进业务队列。\\
+\texttt{order.dead.queue} 未配 DLX，首次失败允许重投一次，再失败（\texttt{Redelivered}）即转 DLQ；\texttt{promo.release} 则 poison 或超限即转。
+\srcnote{repository/rabbitmq/order\_delay.go:87--99；internal/promo/consumer.go:95--102；initialize/cron.go:146--150 声明 DLX 拓扑}
+\end{frame}
+
+\begin{frame}[fragile]{困局三：消费者断连后静默停摆 + 生产 fail-fast}
+\textbf{业务困局}：amqp091-go \textbf{不做自动恢复}。broker 重启 / 网络抖动关掉投递通道后，旧消费者的 \texttt{for range msgs} 直接退出 goroutine —— \textbf{静默死亡}，无报错无重连，延迟关单 / 满减退预算 / 异步下单全部停摆。另一面：旧 \texttt{InitRabbitMQ} 连不上时\textbf{内部 panic / 吞错}，生产行为不可控。
+\begin{lstlisting}[language=Go,firstnumber=26,
+  caption={\srcnote{repository/rabbitmq/consumer.go:26--45}}]
+func superviseConsumer(cfg consumerConfig) {
+    go func() {
+        for {
+            ch, msgs, err := subscribe(cfg)
+            if err != nil { time.Sleep(consumerRetryDelay); continue }
+            for d := range msgs { cfg.deliver(d) }
+            _ = ch.Close()                 // 通道被关：释放句柄
+            time.Sleep(consumerRetryDelay) // 退避后回到顶部重订阅
+        }
+    }()
+}
+\end{lstlisting}
+\small \textbf{修复}：消费者跑在自愈 supervisor 里，通道关闭即 Close 旧句柄、退避后经 \texttt{ensureConnection} 重连重订阅；断连翻转 \texttt{healthy} 标记供探活，启动按 \texttt{RequireOnStartup} 决定 fail-fast 还是降级。
+\srcnote{repository/rabbitmq/init.go:20--27 healthy；:75--78 RequireOnStartup；cmd/main.go:75--83 fail-fast}
+\end{frame}
+
+% ============================================================
 \section{真实事故复盘：用户怎么感知到的}
 % ============================================================
 
@@ -643,7 +726,7 @@ func DoubleDeleteAsync(id uint, interval time.Duration) {
 \end{enumerate}
 \vspace{1mm}
 \textbf{业务影响}：服务起不来 = 全站瘫痪 = GMV 归零 = P0 事故。
-\srcnote{cmd/main.go:32--33 修复后的顺序；stressTest/REPORT.md \S 已修：\texttt{util.LogrusObj}}
+\srcnote{cmd/main.go:35--36 修复后的顺序；stressTest/REPORT.md \S 已修：\texttt{util.LogrusObj}}
 \end{frame}
 
 \begin{frame}{修复后的启动顺序（业务因果）}
@@ -759,7 +842,7 @@ DB $\leftrightarrow$ Cache   & Cache Aside + 延迟双删 & \texttt{product:deta
 
 \vspace{2mm}
 \textbf{Q3}：延迟双删的"延迟"该取多大？\\
-\hspace{4mm}\small A：取\textbf{大于}最长读 race 窗口。gomall 取 500ms：DB 写常态 5--20ms，留 20$\times$ 余量盖 GC / 网络抖动；TTL 10min 兜底。\srcnote{repository/cache/product.go:14--17}
+\hspace{4mm}\small A：取\textbf{大于}最长读 race 窗口。gomall 取 500ms：DB 写常态 5--20ms，留 20$\times$ 余量盖 GC / 网络抖动；TTL 10min 兜底。\srcnote{repository/cache/product.go:17--18}
 
 \vspace{2mm}
 \textbf{Q4}：协同式 vs 编排式 Saga，怎么选？\\
@@ -809,7 +892,7 @@ DB $\leftrightarrow$ Cache   & Cache Aside + 延迟双删 & \texttt{product:deta
   \item[OrderCreate (业务 + outbox 同事务)]\srcnote{internal/order/service.go::OrderCreate}
   \item[CancelUnpaidOrder (Saga 补偿)]\srcnote{internal/order/cancel.go:14--68}
   \item[promo.release 消费者 + 释放台账]\srcnote{internal/promo/consumer.go:25--94 / internal/promo/model.go:54--62}
-  \item[缓存双删 / SETNX 回源锁]\srcnote{repository/cache/product.go:13--74}
+  \item[缓存双删 / SETNX 回源锁]\srcnote{repository/cache/product.go:13--120}
   \item[ProductUpdate 调用双删]\srcnote{internal/product/service.go ProductUpdate}
   \item[启动顺序修复点]\srcnote{cmd/main.go:30--52；branch fix/init-log-order-before-rmq}
   \item[业务码全表]\srcnote{pkg/e/code.go}

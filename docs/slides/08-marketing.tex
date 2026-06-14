@@ -178,7 +178,41 @@ return 1
 \end{lstlisting}
 \vspace{-1mm}
 \scriptsize \textbf{业务码映射}：\texttt{1 $\to$ 200 成功}；\texttt{-1 $\to$ "已抢光" 终态}；\texttt{-2 $\to$ "每人限领 N 张"}。Lua 返回 \texttt{int}，Go 侧 switch 翻译成 \texttt{ErrCouponSoldOut / ErrCouponPerUserExceed}（无独立业务码，复用 ERROR=500 + 文案）。
-\srcnote{repository/cache/coupon.go:57--75 ClaimCouponAtomic 翻译错误码}
+\srcnote{repository/cache/coupon.go:67--85 ClaimCouponAtomic 翻译错误码}
+\end{frame}
+
+\begin{frame}[fragile]{coupon 回滚必须原子：两条独立命令留下的资损口子}
+\small \textbf{业务场景}：Lua 已扣库存 + 记单人，但下一步 DB \texttt{PersistClaim} 落库失败，必须把这两个计数\textbf{一起还回去}。早期回滚用两条独立命令、且\textbf{吞掉错误}：
+\begin{lstlisting}[language=Go,firstnumber=1,
+  caption={旧实现：库存与已领标记分两次写、错误被丢弃}]
+RedisClient.Incr(ctx, stockKey)        // 还库存
+RedisClient.Decr(ctx, userClaimedKey)  // 撤单人标记 —— 两条独立、无返回
+\end{lstlisting}
+\vspace{-1mm}
+\textbf{业务后果}：两条命令之间崩溃或第二条失败，会出现\textbf{半还状态}——
+\begin{itemize}\itemsep0pt
+  \item 库存还了、单人标记没撤：用户\textbf{白白少领一张}（明明没领到却被记了一次）。
+  \item 单人标记撤了、库存没还：这一张\textbf{库存幽灵消耗}，别人永远抢不到。
+  \item 错误被吞 $\to$ 运营无从察觉，活动结束盘点才发现\textbf{发券数对不上}。
+\end{itemize}
+\srcnote{repository/cache/coupon.go:87--93 RollbackCouponStock}
+\end{frame}
+
+\begin{frame}[fragile]{修法：单条 Lua 原子归还 + 返回 error 供补偿}
+\begin{lstlisting}[language=LuaRedis,firstnumber=50,
+  caption={\srcnote{repository/cache/coupon.go:50--54 rollbackScript}}]
+redis.call('INCR', KEYS[1])   -- 归还库存
+redis.call('DECR', KEYS[2])   -- 撤销用户已领标记
+return 1
+\end{lstlisting}
+\vspace{-1mm}
+\small 两个动作放进\textbf{同一个 Lua 单元}，Redis 单线程执行保证\textbf{同进同退}，不再有半还状态。这与领券 \texttt{claimScript} 是同一套纪律——\textbf{扣减原子，回滚也必须原子}。
+\vspace{1mm}
+\begin{itemize}\itemsep0pt
+  \item \textbf{返回 error 不再静默}：\texttt{RollbackCouponStock} 把脚本错误向上抛；业务层回滚失败时打 \texttt{Errorf} 级告警，带上 \texttt{userId / batchId} 便于人工补偿对账。
+  \item \textbf{对账闭环}：库存计数与单人标记永远一致 $\to$ 盘点时\textbf{发券数 = DB 行数 = Redis 消耗}三者对得上。
+\end{itemize}
+\srcnote{repository/cache/coupon.go:89--93 返回 error；internal/coupon/service.go:91--94 回滚失败 Errorf 告警}
 \end{frame}
 
 \begin{frame}{coupon 压测数字：业务侧怎么解读这两组数据}
@@ -208,7 +242,7 @@ avg 延迟          & 0.82ms   & 0.83ms  \\
 \small \textbf{零超发是底线}：1000 goroutine 抢 100 张券 $\to$ 成功数恰好 100，DB 行数 100，Redis 库存归 0，三者一致。\\
 \textbf{业务侧再次确认}：这个不是技术指标，这是"\textbf{不被资损}"的底线 —— 多发出去一张券就是真金白银的损失。\\
 \textbf{踩坑回填}：DB 路径的 FOR UPDATE 曾因裸拼 SQL 退化成无锁空操作（并发下照样超发），现已改用 gorm \texttt{clause.Locking} 真实行锁；券码也补了 \texttt{crypto/rand} 随机段，同一用户同一秒连领不再撞唯一索引。
-\srcnote{stressTest/REPORT.md 链路压测表 第 5--6 行；repository/cache/coupon.go:30--44；internal/coupon/repo.go:44--90 ClaimWithDBLock、:127--137 generateCouponCode}
+\srcnote{stressTest/REPORT.md 链路压测表 第 5--6 行；repository/cache/coupon.go:30--44；internal/coupon/repo.go:44--90 ClaimWithDBLock、:149--157 generateCouponCode}
 \end{frame}
 
 % ============================================================
@@ -228,7 +262,36 @@ avg 延迟          & 0.82ms   & 0.83ms  \\
   \item \textbf{业务取舍}：\textbf{秒杀必须有"抢不到"的人}。如果 100 台 iPhone 5 分钟才卖完，那不叫秒杀。\textbf{用户预期是"瞬间售罄"}，没抢到不是产品问题，是\textbf{运气问题}。
   \item \textbf{对应客服话术}：从来不说"系统繁忙"，永远说"\textbf{已被其他用户抢走，欢迎下次参与}"。
 \end{itemize}
-\srcnote{internal/skill/service.go:113--123 SkillProduct；商品独立 skill.SkillProduct 表}
+\srcnote{internal/skill/service.go:144--152 GetSkillGoods / SkillProduct；商品独立 skill.SkillProduct 表}
+\end{frame}
+
+\begin{frame}[fragile]{秒杀详情/下单读了一个从没写过的 key：接口必然失败}
+\small \textbf{业务现象}：秒杀详情与下单接口\textbf{每次都报错}，用户点开页面就是空白。根因是\textbf{读写 key 对不上}——预热只写了\textbf{列表 key}，详情/下单却按 \texttt{product\_id} 读\textbf{单品 key}，而这个单品 key \textbf{从没被写入}。
+\begin{lstlisting}[language=Go,firstnumber=77,
+  caption={读单品 key：缓存里永远是 redis.Nil}]
+key := fmt.Sprintf(cache.SkillProductKey, productId)  // skill:product:<id>
+resp, err := rc.Get(ctx, key).Result()                // 旧代码到此必空
+\end{lstlisting}
+\vspace{-1mm}
+\textbf{业务后果}：秒杀是引流主入口，详情打不开 = 用户\textbf{连"抢不到"的机会都没有} = 活动当场作废，比"手慢没抢到"严重得多。
+\srcnote{repository/cache/key.go:12 SkillProductKey；internal/skill/service.go:75--85 loadSkillProduct 读取点}
+\end{frame}
+
+\begin{frame}[fragile]{修法：预热补写单品 key + 读侧未命中回源回填}
+\small \textbf{双管齐下}，不再依赖单一预热顺序：
+\begin{itemize}\itemsep0pt
+  \item \textbf{写侧}：\texttt{InitSkillGoods} 在 LPush 列表的同时，按 \texttt{product\_id} 多写一份\textbf{单品 key}（带 30min TTL）。
+  \item \textbf{读侧}：详情/下单未命中时\textbf{回源 DB} \texttt{GetByProductId} 并回填缓存，彻底摆脱"必须先预热"的隐式依赖。
+\end{itemize}
+\begin{lstlisting}[language=Go,firstnumber=61,
+  caption={\srcnote{internal/skill/service.go:61--63 预热补写单品 key}}]
+errx = cache.RedisClient.Set(ctx,
+    fmt.Sprintf(cache.SkillProductKey, spList[i].ProductId),
+    jsonString, cache.SkillProductTTL).Err()
+\end{lstlisting}
+\vspace{-1mm}
+\scriptsize 读侧回填见 \texttt{loadSkillProduct}：\texttt{Get} 命中直接返回；\texttt{redis.Nil} 则查 DB、回写同一 key 再返回；其余错误才向上抛。\texttt{GetSkillGoods}（详情）与 \texttt{SkillProduct}（下单）共用这条读路径。
+\srcnote{internal/skill/service.go:75--103 loadSkillProduct 回源回填；internal/skill/repo.go:40--45 GetByProductId}
 \end{frame}
 
 \begin{frame}{秒杀 vs 普通下单的根本差异：业务侧规则}
@@ -250,7 +313,7 @@ avg 延迟          & 0.82ms   & 0.83ms  \\
 
 \small \textbf{为什么秒杀不熔断}：熔断 = "所有人都买不到"，业务上等价于\textbf{活动作废} —— 比"部分用户买不到"严重 10 倍。\\
 \textbf{为什么秒杀不挂 Idempotency}：用户疯狂点击"再试一次"\textbf{就是业务预期}，幂等命中会让用户以为下单成功，反而误导。
-\srcnote{internal/skill/service.go:113--123；internal/skill/routes.go:12--25 秒杀路由}
+\srcnote{internal/skill/service.go:144--152；internal/skill/routes.go:12--25 秒杀路由}
 \end{frame}
 
 \begin{frame}{SlidingWindow Lua 与"阈值 = 3"的业务依据}
@@ -816,16 +879,17 @@ SRE & Redis 库存\textbf{预热}（活动券 / 秒杀商品 / 红包预拆 SET 
 \vspace{2mm}
 \textbf{Q8}：抢券失败、抢红包失败、秒杀失败，客服怎么区分？\\
 \hspace{4mm}\small A：按业务码：70001 限流$\to$"稍后再试"；sold-out$\to$"已抢完"；exceed$\to$"已领过"。\textbf{绝不能}说"系统繁忙"。\\
-\hspace{4mm}\small \textbf{代码}：\texttt{pkg/e/code.go:57--58}；\texttt{repository/cache/coupon.go:46--49}；\texttt{redpacket.go:22--26}。
+\hspace{4mm}\small \textbf{代码}：\texttt{pkg/e/code.go:57--58}；\texttt{repository/cache/coupon.go:56--59}；\texttt{redpacket.go:22--26}。
 \end{frame}
 
 \begin{frame}{代码位置一览（一）：业务实现}
 \begin{description}\small
   \item[coupon Lua（原子扣减 + 单人限领）]\srcnote{repository/cache/coupon.go:30--44}
-  \item[coupon 错误码翻译]\srcnote{repository/cache/coupon.go:46--75}
+  \item[coupon 错误码翻译]\srcnote{repository/cache/coupon.go:56--85}
+  \item[coupon 回滚 Lua（原子归还 + 返回 error）]\srcnote{repository/cache/coupon.go:50--54、:87--93}
   \item[coupon 业务层 Claim]\srcnote{internal/coupon/service.go:62--96}
   \item[coupon 库存预热（创建批次）]\srcnote{internal/coupon/service.go:27--54}
-  \item[coupon DB 锁路径（clause.Locking + 随机券码）]\srcnote{internal/coupon/repo.go:44--90、:127--137}
+  \item[coupon DB 锁路径（clause.Locking + 随机券码）]\srcnote{internal/coupon/repo.go:44--90、:149--157}
   \item[coupon 路由（无 SlidingWindow，业务取舍）]\srcnote{internal/coupon/routes.go:10--13}
   \item[红包二倍均值法拆分]\srcnote{repository/cache/redpacket.go:98--142 SplitRedPacket}
   \item[红包预拆 RPUSH Lua]\srcnote{repository/cache/redpacket.go:34--43}
@@ -834,7 +898,7 @@ SRE & Redis 库存\textbf{预热}（活动券 / 秒杀商品 / 红包预拆 SET 
   \item[红包 Service 调用 Saga 点]\srcnote{internal/redpacket/service.go:155--162}
   \item[红包过期回收]\srcnote{repository/cache/redpacket.go:65--77 ReleaseRedPacketLeft}
   \item[红包路由（SlidingWindow + Idempotency）]\srcnote{internal/redpacket/routes.go:17--27}
-  \item[秒杀业务]\srcnote{internal/skill/service.go:113--123}
+  \item[秒杀业务（详情/下单读单品 key + 回源回填）]\srcnote{internal/skill/service.go:75--103、:144--152}
   \item[秒杀路由（SlidingWindow 3/s/用户）]\srcnote{internal/skill/routes.go:17--24}
 \end{description}
 \end{frame}
@@ -844,7 +908,7 @@ SRE & Redis 库存\textbf{预热}（活动券 / 秒杀商品 / 红包预拆 SET 
   \item[SlidingWindow Lua（ZSet 滑窗）]\srcnote{repository/cache/ratelimit.go:18--34}
   \item[全局 TokenBucket（100 RPS / IP）]\srcnote{routes/router.go:41 middleware/ratelimit.go}
   \item[业务码 70001 / 70002 / 60002 / 50001]\srcnote{pkg/e/code.go:49--58}
-  \item[Go error（红包 / 优惠券）]\srcnote{repository/cache/coupon.go:46--49；redpacket.go:22--26}
+  \item[Go error（红包 / 优惠券）]\srcnote{repository/cache/coupon.go:56--59；redpacket.go:22--26}
   \item[压测：秒杀 + 滑动窗口（46/45 误差 2.2\%）]\srcnote{stressTest/REPORT.md \S 5；seckill\_rate\_limit.js}
   \item[压测：优惠券 Redis Lua vs DB（51K / 50K RPS）]\srcnote{stressTest/REPORT.md 链路压测表 第 5--6 行}
   \item[拼手气红包模型（gomall 已实现）]\srcnote{internal/redpacket/service.go:41--175 Create + Claim}

@@ -117,7 +117,76 @@ num         & 件数      & "已超过单次购买上限 N 件" \\
   \item 这是为什么 \texttt{CartCreate} 先 \texttt{GetProductById} 再 \texttt{CreateCart} —— 校验商品仍在售。
   \item 购物车不是技术装饰，是\textbf{凑单 / 比价 / 留存}的中转 = 商家拉复购的关键页。
 \end{itemize}
-\srcnote{internal/cart/service.go:36--49 + pkg/e/code.go:31--32 业务码 20007/20008}
+\srcnote{internal/cart/service.go:39--55 + pkg/e/code.go:31--32 业务码 20007/20008}
+\end{frame}
+
+\begin{frame}{加购健壮性：DB 抖动不该被当成"购物车为空"}
+\textbf{业务困局}：加购是全站最高频的写入口之一，背后第一步永远是\\
+\texttt{GetCartById} —— 查"这个用户这个商家这件商品有没有已在车里"。
+\vspace{2mm}
+\begin{tikzpicture}[node distance=6mm and 12mm,font=\scriptsize]
+  \node[node-box]                          (q) {GetCartById\\查既有车行};
+  \node[node-box,right=of q,node-ok]       (nf) {真·没记录\\走"新建"分支};
+  \node[node-box,right=of nf,node-warn]    (hit) {命中\\num++ 或封顶};
+  \node[node-box,below=of q,node-bad]      (db) {连接中断 / 死锁\\context 取消};
+  \node[node-box,right=of db,node-bad]     (panic) {旧代码也进"新建"\\对 nil 解引用 panic};
+  \draw[arrow]       (q) -- (nf);
+  \draw[arrow]       (nf) -- (hit);
+  \draw[arrow-alert] (q) -- (db);
+  \draw[arrow-alert] (db) -- (panic);
+\end{tikzpicture}
+\vspace{2mm}
+\begin{itemize}
+  \item 旧逻辑只看 \texttt{err != nil} 就当"没找到"$\to$ 真实 DB 错误时 \texttt{cart} 仍是 nil。
+  \item 紧接着读 \texttt{cart.Num} $\to$ \textbf{nil 解引用 panic} $\to$ 高频入口直接 500 雪崩。
+  \item 关键认知：\texttt{err==nil}（命中）与 \texttt{errors.Is(err, ErrRecordNotFound)}（确为空）\\
+        是\textbf{两种不同语义}，二者之外还有"查询本身失败"的第三态，绝不能并入前两者。
+\end{itemize}
+\srcnote{internal/cart/repo.go:22--57 CreateCart；:24 第一步 GetCartById}
+\end{frame}
+
+\begin{frame}[fragile]{修法：errors.Is 精确判定，真实错误短路返回}
+\begin{lstlisting}[language=Go,firstnumber=22,
+  caption={\srcnote{internal/cart/repo.go:22--57 CreateCart}}]
+func (d *CartDao) CreateCart(pId, uId, bId uint) (
+    cart *Cart, status int, err error) {
+    cart, err = d.GetCartById(pId, uId, bId)
+    // 仅"确为空"才新建：用 errors.Is 兼容被包装的 not-found
+    if errors.Is(err, gorm.ErrRecordNotFound) {
+        cart = &Cart{UserID: uId, ProductID: pId,
+            BossID: bId, Num: 1, MaxNum: 10, Check: false}
+        err = d.DB.Create(&cart).Error
+        if err != nil {
+            return
+        }
+        return cart, e.SUCCESS, err
+    }
+    // 第三态：非 not-found 的真实 DB 错误，cart 仍为 nil，
+    // 必须在读取字段前短路返回，杜绝 nil 解引用 panic
+    if err != nil {
+        return nil, e.ERROR, err
+    }
+    if cart.Num < cart.MaxNum {   // 命中：在封顶内加一件
+        cart.Num++
+        err = d.DB.Save(&cart).Error
+        ...
+    }
+    return cart, e.ErrorProductMoreCart, err
+}
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{逐行讲：三态分流为什么缺一不可}
+\begin{description}\setlength{\itemsep}{0.5mm}
+  \item[\texttt{errors.Is(ErrRecordNotFound)}] 只认"语义上的空"。直接 \texttt{==} 比较会漏掉被 gorm / 中间层 \texttt{fmt.Errorf("\%w")} 包装过的同种错误，\texttt{errors.Is} 顺着 wrap 链找，才是正解。
+  \item[\texttt{if err != nil} 短路] 连接中断、死锁、\texttt{context} 取消都落这一支。此刻 \texttt{cart} 未被 \texttt{First} 填充仍为 nil，返回 \texttt{e.ERROR} 让上层"系统繁忙，请重试"，而不是骗用户"购物车是空的"。
+  \item[命中分支] 走到这里 \texttt{err==nil} 且 \texttt{cart} 非空，才敢安全读 \texttt{cart.Num} 做封顶判断。
+  \item[失败模式对比] 旧代码把第三态并进"新建"$\to$ panic；修后第三态独立短路 $\to$ 加购接口在 DB 抖动下\textbf{优雅降级而非崩溃}。
+\end{description}
+\vspace{1mm}
+\keypoint{"查不到"和"查出错"是两件事 —— 把它们分开，是高频写入口在依赖抖动下\\
+不被一颗 nil 指针带崩的底线。}
+\srcnote{internal/cart/repo.go:26 errors.Is 分支；:43--45 真实错误短路；:46 命中后安全读 cart.Num}
 \end{frame}
 
 \begin{frame}{地址簿：业务复杂度比想象的高}

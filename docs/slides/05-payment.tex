@@ -300,11 +300,11 @@ func (u *User) DecryptMoney(key string) (money int64, err error) {
 \srcnote{internal/payment/routes.go:14--21 paydown 完整中间件栈；pkg/e/code.go:53--58}
 \end{frame}
 
-\begin{frame}{PayDown 在一次事务里做的五件事}
-\begin{tikzpicture}[node distance=5mm and 8mm]
+\begin{frame}{PayDown 在一次事务里做的几件事}
+\begin{tikzpicture}[node distance=5mm and 7mm,font=\small]
   \node[node-box] (s1) {1.取订单\\(UnPaid?)};
-  \node[node-box,right=of s1] (s2) {2.扣买家\\Dec/Enc};
-  \node[node-box,right=of s2] (s3) {3.入卖家\\Dec/Enc};
+  \node[node-box,right=of s1] (s2) {2.扣买家\\+debit 流水};
+  \node[node-box,right=of s2] (s3) {3.入卖家\\+credit 流水};
   \node[node-box,below=of s2] (s4) {4.减库存\\+翻状态};
   \node[node-box,right=of s4] (s5) {5.写 outbox\\order.paid};
   \node[node-box,below=of s5,node-bad] (rb) {任一失败\\TX rollback};
@@ -315,49 +315,50 @@ func (u *User) DecryptMoney(key string) (money int64, err error) {
   \draw[arrow-bad] (s5) -- (rb);
 \end{tikzpicture}
 \vspace{1mm}
-\small 五步在同一 \texttt{tx}，\textbf{要么全成功要么全不动}。outbox 也在 TX 内写 —— 事务消息防丢（deck 11 主题）。\textbf{业务承诺}：客户端拿到 200 status=200 即代表"钱扣了 / 商家入账了 / 库存减了 / 下游必定能收到事件"四件事都已落定。
-\srcnote{internal/payment/service.go:53--186}
+\small 全部落在同一 \texttt{tx}，\textbf{要么全成功要么全不动}。扣买家 / 入卖家\textbf{各自带一条不可变流水}（debit / credit，§4），余额变动与流水同生共死；outbox 也在 TX 内写 —— 事务消息防丢（deck 11 主题）。\textbf{业务承诺}：客户端拿到 200 status=200 即代表"钱扣了 / 商家入账了 / 两条流水落账 / 库存减了 / 下游必定收到事件"都已落定。
+\srcnote{internal/payment/service.go:55--218}
 \end{frame}
 
-\begin{frame}[fragile]{PayDown 的关键 18 行}
-\begin{lstlisting}[language=Go,firstnumber=56,
-  caption={\srcnote{internal/payment/service.go:56--103 节选}}]
-order, err := orderpkg.NewOrderDaoByDB(tx).GetOrderById(req.OrderId, uId)
-if err != nil { return err }
-if order.Type != consts.OrderWaitPay {
-    return errors.New("订单状态非未支付，无法重复支付")
-}
-totalMoney := order.Money * int64(num)
-
-buyer, err := userDao.GetUserById(uId)
-if err != nil { return err }
-
-userMoney, err := buyer.DecryptMoney(req.Key)  // 密码错 -> ErrMoneyKeyIncorrect
-if err != nil { return err }
-if userMoney-totalMoney < 0 {
-    return errors.New("金额不足")               // TX 内，自动回滚
+\begin{frame}[fragile]{PayDown 扣款这一段的真实代码}
+\begin{lstlisting}[language=Go,firstnumber=79,
+  caption={\srcnote{internal/payment/service.go:79--114 节选}}]
+// 实付口径：命中满减以折后实付 FinalCents 为准，否则单价 * 件数
+payable := order.Money * int64(num)
+if order.PromoRuleID != 0 {            // 用命中标识判据，不用 FinalCents>0
+    payable = order.FinalCents         // 立减到 0 也是合法实付
 }
 
-buyer.Money = strconv.FormatInt(userMoney-totalMoney, 10)
-buyer.Money, err = buyer.EncryptMoney(req.Key) // 同密码重新加密
+buyer, err := userDao.GetUserByIdForUpdate(uId)  // 行锁，杜绝并发双扣
 if err != nil { return err }
-err = userDao.UpdateUserById(uId, buyer)       // 落 DB
+if !buyer.CheckMoneyPassword(req.Key) {          // 密码与余额解密分离
+    return user.ErrMoneyKeyIncorrect
+}
+userMoney, err := buyer.DecryptMoney()
+if err != nil { return err }
+if userMoney-payable < 0 { return errors.New("金额不足") } // TX 内回滚
+
+buyerBalanceAfter := userMoney - payable
+buyer.Money = strconv.FormatInt(buyerBalanceAfter, 10)
+buyer.Money, err = buyer.EncryptMoney()          // 重新加密落库
+if err != nil { return err }
+err = userDao.UpdateUserById(uId, buyer)
 \end{lstlisting}
 \end{frame}
 
 \begin{frame}{逐行讲解：扣款这一步的业务含义}
 \begin{itemize}\small
-  \item \textbf{62 行 OrderWaitPay 校验在 TX 内}：不能 TX 外读再进事务 —— 否则典型 TOCTOU，两并发支付都看到待付款 $\to$ 双扣。这是"重复扣款"客诉的根因之一。
-  \item \textbf{82 行 \texttt{DecryptMoney(req.Key)}}：密码错 $\to$ 底层去填充 panic / 解出乱码，统一折叠为 \texttt{ErrMoneyKeyIncorrect} $\to$ \texttt{return err} $\to$ TX 回滚。用户拿到明确的"支付密码错误"，\textbf{穷举防护交给前置的限流 + 熔断 + 幂等三层}，不再靠错误信息含混。
-  \item \textbf{92--93 行 重新加密}：\texttt{Money} 是 string 不能直接减；必须 decrypt $\to$ int64 减 $\to$ encrypt。整段在 TX 里，失败回滚干净。
-  \item \textbf{金额不足也 \texttt{return err}}：让 TX 走 rollback，\texttt{order.Type} 不会推进，客户端可原 OrderId + 充值后重试 —— 客服话术："充值后原订单可直接付款，30 分钟内有效"。
+  \item \textbf{64 行 OrderWaitPay 校验在 TX 内}：不能 TX 外读再进事务 —— 否则典型 TOCTOU，两并发支付都看到待付款 $\to$ 双扣。这是"重复扣款"客诉的根因之一。
+  \item \textbf{79--82 行 实付口径}：命中满减时 \texttt{payable} 取折后实付 \texttt{FinalCents}，否则单价 $\times$ 件数兜底。判据用 \texttt{PromoRuleID != 0} 而\textbf{不是} \texttt{FinalCents > 0} —— 满减立减到 0 / 100\% 折扣时 \texttt{FinalCents == 0} 是合法实付，用大于零误判为未命中会回退全价多扣买家。
+  \item \textbf{86 行 \texttt{GetUserByIdForUpdate}}：行锁读买家，把"读余额 $\to$ 判断 $\to$ 改写"串行化，并发两笔支付不会都拿到旧余额。
+  \item \textbf{91 行 \texttt{CheckMoneyPassword}}：支付密码校验与余额 AES 解密\textbf{分离}，密码错 $\to$ \texttt{ErrMoneyKeyIncorrect} $\to$ TX 回滚；穷举防护交给前置限流 + 熔断 + 幂等三层。
+  \item \textbf{金额不足也 \texttt{return err}}：让 TX 走 rollback，\texttt{order.Type} 不推进，客户端可原 OrderId 充值后重试 —— 客服话术："充值后原订单可直接付款，30 分钟内有效"。
 \end{itemize}
-\srcnote{internal/payment/service.go:56--103；internal/user/model.go:15--16 ErrMoneyKeyIncorrect}
+\srcnote{internal/payment/service.go:79--114；internal/user/model.go:15--16 ErrMoneyKeyIncorrect}
 \end{frame}
 
 \begin{frame}[fragile]{outbox 写在事务尾 —— 业务承诺的兑现点}
-\begin{lstlisting}[language=Go,firstnumber=175,
-  caption={\srcnote{internal/payment/service.go:175--185}}]
+\begin{lstlisting}[language=Go,firstnumber=208,
+  caption={\srcnote{internal/payment/service.go:208--218}}]
 // outbox 事件：order.paid，投递交给 publisher 异步
 return outbox.NewOutboxDaoByDB(tx).Insert(
     "order", "OrderPaid", "order.paid", order.ID,
@@ -369,7 +370,7 @@ return outbox.NewOutboxDaoByDB(tx).Insert(
 \end{lstlisting}
 \vspace{1mm}
 \small \texttt{outbox.Insert} 用\textbf{同一个 tx} —— 事务消息：扣款与"已发事件"同生共死，\textbf{绝不会"钱扣了但下游没收到"}。Redis 预占释放走 TX 外，失败仅记日志，对账兜底。\textbf{业务下游}：发货通知 / 优惠券核销 / ES 索引更新 / 商家看板更新 / 财务对账增量。
-\srcnote{internal/payment/service.go:193--198 cache.CommitReservation；deck 11 outbox 主题}
+\srcnote{internal/payment/service.go:228 cache.CommitReservation；deck 11 outbox 主题}
 \end{frame}
 
 \begin{frame}{客服 SOP：用户报"扣款没出货"怎么查}
@@ -398,7 +399,122 @@ outbox 已发未消费 & outbox pending > 5min & 提工单升级 SRE \\
 消费失败 & outbox dead & 人工补发 \\
 \bottomrule
 \end{tabular}
-\srcnote{internal/payment/service.go:175--185；internal/shared/outbox/repo.go}
+\srcnote{internal/payment/service.go:208--218；internal/shared/outbox/repo.go}
+\end{frame}
+
+% ============================================================
+\section{资金台账：复式记账补上"不可对账"硬伤}
+% ============================================================
+
+\begin{frame}{业务困局：余额是一个密文列，扣款不留痕}
+\begin{itemize}
+  \item 早先钱包余额就是 \texttt{users.money} 上一个 AES 密文列：扣买家 = 改这个列，入卖家 = 改那个列，\textbf{改完什么都不留}。
+  \item \textbf{财务}："这个月平台少了 3000 块，是哪几笔、谁扣的、扣给了谁？" —— 没流水，查不出来，只能认账。
+  \item \textbf{客服}：用户报"我余额莫名少了 50"，DB 只能看到当前一个密文数，\textbf{看不到这 50 是哪一单扣的}，无从举证。
+  \item \textbf{审计 / 风控}：资损发生后想回放"这笔钱怎么走的"，没有任何事件序列可重放。
+  \item \textbf{对账}：账户余额与订单流水对不上时，没有第三本账做交叉验证 —— 一旦某次扣款代码有 bug 多扣 / 漏入，永远发现不了。
+\end{itemize}
+\keypoint{"余额是一个会被覆盖的数字"是支付系统的硬伤。真正的钱包系统，余额必须是\textbf{流水累加出来的结果}，而不是一个可以随手改的列。}
+\srcnote{internal/payment/service.go:106--157 余额读改写；internal/money/ledger\_model.go:18--26}
+\end{frame}
+
+\begin{frame}{解法：复式记账（debit / credit）流水台账}
+\begin{itemize}\small
+  \item 借鉴会计的\textbf{复式记账}：任何一笔资金转移都\textbf{成对记两条}——一方借记（debit，余额减少），一方贷记（credit，余额增加），两条金额相等、方向相反。
+  \item 一次支付 100 元 $\to$ 买家记一条 debit 100、卖家记一条 credit 100。\textbf{全表 SUM(debit) 应恒等于 SUM(credit)}，这就是对账的数学保证（资金守恒）。
+  \item 新增 \texttt{account\_transaction} 表，每条流水\textbf{不可变}（append-only，只插不改不删）：\texttt{user\_id / direction / amount\_cents / ref\_order\_id / balance\_after\_cents / biz\_type / created\_at}。
+  \item 关键：\texttt{amount\_cents} 与 \texttt{balance\_after\_cents} 都是\textbf{明文 int64 分}，\textbf{不加密} —— 流水台账就是给对账 / 审计用的，必须能 \texttt{SUM} / \texttt{GROUP BY}。
+  \item 与 \texttt{users.money} 的取舍刚好相反：余额密文（防拖库泄漏），流水明文（要对账）。两本账各司其职。
+\end{itemize}
+\srcnote{internal/money/ledger\_model.go:7--36；internal/migrate/migrate.go:44 注册 AutoMigrate}
+\end{frame}
+
+\begin{frame}[fragile]{表结构：account\_transaction}
+\begin{lstlisting}[language=Go,firstnumber=7,
+  caption={\srcnote{internal/money/ledger\_model.go:7--36}}]
+const (                              // 复式记账两个方向
+    DirectionDebit  = "debit"        // 借记：账户余额减少
+    DirectionCredit = "credit"       // 贷记：账户余额增加
+)
+const BizTypeOrderPay = "order_pay"  // 流水来源，对账时区分
+
+type AccountTransaction struct {
+    dbmodel.Model
+    UserID    uint   `gorm:"index:idx_acct_tx_user"`
+    Direction string `gorm:"size:8;uniqueIndex:uniq_acct_tx_order_dir,priority:2"`
+    AmountCents       int64  // 明文分，绝不加密
+    RefOrderID        uint   `gorm:"uniqueIndex:uniq_acct_tx_order_dir,priority:1"`
+    BalanceAfterCents int64  // 本次变更后余额，可回放
+    BizType           string `gorm:"size:32"`
+}
+func (AccountTransaction) TableName() string { return "account_transaction" }
+\end{lstlisting}
+\vspace{1mm}
+\small \texttt{(ref\_order\_id, direction)} 联合\textbf{唯一索引}是幂等的兜底：同一订单同一方向只可能插一条，重复入账撞唯一冲突直接报错回滚。\texttt{balance\_after\_cents} 记下每次变更后的余额快照 $\to$ 哪怕密文余额列被改坏，也能用流水\textbf{逐条回放重建}出正确余额。
+\end{frame}
+
+\begin{frame}{一次支付的双写：余额列 + 流水台账（同事务）}
+\begin{tikzpicture}[node distance=5mm and 8mm,font=\scriptsize]
+  \node[node-box,node-warn] (tx) {PayDown 同一 tx};
+  \node[node-box,node-ok,below left=6mm and 3mm of tx] (bm) {users.money\\买家密文 -100};
+  \node[node-box,node-ok,below right=6mm and 3mm of tx] (sm) {users.money\\卖家密文 +100};
+  \node[node-box,below=9mm of bm] (bl) {account\_transaction\\debit 100 / order=N};
+  \node[node-box,below=9mm of sm] (sl) {account\_transaction\\credit 100 / order=N};
+  \draw[arrow] (tx) -- (bm);
+  \draw[arrow] (tx) -- (sm);
+  \draw[arrow] (bm) -- node[left,font=\tiny]{追加流水} (bl);
+  \draw[arrow] (sm) -- node[right,font=\tiny]{追加流水} (sl);
+  \draw[arrow-bad,dashed] (bl) to[bend right=18] node[below,font=\tiny]{任一失败全回滚} (sl);
+\end{tikzpicture}
+\vspace{0.5mm}
+\scriptsize 四个写（两个余额列 + 两条流水）落在\textbf{同一个事务}：要么 100 元从买家流到卖家且两条流水都在，要么什么都没发生。\textbf{绝不会出现"余额改了但没流水"或"流水有了但余额没动"}—— 这正是早先单写余额列做不到的对账闭环。
+\srcnote{internal/payment/service.go:120--157 同事务两次 AppendTransaction}
+\end{frame}
+
+\begin{frame}[fragile]{PayDown 同事务追加 debit / credit 两条流水}
+\begin{lstlisting}[language=Go,firstnumber=120,
+  caption={\srcnote{internal/payment/service.go:120--157 节选}}]
+// 买家扣款流水：与余额变动同事务追加
+ledgerDao := money.NewLedgerDaoByDB(tx)          // 接管调用方的 tx
+if err = ledgerDao.AppendTransaction(uId, order.ID,
+    money.DirectionDebit, payable, buyerBalanceAfter,
+    money.BizTypeOrderPay); err != nil { return err }
+// ... 卖家余额读改写：bossBalanceAfter = bossMoney + payable ...
+// 卖家入账流水：方向与买家相反，同一 order.ID
+if err = ledgerDao.AppendTransaction(bossID, order.ID,
+    money.DirectionCredit, payable, bossBalanceAfter,
+    money.BizTypeOrderPay); err != nil { return err }
+\end{lstlisting}
+\begin{lstlisting}[language=Go,firstnumber=20,
+  caption={\srcnote{internal/money/ledger\_repo.go:20--38}}]
+// NewLedgerDaoByDB 接管调用方 tx，流水写入与余额变动同一原子提交
+func NewLedgerDaoByDB(db *gorm.DB) *LedgerDao { return &LedgerDao{db} }
+func (d *LedgerDao) AppendTransaction(userID, refOrderID uint,
+    direction string, amountCents, balanceAfterCents int64,
+    bizType string) error { /* Create(&AccountTransaction{...}) */ }
+\end{lstlisting}
+\end{frame}
+
+\begin{frame}{逐行讲解：流水追加的业务含义}
+\begin{itemize}\small
+  \item \textbf{121 行 \texttt{NewLedgerDaoByDB(tx)}}：\textbf{接管} PayDown 传进来的同一个 \texttt{tx}，而不是新开连接。这是"流水与余额同生共死"的命门 —— 余额改了流水必在，流水写失败余额改动一起回滚。
+  \item \textbf{122 行 买家 debit}：\texttt{payable}（折后实付）作为金额，\texttt{buyerBalanceAfter} 是\textbf{扣款后}的余额快照，方向 \texttt{debit}。
+  \item \textbf{154 行 卖家 credit}：同一个 \texttt{order.ID}，金额相同，方向\textbf{相反}，\texttt{bossBalanceAfter} 是\textbf{入账后}余额。一借一贷成对出现 $\to$ 资金守恒。
+  \item \textbf{两条都用 \texttt{payable}}：流水金额与实际余额变动\textbf{同口径}（都是折后实付），绝不会出现"流水记全价、余额扣折后价"的对账裂缝。
+  \item \textbf{失败即回滚}：\texttt{AppendTransaction} 返回 error 直接 \texttt{return} $\to$ 整个 PayDown 事务回滚，余额、库存、订单状态、outbox 全部不落地。
+\end{itemize}
+\srcnote{internal/payment/service.go:120--157；internal/money/ledger\_repo.go:24--38}
+\end{frame}
+
+\begin{frame}{(ref\_order\_id, direction) 唯一索引：同单只入账一次}
+\begin{itemize}\small
+  \item 前置的 Idempotency 中间件已经在网关层拦掉了大部分重复请求（§5），但\textbf{流水台账自己也要兜底}——纵深防御，不把幂等的责任全押在一层上。
+  \item \texttt{(ref\_order\_id, direction)} 联合唯一索引：同一订单的 \texttt{debit} 最多一条、\texttt{credit} 最多一条。第二次试图为同一单追加同方向流水 $\to$ \textbf{唯一键冲突报错} $\to$ 调用方回滚整个事务。
+  \item 业务含义：哪怕 Idempotency 失效、哪怕两个 goroutine 同时进了事务，\textbf{重复入账在 DB 层被物理挡死}，绝不会给卖家入两次账、给买家扣两次款。
+  \item 与订单状态守卫 \texttt{MarkOrderPaidWithCheck}（\texttt{WHERE type=待付款}）形成\textbf{双重幂等}：一层在订单状态，一层在资金流水，同一笔支付任何一层都只放过一次。
+\end{itemize}
+\keypoint{幂等不是单点开关，是从网关（Idempotency）到业务（订单状态守卫）再到资金（流水唯一索引）的\textbf{多层兜底}。任意一层失守，下一层还能挡住重复扣款。}
+\srcnote{internal/money/ledger\_model.go:29--31 唯一索引；internal/payment/service.go:177 MarkOrderPaidWithCheck}
 \end{frame}
 
 % ============================================================
@@ -718,6 +834,33 @@ err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 \small \textbf{CloseOrderWithCheck} 用 \texttt{WHERE type=待付款} 条件 update，第二次调用自然 affected=0 $\to$ 函数变 no-op。这是\textbf{用 DB 行做幂等键}。Redis 释放走 TX 外，失败仅记日志，对账兜底；满减预算退还\textbf{不在关单事务里同步做} —— 事件载荷自带 \texttt{promo\_rule\_id / promo\_discount\_cents}，promo 侧消费 \texttt{order.cancelled} 异步退还（幂等台账，OrderID 唯一索引）。业务承诺：\textbf{用户 / 客服 / Cron / RMQ 四个调用方都能反复点关单，库存绝不漏放}。
 \end{frame}
 
+\begin{frame}{满减实付口径：为什么不能用折前价计费 / 退款}
+\begin{itemize}\small
+  \item 一个满减订单：商品 \texttt{Money*Num = 100} 元，命中"满 80 减 20"，用户\textbf{实际只付 80}（\texttt{FinalCents = 80}）。
+  \item \textbf{扣款若用折前价 100}：买家被多扣 20 元 —— 满减优惠被吞掉，直接客诉 + 平台信任受损（"明明满减了还按原价扣"）。
+  \item \textbf{退款若用折前价 100}：用户只付了 80，却退回 100 —— 平台\textbf{超额退款 20 元资损}。更糟的是满减预算已随 \texttt{order.refunded} 事件由 promo 侧退还，钱包再按原价退 = \textbf{双重退还}。
+  \item 统一解法：payment 扣款与 refund 退款\textbf{都取折后实付 \texttt{FinalCents}}，只有 \texttt{FinalCents} 未写入（老订单 / 老客户端没读这字段）时才回退 \texttt{Money*Num} 兜底。
+\end{itemize}
+\keypoint{满减订单的"应收 / 应退"金额\textbf{只有一个口径}：用户实付 \texttt{FinalCents}。计费用折前价多扣买家，退款用折前价超退资损 —— 两头都是钱，必须统一。}
+\srcnote{internal/payment/service.go:79--82 payable 口径；internal/refund/service.go:106--112 退款口径}
+\end{frame}
+
+\begin{frame}[fragile]{退款侧的实付口径（与支付侧对齐）}
+\begin{lstlisting}[language=Go,firstnumber=106,
+  caption={\srcnote{internal/refund/service.go:106--112}}]
+// 退款额取实付口径，与 payment 侧保持一致：命中满减以折后实付 FinalCents 为准，
+// 仅当 FinalCents 未写入（<=0）时回退到折前价 Money*Num。
+// 用折前价会把满减优惠重复退还（promo 已随事件退预算，钱包再按原价退即双重退还）
+amount := order.FinalCents
+if amount <= 0 {
+    amount = order.Money * int64(order.Num)
+}
+\end{lstlisting}
+\vspace{1mm}
+\small 退款侧的回退判据是 \texttt{FinalCents <= 0}（未写入才回退），与支付侧用 \texttt{PromoRuleID != 0}（命中即取折后价）略有差异：退款拿到的是已落库订单，\texttt{FinalCents} 一定已写定，\texttt{<= 0} 只为兼容历史脏数据。\texttt{amount} 随 \texttt{order.refunded} 事件下发，下游 wallet 服务据此退款；满减预算退还由 promo 侧消费同一事件\textbf{异步}完成（事件自带 \texttt{promo\_rule\_id / promo\_discount\_cents}），两者各退各的、不重不漏。
+\srcnote{internal/refund/service.go:109--132 事件载荷；internal/order/model.go:30--34 FinalCents 注释}
+\end{frame}
+
 \begin{frame}{支付链路 SLO 承诺}
 \small
 \begin{tabular}{@{}llll@{}}
@@ -777,7 +920,9 @@ P0 不挂限流 & ✓ & /paydown 路由仅挂 CB + Idem & 不挂 TokenBucket/SW 
 \midrule
 AES-128-CBC + 双密钥      & DBA 拿 dump 也看不到余额            \\
 6 位支付密码不存盘        & 整库泄漏没密码也解不开              \\
-单次 TX 五件事原子        & 不会出现"扣了钱没改订单"            \\
+单次 TX 多件事原子        & 不会出现"扣了钱没改订单"            \\
+debit/credit 流水同事务   & 余额必有流水，全表借贷恒等，可对账   \\
+实付取 FinalCents         & 满减不多扣买家、退款不超退资损       \\
 outbox 在 TX 内写         & 不会出现"扣了钱下游没收到"          \\
 CircuitBreaker 5/10s/3   & 第三方挂了 5\% 用户受影响，不是 100\% \\
 Idempotency 全程伴随     & 重试 10K 次也只扣一次               \\
@@ -847,7 +992,10 @@ Saga 30min 关单           & 用户忘付款，库存自动释放              
 \begin{frame}{代码位置一览}
 \scriptsize
 \begin{description}
-  \item[PayDown 主体]\srcnote{internal/payment/service.go:35--201}
+  \item[PayDown 主体]\srcnote{internal/payment/service.go:38--234}
+  \item[资金台账 / 复式记账]\srcnote{internal/money/ledger\_model.go:7--36；internal/money/ledger\_repo.go:20--38}
+  \item[实付口径 FinalCents]\srcnote{internal/payment/service.go:79--82；internal/refund/service.go:106--112}
+  \item[台账 AutoMigrate 注册]\srcnote{internal/migrate/migrate.go:44}
   \item[AES 加解密]\srcnote{internal/user/model.go:64--101；pkg/utils/encryption/money\_encrypt.go}
   \item[CircuitBreaker]\srcnote{middleware/circuitbreaker.go:17--136}
   \item[Idempotency]\srcnote{middleware/idempotency.go:17--112；repository/cache/idempotency.go:32--90}
