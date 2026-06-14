@@ -82,6 +82,14 @@ func (d *CartDao) ListCartByUserId(uId uint) (cart []*CartResp, err error) {
 	return
 }
 
+// GetCartByRowId 通过购物车行主键与归属用户查询单条记录
+func (d *CartDao) GetCartByRowId(cId, uId uint) (cart *Cart, err error) {
+	err = d.DB.Model(&Cart{}).
+		Where("id = ? AND user_id = ?", cId, uId).
+		First(&cart).Error
+	return
+}
+
 // UpdateCartNumById 通过 id 更新 Cart 信息
 func (d *CartDao) UpdateCartNumById(cId, uId, num uint) error {
 	return d.DB.Model(&Cart{}).

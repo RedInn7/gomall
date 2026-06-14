@@ -68,12 +68,16 @@ func setupSQLiteForMoney(t *testing.T) (*gorm.DB, func()) {
 	return db, func() { dao.SetTestDB(prev) }
 }
 
-// seedUserWithMoney 写入余额密文：cents 为明文（单位分），key 为 6 位支付密码。
+// seedUserWithMoney 写入余额密文（服务端密钥）+ 支付密码摘要。
+// cents 为明文（单位分），key 为 6 位支付密码。
 func seedUserWithMoney(t *testing.T, db *gorm.DB, name, cents, key string) *user.User {
 	t.Helper()
 	initMoneyTestConfig()
 	u := &user.User{UserName: name, Money: cents}
-	enc, err := u.EncryptMoney(key)
+	if err := u.SetMoneyPassword(key); err != nil {
+		t.Fatalf("SetMoneyPassword: %v", err)
+	}
+	enc, err := u.EncryptMoney()
 	if err != nil {
 		t.Fatalf("EncryptMoney: %v", err)
 	}

@@ -194,6 +194,20 @@ func (d *OrderDao) UpdateOrderById(id, uId uint, order *Order) error {
 		Updates(order).Error
 }
 
+// MarkOrderPaidWithCheck 条件推进订单状态 WaitPay -> WaitShip。
+// 把状态守卫塞进 WHERE：只有仍处于 WaitPay 的订单才会被改为 WaitShip。
+// 并发支付 / 支付与取消竞争时，只有第一个事务影响 1 行，其余 RowsAffected=0，
+// 上层据此回滚，杜绝重复支付。返回 ok=true 表示本次推进成功。
+func (d *OrderDao) MarkOrderPaidWithCheck(orderID, userID uint) (bool, error) {
+	res := d.DB.Model(&Order{}).
+		Where("id=? AND user_id=? AND type=?", orderID, userID, consts.OrderWaitPay).
+		Update("type", consts.OrderWaitShip)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 func (d *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*Order, err error) {
 	expireTime := time.Now().Add(-time.Duration(minutes) * time.Minute)
 	err = d.DB.Model(&Order{}).Where(

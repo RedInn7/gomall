@@ -164,12 +164,15 @@ func TestProductDao_UpdateProduct(t *testing.T) {
 		ImgPath: "old.png", Price: "100", DiscountPrice: "90", Num: 3, BossID: 5, OnSale: true,
 	})
 
-	err := d.UpdateProduct(p.ID, &Product{
+	affected, err := d.UpdateProduct(p.ID, 5, &Product{
 		Name: "new-name", CategoryID: 4, Title: "new-title", Info: "new-info",
 		Price: "120", DiscountPrice: "110", Num: 8, OnSale: true,
 	})
 	if err != nil {
 		t.Fatalf("UpdateProduct: %v", err)
+	}
+	if affected != 1 {
+		t.Fatalf("UpdateProduct affected = %d, want 1", affected)
 	}
 
 	got, err := d.GetProductById(p.ID)
@@ -184,6 +187,20 @@ func TestProductDao_UpdateProduct(t *testing.T) {
 	// boss 维度与图片路径不在 UpdateProduct 字段集合内，保持原值
 	if got.BossID != 5 || got.ImgPath != "old.png" {
 		t.Fatalf("不可更新字段被改动: %+v", got)
+	}
+
+	// 错误 boss_id 无法更新他人商品
+	affected2, err2 := d.UpdateProduct(p.ID, 99, &Product{Name: "hacked"})
+	if err2 != nil {
+		t.Fatalf("UpdateProduct wrong boss unexpected error: %v", err2)
+	}
+	if affected2 != 0 {
+		t.Fatalf("非归属 boss 不应命中任何行, affected = %d", affected2)
+	}
+	// 数据应保持不变
+	got2, _ := d.GetProductById(p.ID)
+	if got2.Name != "new-name" {
+		t.Fatalf("越权更新不应生效, name = %q", got2.Name)
 	}
 }
 
@@ -200,12 +217,15 @@ func TestProductDao_UpdateProductPersistsZeroValues(t *testing.T) {
 		Price: "100", DiscountPrice: "90", Num: 3, BossID: 5, OnSale: true,
 	})
 
-	err := d.UpdateProduct(p.ID, &Product{
+	affected, err := d.UpdateProduct(p.ID, 5, &Product{
 		Name: "on-sale-item", CategoryID: 2, Title: "t", Info: "i",
 		Price: "100", DiscountPrice: "90", Num: 0, OnSale: false,
 	})
 	if err != nil {
 		t.Fatalf("UpdateProduct: %v", err)
+	}
+	if affected != 1 {
+		t.Fatalf("UpdateProduct affected = %d, want 1", affected)
 	}
 
 	got, err := d.GetProductById(p.ID)

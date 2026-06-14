@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 
+	"gorm.io/gorm"
+
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -69,13 +71,30 @@ func (s *CartSrv) CartList(ctx context.Context, req *CartListReq) (*types.DataLi
 }
 
 // CartUpdate 修改购物车信息。成功时不回传数据（保持既有 API 契约：data 为 null）。
+// 数量必须在 [1, cart.MaxNum] 范围内：0 留存无效空行，超上限绕过加购路径的封顶逻辑。
 func (s *CartSrv) CartUpdate(ctx context.Context, req *UpdateCartServiceReq) (*types.DataListResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
-	if err = NewCartDao(ctx).UpdateCartNumById(req.Id, u.Id, req.Num); err != nil {
+	if req.Num < 1 {
+		return nil, errors.New("数量不能小于 1")
+	}
+	cartDao := NewCartDao(ctx)
+	cart, err := cartDao.GetCartByRowId(req.Id, u.Id)
+	if err != nil {
+		// 购物车不存在或不归属当前用户：静默返回，与 UpdateCartNumById 0 行命中行为一致
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	if req.Num > cart.MaxNum {
+		return nil, errors.New(e.GetMsg(e.ErrorProductMoreCart))
+	}
+	if err = cartDao.UpdateCartNumById(req.Id, u.Id, req.Num); err != nil {
 		util.LogrusObj.Error(err)
 		return nil, err
 	}

@@ -206,6 +206,10 @@ func (l *listener) connectAndServe(ctx context.Context) error {
 	defer sub.Unsubscribe()
 	l.backoff.reset()
 
+	// confirmedWatermark 跟踪已连续无失败地处理完的最高区块号。
+	// 只有当某个区块内所有 log 均处理成功后，才将该区块持久化到 Redis，
+	// 避免跳过处理失败的 log（下次重连能从失败点重新扫描）。
+	confirmedWatermark := head
 	for {
 		select {
 		case <-ctx.Done():
@@ -222,9 +226,14 @@ func (l *listener) connectAndServe(ctx context.Context) error {
 			}
 			if err := l.handleLog(ctx, lg); err != nil {
 				util.LogrusObj.Errorf("Web3 listener handle log tx=%s logIdx=%d err=%v", lg.TxHash.Hex(), lg.Index, err)
+				// 不推进 watermark：此 log 处理失败，下次重连需从当前 confirmedWatermark 重新扫描
 				continue
 			}
-			l.saveLastBlock(ctx, lg.BlockNumber)
+			// 只有成功处理的 log 才允许推进 watermark
+			if lg.BlockNumber > confirmedWatermark {
+				confirmedWatermark = lg.BlockNumber
+				l.saveLastBlock(ctx, confirmedWatermark)
+			}
 		}
 	}
 }

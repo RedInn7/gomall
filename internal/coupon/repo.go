@@ -89,7 +89,9 @@ func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*UserCoupon, error) {
 	return uc, err
 }
 
-// PersistClaim Lua 已经把 stock 在 redis 扣减成功，这里只负责落库（不再校验总量）
+// PersistClaim Lua 已经把 stock 在 redis 扣减成功，这里负责落库。
+// 事务内二次校验单用户配额，使得 DB 成为领券上限的权威来源：即使 Redis
+// 计数器因重启或 TTL 到期丢失，也不会造成超发。
 func (d *CouponDao) PersistClaim(userId, batchId uint, validDays int) (*UserCoupon, error) {
 	now := time.Now()
 	uc := &UserCoupon{
@@ -101,6 +103,24 @@ func (d *CouponDao) PersistClaim(userId, batchId uint, validDays int) (*UserCoup
 		ExpireAt:  now.AddDate(0, 0, validDays),
 	}
 	err := d.Transaction(func(tx *gorm.DB) error {
+		// 查批次的 per_user 上限，同时加行锁防止并发绕过。
+		var batch CouponBatch
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ?", batchId).First(&batch).Error; err != nil {
+			return err
+		}
+
+		// DB 层单用户配额守卫：Redis 计数器只是前置快速路径，不能作为唯一防线。
+		var owned int64
+		if err := tx.Model(&UserCoupon{}).
+			Where("user_id = ? AND batch_id = ?", userId, batchId).
+			Count(&owned).Error; err != nil {
+			return err
+		}
+		if owned >= batch.PerUser {
+			return ErrPerUserLimitReached
+		}
+
 		if err := tx.Model(&CouponBatch{}).
 			Where("id = ?", batchId).
 			Update("claimed", gorm.Expr("claimed + 1")).Error; err != nil {

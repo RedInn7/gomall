@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
@@ -56,10 +57,27 @@ func (d *UserDao) GetUserById(uId uint) (user *User, err error) {
 	return
 }
 
+// GetUserByIdForUpdate 在事务内对用户行加行锁（SELECT ... FOR UPDATE）后读取。
+// 余额的"读-改-写"必须走这条路径：行锁把并发支付/退款串行化，杜绝丢失更新
+// （两个事务读到同一余额各自扣减，后写覆盖先写）。
+func (d *UserDao) GetUserByIdForUpdate(uId uint) (user *User, err error) {
+	err = d.DB.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Model(&User{}).Where("id=?", uId).
+		First(&user).Error
+	return
+}
+
 // UpdateUserById 根据 id 更新用户信息
 func (d *UserDao) UpdateUserById(uId uint, user *User) (err error) {
 	return d.DB.Model(&User{}).Where("id=?", uId).
 		Updates(&user).Error
+}
+
+// UpdateUserColumns 按列名 map 更新，支持把字段写成零值（如解绑邮箱写空串），
+// 规避 struct Updates 跳过零值的坑。
+func (d *UserDao) UpdateUserColumns(uId uint, columns map[string]interface{}) error {
+	return d.DB.Model(&User{}).Where("id=?", uId).
+		Updates(columns).Error
 }
 
 // ExistOrNotByUserName 根据username判断是否存在该名字
