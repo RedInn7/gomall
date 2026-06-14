@@ -297,6 +297,112 @@ func TestCouponListMyCoupons_StatusFilter(t *testing.T) {
 	}
 }
 
+// TestPersistClaim_DBPerUserGuard 直接测试 PersistClaim 的 DB 层配额守卫。
+// 模拟 Redis 计数器已失效（重启 / TTL 到期），用户绕过 Redis 快速路径后，
+// PersistClaim 应当在事务内拒绝超额领取并返回 ErrPerUserLimitReached。
+func TestPersistClaim_DBPerUserGuard(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForCoupon(t)
+	defer cleanup()
+
+	now := time.Now()
+	// perUser=1：只允许领一张
+	b := seedCouponBatch(t, db, 100, 1, now.Add(-time.Hour), now.Add(time.Hour))
+
+	dao := NewCouponDao(context.Background())
+
+	// 第一次领取应成功
+	uc1, err := dao.PersistClaim(401, b.ID, b.ValidDays)
+	if err != nil {
+		t.Fatalf("first PersistClaim: %v", err)
+	}
+	if uc1 == nil || uc1.UserId != 401 {
+		t.Fatalf("unexpected coupon: %+v", uc1)
+	}
+
+	// 第二次同一用户：DB 守卫应拒绝，不论 Redis 计数器状态
+	_, err = dao.PersistClaim(401, b.ID, b.ValidDays)
+	if err == nil {
+		t.Fatal("DB 层应拒绝超出 per_user 上限的领取")
+	}
+	if err != ErrPerUserLimitReached {
+		t.Fatalf("期望 ErrPerUserLimitReached，got: %v", err)
+	}
+
+	// 确认 DB 中只有一条记录，claimed 未超发
+	var cnt int64
+	db.Model(&UserCoupon{}).Where("user_id=? AND batch_id=?", 401, b.ID).Count(&cnt)
+	if cnt != 1 {
+		t.Fatalf("user coupon rows = %d, want 1", cnt)
+	}
+	var got CouponBatch
+	db.First(&got, b.ID)
+	if got.Claimed != 1 {
+		t.Fatalf("claimed = %d, want 1", got.Claimed)
+	}
+}
+
+// TestPersistClaim_DBPerUserGuard_MultiAllowed perUser=2 时：前两次应成功，第三次被 DB 拒绝。
+func TestPersistClaim_DBPerUserGuard_MultiAllowed(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForCoupon(t)
+	defer cleanup()
+
+	now := time.Now()
+	b := seedCouponBatch(t, db, 100, 2, now.Add(-time.Hour), now.Add(time.Hour))
+
+	dao := NewCouponDao(context.Background())
+
+	for i := 0; i < 2; i++ {
+		if _, err := dao.PersistClaim(402, b.ID, b.ValidDays); err != nil {
+			t.Fatalf("claim #%d: %v", i+1, err)
+		}
+	}
+
+	// 第三次应被 DB 守卫阻止
+	_, err := dao.PersistClaim(402, b.ID, b.ValidDays)
+	if err == nil {
+		t.Fatal("DB 层应拒绝超出 per_user=2 上限的第三次领取")
+	}
+	if err != ErrPerUserLimitReached {
+		t.Fatalf("期望 ErrPerUserLimitReached，got: %v", err)
+	}
+
+	var cnt int64
+	db.Model(&UserCoupon{}).Where("user_id=? AND batch_id=?", 402, b.ID).Count(&cnt)
+	if cnt != 2 {
+		t.Fatalf("user coupon rows = %d, want 2", cnt)
+	}
+}
+
+// TestPersistClaim_DifferentUsers_Independent 不同用户的配额互不影响。
+func TestPersistClaim_DifferentUsers_Independent(t *testing.T) {
+	initLogForTest()
+	db, cleanup := setupSQLiteForCoupon(t)
+	defer cleanup()
+
+	now := time.Now()
+	b := seedCouponBatch(t, db, 100, 1, now.Add(-time.Hour), now.Add(time.Hour))
+
+	dao := NewCouponDao(context.Background())
+
+	// 用户 A 领满后
+	if _, err := dao.PersistClaim(501, b.ID, b.ValidDays); err != nil {
+		t.Fatalf("user A claim: %v", err)
+	}
+
+	// 用户 B 仍可领取
+	if _, err := dao.PersistClaim(502, b.ID, b.ValidDays); err != nil {
+		t.Fatalf("user B claim should succeed: %v", err)
+	}
+
+	var cnt int64
+	db.Model(&UserCoupon{}).Where("batch_id=?", b.ID).Count(&cnt)
+	if cnt != 2 {
+		t.Fatalf("total coupon rows = %d, want 2", cnt)
+	}
+}
+
 func initLogForTest() {
 	if logpkg.LogrusObj == nil {
 		l := logrus.New()
