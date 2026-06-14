@@ -354,8 +354,9 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 		switched bool
 		members  []*GroupbuyMember
 	)
+	now := time.Now()
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupSuccessIfFull(groupID)
+		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupSuccessIfFull(groupID, now)
 		if e != nil {
 			return e
 		}
@@ -440,8 +441,9 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 	}
 
 	var (
-		switched bool
-		members  []*GroupbuyMember
+		switched     bool
+		members      []*GroupbuyMember
+		closedCount  int // 本次 UPDATE 实际关掉的订单数
 	)
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
 		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupExpired(groupID)
@@ -464,7 +466,11 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 			if res.Error != nil {
 				return res.Error
 			}
-			// RowsAffected=0 不报错：可能已被其它路径关掉
+			// RowsAffected=0 不报错：可能已被其它路径关掉；
+			// 但对应的库存预扣也已由那条路径归还，这里不重复释放。
+			if res.RowsAffected > 0 {
+				closedCount++
+			}
 		}
 		if e = NewGroupbuyDaoByDB(tx).UpdateMembersStatus(groupID, GroupbuyMemberRefunded); e != nil {
 			return e
@@ -491,8 +497,9 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 		return nil
 	}
 
-	// Saga：每位成员预扣归还 available
-	for range members {
+	// Saga：仅归还本次 UPDATE 实际关闭的订单所持有的库存预扣。
+	// 若某成员订单已由其它路径关闭，其预扣由该路径负责释放，此处跳过，避免 available 被多释放。
+	for i := 0; i < closedCount; i++ {
 		if relErr := cache.ReleaseReservation(ctx, g.ProductID, 1); relErr != nil {
 			util.LogrusObj.Errorf("release reservation on group expire group=%d product=%d err=%v",
 				groupID, g.ProductID, relErr)

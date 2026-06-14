@@ -112,7 +112,10 @@ func seedPayment(t *testing.T, db *gorm.DB, buyerCents int64) paymentFixture {
 	const bossCents = int64(500)
 
 	buyer := &user.User{UserName: "buyer-" + t.Name(), Money: strconv.FormatInt(buyerCents, 10)}
-	enc, err := buyer.EncryptMoney(key)
+	if err := buyer.SetMoneyPassword(key); err != nil {
+		t.Fatalf("set buyer money password: %v", err)
+	}
+	enc, err := buyer.EncryptMoney()
 	if err != nil {
 		t.Fatalf("encrypt buyer money: %v", err)
 	}
@@ -122,7 +125,7 @@ func seedPayment(t *testing.T, db *gorm.DB, buyerCents int64) paymentFixture {
 	}
 
 	boss := &user.User{UserName: "boss-" + t.Name(), Money: strconv.FormatInt(bossCents, 10)}
-	enc, err = boss.EncryptMoney(key)
+	enc, err = boss.EncryptMoney()
 	if err != nil {
 		t.Fatalf("encrypt boss money: %v", err)
 	}
@@ -189,7 +192,7 @@ func assertPaymentUntouched(t *testing.T, db *gorm.DB, fx paymentFixture) {
 	if err := db.First(&buyer, fx.BuyerID).Error; err != nil {
 		t.Fatalf("reload buyer: %v", err)
 	}
-	if money, err := buyer.DecryptMoney(fx.Key); err != nil || money != fx.BuyerCents {
+	if money, err := buyer.DecryptMoney(); err != nil || money != fx.BuyerCents {
 		t.Fatalf("buyer money = %d (err=%v), want %d", money, err, fx.BuyerCents)
 	}
 
@@ -197,7 +200,7 @@ func assertPaymentUntouched(t *testing.T, db *gorm.DB, fx paymentFixture) {
 	if err := db.First(&boss, fx.BossID).Error; err != nil {
 		t.Fatalf("reload boss: %v", err)
 	}
-	if money, err := boss.DecryptMoney(fx.Key); err != nil || money != fx.BossCents {
+	if money, err := boss.DecryptMoney(); err != nil || money != fx.BossCents {
 		t.Fatalf("boss money = %d (err=%v), want %d", money, err, fx.BossCents)
 	}
 
@@ -253,14 +256,14 @@ func TestPayDown_Success(t *testing.T) {
 	if err := db.First(&buyer, fx.BuyerID).Error; err != nil {
 		t.Fatalf("reload buyer: %v", err)
 	}
-	if money, err := buyer.DecryptMoney(fx.Key); err != nil || money != fx.BuyerCents-fx.TotalCents {
+	if money, err := buyer.DecryptMoney(); err != nil || money != fx.BuyerCents-fx.TotalCents {
 		t.Fatalf("buyer money = %d (err=%v), want %d", money, err, fx.BuyerCents-fx.TotalCents)
 	}
 	var boss user.User
 	if err := db.First(&boss, fx.BossID).Error; err != nil {
 		t.Fatalf("reload boss: %v", err)
 	}
-	if money, err := boss.DecryptMoney(fx.Key); err != nil || money != fx.BossCents+fx.TotalCents {
+	if money, err := boss.DecryptMoney(); err != nil || money != fx.BossCents+fx.TotalCents {
 		t.Fatalf("boss money = %d (err=%v), want %d", money, err, fx.BossCents+fx.TotalCents)
 	}
 
@@ -377,7 +380,7 @@ func TestPayDown_AlreadyPaidRejected(t *testing.T) {
 	if err := db.First(&buyer, fx.BuyerID).Error; err != nil {
 		t.Fatalf("reload buyer: %v", err)
 	}
-	if money, err := buyer.DecryptMoney(fx.Key); err != nil || money != fx.BuyerCents {
+	if money, err := buyer.DecryptMoney(); err != nil || money != fx.BuyerCents {
 		t.Fatalf("buyer money = %d (err=%v), want %d", money, err, fx.BuyerCents)
 	}
 }

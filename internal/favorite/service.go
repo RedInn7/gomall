@@ -3,6 +3,7 @@ package favorite
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 
 	conf "github.com/RedInn7/gomall/config"
@@ -59,7 +60,11 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 		return nil, err
 	}
 	fDao := NewFavoritesDao(ctx)
-	exist, _ := fDao.FavoriteExistOrNot(u.Id, req.ProductId)
+	exist, err := fDao.FavoriteExistOrNot(u.Id, req.ProductId)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
 	if exist {
 		err = errors.New("已经存在了")
 		util.LogrusObj.Error(err)
@@ -99,6 +104,10 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 	}
 	err = fDao.CreateFavorite(favorite)
 	if err != nil {
+		// 并发场景下，唯一索引冲突视为重复收藏，非服务端异常
+		if isDuplicateEntryError(err) {
+			return nil, errors.New("已经存在了")
+		}
 		util.LogrusObj.Error(err)
 		return nil, err
 	}
@@ -106,8 +115,24 @@ func (s *FavoriteSrv) FavoriteCreate(ctx context.Context, req *FavoriteCreateReq
 	return nil, nil
 }
 
+// isDuplicateEntryError 判断错误是否由唯一索引冲突引起（MySQL / SQLite 兼容）。
+func isDuplicateEntryError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// MySQL: "Error 1062: Duplicate entry ..."
+	// SQLite: "UNIQUE constraint failed: ..."
+	return strings.Contains(msg, "1062") ||
+		strings.Contains(msg, "Duplicate entry") ||
+		strings.Contains(msg, "UNIQUE constraint failed")
+}
+
 // FavoriteDelete 删除收藏夹，仅允许操作当前登录用户自己的收藏
 func (s *FavoriteSrv) FavoriteDelete(ctx context.Context, req *FavoriteDeleteReq) (*Favorite, error) {
+	if req.ProductId == 0 {
+		return nil, errors.New("product_id 不能为空")
+	}
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)

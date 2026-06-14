@@ -60,13 +60,10 @@ func (d *FavoritesDao) CreateFavorite(favorite *Favorite) (err error) {
 // FavoriteExistOrNot 判断是否存在
 func (d *FavoritesDao) FavoriteExistOrNot(uId uint, pid uint) (exist bool, err error) {
 	var count int64
-	db := d.DB.Model(&Favorite{}).
-		Where("user_id=?", uId)
-	if pid != 0 {
-		db = db.Where("product_id=?", pid)
-	}
-	err = db.Count(&count).Error
-
+	err = d.DB.Model(&Favorite{}).
+		Where("user_id=?", uId).
+		Where("product_id=?", pid).
+		Count(&count).Error
 	if err != nil {
 		return
 	}
@@ -74,9 +71,7 @@ func (d *FavoritesDao) FavoriteExistOrNot(uId uint, pid uint) (exist bool, err e
 }
 
 func (d *FavoritesDao) DeleteFavoriteByUserIdAndProductId(userId uint, productId uint) error {
-	db := d.DB.Where("user_id=?", userId)
-	if productId != 0 {
-		db = db.Where("product_id=?", productId)
-	}
-	return db.Delete(&Favorite{}).Error
+	return d.DB.Where("user_id=?", userId).
+		Where("product_id=?", productId).
+		Delete(&Favorite{}).Error
 }

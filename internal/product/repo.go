@@ -75,9 +75,11 @@ func (d *ProductDao) DeleteProduct(pId, uId uint) error {
 // 显式映射列名走 map 更新：gorm 对 struct 的 Updates 会跳过零值字段，
 // 导致下架（on_sale=false）、库存清零（num=0）这类零值写入静默丢失。
 // 字段集合与调用方组装的可更新字段一一对应，boss 维度与图片路径不在此处变更。
-func (d *ProductDao) UpdateProduct(pId uint, product *Product) error {
-	return d.DB.Model(&Product{}).
-		Where("id=?", pId).
+// uId 为商品归属 boss，WHERE 同时过滤 boss_id 防止越权覆盖他人商品（IDOR）。
+// 返回受影响行数：0 表示商品不存在或调用方不是归属 boss，调用方据此拒绝请求。
+func (d *ProductDao) UpdateProduct(pId, uId uint, product *Product) (int64, error) {
+	res := d.DB.Model(&Product{}).
+		Where("id=? AND boss_id=?", pId, uId).
 		Updates(map[string]interface{}{
 			"name":           product.Name,
 			"category_id":    product.CategoryID,
@@ -87,7 +89,8 @@ func (d *ProductDao) UpdateProduct(pId uint, product *Product) error {
 			"discount_price": product.DiscountPrice,
 			"num":            product.Num,
 			"on_sale":        product.OnSale,
-		}).Error
+		})
+	return res.RowsAffected, res.Error
 }
 
 // SearchProduct 搜索商品
@@ -123,6 +126,20 @@ func (d *ProductDao) RollbackStock(productId uint, num int) (bool, error) {
 		return false, errors.New("回滚失败")
 	}
 	return true, nil
+}
+
+// DeductStock 原子扣减库存：UPDATE ... SET num=num-? WHERE id=? AND num>=?。
+// 把"读-判断够不够-写回"塌缩成单条条件 UPDATE，彻底消除两个买家并发读到同一水位
+// 各自扣减导致的超卖（TOCTOU）。ok=false 表示库存不足（影响 0 行），调用方据此拒单。
+// 需在业务事务内用 tx 绑定的 DAO 调用（NewProductDaoWithDB(tx)），与扣款同进同退。
+func (d *ProductDao) DeductStock(productId uint, num int) (ok bool, err error) {
+	res := d.DB.Model(&Product{}).
+		Where("id=? AND num>=?", productId, num).
+		Update("num", gorm.Expr("num-?", num))
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 func NewProductDaoWithDB(db *gorm.DB) *ProductDao {

@@ -30,20 +30,25 @@ func (s *MoneySrv) MoneyShow(ctx context.Context, req *MoneyShowReq) (*MoneyShow
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	user, err := user.NewUserDao(ctx).GetUserById(u.Id)
+	usr, err := user.NewUserDao(ctx).GetUserById(u.Id)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	money, err := user.DecryptMoney(req.Key)
+	// 支付密码单独校验；余额用服务端密钥解密
+	if !usr.CheckMoneyPassword(req.Key) {
+		log.LogrusObj.Error(user.ErrMoneyKeyIncorrect)
+		return nil, user.ErrMoneyKeyIncorrect
+	}
+	money, err := usr.DecryptMoney()
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
 
 	return &MoneyShowResp{
-		UserID:    user.ID,
-		UserName:  user.UserName,
+		UserID:    usr.ID,
+		UserName:  usr.UserName,
 		UserMoney: formatYuan(money),
 	}, nil
 }
