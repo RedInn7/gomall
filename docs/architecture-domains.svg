@@ -52,6 +52,78 @@
     <marker id="arrowDep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#cbd5e1"/>
     </marker>
+
+    <!-- ===== Component Icons (24x24, white) ===== -->
+    <!-- MySQL: 数据库圆柱 + 海豚尾鳍点睛 -->
+    <symbol id="ic-mysql" viewBox="0 0 24 24">
+      <g fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round">
+        <ellipse cx="11" cy="5.2" rx="6.6" ry="2.4"/>
+        <path d="M4.4 5.2 V15 c0 1.33 2.96 2.4 6.6 2.4 s6.6-1.07 6.6-2.4 V5.2"/>
+        <path d="M4.4 10.1 c0 1.33 2.96 2.4 6.6 2.4 s6.6-1.07 6.6-2.4" stroke-opacity="0.65"/>
+      </g>
+      <path d="M16.4 14.2 c2.2 0.2 3.4 1.6 4.2 3.4 c-1.7-0.7-2.6-0.5-3.4-0.2 c0.5-1.1 0.1-2.2-0.8-3.2 z" fill="#ffffff"/>
+    </symbol>
+    <!-- Redis: 堆叠立方(三层菱形) -->
+    <symbol id="ic-redis" viewBox="0 0 24 24">
+      <g fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round">
+        <path d="M2.6 7.2 L12 3.4 L21.4 7.2 L12 11 Z"/>
+        <path d="M2.6 12 L12 15.8 L21.4 12"/>
+        <path d="M2.6 16.6 L12 20.4 L21.4 16.6"/>
+      </g>
+      <circle cx="12" cy="7.2" r="1.1" fill="#ffffff"/>
+    </symbol>
+    <!-- RabbitMQ: 消息队列(信封 + 流转箭头) -->
+    <symbol id="ic-rabbitmq" viewBox="0 0 24 24">
+      <rect x="3" y="6" width="14" height="10" rx="1.6" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+      <path d="M3.6 7 L10 11.4 L16.4 7" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M16 18.6 h4 m0 0 l-2-2 m2 2 l-2 2" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <!-- ElasticSearch: 放大镜(检索) -->
+    <symbol id="ic-es" viewBox="0 0 24 24">
+      <circle cx="10" cy="10" r="6" fill="none" stroke="#ffffff" stroke-width="1.7"/>
+      <path d="M14.6 14.6 L20 20" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+      <path d="M7.4 10 h5.2 M10 7.4 v5.2" stroke="#ffffff" stroke-width="1.3" stroke-opacity="0.7"/>
+    </symbol>
+    <!-- Milvus: 向量散点(近邻连边) -->
+    <symbol id="ic-milvus" viewBox="0 0 24 24">
+      <g stroke="#ffffff" stroke-width="1.3" stroke-opacity="0.7">
+        <path d="M6 7 L12 12 M18 6 L12 12 M5 17 L12 12 M17 17 L12 12"/>
+      </g>
+      <g fill="#ffffff">
+        <circle cx="6" cy="7" r="1.7"/><circle cx="18" cy="6" r="1.7"/>
+        <circle cx="5" cy="17" r="1.7"/><circle cx="17" cy="17" r="1.7"/>
+        <circle cx="12" cy="12" r="2.2"/>
+      </g>
+    </symbol>
+    <!-- Web3 / EVM: 以太坊菱形 -->
+    <symbol id="ic-web3" viewBox="0 0 24 24">
+      <g fill="#ffffff">
+        <path d="M12 2 L18.4 12 L12 15.6 L5.6 12 Z" fill-opacity="0.95"/>
+        <path d="M12 2 L18.4 12 L12 9.4 Z" fill-opacity="0.6"/>
+        <path d="M12 16.9 L18.4 13.2 L12 22 L5.6 13.2 Z"/>
+      </g>
+    </symbol>
+    <!-- Web Portal: 浏览器窗口 -->
+    <symbol id="ic-web" viewBox="0 0 24 24">
+      <rect x="3" y="4.5" width="18" height="15" rx="1.8" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+      <path d="M3 8.6 H21" stroke="#ffffff" stroke-width="1.6"/>
+      <g fill="#ffffff"><circle cx="5.6" cy="6.5" r="0.8"/><circle cx="8" cy="6.5" r="0.8"/></g>
+    </symbol>
+    <!-- Mobile App: 手机 -->
+    <symbol id="ic-mobile" viewBox="0 0 24 24">
+      <rect x="7" y="3" width="10" height="18" rx="2.2" fill="none" stroke="#ffffff" stroke-width="1.6"/>
+      <path d="M10.4 18 h3.2" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+    </symbol>
+    <!-- Gateway: 盾形(网关/中间件) -->
+    <symbol id="ic-gateway" viewBox="0 0 24 24">
+      <path d="M12 2.6 L20 5.4 V11 c0 5.2-3.4 8.2-8 10.4 C7.4 19.2 4 16.2 4 11 V5.4 Z" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
+      <path d="M8.6 11.6 L11 14 L15.4 9" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <!-- Outbox: 发件箱(箱 + 上行箭头) -->
+    <symbol id="ic-outbox" viewBox="0 0 24 24">
+      <path d="M3.5 12 H8 l1.4 2.2 h4.2 L15 12 h5.5 V19 a1.4 1.4 0 0 1-1.4 1.4 H4.9 A1.4 1.4 0 0 1 3.5 19 Z" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
+      <path d="M12 9.6 V2.8 m0 0 L9.4 5.4 M12 2.8 l2.6 2.6" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
   </defs>
 
   <!-- 画布背景 -->
@@ -315,7 +387,8 @@
     <g filter="url(#shadow)">
       <rect x="466" y="500" width="170" height="58" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
       <text x="478" y="521" fill="rgba(255,255,255,0.6)" font-size="11">[Outbox · 事务消息]</text>
-      <text x="478" y="542" fill="#fff" font-size="15" font-weight="700">shared/outbox</text>
+      <use href="#ic-outbox" x="478" y="529" width="22" height="22"/>
+      <text x="506" y="542" fill="#fff" font-size="15" font-weight="700">shared/outbox</text>
     </g>
     <!-- shared/response -->
     <g filter="url(#shadow)">
@@ -350,31 +423,36 @@
     <g filter="url(#shadow)">
       <rect x="66" y="680" width="196" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
       <text x="78" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[RDBMS · 主库]</text>
-      <text x="78" y="722" fill="#fff" font-size="15" font-weight="700">MySQL</text>
+      <use href="#ic-mysql" x="78" y="709" width="22" height="22"/>
+      <text x="106" y="722" fill="#fff" font-size="15" font-weight="700">MySQL</text>
     </g>
     <!-- Redis -->
     <g filter="url(#shadow)">
       <rect x="278" y="680" width="196" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
       <text x="290" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[Cache · 锁/计数]</text>
-      <text x="290" y="722" fill="#fff" font-size="15" font-weight="700">Redis</text>
+      <use href="#ic-redis" x="290" y="709" width="22" height="22"/>
+      <text x="318" y="722" fill="#fff" font-size="15" font-weight="700">Redis</text>
     </g>
     <!-- RabbitMQ -->
     <g filter="url(#shadow)">
       <rect x="490" y="680" width="218" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
       <text x="502" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[MQ · 异步/延迟]</text>
-      <text x="502" y="722" fill="#fff" font-size="15" font-weight="700">RabbitMQ</text>
+      <use href="#ic-rabbitmq" x="502" y="709" width="22" height="22"/>
+      <text x="530" y="722" fill="#fff" font-size="15" font-weight="700">RabbitMQ</text>
     </g>
     <!-- ES -->
     <g filter="url(#shadow)">
       <rect x="724" y="680" width="196" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
       <text x="736" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[全文检索]</text>
-      <text x="736" y="722" fill="#fff" font-size="15" font-weight="700">Elasticsearch</text>
+      <use href="#ic-es" x="736" y="709" width="22" height="22"/>
+      <text x="764" y="722" fill="#fff" font-size="15" font-weight="700">Elasticsearch</text>
     </g>
     <!-- Milvus -->
     <g filter="url(#shadow)">
       <rect x="936" y="680" width="200" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
       <text x="948" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[向量检索]</text>
-      <text x="948" y="722" fill="#fff" font-size="15" font-weight="700">Milvus</text>
+      <use href="#ic-milvus" x="948" y="709" width="22" height="22"/>
+      <text x="976" y="722" fill="#fff" font-size="15" font-weight="700">Milvus</text>
     </g>
   </g>
 
