@@ -79,3 +79,7 @@ rabbitMq:
   rabbitMQPassWord: CHANGE_ME
   rabbitMQHost: localhost
   rabbitMQPort: 5672
+  # 生产置 true：连不上 broker 直接 fail-fast，不静默降级
+  requireOnStartup: false
+  # 单条消息进 DLQ 前允许的最大投递次数，<=0 取默认 3
+  maxDeliveryAttempts: 3

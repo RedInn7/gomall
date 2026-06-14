@@ -14,7 +14,6 @@ func RegisterRoutes(public, authed, admin *gin.RouterGroup) {
 	authed.POST("orders/enqueue", middleware.Idempotency(), EnqueueOrderHandler())
 	authed.GET("orders/status", OrderStatusHandler())
 	authed.GET("orders/list", ListOrdersHandler())
-	authed.GET("orders/old/list", ListOrdersHandlerOld())
 	authed.GET("orders/show", ShowOrderHandler())
 	authed.POST("orders/delete", DeleteOrderHandler())
 

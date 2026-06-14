@@ -76,26 +76,6 @@ func ListOrdersHandler() gin.HandlerFunc {
 	}
 }
 
-func ListOrdersHandlerOld() gin.HandlerFunc {
-	return func(ctx *gin.Context) {
-		req, ok := response.Bind[OrderListReq](ctx)
-		if !ok {
-			return
-		}
-		if req.PageSize == 0 {
-			req.PageSize = consts.BasePageSize
-		}
-
-		l := GetOrderSrv()
-		resp, err := l.OrderListOld(ctx.Request.Context(), req)
-		if err != nil {
-			response.Fail(ctx, err)
-			return
-		}
-		response.OK(ctx, resp)
-	}
-}
-
 // ShowOrderHandler 订单详情
 func ShowOrderHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {

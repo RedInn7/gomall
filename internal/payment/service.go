@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -102,7 +103,8 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return errors.New("金额不足")
 		}
 
-		buyer.Money = strconv.FormatInt(userMoney-payable, 10)
+		buyerBalanceAfter := userMoney - payable
+		buyer.Money = strconv.FormatInt(buyerBalanceAfter, 10)
 		buyer.Money, err = buyer.EncryptMoney()
 		if err != nil {
 			log.LogrusObj.Error(err)
@@ -111,6 +113,13 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 
 		err = userDao.UpdateUserById(uId, buyer)
 		if err != nil { // 更新用户金额失败，回滚
+			log.LogrusObj.Error(err)
+			return err
+		}
+
+		// 买家扣款流水：与余额变动同事务追加，(order_id, debit) 唯一索引兜底重复扣款
+		ledgerDao := money.NewLedgerDaoByDB(tx)
+		if err = ledgerDao.AppendTransaction(uId, order.ID, money.DirectionDebit, payable, buyerBalanceAfter, money.BizTypeOrderPay); err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
@@ -127,7 +136,8 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			log.LogrusObj.Error(err)
 			return err
 		}
-		boss.Money = strconv.FormatInt(bossMoney+payable, 10)
+		bossBalanceAfter := bossMoney + payable
+		boss.Money = strconv.FormatInt(bossBalanceAfter, 10)
 		boss.Money, err = boss.EncryptMoney()
 		if err != nil {
 			log.LogrusObj.Error(err)
@@ -136,6 +146,12 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 
 		err = userDao.UpdateUserById(bossID, boss)
 		if err != nil { // 更新boss金额失败，回滚
+			log.LogrusObj.Error(err)
+			return err
+		}
+
+		// 卖家入账流水：方向与买家相反，(order_id, credit) 唯一索引兜底重复入账
+		if err = ledgerDao.AppendTransaction(bossID, order.ID, money.DirectionCredit, payable, bossBalanceAfter, money.BizTypeOrderPay); err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}

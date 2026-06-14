@@ -11,6 +11,7 @@ import (
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/groupbuy"
+	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/notice"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/preorder"
@@ -40,5 +41,6 @@ func Run() error {
 			&promo.PromoRule{}, &promo.PromoRelease{},
 			&groupbuy.GroupbuyGroup{}, &groupbuy.GroupbuyMember{},
 			&preorder.ProductPreorder{},
+			&money.AccountTransaction{},
 		)
 }

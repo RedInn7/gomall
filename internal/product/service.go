@@ -18,6 +18,7 @@ import (
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/service/events"
 	"github.com/RedInn7/gomall/types"
+	"gorm.io/gorm"
 )
 
 var ProductSrvIns *ProductSrv
@@ -41,6 +42,8 @@ func (s *ProductSrv) ProductShow(ctx context.Context, req *ProductShowReq) (*Pro
 	cached := &ProductResp{}
 	if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
 		return cached, nil
+	} else if cacheErr == cache.ErrProductNotFound {
+		return nil, gorm.ErrRecordNotFound
 	} else if cacheErr != cache.ErrProductCacheMiss {
 		log.LogrusObj.Warnln("read product cache failed:", cacheErr)
 	}
@@ -50,15 +53,27 @@ func (s *ProductSrv) ProductShow(ctx context.Context, req *ProductShowReq) (*Pro
 		time.Sleep(50 * time.Millisecond)
 		if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
 			return cached, nil
+		} else if cacheErr == cache.ErrProductNotFound {
+			return nil, gorm.ErrRecordNotFound
 		}
 	} else {
 		defer cache.UnlockProduct(ctx, req.ID)
 	}
 
-	pResp, err := s.loadProductFromDB(ctx, req.ID)
+	// 进程内 singleflight 合并同 id 的并发回源，叠加在 Redis 互斥锁之上防惊群。
+	loaded, err := cache.LoadProductOnce(req.ID, func() (interface{}, error) {
+		return s.loadProductFromDB(ctx, req.ID)
+	})
 	if err != nil {
+		// 商品不存在: 写短 TTL 空值标记，挡住后续穿透。
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			if setErr := cache.SetProductNotFound(ctx, req.ID); setErr != nil {
+				log.LogrusObj.Warnln("write product null cache failed:", setErr)
+			}
+		}
 		return nil, err
 	}
+	pResp := loaded.(*ProductResp)
 	if setErr := cache.SetProductDetail(ctx, req.ID, pResp); setErr != nil {
 		log.LogrusObj.Warnln("write product cache failed:", setErr)
 	}
