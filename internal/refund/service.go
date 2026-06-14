@@ -88,7 +88,7 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 
 // ApproveRefund 运营同意退款。
 //   - 仅允许 Refunding -> Refunded
-//   - 写 outbox(order.refunded)，amount 取订单 Money * Num；tx_id 留空待下游回填
+//   - 写 outbox(order.refunded)，amount 取实付口径 FinalCents（回退到 Money*Num）；tx_id 留空待下游回填
 //
 // 真正的资金回退在下游 wallet 服务消费事件时执行；本服务仅做状态推进。
 func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
@@ -103,7 +103,13 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 	if order.Type != consts.OrderRefunding {
 		return orderpkg.ErrInvalidOrderStateTransition
 	}
-	amount := order.Money * int64(order.Num)
+	// 退款额取实付口径，与 payment 侧保持一致：命中满减时以折后实付 FinalCents 为准，
+	// 仅当 FinalCents 未写入（<=0）时回退到折前价 Money*Num。
+	// 用折前价会把满减优惠重复退还（promo 已随事件退预算，钱包再按原价退钱即双重退还）。
+	amount := order.FinalCents
+	if amount <= 0 {
+		amount = order.Money * int64(order.Num)
+	}
 	txErr := baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		ok, err := orderpkg.NewOrderDaoByDB(tx).ApproveRefund(orderNum)
 		if err != nil {

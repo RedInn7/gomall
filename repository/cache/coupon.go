@@ -43,6 +43,16 @@ redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 return 1
 `)
 
+// 回滚 Lua 脚本：原子归还库存 + 撤销用户已领标记
+//
+// KEYS[1] = stock key
+// KEYS[2] = user-claimed key
+var rollbackScript = redis.NewScript(`
+redis.call('INCR', KEYS[1])
+redis.call('DECR', KEYS[2])
+return 1
+`)
+
 var (
 	ErrCouponSoldOut       = errors.New("已抢光")
 	ErrCouponPerUserExceed = errors.New("超出单人领取上限")
@@ -74,8 +84,10 @@ func ClaimCouponAtomic(ctx context.Context, userId, batchId uint, perUser int64)
 	return false, fmt.Errorf("coupon lua 未知返回 %v", code)
 }
 
-// RollbackCouponStock 落库失败时回滚库存
-func RollbackCouponStock(ctx context.Context, userId, batchId uint) {
-	RedisClient.Incr(ctx, CouponStockKey(batchId))
-	RedisClient.Decr(ctx, CouponUserClaimedKey(userId, batchId))
+// RollbackCouponStock 落库失败时回滚库存。库存归还与用户已领标记撤销
+// 经单条 Lua 脚本原子执行，保证两个计数同进同退；返回 error 供调用方观测与补偿。
+func RollbackCouponStock(ctx context.Context, userId, batchId uint) error {
+	return rollbackScript.Run(ctx, RedisClient,
+		[]string{CouponStockKey(batchId), CouponUserClaimedKey(userId, batchId)},
+	).Err()
 }

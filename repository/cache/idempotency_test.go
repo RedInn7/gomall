@@ -10,10 +10,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// 使用真实 Redis（默认 127.0.0.1:6379, DB 15）。Redis 不可达时整组用例 skip。
+// 使用真实 Redis（默认 127.0.0.1:6379, DB 13）。Redis 不可达时整组用例 skip。
 func setupTestRedis(t *testing.T) func() {
 	t.Helper()
-	c := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", DB: 15})
+	c := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", DB: 13})
 	if err := c.Ping(context.Background()).Err(); err != nil {
 		t.Skip("Redis 127.0.0.1:6379 不可用，跳过：", err)
 	}

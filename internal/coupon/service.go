@@ -88,8 +88,10 @@ func (s *CouponSrv) Claim(ctx context.Context, mode string, batchId uint) (inter
 
 	uc, err := NewCouponDao(ctx).PersistClaim(u.Id, batchId, batch.ValidDays)
 	if err != nil {
-		// 落库失败回滚 redis，避免库存幽灵消耗
-		cache.RollbackCouponStock(ctx, u.Id, batchId)
+		// 落库失败回滚 redis，避免库存幽灵消耗；回滚失败需告警补偿
+		if rbErr := cache.RollbackCouponStock(ctx, u.Id, batchId); rbErr != nil {
+			log.LogrusObj.Errorf("rollback coupon stock failed, userId=%d batchId=%d: %v", u.Id, batchId, rbErr)
+		}
 		return nil, err
 	}
 	return uc, nil
