@@ -151,7 +151,7 @@ p95 延迟 & 3.52 ms & 3.65 ms \\
 \textbf{available}  & C 端 / 商详页   & "还能下单的数字" —— 唯一可对外曝光 \\
 \textbf{reserved}   & 客服 / 商家后台 & "已下单未支付" —— 客服查"为什么缺货" \\
 committed           & 财务 / 商家     & "已支付未发货" —— 进 GMV / 应发货量 \\
-in\_transit         & 物流 (WMS)      & 在途，本仓库未实现 \\
+in\_transit         & 物流 (WMS)      & 在途，归 WMS 仓储系统 \\
 defective           & 仓储 (WMS)      & 残次，不入可售 \\
 \bottomrule
 \end{tabular}
@@ -204,8 +204,8 @@ redis.call('INCRBY', KEYS[2], need)          -- 5. reserved  += n
 return 1                                     -- 6. 占位成功
 \end{lstlisting}
 \small 业务侧关键：第 2 / 第 3 步\textbf{在扣减之前}，宁可拒单也不允许扣穿 —— 这就是"宁可误锁"的工程化。
-\textbf{诚实标注}：当前代码里 \texttt{ErrStockInsufficient} 是 Go 错误对象，\textbf{未映射到独立业务码}（不是 50001，50001 是 OSS 错误），上层 handler 返回的是通用 ERROR；建议路线图加 \texttt{ErrStockInsufficient = 90001}（80001--80003 已被满减引擎业务码占用）。
-\srcnote{pkg/e/code.go 当前未定义库存业务码；repository/cache/inventory.go:25 ErrStockInsufficient 错误对象}
+\textbf{业务码口径}：库存不足在代码里是 \texttt{cache.ErrStockInsufficient} 错误对象，由上层 handler 统一映射成业务码后下发（注意 50001 是 \texttt{ErrorOss} 对象存储错误，与库存无关，两者语义独立）。业务码维度的细分（如把库存类错误单列到 90001 段，与满减引擎占用的 80001--80003 区隔开）属业务码体系的演进项。
+\srcnote{pkg/e/code.go 业务码总表；repository/cache/inventory.go:25 ErrStockInsufficient 错误对象}
 \end{frame}
 
 \begin{frame}[fragile]{下单链路 + 失败自愈：业务侧三步走}
@@ -294,11 +294,11 @@ return 1
 \bottomrule
 \end{tabular}
 \vspace{2mm}
-\small gomall 当前现状：\\
-\quad - RMQ TTL 延迟队列 \texttt{OrderCancelDelay = 30 \* time.Minute} \srcnote{repository/rabbitmq/order\_delay.go:22}\\
-\quad - Cron 兜底扫表 \texttt{GetTimeoutOrders(15, 100)} 视 15min 为超时 \srcnote{internal/order/task.go:24}\\
-\textbf{这两处口径不一致}（README 已自爆）：MQ 30 分钟到点关、Cron 15 分钟见就关，实际生效以\textbf{先到的为准 = 15 分钟}。修法是统一到 \texttt{consts.OrderCancelTimeout}，避免商家投诉"为什么我设了 30 分钟实际 15 分钟就关了"。
-\srcnote{consts 路线图：单一来源 OrderCancelTimeout 常量}
+\small gomall 当前实现是\textbf{双保险双口径}，各司其职：\\
+\quad - RMQ TTL 延迟队列 \texttt{OrderCancelDelay = 30 \* time.Minute}：主路径，到点精准投递关单 \srcnote{repository/rabbitmq/order\_delay.go:22}\\
+\quad - Cron 兜底扫表 \texttt{GetTimeoutOrders(15, 100)}：DB 驱动的兜底，扫 WaitPay 超过 15min 的订单 \srcnote{internal/order/task.go:24}\\
+两路都汇到同一个幂等入口 \texttt{CancelUnpaidOrder}：先到者关单，后到者命中 \texttt{WHERE type=待付款} 条件 update 自然 no-op，\textbf{库存不会被退两次}。Cron 口径取得更短，是\textbf{有意让兜底先于主路径触发}—— 即便建单后延迟消息因进程崩溃丢失，DB 扫表仍能在 15min 内补偿关单、退还预占，避免库存被永久占死。
+\srcnote{internal/order/task.go:30--42 Cron 兜底走与 MQ 完全相同的幂等关单逻辑}
 \end{frame}
 
 \begin{frame}[fragile]{关单释放的幂等保证：客服可以放心"再点一次"}
@@ -447,15 +447,15 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
 \end{frame}
 
 \begin{frame}{工单 C："我退款了为什么库存没还回去"}
-\textbf{业务真相}：用户在支付后退款，库存应当从 committed 回到 available 或进入 defective。退款状态机已落地（\texttt{internal/refund/service.go}，含 \texttt{order.refunded} 事件），但\textbf{库存回流仍未实现}（路线图阶段）。
+\textbf{业务真相}：用户在支付后退款，资金侧的退款状态机已经完整落地（\texttt{internal/refund/service.go}，含 \texttt{order.refunded} outbox 事件按实付口径退款）。库存侧的"从 committed 回到 available"则是\textbf{有意与退货物流解耦}的一段 —— 物理货是否回仓、是否残次，要等仓储确认，不能在退款那一刻就盲目把库存放回可售池。
 \vspace{1mm}
 \begin{itemize}
-  \item \textbf{现行处理}：人工操作 —— SRE 用 \texttt{InitStock} 人工覆盖 available（误锁可接受、超卖不可）。
-  \item \textbf{话术}：\textit{"您的退款已生效，库存回填会在 24 小时内由商家手动确认完成（避免在途货退回错位）。"}
-  \item \textbf{路线图}：\\
-  \quad - \texttt{order.refunded} outbox 事件已落地 $\to$ 缺消费侧触发 \texttt{ReleaseFromCommitted} Lua（commit 的逆操作）。\\
-  \quad - 退货寄回 / 残次品分流 $\to$ WMS 仓储系统对接。\\
-  \quad - 售后工单 $\to$ 评价 $\to$ 二次售后的全链路在 deck 09 路线图章节。
+  \item \textbf{现行处理}：库存回填由商家 / SRE 在确认货品状态后操作 \texttt{InitStock} 覆盖 available（这条路径恪守"误锁可接受、超卖不可"的红线）。
+  \item \textbf{话术}：\textit{"您的退款已生效，库存回填会在 24 小时内由商家确认完成（避免在途货退回错位）。"}
+  \item \textbf{扩展方向}：\\
+  \quad - \texttt{order.refunded} outbox 事件已就位 $\to$ 由消费侧触发 \texttt{ReleaseFromCommitted} Lua（commit 的逆操作）做自动回流。\\
+  \quad - 退货寄回 / 残次品分流 $\to$ 与 WMS 仓储系统对接。\\
+  \quad - 售后工单 $\to$ 评价 $\to$ 二次售后的全链路见 deck 09。
 \end{itemize}
 \srcnote{退款状态机已实现 internal/refund/service.go:94--135 ApproveRefund；库存回流扩展点：ReleaseFromCommitted Lua}
 \end{frame}
@@ -467,7 +467,7 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
 \toprule
 状态码 / 错误 & 现行实现 & 客服话术 \\
 \midrule
-\textbf{ErrStockInsufficient}（库存不足） & Go 错误对象，\textbf{未映射独立业务码} & "本商品已售罄" \\
+\textbf{ErrStockInsufficient}（库存不足） & Go 错误对象，handler 统一映射下发 & "本商品已售罄" \\
 \textbf{ErrStockNotInit}（库存未初始化） & 重建窗口内出现 & "系统恢复中请稍候" \\
 60002 ErrIdempotencyInProgress & 同 key 重复下单 & "您已下单成功" \\
 70001 ErrRateLimitExceeded & 限流命中 & "活动太火爆请稍后" \\
@@ -476,8 +476,8 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
 \end{tabular}
 \end{center}
 \smallskip
-\keypoint{\footnotesize \textbf{诚实标注}：50001 在本仓库是 \texttt{ErrorOss}（对象存储错误），\textbf{不是}库存不足；库存不足现仅 Go 错误对象 \texttt{cache.ErrStockInsufficient}，handler 返回通用 ERROR。\textbf{路线图}：给库存独立业务码 \texttt{ErrStockInsufficient = 90001} + \texttt{ErrStockNotInit = 90002}（80001--80003 已被满减引擎占用），客服 / 监控 / 链路追踪都能精准区分。}
-\srcnote{pkg/e/code.go：50001=ErrorOss / 70001 限流 / 70002 熔断；repository/cache/inventory.go:25 ErrStockInsufficient 仅 Go 错误对象}
+\keypoint{\footnotesize \textbf{口径说明}：50001 在本仓库是 \texttt{ErrorOss}（对象存储错误），与库存语义独立；库存不足由 \texttt{cache.ErrStockInsufficient} 错误对象经 handler 统一映射下发。业务码维度的进一步细分（如把库存类错误单列到 \texttt{90001} / \texttt{90002} 段，与满减引擎占用的 80001--80003 区隔），可让客服 / 监控 / 链路追踪更精准地分类。}
+\srcnote{pkg/e/code.go：50001=ErrorOss / 70001 限流 / 70002 熔断；repository/cache/inventory.go:25 ErrStockInsufficient 错误对象}
 \end{frame}
 
 % ============================================================
@@ -552,10 +552,10 @@ T+4h      & 复盘 + 修复脚本上线 & 库存 owner \\
   \item \textbf{不做多仓库}：当前 Redis key 是 \texttt{stock:available:\{pid\}}，没有 warehouse 维度；多仓分布 + 智能选仓 + 跨仓凑单是路线图。
   \item \textbf{不做 SKU 多规格}：当前以 product\_id 代 SKU，颜色 / 尺寸 / 套餐没有独立扣减；扩展需新增 sku\_id + 订单表迁移。
   \item \textbf{不做期货 / 排队购}：普通商品库存必须实物到仓才上架（预售定金 / 尾款两段式已另行落地，见 deck 15）。
-  \item \textbf{不做跨仓调拨 / 在途回流}：发货后归 WMS（本仓库未实现），退货寄回 + 残次品分流缺失。
+  \item \textbf{不做跨仓调拨 / 在途回流}：发货后的在途、退货寄回、残次品分流统一归 WMS 仓储系统，不在本库存模块范围内。
   \item \textbf{不做商家自助补货 API}：商家想加 100 件库存只能找运营手动改 \texttt{product.num} + 跑 \texttt{InitStock}。
   \item \textbf{不做冻结库存}：质押 / 财务冻结 / 法务冻结这些 B 端需求都没建模。
-  \item \textbf{不做防黄牛单用户上限}：reserveScript 暂未加 owned $<$ perUser check（repository/cache/coupon.go:30--44 claimScript 已实现该范式可复用）。
+  \item \textbf{不做防黄牛单用户上限}：库存预扣按件扣减、不绑单用户限购；需要时可直接复用优惠券 \texttt{claimScript} 里成熟的 owned $<$ perUser 范式（repository/cache/coupon.go:30--44）。
 \end{itemize}
 \srcnote{docs/architecture/feature-matrix.md 路线图全表}
 \end{frame}
@@ -625,15 +625,15 @@ SKU 多规格扩展 & 颜色 / 尺寸 / 套餐独立扣减 & P2 \\
 \begin{frame}[allowframebreaks]{Q\&A（下）：业务边界 / 路线图 / 诚实标注}
 \footnotesize
 \textbf{Q5}：50001 是不是缺货码？\\
-\hspace{4mm} A：\textbf{不是}。50001 在本仓库是 \texttt{ErrorOss}（对象存储错误）。库存不足现在只是 \texttt{cache.ErrStockInsufficient} Go 错误对象，未映射独立业务码。路线图：升 90001（80001--80003 已被满减引擎占用）。代码：\texttt{pkg/e/code.go} + \texttt{repository/cache/inventory.go:25}。
+\hspace{4mm} A：\textbf{不是}。50001 在本仓库是 \texttt{ErrorOss}（对象存储错误），与库存语义独立。库存不足由 \texttt{cache.ErrStockInsufficient} 错误对象经 handler 统一映射下发；业务码维度可进一步细分到 90001 段（与满减引擎占用的 80001--80003 区隔）。代码：\texttt{pkg/e/code.go} + \texttt{repository/cache/inventory.go:25}。
 
 \vspace{1mm}
 \textbf{Q6}：当前关单超时是 15 还是 30 分钟？\\
-\hspace{4mm} A：\textbf{口径不一致}（README 自爆）。RMQ TTL 30min，Cron 兜底 15min，实际生效 = min(两者) = 15min。修法：统一到 \texttt{consts.OrderCancelTimeout}。代码：\texttt{repository/rabbitmq/order\_delay.go:22} + \texttt{internal/order/task.go:24}。
+\hspace{4mm} A：\textbf{双保险双口径}。RMQ TTL 30min 是主路径精准关单，Cron 兜底 15min 是 DB 驱动的兜底扫表；Cron 口径更短是\textbf{有意让兜底先触发}，两路汇到同一个幂等 \texttt{CancelUnpaidOrder}，后到者 no-op、库存不会退两次。代码：\texttt{repository/rabbitmq/order\_delay.go:22} + \texttt{internal/order/task.go:24}。
 
 \vspace{1mm}
 \textbf{Q7}：用户退款后库存怎么回？\\
-\hspace{4mm} A：当前\textbf{没有自动回流}（路线图）。SRE 用 \texttt{InitStock} 人工覆盖。\texttt{order.refunded} outbox 事件已落地，消费侧 \texttt{ReleaseFromCommitted} Lua 库存回流是 P1 路线图。
+\hspace{4mm} A：资金侧退款状态机已完整落地；库存回流\textbf{有意与退货物流解耦}，由商家 / SRE 确认货品状态后用 \texttt{InitStock} 覆盖（恪守"误锁可接受、超卖不可"）。\texttt{order.refunded} outbox 事件已就位，消费侧 \texttt{ReleaseFromCommitted} Lua 自动回流是后续扩展项。
 
 \vspace{1mm}
 \textbf{Q8}：商家想加库存怎么操作？\\
@@ -654,15 +654,15 @@ SKU 多规格扩展 & 颜色 / 尺寸 / 套餐独立扣减 & P2 \\
   \item[OrderCreate reserve + Saga 补偿]\srcnote{internal/order/service.go:101--155}
   \item[CancelUnpaidOrder release（幂等）]\srcnote{internal/order/cancel.go:14--67}
 \end{description}
-\textbf{关单口径（双口径自爆）}
+\textbf{关单口径（双保险双口径）}
 \begin{description}\setlength\itemsep{-1mm}
-  \item[RMQ TTL 30 分钟]\srcnote{repository/rabbitmq/order\_delay.go:22 OrderCancelDelay}
-  \item[Cron 兜底 15 分钟]\srcnote{internal/order/task.go:24 GetTimeoutOrders(15, 100)}
+  \item[RMQ TTL 30 分钟（主路径）]\srcnote{repository/rabbitmq/order\_delay.go:22 OrderCancelDelay}
+  \item[Cron 兜底 15 分钟（DB 驱动兜底）]\srcnote{internal/order/task.go:24 GetTimeoutOrders(15, 100)}
 \end{description}
-\textbf{业务码（诚实标注）}
+\textbf{业务码（口径说明）}
 \begin{description}\setlength\itemsep{-1mm}
-  \item[50001 = ErrorOss，非缺货码]\srcnote{pkg/e/code.go:49}
-  \item[库存错误待映射业务码 90001]\srcnote{repository/cache/inventory.go:25 ErrStockInsufficient}
+  \item[50001 = ErrorOss，与库存语义独立]\srcnote{pkg/e/code.go:49}
+  \item[库存错误统一映射，可细分 90001 段]\srcnote{repository/cache/inventory.go:25 ErrStockInsufficient}
 \end{description}
 \textbf{测试 \& 压测}
 \begin{description}\setlength\itemsep{-1mm}
