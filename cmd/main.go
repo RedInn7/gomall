@@ -3,9 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	_ "github.com/apache/skywalking-go"
 
@@ -23,10 +27,38 @@ import (
 )
 
 func main() {
-	loading() // 加载配置
+	loading()
 	r := routes.NewRouter()
-	_ = r.Run(conf.Config.System.HttpPort)
+
+	srv := &http.Server{
+		Addr:              conf.Config.System.HttpPort,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			util.LogrusObj.Fatalf("server error: %v", err)
+		}
+	}()
+
+	util.LogrusObj.Infof("server listening on %s", conf.Config.System.HttpPort)
 	fmt.Println("启动配成功...")
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	util.LogrusObj.Info("shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		util.LogrusObj.Errorf("server forced shutdown: %v", err)
+	}
+	util.LogrusObj.Info("shutdown complete")
 }
 
 // loading一些配置
@@ -55,22 +87,31 @@ func loading() {
 	fmt.Println("加载配置完成...")
 }
 
-// snowflakeNodeID 从环境变量 SNOWFLAKE_NODE_ID（或 NODE_ID）读取雪花算法节点 ID，
-// 多实例部署时每个副本配置不同值以避免 ID 碰撞，缺省为 0。
+// snowflakeNodeID 从环境变量 SNOWFLAKE_NODE_ID（或 NODE_ID）读取雪花算法节点 ID。
+// 多实例部署时每个副本必须配置唯一值（0..1023），否则启动被拒绝以防止 ID 碰撞。
+// 仅在设置 SNOWFLAKE_ALLOW_DEFAULT=true 时允许省略，退回节点 0（限本地开发/测试）。
 func snowflakeNodeID() int64 {
 	for _, envKey := range []string{"SNOWFLAKE_NODE_ID", "NODE_ID"} {
 		if raw := strings.TrimSpace(os.Getenv(envKey)); raw != "" {
 			n, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
-				util.LogrusObj.Warnf("snowflakeNodeID: invalid %s=%q, fallback to 0: %v", envKey, raw, err)
-				return 0
+				util.LogrusObj.Fatalf("snowflakeNodeID: %s=%q is not a valid integer: %v", envKey, raw, err)
+			}
+			if n < 0 || n > 1023 {
+				util.LogrusObj.Fatalf("snowflakeNodeID: %s=%d is out of range [0, 1023]", envKey, n)
 			}
 			util.LogrusObj.Infof("snowflakeNodeID: using node id %d from env %s", n, envKey)
 			return n
 		}
 	}
-	util.LogrusObj.Infoln("snowflakeNodeID: SNOWFLAKE_NODE_ID / NODE_ID not set, defaulting to 0")
-	return 0
+
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SNOWFLAKE_ALLOW_DEFAULT")), "true") {
+		util.LogrusObj.Warn("snowflakeNodeID: SNOWFLAKE_NODE_ID / NODE_ID not set; SNOWFLAKE_ALLOW_DEFAULT=true — defaulting to node 0 (local dev/test only, NOT safe for multi-replica)")
+		return 0
+	}
+
+	util.LogrusObj.Fatal("snowflakeNodeID: SNOWFLAKE_NODE_ID (or NODE_ID) must be set for each replica to prevent ID collisions; set SNOWFLAKE_ALLOW_DEFAULT=true to override for local dev")
+	return 0 // unreachable, satisfies compiler
 }
 
 // tryInitRabbitMQ 初始化 RabbitMQ 连接与延迟队列消费者。
