@@ -8,8 +8,9 @@ import (
 )
 
 // 所有业务事件统一进 domain.events 主题交换机
-//   routing key 形如 "order.created" / "stock.reserved" / "product.updated"
-//   消费端 bind 通配符即可订阅自己感兴趣的事件
+//
+//	routing key 形如 "order.created" / "stock.reserved" / "product.updated"
+//	消费端 bind 通配符即可订阅自己感兴趣的事件
 const DomainEventsExchange = "domain.events"
 
 // InitDomainEventsExchange 声明拓扑。Init 在 publisher / consumer 启动前都要调一次
@@ -45,6 +46,12 @@ func PublishDomainEvent(ctx context.Context, routingKey string, payload []byte) 
 		})
 	}
 
+	// 注册 basic.return 监听：mandatory 消息发到无绑定队列的 routing key 时，
+	// broker 会先 return 再 ACK（confirm）。若只看 confirm 会把“无人接收、已被退回”
+	// 的事件误判为发送成功，导致 outbox MarkSent 后事件实际丢失。
+	// 该 channel 仅本次发布独享（用完即 Close），缓冲 1 足够承接单条 return。
+	returns := ch.NotifyReturn(make(chan amqp.Return, 1))
+
 	// PublishWithDeferredConfirmWithContext 返回一个 DeferredConfirmation，
 	// WaitContext 阻塞直到 broker 发回 ACK 或 ctx 超时
 	dc, err := ch.PublishWithDeferredConfirmWithContext(
@@ -69,7 +76,15 @@ func PublishDomainEvent(ctx context.Context, routingKey string, payload []byte) 
 	} else if !ok {
 		return fmt.Errorf("broker NACK for routing key %q", routingKey)
 	}
-	return nil
+
+	// confirm 到达后 return（若有）必已先于 confirm 投入 channel，此处非阻塞探测即可。
+	// 收到 return 说明无队列接收该 routing key，按发布失败处理，不让 outbox MarkSent。
+	select {
+	case ret := <-returns:
+		return fmt.Errorf("domain event returned routing key %q: %d %s", routingKey, ret.ReplyCode, ret.ReplyText)
+	default:
+		return nil
+	}
 }
 
 // BindDomainQueue 给消费方创建队列并绑定到 domain.events 的某个 routing pattern

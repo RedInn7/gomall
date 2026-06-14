@@ -15,6 +15,14 @@ const (
 	BizTypeOrderPay  = "order_pay"
 	BizTypeStripePay = "stripe_pay"
 	BizTypeWeb3Pay   = "web3_pay"
+	// 出账 / 退款 / 两阶段：biz_type 进唯一索引，使同一订单可有多笔不同业务的流水
+	// （如预售定金 + 尾款两次 debit），同业务同方向仍只入账一次。
+	BizTypeRefund          = "refund"           // 退款获批：买家 credit / 卖家 debit
+	BizTypePreorderDeposit = "preorder_deposit" // 预售定金
+	BizTypePreorderFinal   = "preorder_final"   // 预售尾款
+	BizTypePreorderRefund  = "preorder_refund"  // 预售定金退还
+	BizTypeRedPacket       = "redpacket"        // 红包发/抢/退
+	BizTypeGroupBuy        = "groupbuy"         // 拼团支付 / 散团退款
 )
 
 // ExternalClearingUserID 平台对外资金清算账户的 user_id（0 = 系统账户）。
@@ -31,8 +39,8 @@ const StripeClearingUserID = ExternalClearingUserID
 // amount_cents / balance_after_cents 均为明文 int64 分，绝不加密，供对账与审计。
 // 一次资金转移会成对出现（一方 debit、一方 credit），ref_order_id 关联订单。
 //
-// 幂等：对 (ref_order_id, direction) 建唯一索引，保证同一订单同方向只入账一次，
-// 杜绝重复扣款 / 重复入账。
+// 幂等：对 (ref_order_id, direction, biz_type) 建唯一索引，保证同一订单同方向同业务只入账一次，
+// 杜绝重复扣款 / 重复入账；biz_type 进键使两阶段业务（预售定金 + 尾款）可在同一订单各记一笔。
 type AccountTransaction struct {
 	dbmodel.Model
 	UserID            uint   `gorm:"not null;index:idx_acct_tx_user"`
@@ -40,7 +48,7 @@ type AccountTransaction struct {
 	AmountCents       int64  `gorm:"not null"`
 	RefOrderID        uint   `gorm:"not null;uniqueIndex:uniq_acct_tx_order_dir,priority:1"`
 	BalanceAfterCents int64  `gorm:"not null"`
-	BizType           string `gorm:"size:32;not null"`
+	BizType           string `gorm:"size:32;not null;uniqueIndex:uniq_acct_tx_order_dir,priority:3"`
 }
 
 func (AccountTransaction) TableName() string { return "account_transaction" }

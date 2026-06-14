@@ -22,8 +22,9 @@ const (
 const OrderCancelDelay = 30 * time.Minute
 
 // InitOrderDelayTopology 声明延迟队列拓扑：
-//   producer → order.delay.exchange → order.delay.queue (TTL)
-//   过期 → order.dead.exchange → order.dead.queue → consumer
+//
+//	producer → order.delay.exchange → order.delay.queue (TTL)
+//	过期 → order.dead.exchange → order.dead.queue → consumer
 func InitOrderDelayTopology() error {
 	ch, err := GlobalRabbitMQ.Channel()
 	if err != nil {
@@ -35,6 +36,11 @@ func InitOrderDelayTopology() error {
 		return err
 	}
 	if err := ch.ExchangeDeclare(orderDeadExchange, "direct", true, false, false, false, nil); err != nil {
+		return err
+	}
+	// 预声明共享 DLX，确保 order.dead.queue 的 x-dead-letter-exchange 有落点。
+	// 幂等：与 InitDeadLetterTopology 声明同一交换机，参数一致不会触发 PRECONDITION_FAILED。
+	if err := ch.ExchangeDeclare(DeadLetterExchange, "direct", true, false, false, false, nil); err != nil {
 		return err
 	}
 
@@ -49,7 +55,12 @@ func InitOrderDelayTopology() error {
 		return err
 	}
 
-	if _, err := ch.QueueDeclare(orderDeadQueue, true, false, false, false, nil); err != nil {
+	// order.dead.queue 自身挂死信交换机：消费失败被 Nack(requeue=false) / 超 TTL 时
+	// 进入共享 DLX，配合 x-death 计数实现“按投递次数进 DLQ”而非无限 requeue。
+	if _, err := ch.QueueDeclare(orderDeadQueue, true, false, false, false, amqp.Table{
+		"x-dead-letter-exchange":    DeadLetterExchange,
+		"x-dead-letter-routing-key": deadLetterRouting,
+	}); err != nil {
 		return err
 	}
 	return ch.QueueBind(orderDeadQueue, orderDeadRouting, orderDeadExchange, false, nil)
@@ -86,10 +97,10 @@ func ConsumeOrderCancelDelay(handler func(orderNum uint64) error) error {
 			}
 			if err := handler(orderNum); err != nil {
 				util.LogrusObj.Errorf("处理延迟关单失败 orderNum=%d err=%v\n", orderNum, err)
-				// order.dead.queue 未配置 DLX，requeue 会立即回到队首重投。
-				// 仅允许首次失败重投一次；再次失败（Redelivered）即转入独立死信队列，
-				// 避免持续失败的毒丸消息无界回灌、占满消费者。
-				if d.Redelivered {
+				// 按 broker 维护的投递次数（x-death，跨重连可靠）判定毒丸：
+				// 达到上限即显式投 DLQ（带 confirm）并 Ack，否则 Nack 重排重试。
+				// 不再依赖 d.Redelivered——它会在重连后被重置，可能无限 requeue。
+				if ExceededDeliveryLimit(d) {
 					RouteToDLQ(d, orderDeadQueue, orderDeadRouting, false)
 					return
 				}

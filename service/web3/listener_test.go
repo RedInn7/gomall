@@ -39,6 +39,7 @@ func (s *fakeSubscription) Unsubscribe() {
 func (s *fakeSubscription) Err() <-chan error { return s.errCh }
 
 type fakeClient struct {
+	mu           sync.Mutex
 	head         uint64
 	filterLogs   []types.Log
 	subscribeCh  chan<- types.Log
@@ -51,9 +52,42 @@ func newFakeClient(head uint64, filterLogs []types.Log) *fakeClient {
 	return &fakeClient{head: head, filterLogs: filterLogs, closed: make(chan struct{})}
 }
 
-func (c *fakeClient) BlockNumber(ctx context.Context) (uint64, error) { return c.head, nil }
+func (c *fakeClient) BlockNumber(ctx context.Context) (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.head, nil
+}
+
+// setHead 推进链头，模拟新区块到达后此前的事件逐步埋够确认深度。
+func (c *fakeClient) setHead(h uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.head = h
+}
+
+// appendLog 追加一条 FilterLogs 可返回的链上日志。
+func (c *fakeClient) appendLog(lg types.Log) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.filterLogs = append(c.filterLogs, lg)
+}
+
+// FilterLogs 按 [FromBlock, ToBlock] 过滤返回，贴近真实节点行为，
+// 以便测试确认深度（safeHead）对回扫区间的影响。
 func (c *fakeClient) FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
-	return c.filterLogs, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []types.Log
+	for _, lg := range c.filterLogs {
+		if q.FromBlock != nil && lg.BlockNumber < q.FromBlock.Uint64() {
+			continue
+		}
+		if q.ToBlock != nil && lg.BlockNumber > q.ToBlock.Uint64() {
+			continue
+		}
+		out = append(out, lg)
+	}
+	return out, nil
 }
 func (c *fakeClient) SubscribeFilterLogs(ctx context.Context, q ethereum.FilterQuery, ch chan<- types.Log) (ethereum.Subscription, error) {
 	c.subOnce.Do(func() {
@@ -207,18 +241,21 @@ func TestStartPaymentListener_InvalidAddress(t *testing.T) {
 	}
 }
 
-func TestStartPaymentListener_CatchUpAndSubscribe(t *testing.T) {
+func TestStartPaymentListener_ConfirmDepthCatchUpAndScan(t *testing.T) {
 	escrow := common.HexToAddress("0x0000000000000000000000000000000000000abc")
 	t.Setenv(envRPCURL, "http://stub")
 	t.Setenv(envEscrowAddr, escrow.Hex())
+	// 确认深度设 3：block B 需 head >= B+3 才入账。
+	t.Setenv(envConfirmDepth, "3")
 
 	orderID1 := common.HexToHash("0x01")
 	buyer1 := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	// 历史事件在 block 9；初始 head=12 → safeHead=9，已埋够 3 个确认，应被回扫入账。
 	historic := mustEncodeLog(t, escrow, orderID1, buyer1, big.NewInt(1000), 9, common.HexToHash("0xaa"), 0)
 
-	client := newFakeClient(10, []types.Log{historic})
+	client := newFakeClient(12, []types.Log{historic})
 	rdb := newFakeRedis()
-	// 预置 last_block = 8，意味着重启时漏掉了 block 9 这条 PaymentConfirmed，要靠 catch-up 补
+	// 预置 last_block = 8，意味着重启时漏掉了 block 9 这条 PaymentConfirmed，要靠回扫补
 	rdb.Set(context.Background(), lastBlockKey, "8", 0)
 	ob := &fakeOutbox{}
 
@@ -237,26 +274,34 @@ func TestStartPaymentListener_CatchUpAndSubscribe(t *testing.T) {
 	}
 
 	// 等订阅建立
-	deadline := time.Now().Add(2 * time.Second)
-	for client.subscribeCh == nil && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if client.subscribeCh == nil {
-		t.Fatalf("subscription never opened")
-	}
+	waitFor(t, func() bool { return client.subscribeCh != nil }, 2*time.Second, "subscription open")
 
-	// catch-up 完成后应已经写入第一条
-	waitFor(t, func() bool { return len(ob.snapshot()) == 1 }, time.Second, "catch-up event")
+	// 首轮回扫完成后应写入历史事件（block 9，已确认）
+	waitFor(t, func() bool { return len(ob.snapshot()) == 1 }, time.Second, "confirmed catch-up event")
 
-	// 推一条新事件
+	// last_block 应推进到 safeHead=9（head 12 - depth 3），而非 head 本身
+	waitFor(t, func() bool {
+		v, _ := rdb.Get(ctx, lastBlockKey).Result()
+		return v == "9"
+	}, time.Second, "watermark advance to safeHead")
+
+	// 追加一条 block 11 的新事件，此刻 head=12 → safeHead=9，未达确认深度，不应入账
 	orderID2 := common.HexToHash("0x02")
 	buyer2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
 	live := mustEncodeLog(t, escrow, orderID2, buyer2, big.NewInt(2500), 11, common.HexToHash("0xbb"), 0)
+	client.appendLog(live)
+	client.subscribeCh <- live // 仅触发回扫，本体丢弃
+	time.Sleep(80 * time.Millisecond)
+	if got := len(ob.snapshot()); got != 1 {
+		t.Fatalf("unconfirmed event must not be settled, want 1 got %d", got)
+	}
+
+	// 链头推进到 14：block 11 现已埋够 3 个确认（safeHead=11），再触发回扫即应入账
+	client.setHead(14)
 	client.subscribeCh <- live
+	waitFor(t, func() bool { return len(ob.snapshot()) == 2 }, time.Second, "now-confirmed live event")
 
-	waitFor(t, func() bool { return len(ob.snapshot()) == 2 }, time.Second, "live event")
-
-	// 再推一条重复（同 tx + logIndex）应被 dedupe 吃掉
+	// 再次触发回扫，已处理事件靠去重键吃掉，不重复入账
 	client.subscribeCh <- live
 	time.Sleep(80 * time.Millisecond)
 	if got := len(ob.snapshot()); got != 2 {
@@ -283,22 +328,26 @@ func TestStartPaymentListener_CatchUpAndSubscribe(t *testing.T) {
 		t.Errorf("event 1 block want 11 got %d", events[1].payload.BlockNumber)
 	}
 
-	// last_block 应推进到最新 log 的 block
-	val, err := rdb.Get(ctx, lastBlockKey).Result()
-	if err != nil {
-		t.Fatalf("read last_block: %v", err)
-	}
-	if val != "11" {
-		t.Errorf("last_block want 11 got %s", val)
-	}
+	// last_block 应推进到最新 safeHead=11（head 14 - depth 3）
+	waitFor(t, func() bool {
+		v, _ := rdb.Get(ctx, lastBlockKey).Result()
+		return v == "11"
+	}, time.Second, "final watermark")
 }
 
 func TestStartPaymentListener_ReorgRemovedSkipped(t *testing.T) {
 	escrow := common.HexToAddress("0x00000000000000000000000000000000000000ee")
 	t.Setenv(envRPCURL, "http://stub")
 	t.Setenv(envEscrowAddr, escrow.Hex())
+	t.Setenv(envConfirmDepth, "2")
 
-	client := newFakeClient(5, nil)
+	orderID := common.HexToHash("0x03")
+	buyer := common.HexToAddress("0x3333333333333333333333333333333333333333")
+	// block 4，head=10 → safeHead=8，已确认；但标记 Removed（深 reorg 撤销），应被跳过不入账。
+	removed := mustEncodeLog(t, escrow, orderID, buyer, big.NewInt(7), 4, common.HexToHash("0xcc"), 1)
+	removed.Removed = true
+
+	client := newFakeClient(10, []types.Log{removed})
 	rdb := newFakeRedis()
 	ob := &fakeOutbox{}
 
@@ -316,15 +365,38 @@ func TestStartPaymentListener_ReorgRemovedSkipped(t *testing.T) {
 
 	waitFor(t, func() bool { return client.subscribeCh != nil }, time.Second, "subscribe ready")
 
-	orderID := common.HexToHash("0x03")
-	buyer := common.HexToAddress("0x3333333333333333333333333333333333333333")
-	removed := mustEncodeLog(t, escrow, orderID, buyer, big.NewInt(7), 6, common.HexToHash("0xcc"), 1)
-	removed.Removed = true
-	client.subscribeCh <- removed
-
-	time.Sleep(80 * time.Millisecond)
+	// 首轮回扫即覆盖 block 4；Removed log 应被跳过。
+	time.Sleep(120 * time.Millisecond)
 	if got := len(ob.snapshot()); got != 0 {
 		t.Fatalf("removed log should be skipped, got %d events", got)
+	}
+}
+
+// 校验事件来自非配置合约地址时被拒绝（防伪造来源）。
+func TestHandleLog_RejectsForeignContract(t *testing.T) {
+	escrow := common.HexToAddress("0x00000000000000000000000000000000000000ee")
+	foreign := common.HexToAddress("0x00000000000000000000000000000000deadbeef")
+	parsed, err := abi.JSON(strings.NewReader(paymentConfirmedABI))
+	if err != nil {
+		t.Fatalf("abi parse: %v", err)
+	}
+	rdb := newFakeRedis()
+	ob := &fakeOutbox{}
+	l := &listener{
+		escrow:       escrow,
+		abi:          parsed,
+		topic:        EventTopic(),
+		confirmDepth: 2,
+		outbox:       func(ctx context.Context) outboxWriter { return ob },
+		rdb:          func() redisCmd { return rdb },
+	}
+	buyer := common.HexToAddress("0x4444444444444444444444444444444444444444")
+	lg := mustEncodeLog(t, foreign, common.HexToHash("0x05"), buyer, big.NewInt(1), 3, common.HexToHash("0xdd"), 0)
+	if err := l.handleLog(context.Background(), lg); err == nil {
+		t.Fatalf("expected rejection for foreign contract address")
+	}
+	if len(ob.snapshot()) != 0 {
+		t.Fatalf("foreign-contract event must not be written to outbox")
 	}
 }
 
