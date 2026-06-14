@@ -114,12 +114,16 @@ func ensureSnowflake() {
 func TestAsyncOrder_EnqueueReservesAndPublishes(t *testing.T) {
 	cleanup := setupTestRedisForService(t)
 	defer cleanup()
+	db, dcleanup := setupSQLiteForOrder(t)
+	defer dcleanup()
 	ensureSnowflake()
 
 	const pid = 7001
 	if err := cache.InitStock(context.Background(), pid, 5); err != nil {
 		t.Fatalf("init stock: %v", err)
 	}
+	// OrderEnqueue 现在会同步校验收货地址归属，需为下单用户种一条属于他的地址
+	seedOrderAddress(t, db, 42)
 
 	prod, store, restore := installAsyncTestDeps(t)
 	defer restore()
@@ -174,12 +178,16 @@ func TestAsyncOrder_EnqueueReservesAndPublishes(t *testing.T) {
 func TestAsyncOrder_EnqueuePublishFailReleasesReserve(t *testing.T) {
 	cleanup := setupTestRedisForService(t)
 	defer cleanup()
+	db, dcleanup := setupSQLiteForOrder(t)
+	defer dcleanup()
 	ensureSnowflake()
 
 	const pid = 7002
 	if err := cache.InitStock(context.Background(), pid, 10); err != nil {
 		t.Fatalf("init stock: %v", err)
 	}
+	// 种一条属于该用户的地址，让流程通过地址校验、真正走到 publish 失败路径
+	seedOrderAddress(t, db, 1)
 
 	prod, store, restore := installAsyncTestDeps(t)
 	defer restore()

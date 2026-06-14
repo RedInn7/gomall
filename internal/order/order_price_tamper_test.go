@@ -22,12 +22,13 @@ func TestOrderCreate_IgnoresTamperedClientMoneyAndBoss(t *testing.T) {
 	product := seedOrderProduct(t, db, "p-tamper", 10000) // DiscountPrice = "100.00", BossID=1
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 99})
+	addrID := seedOrderAddress(t, db, 99)
 	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
 		Money:     1,   // 攻击者把单价改成 1 分
 		BossID:    999, // 攻击者把收款卖家改成自己的账户
-		AddressID: 1,
+		AddressID: addrID,
 	})
 	if err != nil {
 		t.Fatalf("OrderCreate: %v", err)
