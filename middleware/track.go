@@ -5,6 +5,7 @@ import (
 	"github.com/opentracing/opentracing-go"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/track"
 )
 
@@ -16,7 +17,9 @@ func Jaeger() gin.HandlerFunc {
 			var err error
 			span, err = track.GetParentSpan(c.FullPath(), traceId, c.Request.Header)
 			if err != nil {
-				return
+				// uber-trace-id 由客户端控制，解析失败时降级为本地 span，避免吞掉整条请求链
+				log.LogrusObj.Warnln("parse uber-trace-id failed, fallback to local span:", err)
+				span = track.StartSpan(opentracing.GlobalTracer(), c.FullPath())
 			}
 		} else {
 			span = track.StartSpan(opentracing.GlobalTracer(), c.FullPath())
