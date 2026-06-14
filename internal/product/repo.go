@@ -125,6 +125,20 @@ func (d *ProductDao) RollbackStock(productId uint, num int) (bool, error) {
 	return true, nil
 }
 
+// DeductStock 原子扣减库存：UPDATE ... SET num=num-? WHERE id=? AND num>=?。
+// 把"读-判断够不够-写回"塌缩成单条条件 UPDATE，彻底消除两个买家并发读到同一水位
+// 各自扣减导致的超卖（TOCTOU）。ok=false 表示库存不足（影响 0 行），调用方据此拒单。
+// 需在业务事务内用 tx 绑定的 DAO 调用（NewProductDaoWithDB(tx)），与扣款同进同退。
+func (d *ProductDao) DeductStock(productId uint, num int) (ok bool, err error) {
+	res := d.DB.Model(&Product{}).
+		Where("id=? AND num>=?", productId, num).
+		Update("num", gorm.Expr("num-?", num))
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 func NewProductDaoWithDB(db *gorm.DB) *ProductDao {
 	return &ProductDao{DB: db}
 }
