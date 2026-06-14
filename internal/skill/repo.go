@@ -36,3 +36,10 @@ func (d *SkillGoodsDao) ListSkillGoods() (resp []*SkillProduct, err error) {
 
 	return
 }
+
+func (d *SkillGoodsDao) GetByProductId(productId uint) (resp *SkillProduct, err error) {
+	err = d.Model(&SkillProduct{}).
+		Where("product_id = ?", productId).First(&resp).Error
+
+	return
+}

@@ -3,6 +3,7 @@ package cache
 import (
 	"fmt"
 	"strconv"
+	"time"
 )
 
 const (
@@ -15,6 +16,9 @@ const (
 	// IdempotencyKey idempotency token，按用户隔离
 	IdempotencyKey = "idemp:%d:%s"
 )
+
+// SkillProductTTL 秒杀商品详情缓存的存活时间。
+const SkillProductTTL = 30 * time.Minute
 
 func IdempotencyTokenKey(userId uint, token string) string {
 	return fmt.Sprintf(IdempotencyKey, userId, token)

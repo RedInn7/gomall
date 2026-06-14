@@ -3,8 +3,11 @@ package skill
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -41,7 +44,8 @@ func (s *SkillProductSrv) InitSkillGoods(ctx context.Context) (resp []*SkillProd
 		return nil, err
 	}
 
-	// 落库的同时写入缓存
+	// 落库的同时写入缓存：列表 key 供秒杀列表读取，
+	// per-product key 供秒杀详情/下单按 ProductId 直接命中。
 	for i := range spList {
 		jsonBytes, errx := json.Marshal(spList[i])
 		if errx != nil {
@@ -54,9 +58,48 @@ func (s *SkillProductSrv) InitSkillGoods(ctx context.Context) (resp []*SkillProd
 			log.LogrusObj.Infoln(errx)
 			return nil, errx
 		}
+		errx = cache.RedisClient.Set(ctx,
+			fmt.Sprintf(cache.SkillProductKey, spList[i].ProductId),
+			jsonString, cache.SkillProductTTL).Err()
+		if errx != nil {
+			log.LogrusObj.Infoln(errx)
+			return nil, errx
+		}
 	}
 
 	return nil, nil
+}
+
+// loadSkillProduct 读取单个秒杀商品的 JSON，缓存未命中时回源 DB 并回填，
+// 避免依赖 InitSkillGoods 预热顺序导致接口必然失败。
+func (s *SkillProductSrv) loadSkillProduct(ctx context.Context, productId uint) (string, error) {
+	rc := cache.RedisClient
+	key := fmt.Sprintf(cache.SkillProductKey, productId)
+	resp, err := rc.Get(ctx, key).Result()
+	if err == nil {
+		return resp, nil
+	}
+	if !errors.Is(err, redis.Nil) {
+		log.LogrusObj.Infoln(err)
+		return "", err
+	}
+
+	sp, err := NewSkillGoodsDao(ctx).GetByProductId(productId)
+	if err != nil {
+		log.LogrusObj.Infoln(err)
+		return "", err
+	}
+	jsonBytes, err := json.Marshal(sp)
+	if err != nil {
+		log.LogrusObj.Infoln(err)
+		return "", err
+	}
+	jsonString := string(jsonBytes)
+	if errx := rc.Set(ctx, key, jsonString, cache.SkillProductTTL).Err(); errx != nil {
+		log.LogrusObj.Infoln(errx)
+	}
+
+	return jsonString, nil
 }
 
 // ListSkillGoods 秒杀商品列表。
@@ -100,26 +143,10 @@ func (s *SkillProductSrv) ListSkillGoods(ctx context.Context) (resp interface{},
 
 // GetSkillGoods 秒杀商品详情
 func (s *SkillProductSrv) GetSkillGoods(ctx context.Context, req *GetSkillProductReq) (resp string, err error) {
-	rc := cache.RedisClient
-	resp, err = rc.Get(ctx,
-		fmt.Sprintf(cache.SkillProductKey, req.ProductId)).Result()
-	if err != nil {
-		log.LogrusObj.Infoln(err)
-		return "", err
-	}
-
-	return resp, nil
+	return s.loadSkillProduct(ctx, req.ProductId)
 }
 
 // SkillProduct 秒杀下单
 func (s *SkillProductSrv) SkillProduct(ctx context.Context, req *SkillProductReq) (resp string, err error) {
-	rc := cache.RedisClient
-	resp, err = rc.Get(ctx,
-		fmt.Sprintf(cache.SkillProductKey, req.ProductId)).Result()
-	if err != nil {
-		log.LogrusObj.Infoln(err)
-		return "", err
-	}
-
-	return resp, nil
+	return s.loadSkillProduct(ctx, req.ProductId)
 }
