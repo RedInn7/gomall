@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"gorm.io/gorm"
@@ -13,6 +14,51 @@ import (
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
+
+// orderListCacheTTL 订单列表缓存基础 TTL。
+const orderListCacheTTL = 5 * time.Minute
+
+// orderListCacheJitter 列表缓存 TTL 的最大正向抖动，打散同批写入的过期时刻，避免缓存雪崩。
+const orderListCacheJitter = 60 * time.Second
+
+// orderListCacheKey 列表缓存 key，按用户 + type 分桶。
+func orderListCacheKey(uID uint, typ interface{}) string {
+	return fmt.Sprintf("mall:orders:uid:%v:type:%v", uID, typ)
+}
+
+// invalidateUserOrderListCache 删除某用户的全部订单列表分桶缓存。
+// 订单状态变更后列表内容会跨 type 桶迁移（如 WaitPay->WaitShip），旧桶仍缓存着已迁走的订单，
+// 必须把该用户所有 type 桶一并失效，否则用户最长 TTL 内仍看到陈旧状态 / 重复订单。
+// 桶按已知订单状态枚举删除，避免 KEYS/SCAN 全库扫描。
+func invalidateUserOrderListCache(uID uint) {
+	if uID == 0 {
+		return
+	}
+	types := []uint{
+		consts.OrderWaitPay, consts.OrderWaitShip, consts.OrderClosed,
+		consts.OrderWaitReceive, consts.OrderCompleted, consts.OrderRefunding,
+		consts.OrderRefunded, consts.OrderWaitGroup,
+	}
+	keys := make([]string, 0, len(types))
+	for _, t := range types {
+		keys = append(keys, orderListCacheKey(uID, t))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := cache.RedisClient.Del(ctx, keys...).Err(); err != nil {
+		log.LogrusObj.Errorf("订单列表缓存失效失败 uid=%d err=%v", uID, err)
+	}
+}
+
+// resolveOrderUserID 取订单归属用户，供按 order_num 推进状态的方法在失效列表缓存时定位用户桶。
+func (d *OrderDao) resolveOrderUserID(orderNum uint64) uint {
+	var o Order
+	if err := d.DB.Model(&Order{}).Select("user_id").Where("order_num=?", orderNum).First(&o).Error; err != nil {
+		log.LogrusObj.Errorf("订单列表缓存失效定位用户失败 order_num=%d err=%v", orderNum, err)
+		return 0
+	}
+	return o.UserID
+}
 
 type OrderDao struct {
 	*gorm.DB
@@ -70,7 +116,7 @@ func (d *OrderDao) SumWaitPayNumByProduct() (map[uint]int64, error) {
 func (d *OrderDao) ListOrderByCondition(uId uint, req *OrderListReq) (r *OrderListResp, err error) {
 	req.BasePage.Normalize()
 	// TODO: 详情读路径目前用 join，后续考虑缓存化以支撑高并发读
-	cacheKey := fmt.Sprintf("mall:orders:uid:%v:type:%v", uId, req.Type)
+	cacheKey := orderListCacheKey(uId, req.Type)
 	if req.LastId == 0 {
 		val, err := cache.RedisClient.Get(context.Background(), cacheKey).Result()
 		if err == nil && val != "" {
@@ -104,7 +150,8 @@ func (d *OrderDao) ListOrderByCondition(uId uint, req *OrderListReq) (r *OrderLi
 
 	if req.LastId == 0 {
 		bytes, _ := json.Marshal(r)
-		cache.RedisClient.Set(context.Background(), cacheKey, string(bytes), 5*time.Minute)
+		ttl := orderListCacheTTL + time.Duration(rand.Int63n(int64(orderListCacheJitter)))
+		cache.RedisClient.Set(context.Background(), cacheKey, string(bytes), ttl)
 	}
 
 	return
@@ -153,15 +200,29 @@ func (d *OrderDao) ShowOrderById(id, uId uint) (r *OrderListRespItem, err error)
 
 // DeleteOrderById 删除订单
 func (d *OrderDao) DeleteOrderById(id, uId uint) error {
-	return d.DB.Model(&Order{}).
+	res := d.DB.Model(&Order{}).
 		Where("id=? AND user_id = ?", id, uId).
-		Delete(&Order{}).Error
+		Delete(&Order{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(uId)
+	}
+	return nil
 }
 
 // UpdateOrderById 更新订单详情
 func (d *OrderDao) UpdateOrderById(id, uId uint, order *Order) error {
-	return d.DB.Where("id = ? AND user_id = ?", id, uId).
-		Updates(order).Error
+	res := d.DB.Where("id = ? AND user_id = ?", id, uId).
+		Updates(order)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(uId)
+	}
+	return nil
 }
 
 // MarkOrderPaidWithCheck 条件推进订单状态 WaitPay -> WaitShip。
@@ -174,6 +235,9 @@ func (d *OrderDao) MarkOrderPaidWithCheck(orderID, userID uint) (bool, error) {
 		Update("type", consts.OrderWaitShip)
 	if res.Error != nil {
 		return false, res.Error
+	}
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(userID)
 	}
 	return res.RowsAffected > 0, nil
 }
@@ -209,7 +273,9 @@ func (d *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 	if res.Error != nil {
 		return false, res.Error
 	}
-
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(d.resolveOrderUserID(orderNum))
+	}
 	return res.RowsAffected > 0, nil
 
 }
@@ -225,6 +291,9 @@ func (d *OrderDao) ShipOrder(orderNum uint64) (bool, error) {
 	if res.Error != nil {
 		return false, res.Error
 	}
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(d.resolveOrderUserID(orderNum))
+	}
 	return res.RowsAffected > 0, nil
 }
 
@@ -236,6 +305,9 @@ func (d *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
 		Update("type", consts.OrderCompleted)
 	if res.Error != nil {
 		return false, res.Error
+	}
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(d.resolveOrderUserID(orderNum))
 	}
 	return res.RowsAffected > 0, nil
 }
@@ -252,6 +324,9 @@ func (d *OrderDao) RequestRefund(orderNum uint64, allowedFrom []uint) (bool, err
 	if res.Error != nil {
 		return false, res.Error
 	}
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(d.resolveOrderUserID(orderNum))
+	}
 	return res.RowsAffected > 0, nil
 }
 
@@ -262,6 +337,9 @@ func (d *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
 		Update("type", consts.OrderRefunded)
 	if res.Error != nil {
 		return false, res.Error
+	}
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(d.resolveOrderUserID(orderNum))
 	}
 	return res.RowsAffected > 0, nil
 }
@@ -274,6 +352,9 @@ func (d *OrderDao) RejectRefund(orderNum uint64) (bool, error) {
 		Update("type", consts.OrderCompleted)
 	if res.Error != nil {
 		return false, res.Error
+	}
+	if res.RowsAffected > 0 {
+		invalidateUserOrderListCache(d.resolveOrderUserID(orderNum))
 	}
 	return res.RowsAffected > 0, nil
 }

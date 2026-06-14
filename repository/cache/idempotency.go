@@ -49,12 +49,26 @@ end
 return {0, ''}
 `)
 
-// IssueIdempotencyToken 写入 init 状态
+// issueScript 原子写入 init 状态并附带 TTL。
+// HSET 与 EXPIRE 必须同生效：拆成两次往返时，若 HSET 后进程崩在 EXPIRE 前，
+// 会留下一条永不过期的 init 记录，长期累积导致无界泄漏。
+// KEYS[1]=token key，ARGV[1]=state，ARGV[2]=TTL 秒。
+var issueScript = redis.NewScript(`
+redis.call('HSET', KEYS[1], 'state', ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+`)
+
+// IssueIdempotencyToken 原子写入 init 状态并设置 TTL。
 func IssueIdempotencyToken(ctx context.Context, key string) error {
-	return RedisClient.HSet(ctx, key, "state", IdempotencyStateInit).Err()
+	return issueScript.Run(ctx, RedisClient,
+		[]string{key},
+		IdempotencyStateInit, int(IdempotencyTokenTTL.Seconds()),
+	).Err()
 }
 
-// SetTokenTTL 为新建的 token 设置过期
+// SetTokenTTL 兜底刷新 token 过期时间。IssueIdempotencyToken 已原子带上 TTL，
+// 此处仅作为幂等补刷，单独调用失败不影响已设置的 TTL。
 func SetTokenTTL(ctx context.Context, key string) error {
 	return RedisClient.Expire(ctx, key, IdempotencyTokenTTL).Err()
 }

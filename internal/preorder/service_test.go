@@ -17,6 +17,7 @@ import (
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/address"
+	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -75,7 +76,7 @@ func setupSQLiteForPreorder(t *testing.T) (*gorm.DB, func()) {
 	}
 	if err := db.AutoMigrate(
 		&user.User{}, &order.Order{}, &product.Product{}, &address.Address{},
-		&ProductPreorder{}, &outbox.OutboxEvent{},
+		&ProductPreorder{}, &outbox.OutboxEvent{}, &money.AccountTransaction{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
