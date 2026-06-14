@@ -29,6 +29,12 @@ type RabbitMq struct {
 	RabbitMQPassWord string `yaml:"rabbitMqPassWord"`
 	RabbitMQHost     string `yaml:"rabbitMqHost"`
 	RabbitMQPort     string `yaml:"rabbitMqPort"`
+	// RequireOnStartup 为 true 时连不上 broker 直接 fail-fast，
+	// 用于生产环境避免静默降级（订单延迟关单 / 事件投递不可用却照常起服务）。
+	// 缺省 false 保持开发态容错行为。
+	RequireOnStartup bool `yaml:"requireOnStartup"`
+	// MaxDeliveryAttempts 单条消息进 DLQ 前允许的最大投递次数，<=0 时取默认值 3。
+	MaxDeliveryAttempts int `yaml:"maxDeliveryAttempts"`
 }
 
 type KafkaConfig struct {

@@ -61,9 +61,13 @@ func DispatchReleaseEvent(ctx context.Context, routingKey string, payload []byte
 }
 
 // StartReleaseConsumer 绑定 order.cancelled / order.refunded 并启动消费循环。
-//   - 解析失败（毒消息）：Nack 不重排，交给上游 outbox 重发 / 死信兜底
+//   - 解析失败（毒消息）：直接进 DLQ 并告警，不回灌业务队列
+//   - 投递次数超限：即便业务判为可重试也兜底进 DLQ，避免无限 requeue
 //   - 业务处理失败（DB 抖动等）：Nack 重排，依赖 at-least-once + 台账幂等收敛
 func StartReleaseConsumer(ctx context.Context) error {
+	if err := rabbitmq.InitDeadLetterTopology(); err != nil {
+		return err
+	}
 	for _, pattern := range []string{"order.cancelled", "order.refunded"} {
 		if err := rabbitmq.BindDomainQueue(releaseQueue, pattern); err != nil {
 			return err
@@ -82,12 +86,20 @@ func StartReleaseConsumer(ctx context.Context) error {
 	}
 	go func() {
 		for d := range msgs {
-			if err := DispatchReleaseEvent(ctx, d.RoutingKey, d.Body); err != nil {
-				util.LogrusObj.Errorf("promo release handle key=%s err=%v", d.RoutingKey, err)
-				_ = d.Nack(false, !errors.Is(err, errReleasePoisonMessage))
+			err := DispatchReleaseEvent(ctx, d.RoutingKey, d.Body)
+			if err == nil {
+				_ = d.Ack(false)
 				continue
 			}
-			_ = d.Ack(false)
+			util.LogrusObj.Errorf("promo release handle key=%s err=%v", d.RoutingKey, err)
+			// 毒消息（解析失败 / 未知 routing key）不可恢复，直接进 DLQ。
+			// 业务可重试错误也要在投递次数超限后兜底进 DLQ，避免无限 requeue。
+			poison := errors.Is(err, errReleasePoisonMessage)
+			if poison || rabbitmq.ExceededDeliveryLimit(d) {
+				rabbitmq.RouteToDLQ(d, releaseQueue, d.RoutingKey, poison)
+				continue
+			}
+			_ = d.Nack(false, true)
 		}
 	}()
 	return nil

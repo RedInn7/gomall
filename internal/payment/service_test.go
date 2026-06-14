@@ -16,6 +16,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -69,6 +70,7 @@ func setupSQLiteForPayment(t *testing.T) (*gorm.DB, func()) {
 	}
 	if err := db.AutoMigrate(
 		&user.User{}, &orderpkg.Order{}, &product.Product{}, &outbox.OutboxEvent{},
+		&money.AccountTransaction{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
@@ -293,6 +295,24 @@ func TestPayDown_Success(t *testing.T) {
 		t.Fatalf("expect 1 outbox row for order.paid, got %d", cnt)
 	}
 
+	// 复式记账：买家一条 debit、卖家一条 credit，金额=总价，balance_after 对得上
+	var debit money.AccountTransaction
+	if err := db.Where("ref_order_id=? AND direction=?", fx.OrderID, money.DirectionDebit).First(&debit).Error; err != nil {
+		t.Fatalf("买家扣款流水缺失: %v", err)
+	}
+	if debit.UserID != fx.BuyerID || debit.AmountCents != fx.TotalCents || debit.BalanceAfterCents != fx.BuyerCents-fx.TotalCents {
+		t.Fatalf("debit 流水 user=%d amount=%d after=%d, want user=%d amount=%d after=%d",
+			debit.UserID, debit.AmountCents, debit.BalanceAfterCents, fx.BuyerID, fx.TotalCents, fx.BuyerCents-fx.TotalCents)
+	}
+	var credit money.AccountTransaction
+	if err := db.Where("ref_order_id=? AND direction=?", fx.OrderID, money.DirectionCredit).First(&credit).Error; err != nil {
+		t.Fatalf("卖家入账流水缺失: %v", err)
+	}
+	if credit.UserID != fx.BossID || credit.AmountCents != fx.TotalCents || credit.BalanceAfterCents != fx.BossCents+fx.TotalCents {
+		t.Fatalf("credit 流水 user=%d amount=%d after=%d, want user=%d amount=%d after=%d",
+			credit.UserID, credit.AmountCents, credit.BalanceAfterCents, fx.BossID, fx.TotalCents, fx.BossCents+fx.TotalCents)
+	}
+
 	// Redis reserved 桶核销：available 不变（下单时已扣），reserved 清零
 	avail, reserved, _ := cache.GetStockSnapshot(ctx, fx.ProductID)
 	if avail != int64(fx.StockNum-fx.OrderNum) || reserved != 0 {
@@ -382,6 +402,33 @@ func TestPayDown_AlreadyPaidRejected(t *testing.T) {
 	}
 	if money, err := buyer.DecryptMoney(); err != nil || money != fx.BuyerCents {
 		t.Fatalf("buyer money = %d (err=%v), want %d", money, err, fx.BuyerCents)
+	}
+}
+
+// TestLedger_OrderDirectionIdempotent 校验 (ref_order_id, direction) 唯一约束：
+// 同一订单同方向重复入账会因唯一冲突报错，杜绝重复扣款 / 重复入账。
+func TestLedger_OrderDirectionIdempotent(t *testing.T) {
+	initLogForTest()
+	db, dcleanup := setupSQLiteForPayment(t)
+	defer dcleanup()
+
+	ledger := money.NewLedgerDaoByDB(db)
+	if err := ledger.AppendTransaction(1, 9001, money.DirectionCredit, 4000, 4500, money.BizTypeOrderPay); err != nil {
+		t.Fatalf("首次入账应成功: %v", err)
+	}
+	// 同一 (order_id, direction) 再写一条：唯一索引应拒绝
+	if err := ledger.AppendTransaction(1, 9001, money.DirectionCredit, 4000, 8500, money.BizTypeOrderPay); err == nil {
+		t.Fatal("同一订单同方向重复入账应被唯一约束拒绝")
+	}
+	// 同一订单、反方向（debit）属另一笔合法流水，应当放行
+	if err := ledger.AppendTransaction(2, 9001, money.DirectionDebit, 4000, 1000, money.BizTypeOrderPay); err != nil {
+		t.Fatalf("反方向流水应允许: %v", err)
+	}
+
+	var cnt int64
+	db.Model(&money.AccountTransaction{}).Where("ref_order_id=?", 9001).Count(&cnt)
+	if cnt != 2 {
+		t.Fatalf("订单 9001 应只有 2 条流水（各方向 1 条），got %d", cnt)
 	}
 }
 

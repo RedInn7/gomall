@@ -69,14 +69,27 @@ func snowflakeNodeID() int64 {
 	return 0
 }
 
-// tryInitRabbitMQ RabbitMQ 不可用时不阻塞启动，但放弃延迟队列能力
+// tryInitRabbitMQ 初始化 RabbitMQ 连接与延迟队列消费者。
+//   - 配置 requireOnStartup=true（生产）时连不上直接 panic 中止启动，避免静默降级；
+//   - 否则打 error 级日志并标记不健康，订单延迟关单 / 事件消费能力关闭，主链路继续。
 func tryInitRabbitMQ() {
+	if err := rabbitmq.InitRabbitMQ(); err != nil {
+		if rabbitmq.RequireOnStartup() {
+			util.LogrusObj.Errorf("RabbitMQ 初始化失败且 requireOnStartup=true，启动中止: %v", err)
+			panic(err)
+		}
+		util.LogrusObj.Errorf("RabbitMQ 初始化失败，订单延迟关单 / 事件消费能力关闭: %v", err)
+		return
+	}
+
 	defer func() {
 		if r := recover(); r != nil {
-			util.LogrusObj.Warnf("RabbitMQ 初始化失败，订单延迟关单功能不可用: %v", r)
+			if rabbitmq.RequireOnStartup() {
+				panic(r)
+			}
+			util.LogrusObj.Errorf("RabbitMQ 延迟队列消费者初始化失败: %v", r)
 		}
 	}()
-	rabbitmq.InitRabbitMQ()
 	initialize.InitOrderDelayConsumer()
 }
 
