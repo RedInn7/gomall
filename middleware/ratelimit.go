@@ -16,6 +16,18 @@ import (
 	"github.com/RedInn7/gomall/repository/cache"
 )
 
+// 空闲限流器的回收阈值与清理周期：超过 ttl 未访问的条目会被 janitor 删除，
+// 避免 limiters map 随源 IP 数量无界增长。
+const (
+	tokenBucketIdleTTL         = 10 * time.Minute
+	tokenBucketCleanupInterval = time.Minute
+)
+
+type tokenBucketEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
 // TokenBucket 单实例 IP 维度令牌桶限流
 //
 //	rps:   每秒放令牌速率
@@ -23,18 +35,34 @@ import (
 func TokenBucket(rps rate.Limit, burst int) gin.HandlerFunc {
 	var (
 		mu       sync.Mutex
-		limiters = make(map[string]*rate.Limiter)
+		limiters = make(map[string]*tokenBucketEntry)
 	)
 	get := func(ip string) *rate.Limiter {
 		mu.Lock()
 		defer mu.Unlock()
-		l, ok := limiters[ip]
+		e, ok := limiters[ip]
 		if !ok {
-			l = rate.NewLimiter(rps, burst)
-			limiters[ip] = l
+			e = &tokenBucketEntry{limiter: rate.NewLimiter(rps, burst)}
+			limiters[ip] = e
 		}
-		return l
+		e.lastSeen = time.Now()
+		return e.limiter
 	}
+	// 后台 janitor 周期性回收空闲限流器，保证 map 容量有界。
+	go func() {
+		ticker := time.NewTicker(tokenBucketCleanupInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			now := time.Now()
+			mu.Lock()
+			for ip, e := range limiters {
+				if now.Sub(e.lastSeen) > tokenBucketIdleTTL {
+					delete(limiters, ip)
+				}
+			}
+			mu.Unlock()
+		}
+	}()
 	return func(c *gin.Context) {
 		if !get(c.ClientIP()).Allow() {
 			c.JSON(http.StatusOK, gin.H{

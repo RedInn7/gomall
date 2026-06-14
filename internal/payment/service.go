@@ -73,8 +73,10 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 		paidNum = num
 		// 实付口径：命中满减时以折后实付 FinalCents 为准，否则单价 * 件数。
 		// 之前一律用 order.Money*num（折前价）会把满减优惠吞掉，买家被多扣。
+		// 判据用 PromoRuleID（与下单侧一致的命中口径），不能用 FinalCents > 0：
+		// 满减立减到 0 / 100% 折扣时 FinalCents == 0 是合法实付，误判为未命中会回退全价。
 		payable := order.Money * int64(num)
-		if order.FinalCents > 0 {
+		if order.PromoRuleID != 0 {
 			payable = order.FinalCents
 		}
 
