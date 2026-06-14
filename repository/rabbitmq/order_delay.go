@@ -86,7 +86,14 @@ func ConsumeOrderCancelDelay(handler func(orderNum uint64) error) error {
 			}
 			if err := handler(orderNum); err != nil {
 				util.LogrusObj.Errorf("处理延迟关单失败 orderNum=%d err=%v\n", orderNum, err)
-				_ = d.Nack(false, true) // requeue 一次，下游再决定是否进 DLX
+				// order.dead.queue 未配置 DLX，requeue 会立即回到队首重投。
+				// 仅允许首次失败重投一次；再次失败（Redelivered）即转入独立死信队列，
+				// 避免持续失败的毒丸消息无界回灌、占满消费者。
+				if d.Redelivered {
+					RouteToDLQ(d, orderDeadQueue, orderDeadRouting, false)
+					return
+				}
+				_ = d.Nack(false, true)
 				return
 			}
 			_ = d.Ack(false)

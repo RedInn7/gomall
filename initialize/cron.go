@@ -143,6 +143,11 @@ func InitOrderDelayConsumer() {
 		util.LogrusObj.Errorf("InitOrderDelayTopology failed: %v", err)
 		return
 	}
+	// 关单失败的毒丸消息超限后转入独立死信队列，需保证 DLX 拓扑已声明（幂等）。
+	if err := rabbitmq.InitDeadLetterTopology(); err != nil {
+		util.LogrusObj.Errorf("InitDeadLetterTopology failed: %v", err)
+		return
+	}
 	if err := rabbitmq.ConsumeOrderCancelDelay(order.CancelUnpaidOrder); err != nil {
 		util.LogrusObj.Errorf("ConsumeOrderCancelDelay failed: %v", err)
 	}
