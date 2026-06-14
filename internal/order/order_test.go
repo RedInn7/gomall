@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 
+	"github.com/RedInn7/gomall/internal/address"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -52,13 +53,24 @@ func setupSQLiteForOrder(t *testing.T) (*gorm.DB, func()) {
 		t.Skipf("sqlite 不可用（CGO 关闭？）：%v", err)
 	}
 	if err := db.AutoMigrate(
-		&user.User{}, &Order{}, &product.Product{},
+		&user.User{}, &Order{}, &product.Product{}, &address.Address{},
 		&promo.PromoRule{}, &promo.PromoRelease{}, &outbox.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
 	prev := dao.SetTestDB(db)
 	return db, func() { dao.SetTestDB(prev) }
+}
+
+// seedOrderAddress 给 userID 建一条收货地址并返回其 id。下单链路现在强制校验
+// address 归属，测试必须为下单用户种一条属于他的地址。
+func seedOrderAddress(t *testing.T, db *gorm.DB, userID uint) uint {
+	t.Helper()
+	a := &address.Address{UserID: userID, Name: "收货人", Phone: "13800000000", Address: "测试地址"}
+	if err := db.Create(a).Error; err != nil {
+		t.Fatalf("create address: %v", err)
+	}
+	return a.ID
 }
 
 func setupRedisForOrder(t *testing.T) func() {
@@ -166,6 +178,7 @@ func TestOrderCreate_AppliesBestPromo(t *testing.T) {
 		8000, 1000, 0, 0 /* unlimited budget */)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
+	seedOrderAddress(t, db, 42)
 	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
@@ -226,6 +239,7 @@ func TestOrderCreate_NoApplicableRule(t *testing.T) {
 		20000, 3000, 0, 0)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 43})
+	seedOrderAddress(t, db, 43)
 	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
@@ -278,6 +292,7 @@ func TestOrderCreate_PicksBestAmongMultipleRules(t *testing.T) {
 		20000, 0, 9000, 0)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 44})
+	seedOrderAddress(t, db, 44)
 	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
@@ -324,6 +339,7 @@ func TestOrderCreate_BudgetExhaustedDowngrades(t *testing.T) {
 	}
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 45})
+	seedOrderAddress(t, db, 45)
 	resp, err := GetOrderSrv().OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,

@@ -12,6 +12,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/address"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -65,6 +66,13 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
+		return nil, err
+	}
+
+	// 收货地址必须属于当前登录用户：address_id 同样是客户端可篡改字段，信它等于允许
+	// 用别人的地址 id 下单（把货寄到他人地址 / 撞他人隐私）。
+	if err = address.NewAddressDao(ctx).EnsureOwned(req.AddressID, u.Id); err != nil {
+		util.LogrusObj.Errorf("address ownership check failed addr=%d user=%d err=%v", req.AddressID, u.Id, err)
 		return nil, err
 	}
 
