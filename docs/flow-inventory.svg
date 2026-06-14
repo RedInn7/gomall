@@ -1,0 +1,236 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif">
+  <!-- ============================================================= -->
+  <!-- flow-inventory.svg  ·  库存两桶防超卖流程                       -->
+  <!-- 复用 docs/_svg_style_spec.md 的 defs / 配色 / 连线规范          -->
+  <!-- ============================================================= -->
+  <defs>
+    <!-- 层级渐变 -->
+    <linearGradient id="gClient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="gGate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="gTrade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/><stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="gProduct" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="gMQ" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#d97706"/>
+    </linearGradient>
+    <!-- 阴影 -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <!-- 核心组件发光 -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- 实线箭头(同步主流量) -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"/>
+    </marker>
+    <!-- 虚线箭头(异步/旁路) -->
+    <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+  </defs>
+
+  <!-- 背景 -->
+  <rect x="0" y="0" width="1200" height="760" fill="#0d1117"/>
+
+  <!-- ===================== 标题区 ===================== -->
+  <g>
+    <text x="60" y="52" fill="#ffffff" font-size="26" font-weight="700">库存两桶模型</text>
+    <text x="60" y="80" fill="rgba(255,255,255,0.55)" font-size="14">Redis Lua 预扣 + DB 最终真相 + 启动重建对账　·　杜绝读-判-写超卖</text>
+  </g>
+
+  <!-- ===================== 图例 legend ===================== -->
+  <g>
+    <line x1="820" y1="46" x2="858" y2="46" stroke="#38bdf8" stroke-width="2"/>
+    <text x="866" y="50" fill="rgba(255,255,255,0.7)" font-size="12">同步主流程</text>
+    <line x1="960" y1="46" x2="998" y2="46" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5"/>
+    <text x="1006" y="50" fill="rgba(255,255,255,0.7)" font-size="12">旁路 / 对账</text>
+    <rect x="820" y="64" width="14" height="14" rx="3" fill="url(#gData)"/>
+    <text x="840" y="76" fill="rgba(255,255,255,0.7)" font-size="12">基础设施</text>
+    <rect x="940" y="64" width="14" height="14" rx="3" fill="url(#gProduct)"/>
+    <text x="960" y="76" fill="rgba(255,255,255,0.7)" font-size="12">库存服务</text>
+  </g>
+
+  <!-- ===================== Group: 交易触发场景（左侧三态）===================== -->
+  <g>
+    <!-- Layer box -->
+    <rect x="48" y="120" width="250" height="490" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+    <text x="68" y="146" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">交易触发</text>
+
+    <!-- 下单 -->
+    <g>
+      <rect x="74" y="170" width="198" height="84" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="90" y="194" fill="rgba(255,255,255,0.6)" font-size="11">[下单]</text>
+      <text x="90" y="216" fill="#ffffff" font-size="16" font-weight="700">创建订单</text>
+      <text x="90" y="238" fill="rgba(255,255,255,0.78)" font-size="11.5">CreateOrder → 预扣库存</text>
+    </g>
+
+    <!-- 支付 -->
+    <g>
+      <rect x="74" y="318" width="198" height="84" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="90" y="342" fill="rgba(255,255,255,0.6)" font-size="11">[支付]</text>
+      <text x="90" y="364" fill="#ffffff" font-size="16" font-weight="700">支付成功</text>
+      <text x="90" y="386" fill="rgba(255,255,255,0.78)" font-size="11.5">PaySuccess → 提交占用</text>
+    </g>
+
+    <!-- 关单/取消 -->
+    <g>
+      <rect x="74" y="466" width="198" height="84" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="90" y="490" fill="rgba(255,255,255,0.6)" font-size="11">[超时 / 取消]</text>
+      <text x="90" y="512" fill="#ffffff" font-size="16" font-weight="700">关单回滚</text>
+      <text x="90" y="534" fill="rgba(255,255,255,0.78)" font-size="11.5">CancelOrder → 归还占用</text>
+    </g>
+  </g>
+
+  <!-- ===================== Group: 库存服务三动作（中列）===================== -->
+  <g>
+    <rect x="370" y="120" width="312" height="490" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+    <text x="390" y="146" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">库存服务 · Redis Lua 原子脚本</text>
+
+    <!-- ReserveStock -->
+    <g>
+      <rect x="396" y="166" width="260" height="92" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="414" y="190" fill="rgba(255,255,255,0.62)" font-size="11">[reserveScript · 原子]</text>
+      <text x="414" y="212" fill="#ffffff" font-size="16" font-weight="700">ReserveStock 预扣</text>
+      <text x="414" y="232" fill="rgba(255,255,255,0.85)" font-size="11.5">avail &lt; n → 直接拒绝(库存不足)</text>
+      <text x="414" y="250" fill="rgba(255,255,255,0.85)" font-size="11.5">否则 available−− , reserved++</text>
+    </g>
+
+    <!-- CommitReservation -->
+    <g>
+      <rect x="396" y="314" width="260" height="92" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="414" y="338" fill="rgba(255,255,255,0.62)" font-size="11">[commitScript · 原子]</text>
+      <text x="414" y="360" fill="#ffffff" font-size="16" font-weight="700">CommitReservation 提交</text>
+      <text x="414" y="380" fill="rgba(255,255,255,0.85)" font-size="11.5">reserved−− (占用真正消耗)</text>
+      <text x="414" y="398" fill="rgba(255,255,255,0.85)" font-size="11.5">→ 触发 DB product.Num 落库</text>
+    </g>
+
+    <!-- ReleaseReservation -->
+    <g>
+      <rect x="396" y="462" width="260" height="92" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="414" y="486" fill="rgba(255,255,255,0.62)" font-size="11">[releaseScript · 原子]</text>
+      <text x="414" y="508" fill="#ffffff" font-size="16" font-weight="700">ReleaseReservation 归还</text>
+      <text x="414" y="528" fill="rgba(255,255,255,0.85)" font-size="11.5">reserved−− , available++</text>
+      <text x="414" y="546" fill="rgba(255,255,255,0.85)" font-size="11.5">占用退回可用桶</text>
+    </g>
+  </g>
+
+  <!-- ===================== Group: 两桶 + 真相库（右列）===================== -->
+  <g>
+    <rect x="752" y="120" width="400" height="490" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+    <text x="772" y="146" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">数据层 · 预扣加速 + 最终真相</text>
+
+    <!-- Redis 两桶容器 -->
+    <g>
+      <rect x="776" y="166" width="352" height="232" rx="12" fill="rgba(52,211,153,0.06)" stroke="rgba(52,211,153,0.35)" stroke-width="1.2"/>
+      <text x="794" y="190" fill="#34d399" font-size="12.5" font-weight="700">Redis · 预扣加速层</text>
+
+      <!-- available 桶 -->
+      <g>
+        <rect x="794" y="206" width="316" height="78" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)" />
+        <text x="812" y="230" fill="rgba(255,255,255,0.62)" font-size="11">[Cache · 桶 A]</text>
+        <text x="812" y="252" fill="#ffffff" font-size="15" font-weight="700">available 可用桶</text>
+        <text x="812" y="272" fill="rgba(255,255,255,0.82)" font-size="11.5">stock:available:{pid}　还能下单的数量</text>
+      </g>
+
+      <!-- reserved 桶 -->
+      <g>
+        <rect x="794" y="298" width="316" height="78" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)" />
+        <text x="812" y="322" fill="rgba(255,255,255,0.62)" font-size="11">[Cache · 桶 B]</text>
+        <text x="812" y="344" fill="#ffffff" font-size="15" font-weight="700">reserved 预占桶</text>
+        <text x="812" y="364" fill="rgba(255,255,255,0.82)" font-size="11.5">stock:reserved:{pid}　已占未支付</text>
+      </g>
+    </g>
+
+    <!-- MySQL 真相 -->
+    <g>
+      <rect x="776" y="430" width="352" height="120" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
+      <text x="794" y="456" fill="rgba(255,255,255,0.62)" font-size="11">[MySQL · 最终真相 Source of Truth]</text>
+      <text x="794" y="480" fill="#ffffff" font-size="16" font-weight="700">product.Num</text>
+      <text x="794" y="502" fill="rgba(255,255,255,0.82)" font-size="11.5">初始水位来源；支付提交时真正扣减落库</text>
+      <text x="794" y="522" fill="rgba(255,255,255,0.82)" font-size="11.5">Redis 只是加速，DB 才是不可推翻的账</text>
+    </g>
+  </g>
+
+  <!-- ===================== 连线: 主流程(实线) ===================== -->
+  <!-- 下单 → ReserveStock -->
+  <g>
+    <path d="M272 212 L396 212" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <rect x="298" y="195" width="72" height="16" rx="3" fill="#0d1117" opacity="0.85"/>
+    <text x="302" y="207" fill="rgba(255,255,255,0.7)" font-size="11">① 下单预扣</text>
+  </g>
+  <!-- 支付 → CommitReservation -->
+  <g>
+    <path d="M272 360 L396 360" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <rect x="298" y="343" width="72" height="16" rx="3" fill="#0d1117" opacity="0.85"/>
+    <text x="302" y="355" fill="rgba(255,255,255,0.7)" font-size="11">③ 支付提交</text>
+  </g>
+  <!-- 关单 → ReleaseReservation -->
+  <g>
+    <path d="M272 508 L396 508" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <rect x="298" y="491" width="72" height="16" rx="3" fill="#0d1117" opacity="0.85"/>
+    <text x="302" y="503" fill="rgba(255,255,255,0.7)" font-size="11">④ 关单归还</text>
+  </g>
+
+  <!-- ReserveStock → available/reserved 两桶 (从右侧出，绕到桶容器左侧) -->
+  <g>
+    <path d="M656 212 L716 212 L716 245 L776 245" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <rect x="664" y="195" width="118" height="16" rx="3" fill="#0d1117" opacity="0.85"/>
+    <text x="668" y="207" fill="rgba(255,255,255,0.7)" font-size="11">② avail−− reserved++</text>
+  </g>
+
+  <!-- CommitReservation → reserved 桶 -->
+  <g>
+    <path d="M656 360 L716 360 L716 337 L776 337" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <rect x="664" y="370" width="96" height="16" rx="3" fill="#0d1117" opacity="0.85"/>
+    <text x="668" y="382" fill="rgba(255,255,255,0.7)" font-size="11">reserved−−</text>
+  </g>
+  <!-- CommitReservation → MySQL product.Num 落库 -->
+  <g>
+    <path d="M656 388 L700 388 L700 470 L776 470" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <rect x="664" y="440" width="118" height="16" rx="3" fill="#0d1117" opacity="0.85"/>
+    <text x="668" y="452" fill="rgba(255,255,255,0.7)" font-size="11">真正扣减落库</text>
+  </g>
+
+  <!-- ReleaseReservation → 两桶 -->
+  <g>
+    <path d="M656 508 L728 508 L728 360 L776 360" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+    <rect x="664" y="491" width="124" height="16" rx="3" fill="#0d1117" opacity="0.85"/>
+    <text x="668" y="503" fill="rgba(255,255,255,0.7)" font-size="11">reserved−− avail++</text>
+  </g>
+
+  <!-- ===================== 连线: 旁路(虚线) ===================== -->
+  <!-- 启动 InitInventory: DB → Redis 重建 -->
+  <g>
+    <rect x="752" y="636" width="400" height="92" rx="14" fill="rgba(251,191,36,0.05)" stroke="rgba(251,191,36,0.30)" stroke-width="1.2"/>
+    <text x="772" y="660" fill="#fbbf24" font-size="12.5" font-weight="700">[启动 / 巡检 旁路]　InitInventory · SeedFromDB</text>
+    <text x="772" y="684" fill="rgba(255,255,255,0.82)" font-size="11.5">启动：DB product.Num → 重建 Redis available 桶 (已存在则跳过)</text>
+    <text x="772" y="706" fill="rgba(255,255,255,0.82)" font-size="11.5">定时：DB ↔ Redis 对账，差异告警，防 Redis 故障/重启致超卖或预占泄漏</text>
+  </g>
+  <!-- DB → Redis 重建 (虚线，从 MySQL 上行到桶容器) -->
+  <g>
+    <path d="M745 470 L730 470 L730 245 L776 245" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
+    <rect x="700" y="350" width="80" height="16" rx="3" fill="#0d1117" opacity="0.9"/>
+    <text x="704" y="362" fill="rgba(255,255,255,0.7)" font-size="11">启动重建</text>
+  </g>
+  <!-- 对账旁路 box → 两桶 与 MySQL 双向校验 (虚线) -->
+  <g>
+    <path d="M900 636 L900 560" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
+    <path d="M1010 636 L1010 398" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
+    <rect x="1014" y="500" width="84" height="16" rx="3" fill="#0d1117" opacity="0.9"/>
+    <text x="1018" y="512" fill="rgba(255,255,255,0.7)" font-size="11">对账巡检</text>
+  </g>
+
+</svg>

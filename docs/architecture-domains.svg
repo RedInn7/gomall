@@ -1,0 +1,401 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif">
+  <!-- ============================================================ -->
+  <!-- gomall · 领域地图（DDD 垂直切片）                              -->
+  <!-- 背景 #0d1117 · 复用 _svg_style_spec.md 的 defs/配色/连线规范    -->
+  <!-- ============================================================ -->
+
+  <!-- 共享 defs（与全套架构图一致） -->
+  <defs>
+    <!-- 层级渐变 -->
+    <linearGradient id="gClient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="gGate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="gTrade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#60a5fa"/><stop offset="1" stop-color="#2563eb"/>
+    </linearGradient>
+    <linearGradient id="gProduct" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <linearGradient id="gPromo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fb923c"/><stop offset="1" stop-color="#ea580c"/>
+    </linearGradient>
+    <linearGradient id="gUser" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#c084fc"/><stop offset="1" stop-color="#9333ea"/>
+    </linearGradient>
+    <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="gMQ" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#d97706"/>
+    </linearGradient>
+    <!-- 阴影 -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <!-- 核心组件发光 -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <!-- 实线箭头(同步主依赖) -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"/>
+    </marker>
+    <!-- 虚线箭头(异步/MQ/旁路) -->
+    <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
+    </marker>
+    <!-- 域间依赖专用箭头(灰白，方向=依赖方→被依赖方) -->
+    <marker id="arrowDep" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#cbd5e1"/>
+    </marker>
+  </defs>
+
+  <!-- 画布背景 -->
+  <rect x="0" y="0" width="1200" height="800" fill="#0d1117"/>
+
+  <!-- ============================================================ -->
+  <!-- 标题区                                                        -->
+  <!-- ============================================================ -->
+  <g>
+    <text x="48" y="46" fill="#ffffff" font-size="27" font-weight="700">gomall · 领域地图（DDD 垂直切片）</text>
+    <text x="48" y="70" fill="rgba(255,255,255,0.55)" font-size="14">
+      按 bounded context 垂直切片 internal/&lt;domain&gt; · 22 个域 + 横切基座 · 箭头方向 = 依赖方 → 被依赖方
+    </text>
+  </g>
+
+  <!-- 顶部图例：各色 = 各 bounded context -->
+  <g transform="translate(742,22)" font-size="12">
+    <rect x="0" y="0" width="410" height="56" rx="10" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
+    <text x="14" y="20" fill="rgba(255,255,255,0.5)" font-size="11" letter-spacing="1">BOUNDED CONTEXT · 图例</text>
+    <!-- 色块行 1 -->
+    <rect x="14" y="30" width="14" height="14" rx="3" fill="url(#gTrade)"/>
+    <text x="34" y="41" fill="rgba(255,255,255,0.8)">交易域</text>
+    <rect x="90" y="30" width="14" height="14" rx="3" fill="url(#gProduct)"/>
+    <text x="110" y="41" fill="rgba(255,255,255,0.8)">商品域</text>
+    <rect x="166" y="30" width="14" height="14" rx="3" fill="url(#gPromo)"/>
+    <text x="186" y="41" fill="rgba(255,255,255,0.8)">营销域</text>
+    <rect x="242" y="30" width="14" height="14" rx="3" fill="url(#gUser)"/>
+    <text x="262" y="41" fill="rgba(255,255,255,0.8)">用户/平台域</text>
+    <rect x="346" y="30" width="14" height="14" rx="3" fill="url(#gMQ)"/>
+    <text x="366" y="41" fill="rgba(255,255,255,0.8)">横切</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- 域间依赖边（先画，置于盒子下层；箭头露在盒边缘外）            -->
+  <!-- 实线 = 同步依赖；方向 = 依赖方 → 被依赖方；严禁穿盒          -->
+  <!-- 盒坐标（rect）：                                              -->
+  <!--   交易域 Group : x 48..408   , y 110..430                    -->
+  <!--   商品域 Group : x 448..792  , y 110..430                    -->
+  <!--   营销域 Group : x 48..408   , y 458..690                    -->
+  <!--   用户/平台 Grp: x 832..1152 , y 110..430                    -->
+  <!--   横切基座 Grp : x 448..1152 , y 458..610                    -->
+  <!-- ============================================================ -->
+  <g stroke="#cbd5e1" stroke-width="2" fill="none" marker-end="url(#arrowDep)" opacity="0.92">
+
+    <!-- order → product (定价/库存)：交易域右侧 → 商品域左侧 -->
+    <path d="M408,176 H448"/>
+    <!-- order → promo (满减计算)：交易域下沿 → 营销域上沿(promo) -->
+    <path d="M150,430 V458"/>
+    <!-- order → address (地址归属校验)：交易域右上 → 用户/平台域左侧(address)
+         走顶部通道 y=98，避开商品域盒 -->
+    <path d="M250,110 V98 H980 V110"/>
+
+    <!-- payment → product (商品归属转移)：交易域右 → 商品域左 -->
+    <path d="M408,206 H448"/>
+    <!-- payment → user (余额)：交易域右 → 用户/平台域(user)，走商品域上方通道 y=104 -->
+    <path d="M280,110 V104 H900 V110"/>
+    <!-- payment → money (写流水)：payment 与 money 同域内部，短实线 -->
+    <path d="M196,332 V360"/>
+    <!-- payment → order (状态)：同域内部，order→payment 反向，payment 读 order 状态 -->
+    <path d="M118,332 V214"/>
+  </g>
+
+  <!-- cart / search → product（商品域内部入口左侧）+ preorder/groupbuy → order/payment -->
+  <g stroke="#cbd5e1" stroke-width="2" fill="none" marker-end="url(#arrowDep)" opacity="0.92">
+    <!-- cart → product：交易域(cart)右 → 商品域 product 左，走 y=380 低通道 -->
+    <path d="M408,380 H448"/>
+    <!-- preorder/groupbuy → order/payment (复用结算)：营销域右 → 交易域右下角
+         走 x=420 外侧竖直通道，从交易域右边沿(x=408,y≈300) 进入 refund/payment 一侧 -->
+    <path d="M408,520 H420 V300 H408"/>
+  </g>
+
+  <!-- 各域 → shared/outbox（发事件，虚线异步）：从各域汇聚到横切 outbox -->
+  <g stroke="#fbbf24" stroke-width="2" fill="none" stroke-dasharray="5,5" marker-end="url(#arrowA)" opacity="0.85">
+    <!-- 交易域 → outbox -->
+    <path d="M380,430 V450 H520 V500"/>
+    <!-- 商品域 → outbox -->
+    <path d="M560,430 V500"/>
+    <!-- 用户/平台域 → outbox -->
+    <path d="M900,430 V450 H600 V500"/>
+  </g>
+
+  <!-- 横切基座 → 基础设施（虚线，落库/缓存/投递） -->
+  <g stroke="#fbbf24" stroke-width="2" fill="none" stroke-dasharray="5,5" marker-end="url(#arrowA)" opacity="0.7">
+    <path d="M800,610 V640"/>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- 交易域 gTrade（蓝）：cart order payment refund money          -->
+  <!-- ============================================================ -->
+  <g>
+    <rect x="48" y="110" width="360" height="320" rx="14" fill="rgba(96,165,250,0.05)" stroke="rgba(96,165,250,0.25)"/>
+    <text x="66" y="136" fill="rgba(255,255,255,0.55)" font-size="13" letter-spacing="2">交易域 · gTrade · internal/{cart,order,payment,refund,money}</text>
+
+    <!-- order -->
+    <g filter="url(#shadow)">
+      <rect x="66" y="152" width="148" height="62" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="78" y="174" fill="rgba(255,255,255,0.6)" font-size="11">[Aggregate]</text>
+      <text x="78" y="196" fill="#fff" font-size="16" font-weight="700">order 订单</text>
+    </g>
+    <!-- payment -->
+    <g filter="url(#shadow)">
+      <rect x="66" y="270" width="148" height="62" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="78" y="292" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="78" y="314" fill="#fff" font-size="16" font-weight="700">payment 支付</text>
+    </g>
+    <!-- cart -->
+    <g filter="url(#shadow)">
+      <rect x="240" y="152" width="148" height="62" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="252" y="174" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="252" y="196" fill="#fff" font-size="16" font-weight="700">cart 购物车</text>
+    </g>
+    <!-- refund -->
+    <g filter="url(#shadow)">
+      <rect x="240" y="270" width="148" height="62" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="252" y="292" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="252" y="314" fill="#fff" font-size="16" font-weight="700">refund 退款</text>
+    </g>
+    <!-- money -->
+    <g filter="url(#shadow)">
+      <rect x="66" y="352" width="322" height="56" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="78" y="373" fill="rgba(255,255,255,0.6)" font-size="11">[Ledger 资金台账]</text>
+      <text x="78" y="394" fill="#fff" font-size="16" font-weight="700">money 账户 / 流水</text>
+    </g>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- 商品域 gProduct（青绿）：product category carousel favorite search -->
+  <!-- ============================================================ -->
+  <g>
+    <rect x="448" y="110" width="344" height="320" rx="14" fill="rgba(45,212,191,0.05)" stroke="rgba(45,212,191,0.25)"/>
+    <text x="466" y="136" fill="rgba(255,255,255,0.55)" font-size="13" letter-spacing="2">商品域 · gProduct · internal/{product,category,...,search}</text>
+
+    <!-- product (聚合根) -->
+    <g filter="url(#shadow)">
+      <rect x="466" y="152" width="158" height="62" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="478" y="174" fill="rgba(255,255,255,0.6)" font-size="11">[Aggregate]</text>
+      <text x="478" y="196" fill="#fff" font-size="16" font-weight="700">product 商品</text>
+    </g>
+    <!-- category -->
+    <g filter="url(#shadow)">
+      <rect x="640" y="152" width="134" height="62" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="652" y="174" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="652" y="196" fill="#fff" font-size="15" font-weight="700">category 分类</text>
+    </g>
+    <!-- search -->
+    <g filter="url(#shadow)">
+      <rect x="466" y="270" width="158" height="62" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="478" y="292" fill="rgba(255,255,255,0.6)" font-size="11">[Service · ES/向量]</text>
+      <text x="478" y="314" fill="#fff" font-size="16" font-weight="700">search 搜索</text>
+    </g>
+    <!-- favorite -->
+    <g filter="url(#shadow)">
+      <rect x="640" y="270" width="134" height="62" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="652" y="292" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="652" y="314" fill="#fff" font-size="15" font-weight="700">favorite 收藏</text>
+    </g>
+    <!-- carousel -->
+    <g filter="url(#shadow)">
+      <rect x="466" y="352" width="308" height="56" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="478" y="373" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="478" y="394" fill="#fff" font-size="16" font-weight="700">carousel 轮播 / 运营位</text>
+    </g>
+
+    <!-- 域内：search → product（已斩环为单向） -->
+    <g stroke="#cbd5e1" stroke-width="2" fill="none" marker-end="url(#arrowDep)" opacity="0.92">
+      <path d="M545,270 V214"/>
+    </g>
+    <text x="552" y="248" fill="rgba(255,255,255,0.6)" font-size="10.5">已斩环 · 单向</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- 用户/平台域 gUser（紫）：user address notice admin           -->
+  <!-- ============================================================ -->
+  <g>
+    <rect x="832" y="110" width="320" height="320" rx="14" fill="rgba(192,132,252,0.05)" stroke="rgba(192,132,252,0.25)"/>
+    <text x="850" y="136" fill="rgba(255,255,255,0.55)" font-size="13" letter-spacing="2">用户 / 平台域 · gUser · internal/{user,address,notice,admin}</text>
+
+    <!-- user -->
+    <g filter="url(#shadow)">
+      <rect x="850" y="152" width="142" height="62" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="862" y="174" fill="rgba(255,255,255,0.6)" font-size="11">[Aggregate · 余额]</text>
+      <text x="862" y="196" fill="#fff" font-size="16" font-weight="700">user 用户</text>
+    </g>
+    <!-- address -->
+    <g filter="url(#shadow)">
+      <rect x="1006" y="152" width="128" height="62" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="1018" y="174" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="1018" y="196" fill="#fff" font-size="15" font-weight="700">address 地址</text>
+    </g>
+    <!-- notice -->
+    <g filter="url(#shadow)">
+      <rect x="850" y="270" width="142" height="62" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="862" y="292" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="862" y="314" fill="#fff" font-size="16" font-weight="700">notice 通知</text>
+    </g>
+    <!-- admin -->
+    <g filter="url(#shadow)">
+      <rect x="1006" y="270" width="128" height="62" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="1018" y="292" fill="rgba(255,255,255,0.6)" font-size="11">[Service]</text>
+      <text x="1018" y="314" fill="#fff" font-size="15" font-weight="700">admin 后台</text>
+    </g>
+    <!-- 域说明 -->
+    <text x="850" y="392" fill="rgba(255,255,255,0.5)" font-size="12">承载身份 / 余额 / 收货地址 / 站内信 / 运营后台</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- 营销域 gPromo（橙）：coupon skill redpacket promo groupbuy preorder -->
+  <!-- ============================================================ -->
+  <g>
+    <rect x="48" y="458" width="360" height="232" rx="14" fill="rgba(251,146,60,0.05)" stroke="rgba(251,146,60,0.25)"/>
+    <text x="66" y="484" fill="rgba(255,255,255,0.55)" font-size="13" letter-spacing="2">营销域 · gPromo · internal/{coupon,skill,redpacket,promo,groupbuy,preorder}</text>
+
+    <!-- promo (满减引擎，依赖源) -->
+    <g filter="url(#shadow)">
+      <rect x="66" y="500" width="148" height="58" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="78" y="521" fill="rgba(255,255,255,0.6)" font-size="11">[Engine · 满减]</text>
+      <text x="78" y="542" fill="#fff" font-size="16" font-weight="700">promo 促销</text>
+    </g>
+    <!-- coupon -->
+    <g filter="url(#shadow)">
+      <rect x="226" y="500" width="74" height="58" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="238" y="528" fill="#fff" font-size="14" font-weight="700">coupon</text>
+      <text x="238" y="545" fill="rgba(255,255,255,0.75)" font-size="11">优惠券</text>
+    </g>
+    <!-- skill (秒杀) -->
+    <g filter="url(#shadow)">
+      <rect x="312" y="500" width="80" height="58" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="324" y="528" fill="#fff" font-size="14" font-weight="700">skill</text>
+      <text x="324" y="545" fill="rgba(255,255,255,0.75)" font-size="11">秒杀</text>
+    </g>
+    <!-- redpacket -->
+    <g filter="url(#shadow)">
+      <rect x="66" y="572" width="110" height="56" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="78" y="600" fill="#fff" font-size="14" font-weight="700">redpacket</text>
+      <text x="78" y="617" fill="rgba(255,255,255,0.75)" font-size="11">红包</text>
+    </g>
+    <!-- groupbuy -->
+    <g filter="url(#shadow)">
+      <rect x="188" y="572" width="110" height="56" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="200" y="600" fill="#fff" font-size="14" font-weight="700">groupbuy</text>
+      <text x="200" y="617" fill="rgba(255,255,255,0.75)" font-size="11">拼团</text>
+    </g>
+    <!-- preorder -->
+    <g filter="url(#shadow)">
+      <rect x="310" y="572" width="82" height="56" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="322" y="600" fill="#fff" font-size="14" font-weight="700">preorder</text>
+      <text x="322" y="617" fill="rgba(255,255,255,0.75)" font-size="11">预售</text>
+    </g>
+
+    <text x="66" y="662" fill="rgba(255,255,255,0.5)" font-size="12">promo 是依赖源：交易域调用满减，不反向依赖任何消费者</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- 横切 / 基座 gMQ（橙黄）：outbox response money台账 idempotency migrate -->
+  <!-- ============================================================ -->
+  <g>
+    <rect x="448" y="458" width="704" height="152" rx="14" fill="rgba(251,191,36,0.05)" stroke="rgba(251,191,36,0.25)"/>
+    <text x="466" y="484" fill="rgba(255,255,255,0.55)" font-size="13" letter-spacing="2">横切 / 基座 · 被各域复用，不属任何单一 bounded context</text>
+
+    <!-- shared/outbox -->
+    <g filter="url(#shadow)">
+      <rect x="466" y="500" width="170" height="58" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="478" y="521" fill="rgba(255,255,255,0.6)" font-size="11">[Outbox · 事务消息]</text>
+      <text x="478" y="542" fill="#fff" font-size="15" font-weight="700">shared/outbox</text>
+    </g>
+    <!-- shared/response -->
+    <g filter="url(#shadow)">
+      <rect x="648" y="500" width="148" height="58" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="660" y="521" fill="rgba(255,255,255,0.6)" font-size="11">[统一返回]</text>
+      <text x="660" y="542" fill="#fff" font-size="15" font-weight="700">shared/response</text>
+    </g>
+    <!-- idempotency -->
+    <g filter="url(#shadow)">
+      <rect x="808" y="500" width="152" height="58" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="820" y="521" fill="rgba(255,255,255,0.6)" font-size="11">[幂等键]</text>
+      <text x="820" y="542" fill="#fff" font-size="15" font-weight="700">idempotency</text>
+    </g>
+    <!-- migrate -->
+    <g filter="url(#shadow)">
+      <rect x="972" y="500" width="164" height="58" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="984" y="521" fill="rgba(255,255,255,0.6)" font-size="11">[Schema 迁移]</text>
+      <text x="984" y="542" fill="#fff" font-size="15" font-weight="700">migrate</text>
+    </g>
+
+    <text x="466" y="588" fill="rgba(255,255,255,0.5)" font-size="12">跨域写一律经属主领域服务方法落库；事件经 outbox 投递保证最终一致</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- 底座基础设施 gData（绿）：MySQL Redis RabbitMQ ES Milvus      -->
+  <!-- ============================================================ -->
+  <g>
+    <rect x="48" y="640" width="1104" height="118" rx="14" fill="rgba(52,211,153,0.05)" stroke="rgba(52,211,153,0.25)"/>
+    <text x="66" y="666" fill="rgba(255,255,255,0.55)" font-size="13" letter-spacing="2">基础设施底座 · gData · repository/</text>
+
+    <!-- MySQL -->
+    <g filter="url(#shadow)">
+      <rect x="66" y="680" width="196" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="78" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[RDBMS · 主库]</text>
+      <text x="78" y="722" fill="#fff" font-size="15" font-weight="700">MySQL</text>
+    </g>
+    <!-- Redis -->
+    <g filter="url(#shadow)">
+      <rect x="278" y="680" width="196" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="290" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[Cache · 锁/计数]</text>
+      <text x="290" y="722" fill="#fff" font-size="15" font-weight="700">Redis</text>
+    </g>
+    <!-- RabbitMQ -->
+    <g filter="url(#shadow)">
+      <rect x="490" y="680" width="218" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="502" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[MQ · 异步/延迟]</text>
+      <text x="502" y="722" fill="#fff" font-size="15" font-weight="700">RabbitMQ</text>
+    </g>
+    <!-- ES -->
+    <g filter="url(#shadow)">
+      <rect x="724" y="680" width="196" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="736" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[全文检索]</text>
+      <text x="736" y="722" fill="#fff" font-size="15" font-weight="700">Elasticsearch</text>
+    </g>
+    <!-- Milvus -->
+    <g filter="url(#shadow)">
+      <rect x="936" y="680" width="200" height="58" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
+      <text x="948" y="701" fill="rgba(255,255,255,0.6)" font-size="11">[向量检索]</text>
+      <text x="948" y="722" fill="#fff" font-size="15" font-weight="700">Milvus</text>
+    </g>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- 依赖边文字标注（盖在实线旁，带描边底避免压线看不清）         -->
+  <!-- ============================================================ -->
+  <g font-size="11" fill="rgba(255,255,255,0.72)" stroke="#0d1117" stroke-width="3" paint-order="stroke" stroke-linejoin="round">
+    <text x="412" y="172">定价/库存</text>
+    <text x="412" y="202">归属转移</text>
+    <text x="412" y="376">购物车取价</text>
+    <text x="98" y="452">满减计算</text>
+    <text x="565" y="92">地址归属校验</text>
+    <text x="640" y="100">余额扣减</text>
+    <text x="425" y="500">复用结算</text>
+  </g>
+
+  <!-- 底部图例：实线/虚线语义 -->
+  <g transform="translate(742,640)" font-size="11.5">
+    <line x1="0" y1="14" x2="34" y2="14" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrowDep)"/>
+    <text x="42" y="18" fill="rgba(255,255,255,0.75)">同步域间依赖（依赖方 → 被依赖方）</text>
+    <line x1="0" y1="34" x2="34" y2="34" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrowA)"/>
+    <text x="42" y="38" fill="rgba(255,255,255,0.75)">异步发事件 → shared/outbox（最终一致）</text>
+  </g>
+</svg>
