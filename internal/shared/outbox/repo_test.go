@@ -14,13 +14,13 @@ func initDBForTest(t *testing.T) {
 	if dao.NewDBClient(context.Background()) != nil {
 		return
 	}
-	re := conf.ConfigReader{FileName: "../../../config/locales/config.yaml"}
-	conf.InitConfigForTest(&re)
 	defer func() {
 		if r := recover(); r != nil {
 			t.Skipf("MySQL not available: %v", r)
 		}
 	}()
+	re := conf.ConfigReader{FileName: "../../../config/locales/config.yaml"}
+	conf.InitConfigForTest(&re)
 	dao.InitMySQL()
 	if dao.NewDBClient(context.Background()) != nil {
 		_ = dao.NewDBClient(context.Background()).AutoMigrate(&OutboxEvent{})

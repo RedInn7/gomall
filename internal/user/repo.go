@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"errors"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -9,6 +10,9 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
+
+// ErrUserNotExist 关注/取关的目标用户不存在
+var ErrUserNotExist = errors.New("用户不存在")
 
 type UserDao struct {
 	*gorm.DB
@@ -24,9 +28,13 @@ func NewUserDaoByDB(db *gorm.DB) *UserDao {
 
 // FollowUser userId 关注了 followerId
 func (d *UserDao) FollowUser(uId, followerId uint) (err error) {
-	u, f := new(User), new(User)
-	d.DB.Model(&User{}).Where(`id = ?`, uId).First(&u)
-	d.DB.Model(&User{}).Where(`id = ?`, followerId).First(&f)
+	if uId == followerId {
+		return errors.New("不能关注自己")
+	}
+	u, f, err := d.loadRelationUsers(uId, followerId)
+	if err != nil {
+		return err
+	}
 	err = d.DB.Model(&f).Association(`Relations`).
 		Append([]User{*u})
 	if err != nil {
@@ -39,15 +47,40 @@ func (d *UserDao) FollowUser(uId, followerId uint) (err error) {
 
 // UnFollowUser 不再关注
 func (d *UserDao) UnFollowUser(uId, followerId uint) (err error) {
-	u, f := new(User), new(User)
-	d.DB.Model(&User{}).Where(`id = ?`, uId).First(&u)
-	d.DB.Model(&User{}).Where(`id = ?`, followerId).First(&f)
+	if uId == followerId {
+		return errors.New("不能取关自己")
+	}
+	u, f, err := d.loadRelationUsers(uId, followerId)
+	if err != nil {
+		return err
+	}
 	err = d.DB.Model(&u).Association(`Relations`).Delete(f)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return
 	}
 	return
+}
+
+// loadRelationUsers 加载关注关系两端的用户，任一不存在返回 ErrUserNotExist，
+// 避免对主键为 0 的零值 User 执行关联写入而污染关系表。
+func (d *UserDao) loadRelationUsers(uId, followerId uint) (u, f *User, err error) {
+	u, f = new(User), new(User)
+	if err = d.DB.Model(&User{}).Where(`id = ?`, uId).First(&u).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, ErrUserNotExist
+		}
+		log.LogrusObj.Error(err)
+		return nil, nil, err
+	}
+	if err = d.DB.Model(&User{}).Where(`id = ?`, followerId).First(&f).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, ErrUserNotExist
+		}
+		log.LogrusObj.Error(err)
+		return nil, nil, err
+	}
+	return u, f, nil
 }
 
 // GetUserById 根据 id 获取用户

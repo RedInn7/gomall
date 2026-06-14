@@ -46,27 +46,19 @@ func PublishOrderAsync(ctx context.Context, payload []byte) error {
 }
 
 // ConsumeOrderAsync 启动异步下单消费者，handler 返回 nil 时 Ack，否则 Nack 不重投
-// 重试逻辑交给上层（失败要释放预扣库存 + 写 ticket 失败态，不能让 RMQ 无限 requeue）
+// 重试逻辑交给上层（失败要释放预扣库存 + 写 ticket 失败态，不能让 RMQ 无限 requeue）。
+// 消费在自愈 supervisor 中运行：连接抖动 / channel 关闭后会自动重连并重新订阅。
 func ConsumeOrderAsync(handler func(body []byte) error) error {
-	ch, err := GlobalRabbitMQ.Channel()
-	if err != nil {
-		return err
-	}
-	if err := ch.Qos(32, 0, false); err != nil {
-		return err
-	}
-	msgs, err := ch.Consume(OrderAsyncQueue, "", false, false, false, false, nil)
-	if err != nil {
-		return err
-	}
-	go func() {
-		for d := range msgs {
+	superviseConsumer(consumerConfig{
+		queue:    OrderAsyncQueue,
+		prefetch: 32,
+		deliver: func(d amqp.Delivery) {
 			if err := handler(d.Body); err != nil {
 				_ = d.Nack(false, false)
-				continue
+				return
 			}
 			_ = d.Ack(false)
-		}
-	}()
+		},
+	})
 	return nil
 }
