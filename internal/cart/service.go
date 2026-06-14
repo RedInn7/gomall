@@ -44,7 +44,11 @@ func (s *CartSrv) CartCreate(ctx context.Context, req *CartCreateReq) (*types.Da
 
 	// 创建购物车
 	cartDao := NewCartDao(ctx)
-	_, status, _ := cartDao.CreateCart(req.ProductId, u.Id, p.BossID)
+	_, status, err := cartDao.CreateCart(req.ProductId, u.Id, p.BossID)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
 	if status == e.ErrorProductMoreCart {
 		return nil, errors.New(e.GetMsg(status))
 	}

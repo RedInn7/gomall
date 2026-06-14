@@ -37,6 +37,11 @@ func (d *CartDao) CreateCart(pId, uId, bId uint) (cart *Cart, status int, err er
 		}
 		return cart, e.SUCCESS, err
 	}
+	// 非 RecordNotFound 的 DB 错误（连接中断、死锁、context 取消等），
+	// 此时 cart 未被填充仍为 nil，必须在访问其字段前返回，避免 nil 解引用 panic
+	if err != nil {
+		return nil, e.ERROR, err
+	}
 	if cart.Num < cart.MaxNum {
 		// 小于最大 num
 		cart.Num++

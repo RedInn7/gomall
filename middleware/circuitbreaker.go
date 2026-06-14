@@ -28,12 +28,13 @@ type CircuitBreakerOption struct {
 }
 
 type circuitBreaker struct {
-	opt         CircuitBreakerOption
-	state       atomic.Int32 // circuitState
-	failures    atomic.Int64
-	openedAt    atomic.Int64 // unix nano
-	halfOpenReq atomic.Int64
-	mu          sync.Mutex
+	opt             CircuitBreakerOption
+	state           atomic.Int32 // circuitState
+	failures        atomic.Int64
+	openedAt        atomic.Int64 // unix nano
+	halfOpenReq     atomic.Int64 // 半开态已放行的探测数
+	halfOpenSuccess atomic.Int64 // 半开态已成功返回的探测数
+	mu              sync.Mutex
 }
 
 // CircuitBreaker 简易三态熔断中间件。
@@ -88,6 +89,7 @@ func (cb *circuitBreaker) allow() error {
 			time.Now().UnixNano()-cb.openedAt.Load() >= int64(cb.opt.OpenTimeout) {
 			cb.state.Store(int32(stateHalfOpen))
 			cb.halfOpenReq.Store(0)
+			cb.halfOpenSuccess.Store(0)
 		}
 		if circuitState(cb.state.Load()) == stateHalfOpen {
 			if cb.halfOpenReq.Add(1) > cb.opt.HalfOpenMaxReq {
@@ -118,7 +120,7 @@ func (cb *circuitBreaker) report(failed bool) {
 	case stateHalfOpen:
 		if failed {
 			cb.tripOpen()
-		} else if cb.halfOpenReq.Load() >= cb.opt.HalfOpenMaxReq {
+		} else if cb.halfOpenSuccess.Add(1) >= cb.opt.HalfOpenMaxReq {
 			cb.mu.Lock()
 			cb.state.Store(int32(stateClosed))
 			cb.failures.Store(0)
@@ -132,5 +134,7 @@ func (cb *circuitBreaker) tripOpen() {
 	cb.state.Store(int32(stateOpen))
 	cb.openedAt.Store(time.Now().UnixNano())
 	cb.failures.Store(0)
+	cb.halfOpenReq.Store(0)
+	cb.halfOpenSuccess.Store(0)
 	cb.mu.Unlock()
 }

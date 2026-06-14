@@ -2,7 +2,6 @@ package conf
 
 import (
 	"io/ioutil"
-	"log"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,11 +20,10 @@ type ConfigReader struct {
 // Function to read from actual file
 func (r *ConfigReader) readConfig() ([]byte, error) {
 	file, err := ioutil.ReadFile(r.FileName)
-
 	if err != nil {
-		log.Fatal(err)
+		return nil, err
 	}
-	return file, err
+	return file, nil
 }
 
 func InitConfigForTest(reader IReader) {
