@@ -228,6 +228,42 @@ err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 \srcnote{internal/shared/outbox/publisher.go:49--60 主循环；:63--84 单批投递}
 \end{frame}
 
+\begin{frame}{Transactional Outbox 可靠投递时序}
+\centering
+\resizebox{!}{0.48\textheight}{%
+\begin{sequencediagram}
+  \newthread{biz}{业务服务}
+  \newinst[1]{db}{MySQL 业务表+outbox}
+  \newinst[1]{pub}{Outbox Publisher}
+  \newinst[1]{mq}{RabbitMQ}
+  \newinst[1]{con}{下游消费者}
+
+  \begin{call}{biz}{本地事务: 写业务表 + 写 outbox(status=pending)}{db}{commit 成功}
+  \end{call}
+  \mess{biz}{双写问题就此消除}{biz}
+  \postlevel
+
+  \begin{call}{pub}{轮询 status=pending 事件}{db}{返回待发事件}
+  \end{call}
+
+  \begin{call}{pub}{发布事件 (mandatory, 等 confirm)}{mq}{publisher confirm ACK}
+  \end{call}
+
+  \begin{call}{pub}{ACK 后才 MarkSent(status=sent)}{db}{更新成功}
+  \end{call}
+  \postlevel
+
+  \mess{mq}{异步投递事件}{con}
+  \begin{call}{con}{幂等处理 (吸收重投)}{con}{消费完成}
+  \end{call}
+\end{sequencediagram}%
+}
+
+\vspace{1mm}
+\keypoint{先落库再异步投递、ACK 后才标记已发：DB 成功的事件最终一定送达；消费侧幂等吸收重投。}
+\srcnote{internal/shared/outbox/publisher.go:63--84 drainBatch（发布 $\to$ confirm $\to$ MarkSent）}
+\end{frame}
+
 % ============================================================
 \section{Publisher：业务参数的业务解释}
 % ============================================================

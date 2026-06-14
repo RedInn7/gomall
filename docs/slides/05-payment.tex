@@ -319,6 +319,38 @@ func (u *User) DecryptMoney(key string) (money int64, err error) {
 \srcnote{internal/payment/service.go:55--218}
 \end{frame}
 
+\begin{frame}{PayDown 结算的标准时序：六方一次扣款}
+\centering
+\resizebox{0.92\textwidth}{!}{%
+\begin{sequencediagram}
+  \newthread{u}{用户}
+  \newinst[1]{h}{Payment Handler}
+  \newinst[1]{d}{订单/用户 DAO}
+  \newinst[1]{l}{台账 money}
+  \newinst[1]{o}{Outbox}
+  \newinst[1]{q}{RabbitMQ}
+
+  \begin{call}{u}{POST /paydown (支付密码)}{h}{200 OK}
+    \begin{call}{h}{开事务 · 锁买卖双方 FOR UPDATE}{d}{校验支付密码 OK}
+    \end{call}
+    \begin{call}{h}{买家扣款 / 卖家入账 (折后实付 FinalCents)}{d}{余额密文回写}
+    \end{call}
+    \begin{call}{h}{追加 debit + credit 复式记账流水}{l}{同事务落账}
+    \end{call}
+    \begin{call}{h}{DeductStock 扣库存 · MarkOrderPaid (WaitPay 守卫)}{d}{状态推进}
+    \end{call}
+    \begin{call}{h}{写 order.paid 事件}{o}{同事务 commit}
+    \end{call}
+  \end{call}
+
+  \mess{o}{异步投递 OrderPaid}{q}
+\end{sequencediagram}}
+
+\vspace{1mm}
+\small 扣款、入账、台账流水、库存、改单、发件箱六件事落在\textbf{同一个事务}里，要么全成功要么全回滚。用户拿到 \texttt{200 OK} 即代表六者皆已落定；\texttt{order.paid} 事件由 Outbox 发布器\textbf{事务外异步}投递给 RabbitMQ，下游发货 / 核销 / 索引各自消费。
+\srcnote{internal/payment/service.go:55--218 PayDown 事务体；:208--218 outbox.Insert}
+\end{frame}
+
 \begin{frame}[fragile]{PayDown 扣款这一段的真实代码}
 \begin{lstlisting}[language=Go,firstnumber=79,
   caption={\srcnote{internal/payment/service.go:79--114 节选}}]
