@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/address"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -99,6 +100,12 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 	bossID, err := product.NewProductDao(ctx).ResolveBossID(req.ProductID)
 	if err != nil {
 		util.LogrusObj.Errorf("preorder resolve boss failed product=%d err=%v", req.ProductID, err)
+		return nil, err
+	}
+
+	// 收货地址必须属于当前用户，不能信客户端传入的 address_id
+	if err = address.NewAddressDao(ctx).EnsureOwned(req.AddressID, u.Id); err != nil {
+		util.LogrusObj.Errorf("preorder address ownership check failed addr=%d user=%d err=%v", req.AddressID, u.Id, err)
 		return nil, err
 	}
 

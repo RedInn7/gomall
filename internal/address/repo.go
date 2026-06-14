@@ -2,11 +2,15 @@ package address
 
 import (
 	"context"
+	"errors"
 
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
+
+// ErrAddressNotOwned 地址不存在或不属于当前用户：下单类入口据此拒单。
+var ErrAddressNotOwned = errors.New("收货地址不存在或不属于当前用户")
 
 type AddressDao struct {
 	*gorm.DB
@@ -27,6 +31,24 @@ func (d *AddressDao) GetAddressByAid(aId, uId uint) (address *Address, err error
 		Error
 
 	return
+}
+
+// EnsureOwned 校验收货地址归属：addressID 必须存在且属于 userID，否则返回 ErrAddressNotOwned。
+// address_id 同样是客户端可篡改的字段，下单类入口不能只信请求体——否则用户可拿别人的地址 id
+// 下单，把货寄到他人地址或撞出他人隐私。addressID 为 0 视为"未选地址"，是否必填由各域自行决定，
+// 本校验只在非零时判定归属。
+func (d *AddressDao) EnsureOwned(addressID, userID uint) error {
+	if addressID == 0 {
+		return nil
+	}
+	if d == nil || d.DB == nil {
+		return errors.New("address dao 不可用，无法校验地址归属")
+	}
+	addr, err := d.GetAddressByAid(addressID, userID)
+	if err != nil || addr == nil || addr.ID == 0 {
+		return ErrAddressNotOwned
+	}
+	return nil
 }
 
 func (d *AddressDao) GetAddressByuId(uId uint) (address []*Address, err error) {

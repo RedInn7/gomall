@@ -16,6 +16,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/address"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -73,7 +74,7 @@ func setupSQLiteForPreorder(t *testing.T) (*gorm.DB, func()) {
 		t.Skipf("sqlite 不可用（CGO 关闭？）：%v", err)
 	}
 	if err := db.AutoMigrate(
-		&user.User{}, &order.Order{}, &product.Product{},
+		&user.User{}, &order.Order{}, &product.Product{}, &address.Address{},
 		&ProductPreorder{}, &outbox.OutboxEvent{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
@@ -132,6 +133,12 @@ func seedPreorder(t *testing.T, db *gorm.DB, depositWindow, finalWindow time.Dur
 	boss.Money, _ = boss.EncryptMoney()
 	if err := db.Create(boss).Error; err != nil {
 		t.Fatalf("create boss: %v", err)
+	}
+
+	// 收货地址：PayDeposit 现在校验地址归属，给买家种一条（首条 → id=1，对齐各用例的 AddressID:1）
+	addr := &address.Address{UserID: buyer.ID, Name: "收货人", Phone: "13800000000", Address: "测试地址"}
+	if err := db.Create(addr).Error; err != nil {
+		t.Fatalf("create address: %v", err)
 	}
 
 	product := &product.Product{Name: "preorder-item", Num: 10, BossID: boss.ID}

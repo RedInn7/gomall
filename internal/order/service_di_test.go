@@ -41,6 +41,7 @@ func TestOrderCreate_PromoDownDegrades(t *testing.T) {
 	srv := NewOrderSrv(&promoCalcStub{calcErr: errors.New("promo unavailable")})
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
+	seedOrderAddress(t, db, 42)
 	resp, err := srv.OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
@@ -89,6 +90,7 @@ func TestOrderCreate_BudgetExhaustedFallsBack(t *testing.T) {
 	})
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
+	seedOrderAddress(t, db, 42)
 	resp, err := srv.OrderCreate(ctx, &OrderCreateReq{
 		ProductID: product.ID,
 		Num:       1,
