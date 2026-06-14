@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
@@ -27,19 +28,19 @@ import (
 //   - WEB3_PAY_TOKEN          : usdc(默认) | eth
 //   - WEB3_USDC_DECIMALS      : USDC 代币精度，默认 6
 //   - WEB3_ETH_CENTS_PER_ETH  : ETH 计价，1 ETH 折多少法币分（如 300000 = $3000/ETH）。
-//                               走 ETH 必填；稳定币 USDC 与法币 1:1 无需喂价。
+//     走 ETH 必填；稳定币 USDC 与法币 1:1 无需喂价。
 //   - WEB3_AMOUNT_TOLERANCE_BPS: 允许的链上金额下浮容差（基点），默认 50 = 0.5%，吸收 ETH 报价滑点。
 const (
-	envWeb3PayToken      = "WEB3_PAY_TOKEN"
-	envWeb3USDCDecimals  = "WEB3_USDC_DECIMALS"
-	envWeb3CentsPerETH   = "WEB3_ETH_CENTS_PER_ETH"
-	envWeb3ToleranceBps  = "WEB3_AMOUNT_TOLERANCE_BPS"
-	tokenUSDC            = "usdc"
-	tokenETH             = "eth"
-	defaultUSDCDecimals  = 6
-	defaultToleranceBps  = 50
-	weiDecimals          = 18
-	fiatDecimals         = 2 // 法币以「分」为最小单位
+	envWeb3PayToken     = "WEB3_PAY_TOKEN"
+	envWeb3USDCDecimals = "WEB3_USDC_DECIMALS"
+	envWeb3CentsPerETH  = "WEB3_ETH_CENTS_PER_ETH"
+	envWeb3ToleranceBps = "WEB3_AMOUNT_TOLERANCE_BPS"
+	tokenUSDC           = "usdc"
+	tokenETH            = "eth"
+	defaultUSDCDecimals = 6
+	defaultToleranceBps = 50
+	weiDecimals         = 18
+	fiatDecimals        = 2 // 法币以「分」为最小单位
 )
 
 var (
@@ -47,6 +48,10 @@ var (
 	ErrWeb3AmountMismatch = errors.New("链上确认金额低于订单应付")
 	// ErrWeb3PriceNotConfigured 走 ETH 但未配置喂价。
 	ErrWeb3PriceNotConfigured = errors.New("Web3 ETH 支付未配置 WEB3_ETH_CENTS_PER_ETH 喂价")
+	// ErrWeb3BuyerMismatch 链上 buyer 与签名 park 阶段写入的钱包地址不一致（防越权结算）。
+	ErrWeb3BuyerMismatch = errors.New("链上 buyer 与 park 钱包地址不匹配")
+	// ErrWeb3PendingMissing park 占位缺失（过期 / 从未签名）。无可信绑定来源，拒绝结算。
+	ErrWeb3PendingMissing = errors.New("Web3 park 占位缺失，无法校验 buyer 绑定")
 )
 
 func web3PayToken() string {
@@ -131,11 +136,42 @@ func GetWeb3SettleSrv() *Web3SettleSrv {
 	return web3SettleSrvIns
 }
 
+// verifyBuyerBinding 强校验链上 buyer 地址 == 签名 park 阶段写入 Redis 的钱包地址。
+// 这是把“链下签名授权”真正绑定到“链上结算”的关键一环：缺了它，任何人只要凑出
+// 金额匹配的事件就能结算任意订单。占位缺失（过期 / 未签名）同样拒绝，避免无绑定结算。
+//
+// 注：当前只能校验 buyer 字段。代币合约地址 / recipient（收款方）字段 escrow 合约
+// 的 PaymentConfirmed 事件并未 emit，链下无法核对——需合约补 token/recipient 字段后
+// 才能完整校验“钱付给了正确的收款地址、且是预期代币”。
+func verifyBuyerBinding(ctx context.Context, orderID uint, onchainBuyer string) error {
+	parked, err := cache.RedisClient.HGet(ctx, cache.Web3PendingKey(orderID), "addr").Result()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			log.LogrusObj.Errorf("web3 settle reject order=%d: park placeholder missing", orderID)
+			return ErrWeb3PendingMissing
+		}
+		// Redis 抖动属可重试错误，向上抛由消费者 Nack 重排，不静默放行（防绕过绑定校验）。
+		return fmt.Errorf("read web3 pending addr order=%d: %w", orderID, err)
+	}
+	if !strings.EqualFold(strings.TrimSpace(parked), strings.TrimSpace(onchainBuyer)) {
+		log.LogrusObj.Errorf("web3 settle reject order=%d: onchain buyer=%s != parked addr=%s", orderID, onchainBuyer, parked)
+		return ErrWeb3BuyerMismatch
+	}
+	return nil
+}
+
 // SettleConfirmedOrder 结算一笔链上已确认的订单（ETH/USDC）。
-// 由 listener 监听到 escrow 合约 PaymentConfirmed 事件后触发：校验金额 → 标记已付 + 扣库存
-// + 商品归属转移 + 卖家入账 + 复式记账（卖家 credit / 平台清算账户 debit）+ outbox order.paid。
+// 由 listener 监听到 escrow 合约 PaymentConfirmed 事件后触发：校验 buyer 绑定 + 金额 →
+// 标记已付 + 扣库存 + 商品归属转移 + 卖家入账 + 复式记账（卖家 credit / 平台清算账户 debit）
+// + outbox order.paid。
 // 幂等：订单 WaitPay 守卫 + (order_id,direction) 唯一索引，链上事件重投安全。
-func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, onchainAmount string) error {
+func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, onchainBuyer, onchainAmount string) error {
+	// 先做 buyer 绑定校验：链上 buyer 必须等于签名 park 阶段写入的钱包地址，否则拒绝结算。
+	// 放在事务外、最前面，确保未通过绑定校验时不触碰任何账务 / 库存状态。
+	if err := verifyBuyerBinding(ctx, orderID, onchainBuyer); err != nil {
+		return err
+	}
+
 	var (
 		paidProductID uint
 		paidNum       int

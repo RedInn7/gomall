@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/stripe/stripe-go/v82"
 	"github.com/stripe/stripe-go/v82/checkout/session"
@@ -43,7 +45,20 @@ var (
 	ErrStripeWebhookNotConfigured = errors.New("Stripe webhook 未配置：缺少 STRIPE_WEBHOOK_SECRET")
 	// ErrStripeSignature 签名校验失败：请求可能被伪造或篡改，应拒绝且无需 Stripe 重投。
 	ErrStripeSignature = errors.New("Stripe webhook 签名校验失败")
+	// ErrStripeAmountMismatch 会话实付金额 / 币种与订单应付口径不符：可能是被篡改的请求或
+	// 配置漂移（如 STRIPE_CURRENCY 与建会话时不一致），一律拒绝结算并告警，无需重投。
+	ErrStripeAmountMismatch = errors.New("Stripe webhook 实付金额或币种与订单应付不符")
 )
+
+// stripeEventDedupeTTL Stripe 事件去重键的存活时长。Stripe 的重投窗口最长约 3 天，
+// 取 72h 覆盖其全部自动重试，过期后键自然回收，不长期占用 Redis。
+const stripeEventDedupeTTL = 72 * time.Hour
+
+// stripeEventDedupeKey 以 event.ID 为粒度的去重键。Stripe 每个事件 ID 全局唯一，
+// 同一事件无论重投多少次都落同一个键。
+func stripeEventDedupeKey(eventID string) string {
+	return fmt.Sprintf("stripe:event:%s", eventID)
+}
 
 func stripeSecretKey() string     { return strings.TrimSpace(os.Getenv(envStripeSecretKey)) }
 func stripeWebhookSecret() string { return strings.TrimSpace(os.Getenv(envStripeWebhookSecret)) }
@@ -166,6 +181,16 @@ func (s *StripePaymentSrv) HandleWebhook(ctx context.Context, payload []byte, si
 		return nil // 其它事件忽略，正常 200
 	}
 
+	// 显式去重：以 event.ID 抢占一次性占位。订单状态守卫(WaitPay)是兜底，但
+	// 在「已结算 / 正在结算」窗口内同一事件重投仍会做无谓的 DB 事务甚至触发误判，
+	// 这里在入口处直接拦掉重复事件，更稳更省。Redis 不可用时退化为放行，由下游守卫兜底。
+	if first, derr := s.claimStripeEvent(ctx, event.ID); derr != nil {
+		log.LogrusObj.Warnf("stripe webhook dedupe redis err=%v event=%s, fallback to settle", derr, event.ID)
+	} else if !first {
+		log.LogrusObj.Infof("stripe webhook skip: event=%s already processed", event.ID)
+		return nil
+	}
+
 	var sess stripe.CheckoutSession
 	if err := json.Unmarshal(event.Data.Raw, &sess); err != nil {
 		log.LogrusObj.Errorf("stripe webhook unmarshal session failed: %v", err)
@@ -187,17 +212,55 @@ func (s *StripePaymentSrv) HandleWebhook(ctx context.Context, payload []byte, si
 		return errors.New("stripe webhook 缺少 user_id")
 	}
 
-	return s.settleStripeOrder(ctx, uint(orderID), uint(userID))
+	if err := s.settleStripeOrder(ctx, uint(orderID), uint(userID), sess.AmountTotal, string(sess.Currency)); err != nil {
+		// 金额 / 币种不符是确定性拒绝（同一会话重投结果不变），保留去重键直接挡掉后续重投。
+		// 其余多为瞬时错误（DB 抖动等），释放去重键让 Stripe 重投能再次进入结算，避免被永久挡住。
+		if !errors.Is(err, ErrStripeAmountMismatch) {
+			s.releaseStripeEvent(ctx, event.ID)
+		}
+		return err
+	}
+	return nil
+}
+
+// claimStripeEvent 用 SETNX 对 event.ID 占位：true 表示首次处理。Redis 不可用时返回 err，
+// 调用方据此降级放行（仍有订单状态守卫兜底），避免 Redis 抖动导致正常支付无法结算。
+func (s *StripePaymentSrv) claimStripeEvent(ctx context.Context, eventID string) (bool, error) {
+	if eventID == "" {
+		return true, nil
+	}
+	if cache.RedisClient == nil {
+		return true, nil
+	}
+	ok, err := cache.RedisClient.SetNX(ctx, stripeEventDedupeKey(eventID), "1", stripeEventDedupeTTL).Result()
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+// releaseStripeEvent 删除去重占位键，使同一事件的后续重投能再次进入结算。
+// 仅在瞬时失败时调用；删除失败只记日志（最坏结果是该事件需等占位键过期后才能重投）。
+func (s *StripePaymentSrv) releaseStripeEvent(ctx context.Context, eventID string) {
+	if eventID == "" || cache.RedisClient == nil {
+		return
+	}
+	if err := cache.RedisClient.Del(ctx, stripeEventDedupeKey(eventID)).Err(); err != nil {
+		log.LogrusObj.Warnf("stripe webhook release dedupe key failed event=%s err=%v", eventID, err)
+	}
 }
 
 // settleStripeOrder 结算一笔 Stripe 已支付订单：标记已付 + 扣库存 + 商品归属转移 + 卖家入账 + 写台账 + outbox。
 // 与钱包路径的区别：买家资金来自外部卡组织、不扣内部钱包，故 debit 记在平台清算账户。
 // 幂等：订单 WaitPay 守卫为主，(order_id, direction) 唯一索引兜底并发重投。
-func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userID uint) error {
+// paidAmount/paidCurrency 取自 Stripe 会话(sess.AmountTotal/sess.Currency)，结算前需与
+// 订单应付口径逐项核对，杜绝被篡改的 webhook 或币种漂移导致少收 / 错收。
+func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userID uint, paidAmount int64, paidCurrency string) error {
 	var (
 		paidProductID uint
 		paidNum       int
 	)
+	expectCurrency := stripeCurrency()
 
 	err := orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		order, err := orderpkg.NewOrderDaoByDB(tx).GetOrderById(orderID, userID)
@@ -221,6 +284,15 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 		payable := order.Money * int64(num)
 		if order.PromoRuleID != 0 {
 			payable = order.FinalCents
+		}
+
+		// 结算前断言会话实付金额 / 币种与订单应付完全一致：签名只证明「来自 Stripe」，
+		// 不保证「金额对得上订单」。币种大小写无关比较（Stripe 回传小写，建会话也用小写）。
+		if paidAmount != payable || !strings.EqualFold(paidCurrency, expectCurrency) {
+			log.LogrusObj.Errorf(
+				"stripe settle reject order=%d amount/currency mismatch: paid=%d/%s expect=%d/%s",
+				orderID, paidAmount, paidCurrency, payable, expectCurrency)
+			return ErrStripeAmountMismatch
 		}
 
 		userDao := user.NewUserDaoByDB(tx)

@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -47,6 +48,13 @@ func (s *OrderTaskService) RunOrderTimeoutCheck() {
 // （ReserveStock -> DB commit 通常亚秒级），让「建单在途」的预占在二次采样时
 // 已落库，避免把它误判成泄漏而错误回收。取 5s 留足余量。
 const stockReconcileGrace = 5 * time.Second
+
+// stockCommitGrace 支付「DB 已 WaitShip、Redis reserved 尚未 CommitReservation」窗口的宽限期。
+// 支付路径先在 DB 事务把订单推进到 WaitShip，再在事务外扣 reserved；这两步之间订单已离开
+// WaitPay 但 reserved 仍占着。对账时把「最近 stockCommitGrace 内刚推进到 WaitShip」的订单量
+// 并入基准，避免把这笔在途预占误判成泄漏而回收，否则随后支付侧 CommitReservation 会净超卖。
+// 取值远大于事务提交到 commit 之间的耗时（通常亚秒级），30s 留足重试 / 抖动余量。
+const stockCommitGrace = 30 * time.Second
 
 // RunStockReservationReconcile 对账 Redis reserved 桶与 DB 未支付订单，回收泄漏的预占。
 //
@@ -91,8 +99,13 @@ func (s *OrderTaskService) RunStockReservationReconcile() {
 	}
 }
 
-// sampleReservationLeak 采一次样：对每个存在 reserved 桶的商品，算 reserved - Σ(WaitPay Num)，
-// 正值即疑似泄漏。返回 map[productID]leak(>0)。
+// sampleReservationLeak 采一次样：对每个存在 reserved 桶的商品，算
+// reserved - Σ(WaitPay Num) - Σ(刚支付待 commit 的 Num)，正值即疑似泄漏。返回 map[productID]leak(>0)。
+//
+// 基准里减去两类合法占用：
+//   - WaitPay 订单：reserved 的正常归属；
+//   - 刚推进到 WaitShip 且在 stockCommitGrace 内的订单：支付已成功但 Redis 尚未 CommitReservation
+//     的在途预占。这一项是关键防线，避免把「支付成功但 commit 在途」的预占误回收成泄漏。
 func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]int64, error) {
 	pids, err := cache.ScanReservedProductIDs(ctx)
 	if err != nil {
@@ -101,7 +114,12 @@ func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]
 	if len(pids) == 0 {
 		return nil, nil
 	}
-	dbSum, err := NewOrderDao(ctx).SumWaitPayNumByProduct()
+	dao := NewOrderDao(ctx)
+	waitPaySum, err := dao.SumWaitPayNumByProduct()
+	if err != nil {
+		return nil, err
+	}
+	inflightSum, err := s.sumRecentlyPaidNumByProduct(ctx, time.Now().Add(-stockCommitGrace))
 	if err != nil {
 		return nil, err
 	}
@@ -112,11 +130,34 @@ func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]
 			util.LogrusObj.Errorf("StockReconcile 读 reserved 失败 product=%d err=%v", pid, err)
 			continue
 		}
-		if diff := reserved - dbSum[pid]; diff > 0 {
+		// 减去 WaitPay 与刚支付待 commit 两类合法占用，剩余才视为疑似泄漏。
+		if diff := reserved - waitPaySum[pid] - inflightSum[pid]; diff > 0 {
 			leak[pid] = diff
 		}
 	}
 	return leak, nil
+}
+
+// sumRecentlyPaidNumByProduct 汇总每个商品「刚支付成功、Redis 预占可能尚未 commit」的在途数量(Σ Num)。
+// 口径：type=WaitShip 且 updated_at 在 since 之后（刚由支付推进而来、仍在 commit 宽限期内）。
+// 仅取宽限期内的新近订单，避免把早已 commit 完成的 WaitShip 也算进基准而漏掉真实泄漏。
+func (s *OrderTaskService) sumRecentlyPaidNumByProduct(ctx context.Context, since time.Time) (map[uint]int64, error) {
+	var rows []struct {
+		ProductID uint
+		Total     int64
+	}
+	if err := NewOrderDao(ctx).DB.Model(&Order{}).
+		Select("product_id, SUM(num) AS total").
+		Where("type = ? AND updated_at >= ?", consts.OrderWaitShip, since).
+		Group("product_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	m := make(map[uint]int64, len(rows))
+	for _, r := range rows {
+		m[r.ProductID] = r.Total
+	}
+	return m, nil
 }
 
 // RunAutoConfirmReceive 对长时间未确认收货的订单兜底自动 Completed。

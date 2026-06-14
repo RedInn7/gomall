@@ -33,7 +33,7 @@ func superviseConsumer(cfg consumerConfig) {
 				continue
 			}
 			for d := range msgs {
-				cfg.deliver(d)
+				deliverWithRecover(cfg.queue, cfg.deliver, d)
 			}
 			// msgs 被 broker 关闭：旧 channel 已失效，先 Close 释放句柄避免堆积，
 			// 退避后回到循环顶部重新订阅（ensureConnection 会按需重连）。
@@ -42,6 +42,25 @@ func superviseConsumer(cfg consumerConfig) {
 			time.Sleep(consumerRetryDelay)
 		}
 	}()
+}
+
+// deliverWithRecover 包裹单条投递处理，捕获 handler panic 避免一条毒消息打挂整个消费者 goroutine。
+// panic 时 Nack 重排（交由投递次数 / DLQ 兜底），不静默丢消息。
+func deliverWithRecover(queue string, deliver func(amqp.Delivery), d amqp.Delivery) {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Errorf("RabbitMQ 消费者 %s 处理 panic: %v", queue, r)
+			_ = d.Nack(false, true)
+		}
+	}()
+	deliver(d)
+}
+
+// SuperviseDomainConsumer 给领域包提供的自愈消费者入口：内部复用 superviseConsumer 的
+// 断连重订阅 + panic 兜底，领域侧只需提供队列名、prefetch 与单条投递处理（自行 Ack/Nack/进 DLQ）。
+// 调用前应先 InitDeadLetterTopology + BindDomainQueue 声明拓扑与绑定。
+func SuperviseDomainConsumer(queue string, prefetch int, deliver func(amqp.Delivery)) {
+	superviseConsumer(consumerConfig{queue: queue, prefetch: prefetch, deliver: deliver})
 }
 
 // subscribe 在一条可用连接上开 channel、设置 Qos 并发起 Consume。
