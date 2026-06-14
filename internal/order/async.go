@@ -9,6 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/RedInn7/gomall/internal/address"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -119,6 +120,12 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (Order
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
+		return OrderEnqueueResp{}, err
+	}
+
+	// 地址归属在入队前同步校验：失败快速拒绝，避免白白预扣库存 / 投递无效任务。
+	if err = address.NewAddressDao(ctx).EnsureOwned(req.AddressID, u.Id); err != nil {
+		util.LogrusObj.Errorf("async enqueue address ownership check failed addr=%d user=%d err=%v", req.AddressID, u.Id, err)
 		return OrderEnqueueResp{}, err
 	}
 

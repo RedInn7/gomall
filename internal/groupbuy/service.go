@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/address"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -103,6 +104,12 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 	floorCents := retailCents * GroupbuyMinPriceBps / 10000
 	if priceCents > retailCents || priceCents < floorCents {
 		return nil, fmt.Errorf("拼团价 %d 分越界，须落在 [%d, %d] 分（商品原价 %d 分）", priceCents, floorCents, retailCents, retailCents)
+	}
+
+	// 收货地址必须属于团长本人，不能信客户端传入的 address_id
+	if e := address.NewAddressDao(ctx).EnsureOwned(addressID, leaderID); e != nil {
+		util.LogrusObj.Errorf("groupbuy create address ownership check failed addr=%d leader=%d err=%v", addressID, leaderID, e)
+		return nil, e
 	}
 
 	// 1. 预扣 1 份库存
@@ -214,6 +221,12 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 	bossID, err = product.NewProductDao(ctx).ResolveBossID(g.ProductID)
 	if err != nil {
 		util.LogrusObj.Errorf("groupbuy join resolve boss failed user=%d product=%d err=%v", userID, g.ProductID, err)
+		return nil, err
+	}
+
+	// 收货地址必须属于参团用户本人，不能信客户端传入的 address_id
+	if err = address.NewAddressDao(ctx).EnsureOwned(addressID, userID); err != nil {
+		util.LogrusObj.Errorf("groupbuy join address ownership check failed addr=%d user=%d err=%v", addressID, userID, err)
 		return nil, err
 	}
 
