@@ -35,9 +35,11 @@ func GetRedPacketSrv() *RedPacketSrv {
 
 // Create 发红包：
 //  1. 二倍均值法预拆好 count 份金额数组
-//  2. DB 事务：写 red_packet 主记录 + outbox(red_packet.created)
+//  2. DB 事务：写 red_packet 主记录 + 发包人钱包扣 total 进平台清算 escrow(同事务写台账) + outbox(red_packet.created)
 //  3. Redis Lua 一把 RPUSH 金额数组 + EXPIRE
-//     钱包扣账由下游消费 red_packet.created 事件入账
+//
+// 资金在第 2 步同事务原子落地（settleSendTx）：发包人 debit / 清算 credit，幂等由台账唯一索引兜底。
+// red_packet.created 事件仅用于风控 / 数据同步，不再承担入账。
 func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (interface{}, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -75,6 +77,10 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (int
 		if e := NewRedPacketDaoByDB(tx).Create(rp); e != nil {
 			return e
 		}
+		// 发包人钱包扣 total 进平台清算 escrow，与红包主记录同事务原子落地。
+		if e := settleSendTx(tx, rp.ID, u.Id, req.Total); e != nil {
+			return e
+		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"red_packet", "RedPacketCreated", "red_packet.created", rp.ID,
 			events.RedPacketCreated{
@@ -103,8 +109,11 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (int
 
 // Claim 抢红包：
 //  1. Lua 原子 LPOP + 标记 claimed -> amount
-//  2. DB 事务：写 RedPacketClaim + remaining-- + outbox(red_packet.claimed)
+//  2. DB 事务：写 RedPacketClaim + remaining-- + 领取人钱包入账 amount(同事务写台账，escrow 出账) + outbox(red_packet.claimed)
 //  3. DB 事务失败 -> Saga 回滚 Lua (LPUSH 金额回 list, 撤销 claimed 标记)
+//
+// 资金在第 2 步同事务原子落地（settleClaimTx）：领取人 credit / 清算 debit，
+// ref 用领取记录 id 保证同红包不同领取人各自唯一、只入账一次。
 func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (interface{}, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -140,6 +149,10 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (inter
 			return e
 		}
 		if _, e := txDao.DecrRemaining(rp.ID); e != nil {
+			return e
+		}
+		// 领取人钱包入账，escrow 出账；ref=领取记录 id（CreateClaim 后已回填自增主键）。
+		if e := settleClaimTx(tx, claim.ID, u.Id, amount); e != nil {
 			return e
 		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(

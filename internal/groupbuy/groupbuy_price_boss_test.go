@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm/schema"
 
 	"github.com/RedInn7/gomall/internal/address"
+	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -35,7 +36,7 @@ func setupGroupbuyDB(t *testing.T) (*gorm.DB, func()) {
 	}
 	if err := db.AutoMigrate(
 		&user.User{}, &orderpkg.Order{}, &product.Product{}, &address.Address{},
-		&GroupbuyGroup{}, &GroupbuyMember{}, &outbox.OutboxEvent{},
+		&GroupbuyGroup{}, &GroupbuyMember{}, &outbox.OutboxEvent{}, &money.AccountTransaction{},
 	); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
@@ -107,6 +108,7 @@ func TestCreateGroup_AuthoritativeBossAndPriceClamp(t *testing.T) {
 	p := seedGroupbuyProduct(t, db, "100.00", realBoss, 10) // 原价 10000 分，floor=5000 分
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
+	seedGroupbuyUserWithID(t, db, 42, 100000) // 团长钱包：加入即扣拼团价
 	addr := seedGroupbuyAddress(t, db, 42)
 
 	// 合法拼团价 8000 分（在 [5000,10000] 内）；boss_id 篡改成攻击者 999
@@ -148,6 +150,8 @@ func TestJoinGroup_AuthoritativeBoss(t *testing.T) {
 	p := seedGroupbuyProduct(t, db, "100.00", realBoss, 10)
 
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
+	seedGroupbuyUserWithID(t, db, 42, 100000) // 团长钱包
+	seedGroupbuyUserWithID(t, db, 50, 100000) // 参团用户钱包
 	leaderAddr := seedGroupbuyAddress(t, db, 42)
 	joinerAddr := seedGroupbuyAddress(t, db, 50)
 	created, err := GetGroupbuySrv().CreateGroup(ctx, 42, p.ID, 3, 8000, 0, realBoss, leaderAddr)

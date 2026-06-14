@@ -2,6 +2,7 @@ package redpacket
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"gorm.io/gorm"
@@ -78,6 +79,21 @@ func (d *RedPacketDao) ListClaims(redPacketID uint) ([]*RedPacketClaim, error) {
 		Order("id ASC").
 		Find(&out).Error
 	return out, err
+}
+
+// GetClaim 按 (red_packet_id, user_id) 反查领取记录（uniq 约束保证至多一行），用于事件结算定位 ref。
+// 未找到返回 (nil, nil)，由调用方判脏事件。
+func (d *RedPacketDao) GetClaim(redPacketID, userID uint) (*RedPacketClaim, error) {
+	var c RedPacketClaim
+	err := d.DB.Where("red_packet_id = ? AND user_id = ?", redPacketID, userID).
+		First(&c).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // GetExpired 取出 status=active 且 expire_at <= now 的红包，限量
