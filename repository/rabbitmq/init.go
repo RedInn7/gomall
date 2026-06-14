@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -12,6 +13,9 @@ import (
 
 // GlobalRabbitMQ rabbitMQ链接单例
 var GlobalRabbitMQ *amqp.Connection
+
+// connMu 串行化对 GlobalRabbitMQ 的（重）建连，避免抖动期间多个消费者并发 Dial。
+var connMu sync.Mutex
 
 // healthy 标记当前 broker 连接是否可用，供启动后探活/降级判断使用。
 // 用 atomic.Bool 以便消费/发布侧并发读取无需加锁。
@@ -26,6 +30,14 @@ func Healthy() bool {
 // 连接失败时返回 error 由调用方决定 fail-fast 还是降级，
 // 不再内部 panic，便于上层按配置区分生产/开发行为。
 func InitRabbitMQ() error {
+	connMu.Lock()
+	defer connMu.Unlock()
+	return dial()
+}
+
+// dial 建立一条新连接并刷新 GlobalRabbitMQ 与健康标记。
+// 调用方需持有 connMu。
+func dial() error {
 	rConfig := conf.Config.RabbitMq
 	pathRabbitMQ := strings.Join([]string{rConfig.RabbitMQ, "://", rConfig.RabbitMQUser, ":", rConfig.RabbitMQPassWord, "@", rConfig.RabbitMQHost, ":", rConfig.RabbitMQPort, "/"}, "")
 	conn, err := amqp.Dial(pathRabbitMQ)
@@ -44,6 +56,20 @@ func InitRabbitMQ() error {
 		healthy.Store(false)
 	}()
 	return nil
+}
+
+// ensureConnection 返回一个可用连接：当前连接已被 broker 关闭时重新 Dial。
+// 供长生命周期消费者在断连后自愈复用，单次 Dial 由 connMu 串行化。
+func ensureConnection() (*amqp.Connection, error) {
+	connMu.Lock()
+	defer connMu.Unlock()
+	if GlobalRabbitMQ != nil && !GlobalRabbitMQ.IsClosed() {
+		return GlobalRabbitMQ, nil
+	}
+	if err := dial(); err != nil {
+		return nil, err
+	}
+	return GlobalRabbitMQ, nil
 }
 
 // RequireOnStartup 暴露配置中的 fail-fast 开关，供启动流程决定连不上是否中止。

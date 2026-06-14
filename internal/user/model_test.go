@@ -8,8 +8,13 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	re := conf.ConfigReader{FileName: "../../config/locales/config.yaml"}
-	conf.InitConfigForTest(&re)
+	// 配置文件（config/locales/config.yaml）在 CI/全新检出环境中可能缺失，
+	// 而本包的单测均为内存逻辑，不依赖落地配置，故缺失时降级继续而非中断。
+	func() {
+		defer func() { _ = recover() }()
+		re := conf.ConfigReader{FileName: "../../config/locales/config.yaml"}
+		conf.InitConfigForTest(&re)
+	}()
 	fmt.Println("Write tests on values: ", conf.Config)
 	m.Run()
 }

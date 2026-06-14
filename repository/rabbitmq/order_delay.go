@@ -71,35 +71,26 @@ func PublishOrderCancelDelay(ctx context.Context, orderNum uint64, delay time.Du
 	})
 }
 
-// ConsumeOrderCancelDelay 启动消费者，对每个超时订单调用 handler
+// ConsumeOrderCancelDelay 启动消费者，对每个超时订单调用 handler。
+// 消费在自愈 supervisor 中运行：连接抖动 / channel 关闭后会自动重连并重新订阅。
 func ConsumeOrderCancelDelay(handler func(orderNum uint64) error) error {
-	ch, err := GlobalRabbitMQ.Channel()
-	if err != nil {
-		return err
-	}
-	if err := ch.Qos(16, 0, false); err != nil {
-		return err
-	}
-	msgs, err := ch.Consume(orderDeadQueue, "", false, false, false, false, nil)
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		for d := range msgs {
+	superviseConsumer(consumerConfig{
+		queue:    orderDeadQueue,
+		prefetch: 16,
+		deliver: func(d amqp.Delivery) {
 			orderNum, err := strconv.ParseUint(string(d.Body), 10, 64)
 			if err != nil {
 				util.LogrusObj.Errorln("delay queue body 不是合法 orderNum:", err)
 				_ = d.Nack(false, false)
-				continue
+				return
 			}
 			if err := handler(orderNum); err != nil {
 				util.LogrusObj.Errorf("处理延迟关单失败 orderNum=%d err=%v\n", orderNum, err)
 				_ = d.Nack(false, true) // requeue 一次，下游再决定是否进 DLX
-				continue
+				return
 			}
 			_ = d.Ack(false)
-		}
-	}()
+		},
+	})
 	return nil
 }
