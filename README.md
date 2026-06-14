@@ -117,7 +117,7 @@
 - **不真上链**：Web3 合约源码 + Go binding 完整，但默认不连 RPC（env 控制）
 - **没有 merchant role**：商家自助 API（发货 / 看板 / 提现）路线图阶段
 - **没有物流单 / 售后工单 / 评价表**：订单状态机推到 7 态，但物流商对接 / 退货寄回 / 评价审核三件独立表是路线图
-- **不做前端**：纯后端 API，配 Postman 调
+- **不做前端**：纯后端 API，用 curl / Postman 自己调
 - **MVP 阶段聚焦交易闭环**：履约链路有 7 态但物流回流 / 售后 SOP 留待 wallet & merchant 落地后做
 
 未做清单完整版：`docs/architecture/feature-matrix.md`。
@@ -168,7 +168,7 @@
 - Cron 每 5min 兜底扫超时 UnPaid
 - 共用 `CancelUnpaidOrder` 入口，通过条件 UPDATE 兜底幂等（至少 4 个调用方：RMQ / Cron / 客服 / 用户）
 
-`internal/order/cancel.go` + `internal/order/task.go` + `initialize/cron.go`。这里踩过一个 cron 陷阱，已经修了，细节在第 12 节。
+`internal/order/cancel.go` + `internal/order/task.go` + `initialize/cron.go`。
 
 ### 5 · 抢红包二倍均值法：拆包公平 + 总额精确
 
@@ -249,16 +249,6 @@ func tryInitES(ctx context.Context) {
 }
 ```
 所有外部依赖独立 try* 函数 + recover，env 未设直接静默不启动，**主链路（下单 / 支付 / 列表 / 详情）永远在线**。
-
-### 12 · 几个我没修干净的坑
-
-代码不完美，几个写的时候就知道、暂时没动的问题列在这。deck 09 / deck 11 里也标了。
-
-**订单超时两个数对不上。** MQ 延迟队列是 30 分钟（`repository/rabbitmq/order_delay.go:22`），Cron 兜底扫的是 15 分钟没付的（`internal/order/task.go:25`，`GetTimeoutOrders(15, 100)`）。两条关单路径一个按 30 分钟一个按 15 分钟，实际先触发的是 15 分钟那条，30 分钟这个数没意义。前后分两次加的，没对齐。
-
-**`orders/delete` 是条野路子。** 路由 `internal/order/routes.go:19`，落到 `DeleteOrderById`（`internal/order/repo.go:185`）。这里的 `DeletedAt` 是普通 `*time.Time` 不是 `gorm.DeletedAt`，所以是物理删除不是软删。两个问题：没做状态判断，待付款（reserved 还占着库存）的订单也能删；删的时候不退 Redis reserved、也不写 outbox。行没了，超时 Cron 也扫不到，reserved 就一直挂在 Redis 上。现在靠 `RunStockReservationReconcile`（`initialize/cron.go:38`）每 5 分钟对账把这种孤儿预占收回来，能兜住，但这个删除接口本身该改。
-
-**这个已经修了：cron 表达式。** 原来关单写的是 `* */5 * * * *`，在 `cron.WithSeconds()` 下不是每 5 分钟，是「分钟数能被 5 整除时每秒触发一次」，60 次/5min，靠关单幂等才没出事。后来改成 `@every 5m`，`initialize/cron.go:21` 留了行注释。
 
 ---
 
@@ -446,7 +436,6 @@ gomall
 ├── config              # 配置加载
 ├── consts              # 全局常量（订单状态机 / 业务码 等）
 ├── contracts           # Solidity 合约（Web3 Escrow）
-├── doc                 # 项目说明 / 截图
 ├── docs
 │   ├── architecture    # feature matrix / DDD 迁移手册 / 路线图
 │   ├── blog            # 11 篇博客长文
@@ -472,7 +461,6 @@ gomall
 │   ├── db
 │   │   └── dao         # DB 基座（连接 / InitMySQL；领域 repo / model 在 internal/<域>/）
 │   ├── es              # ElasticSearch
-│   ├── kafka           # Kafka（备用）
 │   ├── milvus          # Milvus 向量库
 │   └── rabbitmq        # RMQ（domain / order_async / order_delay）
 ├── routes              # 路由 + 中间件链
@@ -528,16 +516,6 @@ encryptSecret:
 
 ---
 
-## Postman
-
-`doc/` 下有截图导入步骤：
-
-1. 打开 Postman → Import → 选择 `doc/` 下的接口文件
-2. 在 Collection（gin-mall）的 Variables 中加 `url` = `localhost:5001/api/v1/`
-3. 跑接口
-
----
-
 ## 主要依赖
 
 | 名称 | 版本 |
@@ -556,13 +534,3 @@ encryptSecret:
 | rabbitmq/amqp091-go | v1.8.1 |
 | elastic/go-elasticsearch | v0.0.0 |
 | Skywalking-go | v0.0.0-20230511 |
-
----
-
-## 一起改
-
-欢迎提 PR，几条不成文的规矩：
-
-1. 从最新版本切分支，别直接往 main 上怼
-2. 自测过了再提
-3. 过了 review 再合
