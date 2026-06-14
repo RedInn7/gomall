@@ -45,6 +45,7 @@ func loading() {
 	initialize.InitOutboxPublisher(context.Background())
 	initialize.InitOrderAsyncConsumer(context.Background())
 	initialize.InitPromoReleaseConsumer(context.Background())
+	initialize.InitWeb3SettleConsumer(context.Background())
 	tryInitES(context.Background())
 	tryInitWeb3Listener(context.Background())
 	tryInitMilvus(context.Background())
