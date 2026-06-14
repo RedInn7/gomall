@@ -78,7 +78,7 @@ func setupSQLiteForPayment(t *testing.T) (*gorm.DB, func()) {
 
 func setupRedisForPayment(t *testing.T) func() {
 	t.Helper()
-	c := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", DB: 15})
+	c := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379", DB: 14})
 	if err := c.Ping(context.Background()).Err(); err != nil {
 		t.Skipf("Redis 127.0.0.1:6379 不可用：%v", err)
 	}

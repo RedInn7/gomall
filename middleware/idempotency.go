@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -13,6 +15,12 @@ import (
 )
 
 const IdempotencyHeader = "Idempotency-Key"
+
+const (
+	// 提交/释放属于请求返回后的清理动作，使用独立的后台超时，避免请求 ctx 已取消导致清理失败
+	idempotencyCleanupTimeout = 3 * time.Second
+	idempotencyCommitRetries  = 3
+)
 
 // responseRecorder 拷贝写入的响应体，便于幂等命中时回放
 type responseRecorder struct {
@@ -99,14 +107,38 @@ func Idempotency() gin.HandlerFunc {
 		c.Next()
 
 		if len(c.Errors) > 0 || recorder.Status() >= http.StatusBadRequest {
-			if err := cache.ReleaseIdempotencyLock(c.Request.Context(), key); err != nil {
-				log.LogrusObj.Errorln("idempotency release error:", err)
-			}
+			releaseIdempotencyLock(key)
 			return
 		}
 
-		if err := cache.CommitIdempotencyResult(c.Request.Context(), key, recorder.body.String()); err != nil {
-			log.LogrusObj.Errorln("idempotency commit error:", err)
+		commitIdempotencyResult(key, recorder.body.String())
+	}
+}
+
+// commitIdempotencyResult 将幂等记录从 processing 推进到 done 并缓存响应体。
+// 业务副作用此时已落库、2xx 也已返回给客户端，因此提交失败不能静默吞掉：
+// 在后台 context 内带超时重试若干次；若仍失败则把记录回退到 init，
+// 让客户端可以用同一 token 安全重试，而不是把记录滞留在 processing 直到 TTL 过期。
+func commitIdempotencyResult(key, result string) {
+	for i := 0; i < idempotencyCommitRetries; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), idempotencyCleanupTimeout)
+		err := cache.CommitIdempotencyResult(ctx, key, result)
+		cancel()
+		if err == nil {
+			return
 		}
+		log.LogrusObj.Errorln("idempotency commit error:", err)
+	}
+	// 多次提交仍失败，回退到 init 解除 processing 卡死，优先保证客户端可重试
+	releaseIdempotencyLock(key)
+}
+
+// releaseIdempotencyLock 在后台 context 内把幂等记录回退到 init，
+// 使用独立超时避免请求 ctx 已取消导致清理本身失败。
+func releaseIdempotencyLock(key string) {
+	ctx, cancel := context.WithTimeout(context.Background(), idempotencyCleanupTimeout)
+	defer cancel()
+	if err := cache.ReleaseIdempotencyLock(ctx, key); err != nil {
+		log.LogrusObj.Errorln("idempotency release error:", err)
 	}
 }
