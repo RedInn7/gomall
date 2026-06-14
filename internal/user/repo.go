@@ -100,6 +100,37 @@ func (d *UserDao) GetUserByIdForUpdate(uId uint) (user *User, err error) {
 	return
 }
 
+// LockTwoUsersForUpdate 按 id 升序对两个用户行加 FOR UPDATE 后返回（a 对应 idA，b 对应 idB）。
+// 转账类操作（支付、退款、定金划转）会同时锁定买家与卖家两行；若各事务按各自的
+// “买家→卖家”业务顺序加锁，用户 A 向 B 下单（锁 A→锁 B）与 B 向 A 下单（锁 B→锁 A）
+// 并发时即构成循环等待死锁。统一按 id 排序加锁，使所有事务的多锁获取顺序全局一致，
+// 从根上消除死锁。idA==idB（自购自卖）时只锁一次，两个返回值指向同一对象。
+func (d *UserDao) LockTwoUsersForUpdate(idA, idB uint) (a, b *User, err error) {
+	if idA == idB {
+		only, e := d.GetUserByIdForUpdate(idA)
+		if e != nil {
+			return nil, nil, e
+		}
+		return only, only, nil
+	}
+	first, second := idA, idB
+	if idB < idA {
+		first, second = idB, idA
+	}
+	u1, e := d.GetUserByIdForUpdate(first)
+	if e != nil {
+		return nil, nil, e
+	}
+	u2, e := d.GetUserByIdForUpdate(second)
+	if e != nil {
+		return nil, nil, e
+	}
+	if first == idA {
+		return u1, u2, nil
+	}
+	return u2, u1, nil
+}
+
 // UpdateUserById 根据 id 更新用户信息
 func (d *UserDao) UpdateUserById(uId uint, user *User) (err error) {
 	return d.DB.Model(&User{}).Where("id=?", uId).
