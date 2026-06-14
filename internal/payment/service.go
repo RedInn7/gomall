@@ -82,8 +82,9 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 		}
 
 		userDao := user.NewUserDaoByDB(tx)
-		// 先校验支付密码（与余额加密分离），再做加行锁的余额读改写
-		buyer, err := userDao.GetUserByIdForUpdate(uId)
+		// 统一锁序：按 user id 升序对买卖双方一并加 FOR UPDATE，消除 A 向 B 下单与 B 向 A
+		// 下单并发时“先买家后卖家”角色锁序构成的锁环死锁。锁就位后再校验支付密码、读改写余额。
+		buyer, boss, err := userDao.LockTwoUsersForUpdate(uId, bossID)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
@@ -124,12 +125,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 
-		boss, err := userDao.GetUserByIdForUpdate(bossID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-
+		// boss 已在事务开头随 buyer 一并按 id 序加锁，无需二次读取。
 		// 商家余额同样用服务端密钥解密——绝不能用买家支付密码，否则跨账户串密钥
 		bossMoney, err := boss.DecryptMoney()
 		if err != nil {
