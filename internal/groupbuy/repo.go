@@ -71,12 +71,14 @@ func (d *GroupbuyDao) JoinGroupAtomic(groupID uint, member *GroupbuyMember) erro
 	return nil
 }
 
-// MarkGroupSuccessIfFull 当 current_count >= target_count 时把 status 推到 success。
+// MarkGroupSuccessIfFull 当 current_count >= target_count 且尚未过期时把 status 推到 success。
 // 返回 (推进与否, error)；幂等：多次调用只有第一次切 status。
-func (d *GroupbuyDao) MarkGroupSuccessIfFull(groupID uint) (bool, error) {
+// now 由调用方传入，与 JoinGroupAtomic 保持相同的截止口径，防止在截单线附近
+// 将本应散团的拼团误判成成团。
+func (d *GroupbuyDao) MarkGroupSuccessIfFull(groupID uint, now time.Time) (bool, error) {
 	res := d.DB.Model(&GroupbuyGroup{}).
-		Where("id=? AND status=? AND current_count>=target_count",
-			groupID, GroupbuyStatusOpen).
+		Where("id=? AND status=? AND current_count>=target_count AND expire_at>?",
+			groupID, GroupbuyStatusOpen, now).
 		Update("status", GroupbuyStatusSuccess)
 	if res.Error != nil {
 		return false, res.Error
