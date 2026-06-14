@@ -99,3 +99,8 @@ func SetWeb3Pending(ctx context.Context, orderID uint, walletAddr string) error 
 	_, err := pipe.Exec(ctx)
 	return err
 }
+
+// DelWeb3Pending 链上确认结算成功后清除待确认占位（best-effort，幂等）。
+func DelWeb3Pending(ctx context.Context, orderID uint) error {
+	return RedisClient.Del(ctx, Web3PendingKey(orderID)).Err()
+}

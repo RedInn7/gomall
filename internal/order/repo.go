@@ -118,6 +118,13 @@ func (d *OrderDao) GetOrderById(id, uId uint) (r *Order, err error) {
 	return
 }
 
+// GetOrderByIdOnly 仅按订单 id 查询，不限定 user_id。
+// 用于链上确认结算等无用户上下文的场景：order 来源由调用方（如 listener 监听到的合约事件）保证。
+func (d *OrderDao) GetOrderByIdOnly(id uint) (r *Order, err error) {
+	err = d.DB.Model(&Order{}).Where("id = ?", id).First(&r).Error
+	return
+}
+
 // ShowOrderById 获取订单详情
 func (d *OrderDao) ShowOrderById(id, uId uint) (r *OrderListRespItem, err error) {
 	err = d.DB.Model(&Order{}).

@@ -14,11 +14,16 @@ const (
 const (
 	BizTypeOrderPay  = "order_pay"
 	BizTypeStripePay = "stripe_pay"
+	BizTypeWeb3Pay   = "web3_pay"
 )
 
-// StripeClearingUserID 平台 Stripe 清算账户的 user_id。Stripe 支付的资金来自外部卡组织，
-// 买家不从内部钱包扣款，故复式记账的 debit 对手方记在该清算账户上，保持 SUM(debit)=SUM(credit)。
-const StripeClearingUserID uint = 0
+// ExternalClearingUserID 平台对外资金清算账户的 user_id（0 = 系统账户）。
+// Stripe / Web3 等外部资金入口，买家不从内部钱包扣款，复式记账的 debit 对手方记在该清算账户上，
+// 保持 SUM(debit)=SUM(credit) 守恒。
+const ExternalClearingUserID uint = 0
+
+// StripeClearingUserID 保留兼容旧引用，语义同 ExternalClearingUserID。
+const StripeClearingUserID = ExternalClearingUserID
 
 // AccountTransaction 复式记账资金流水台账。
 //
