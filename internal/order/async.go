@@ -32,14 +32,14 @@ func OrderTicketKey(ticket string) string {
 }
 
 // AsyncOrderTask 投递到 MQ 的消息体。
-// 不携带金额：单价由 consumer 落库时从商品表权威反查，客户端金额一律不进入计费链路。
+// 不携带金额与卖家：单价 / boss 由 consumer 落库时从商品表权威反查，客户端值一律不进入
+// 计费 / 打款链路。
 type AsyncOrderTask struct {
 	Ticket    string `json:"ticket"`
 	UserID    uint   `json:"user_id"`
 	ProductID uint   `json:"product_id"`
 	Num       uint   `json:"num"`
 	AddressID uint   `json:"address_id"`
-	BossID    uint   `json:"boss_id"`
 }
 
 // OrderTicketStatus 写到 Redis ticket key 的状态
@@ -143,7 +143,6 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (Order
 		ProductID: req.ProductID,
 		Num:       req.Num,
 		AddressID: req.AddressID,
-		BossID:    req.BossID,
 	}
 	body, err := json.Marshal(task)
 	if err != nil {

@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -71,10 +68,11 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 		return nil, err
 	}
 
-	// 单价以服务端商品表为准，不取 req.Money：金额是安全敏感字段，客户端可任意改写，
-	// 信它等于把定价权交给买家（money=1 即可 1 分钱下单）。这里一次反查同时拿到单价与
-	// 类目；商品不存在或定价非法直接拒单，绝不回退到 req.Money（回退即重新打开漏洞）。
-	unitCents, categoryID, err := resolveProductPricing(ctx, req.ProductID)
+	// 单价与卖家均以服务端商品表为准，不取 req.Money / req.BossID：二者都是安全敏感字段，
+	// 客户端可任意改写——信 money 等于把定价权交给买家（1 分下单），信 boss_id 等于让买家
+	// 指定收款方（把货款打给攻击者账户）。一次反查同时拿到单价 / 类目 / 卖家；商品不存在或
+	// 定价非法直接拒单，绝不回退到客户端值（回退即重新打开漏洞）。
+	unitCents, categoryID, bossID, err := resolveProductPricing(ctx, req.ProductID)
 	if err != nil {
 		util.LogrusObj.Errorf("resolve product pricing failed product=%d err=%v", req.ProductID, err)
 		return nil, err
@@ -105,7 +103,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 	order := &Order{
 		UserID:    u.Id,
 		ProductID: req.ProductID,
-		BossID:    req.BossID,
+		BossID:    bossID, // 卖家以商品表为准，忽略 req.BossID
 		Num:       int(req.Num),
 		Money:     unitCents, // 单价口径不变；满减结果记在 PromoDiscountCents / FinalCents
 		Type:      consts.OrderWaitPay,
@@ -261,47 +259,29 @@ func buildPromoCartItems(productID uint, categoryID, unitCents, qty int64) []pro
 	}}
 }
 
-// resolveProductPricing 从商品表反查权威单价（分）与类目，作为下单计费的唯一价格来源。
-// 取价优先级：DiscountPrice（用户实付价）→ Price（原价兜底）。任一步失败都返回 error，
-// 由调用方拒单；绝不静默回退到客户端传入的金额，否则等于把篡改后的价格重新放行。
-func resolveProductPricing(ctx context.Context, productID uint) (unitCents int64, categoryID int64, err error) {
+// resolveProductPricing 从商品表反查权威单价（分）、类目与卖家，作为下单计费 / 打款的唯一来源。
+// 单价换算与取价优先级（DiscountPrice→Price）集中在 product.Product.UnitCents；商品不存在或
+// 定价非法直接返回 error 由调用方拒单，绝不回退到客户端传入的金额 / 卖家。
+func resolveProductPricing(ctx context.Context, productID uint) (unitCents int64, categoryID int64, bossID uint, err error) {
 	pdao := product.NewProductDao(ctx)
 	if pdao == nil || pdao.DB == nil {
-		return 0, 0, errors.New("product dao 不可用，无法核定单价")
+		return 0, 0, 0, errors.New("product dao 不可用，无法核定单价")
 	}
 	p, perr := pdao.GetProductById(productID)
 	if perr != nil || p == nil {
-		return 0, 0, fmt.Errorf("商品不存在或查询失败 product=%d: %w", productID, perr)
+		return 0, 0, 0, fmt.Errorf("商品不存在或查询失败 product=%d: %w", productID, perr)
 	}
-	cents, ok := yuanToCents(p.DiscountPrice)
-	if !ok || cents <= 0 {
-		cents, ok = yuanToCents(p.Price)
+	cents, ok := p.UnitCents()
+	if !ok {
+		return 0, 0, 0, fmt.Errorf("商品定价非法 product=%d discount=%q price=%q", productID, p.DiscountPrice, p.Price)
 	}
-	if !ok || cents <= 0 {
-		return 0, 0, fmt.Errorf("商品定价非法 product=%d discount=%q price=%q", productID, p.DiscountPrice, p.Price)
-	}
-	return cents, int64(p.CategoryID), nil
+	return cents, int64(p.CategoryID), p.BossID, nil
 }
 
-// resolveUnitCents 仅取权威单价（分），异步消费侧不需要类目时用它。
-func resolveUnitCents(ctx context.Context, productID uint) (int64, error) {
-	cents, _, err := resolveProductPricing(ctx, productID)
-	return cents, err
-}
-
-// yuanToCents 把「元」字符串（如 "99.50"）转成「分」。商品价以两位小数的元为单位存储，
-// 与订单的分口径不同，这里统一换算。解析失败或为负返回 ok=false，交由上层兜底/拒单。
-func yuanToCents(s string) (int64, bool) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, false
-	}
-	yuan, err := strconv.ParseFloat(s, 64)
-	if err != nil || yuan < 0 {
-		return 0, false
-	}
-	// Round 抵消二进制浮点误差（99.50*100 可能算出 9949.999...）。
-	return int64(math.Round(yuan * 100)), true
+// resolveProductSettlement 仅取权威单价（分）与卖家，异步消费侧不需要类目时用它。
+func resolveProductSettlement(ctx context.Context, productID uint) (unitCents int64, bossID uint, err error) {
+	cents, _, boss, err := resolveProductPricing(ctx, productID)
+	return cents, boss, err
 }
 
 // OrderDelete 软删订单。成功时不回传订单体（保持既有 API 契约：data 为 null），
