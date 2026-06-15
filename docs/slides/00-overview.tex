@@ -22,7 +22,7 @@
   \column{0.53\textwidth}
     \textbf{它到底在解决什么}
     \begin{itemize}\small
-      \item \textbf{不是 toy demo}：盯住真实电商里"该怎么选"的工程决策——超卖、一致性、限流、降级如何权衡。
+      \item \textbf{解决真实问题}：盯住真实电商里"该怎么选"的工程决策——超卖、一致性、限流、降级如何权衡。
       \item \textbf{20 个业务域}按 DDD 垂直切片，每域 \texttt{internal/<域>/} 五件套内聚，跨域写经属主服务落库。
       \item \textbf{4 条支付通道}（钱包 / Stripe / USDC / ETH）殊途同归，统一汇到\textbf{复式记账台账}，借贷守恒可对账。
       \item 每个域配\textbf{压测报告 + Beamer deck + 博客}，把当初的取舍也一并写下来。
@@ -78,6 +78,32 @@
 \end{tikzpicture}}
 \par\smallskip
 {\centering\srcnote{routes/router.go:58--81 各域自注册 RegisterRoutes(public, authed, admin)}\par}
+\end{frame}
+
+
+\begin{frame}[t]{哪里会出事：把"坑"标在主线上（只盯 happy path 时全看不见）}
+\vspace{0.3em}
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.4}
+\begin{tabular}{@{}p{0.115\textwidth}p{0.42\textwidth}p{0.10\textwidth}p{0.24\textwidth}@{}}
+\toprule
+\textbf{这一跳} & \textbf{容易翻车的点（学生常以为没事）} & \textbf{后果} & \textbf{本 deck 怎么填} \\
+\midrule
+逛 / 详情 & 热点缓存集体失效、回源时击穿/穿透/雪崩 & DB 打挂 & Cache Aside+空值缓存 \\
+优惠 / 秒杀 & 券被脚本超领、预算被刷穿、库存卖超 & 营销亏钱 & 两桶库存 Lua+预算降级 \\
+下单 & \textbf{(1)} 超卖\ \ \textbf{(2)} 双写丢消息\ \ \textbf{(3)} 重试重复下单 & 钱货两失 & 防超卖+Outbox+幂等 \\
+支付 & 第三方重复回调、扣了钱没货、台账对不平 & 直接资损 & 同事务收钱+复式记账 \\
+履约 / 售后 & 并发改乱订单状态、同一笔退款退两次 & 状态错乱 & 状态机 \texttt{CanTransit} 守门 \\
+大促全局 & 零点洪峰打满连接池、下游挂了拖死自己 & 整站雪崩 & 限流+熔断+削峰 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vspace{0.5em}
+{\small \textbf{凡是碰钱、碰库存的地方都会翻车}——越靠近"下单—支付"代价越高，事务 / 原子性 / 资源都堆这段；边缘能力（搜索 / 优惠 / 通知）一律可降级，绝不反过来阻断 happy path。\par}
+\vspace{0.4em}
+\srcnote{逐个拆解见"贯穿全局的硬骨头：超卖·一致·限流·降级"与"订单状态机"两节}
 \end{frame}
 
 
