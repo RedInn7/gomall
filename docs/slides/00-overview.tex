@@ -201,9 +201,9 @@
 
 
 
-\begin{frame}{中间件洋葱模型：下单请求逐层穿过鉴权打到后端（真实顺序）}
-\keypoint{中间件是\textbf{洋葱模型}：每层验过自己的关就调 \texttt{c.Next()} 递给内层，内层返回后再逐层收回；任一层 \texttt{Abort}，请求在那层原路返回，到不了业务。}
-\resizebox{0.97\textwidth}{0.44\textheight}{%
+\begin{frame}[t]{中间件洋葱模型：下单请求逐层穿过鉴权打到后端（真实顺序）}
+\keypoint{中间件是\textbf{洋葱模型}：逐层 \texttt{c.Next()} 进内层、再原路返回出；任一层 \texttt{Abort} 就在那层折回，到不了业务。}
+\resizebox{0.97\textwidth}{0.36\textheight}{%
 \begin{tikzpicture}[font=\scriptsize]
   % 角色头（自左向右一层层往内）
   \node[node-box,minimum width=22mm] (u)    at (0,0)    {前端\\Web/App};
@@ -228,8 +228,9 @@
   \draw[arrow-bad] ($(auth.south)+(0,-5.9)$) -- node[below,font=\tiny]{token 失效：HTTP 200+鉴权业务码} ($(u.south)+(0,-5.9)$);
 \end{tikzpicture}}
 \par\smallskip
-{\small 真实顺序：\textbf{限流(IP) $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT}；admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层，洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流则在鉴权\textbf{之后}。}
-\srcnote{routes/router.go:41--55 全局链 + 分组；internal/order/routes.go:12 下单叠 Idempotency；被拒统一 HTTP 200+业务码见 ratelimit.go:68 / jwt.go:38}
+{\footnotesize 真实顺序：\textbf{限流(IP) $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT}；admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层、洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流在鉴权\textbf{之后}。}
+\par\smallskip
+{\centering\srcnote{routes/router.go:41--55 全局链；order/routes.go:12 下单叠 Idempotency；被拒一律 HTTP 200+业务码}\par}
 \end{frame}
 
 
