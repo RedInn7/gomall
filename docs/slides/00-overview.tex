@@ -352,7 +352,7 @@
     \begin{call}{api}{事务：写单 + 扣预算 + 写 outbox(pending)}{db}{COMMIT}
     \end{call}
   \end{call}
-  \mess[1]{db}{commit 后异步扫 pending 投递}{mq}
+  \mess[0]{db}{commit 后异步扫 pending 投递}{mq}
 \end{sequencediagram}}
 \par\smallskip
 {\centering\srcnote{internal/order/service.go:110 Reserve · :117 Tx · :145 outbox · :159 释放补偿 · :172 延迟关单}\par}
