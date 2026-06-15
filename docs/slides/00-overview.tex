@@ -95,7 +95,7 @@
 优惠 / 秒杀 & 券被脚本超领、预算被刷穿、库存卖超 & 营销亏钱 & 两桶库存 Lua+预算降级 \\
 下单 & \textbf{(1)} 超卖\ \ \textbf{(2)} 双写丢消息\ \ \textbf{(3)} 重试重复下单 & 钱货两失 & 防超卖+Outbox+幂等 \\
 支付 & 第三方重复回调、扣了钱没货、台账对不平 & 直接资损 & 同事务收钱+复式记账 \\
-履约 / 售后 & 并发改乱订单状态、同一笔退款退两次 & 状态错乱 & 状态机 \texttt{CanTransit} 守门 \\
+履约 / 售后 & 并发改乱订单状态、同一笔退款退两次 & 状态错乱 & 状态机 \texttt{CanTransition} \\
 大促全局 & 零点洪峰打满连接池、下游挂了拖死自己 & 整站雪崩 & 限流+熔断+削峰 \\
 \bottomrule
 \end{tabular}
@@ -567,7 +567,7 @@ return {1, ''}
   \draw[arrow] (rf) -- node[above,font=\tiny]{同意} (rd);
 \end{tikzpicture}}
 \par\smallskip
-\keypoint{每一次状态变更都走 \texttt{CanTransit} 校验，非法迁移直接报错 ——\\
+\keypoint{每一次状态变更都走 \texttt{CanTransition} 校验，非法迁移直接报错 ——\\
 "已完成"的订单不可能跳回"待付款"，客服查到的状态永远自洽。}
 \srcnote{consts/order.go 状态常量；internal/order/state.go:21 orderStateTransitions 转换表}
 \end{frame}
