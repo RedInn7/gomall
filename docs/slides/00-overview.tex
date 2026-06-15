@@ -1,7 +1,7 @@
 \input{preamble}
 
 \title{业务全景与端到端主线}
-\subtitle{gomall 一次购物穿过的 15 个域 —— 怎么连 / 怎么读 / 卡在哪}
+\subtitle{gomall 一次购物的端到端全景 —— 从进门到收货怎么跑通 / 卡在哪}
 \author{gomall · 业务侧 deck}
 \date{}
 
@@ -24,22 +24,22 @@
   \item \textbf{SRE}：大促洪峰别把库存卖超、别把数据库打挂，挂了要能降级。
 \end{itemize}
 \vspace{2mm}
-\keypoint{这套 deck 按\textbf{业务域}垂直切成 15 份，每份讲透一个域。\\
-本份是横向的"地图"：把 15 个域串成用户真实走过的一条线。}
+\keypoint{这份概览把一次购物从\textbf{进门到收货}串成一条线：先看全局怎么连，\\
+再逐段看每一跳背后的技术取舍，以及"出事会卡在哪"。}
 \srcnote{README.md \S 业务全景 / \S 业务承诺(SLO)}
 \end{frame}
 
 \begin{frame}{业务全景图：一次购物穿过的 8 个环节}
 \resizebox{0.97\textwidth}{!}{%
 \begin{tikzpicture}[node distance=7mm and 11mm,font=\scriptsize]
-  \node[node-box,minimum width=20mm] (s1) {进门\\{\tiny\color{cAccent}deck 01}};
-  \node[node-box,right=of s1,minimum width=20mm] (s2) {逛\\{\tiny\color{cAccent}deck 02 / 03}};
-  \node[node-box,right=of s2,minimum width=20mm] (s3) {心动\\{\tiny\color{cAccent}购物车 deck 04}};
-  \node[node-box,right=of s3,minimum width=20mm] (s4) {优惠\\{\tiny\color{cAccent}deck 08/13/14/15}};
-  \node[node-box,node-warn,below=14mm of s4,minimum width=20mm] (s5) {下单\\{\tiny\color{cAccent}deck 04}};
-  \node[node-box,left=of s5,minimum width=20mm] (s6) {支付\\{\tiny\color{cAccent}deck 05 / 06}};
-  \node[node-box,left=of s6,minimum width=20mm] (s7) {履约\\{\tiny\color{cAccent}deck 09}};
-  \node[node-box,left=of s7,minimum width=20mm] (s8) {售后\\{\tiny\color{cAccent}deck 12 / refund}};
+  \node[node-box,minimum width=20mm] (s1) {进门\\{\tiny\color{cAccent}登录/注册}};
+  \node[node-box,right=of s1,minimum width=20mm] (s2) {逛\\{\tiny\color{cAccent}商品/搜索}};
+  \node[node-box,right=of s2,minimum width=20mm] (s3) {心动\\{\tiny\color{cAccent}购物车}};
+  \node[node-box,right=of s3,minimum width=20mm] (s4) {优惠\\{\tiny\color{cAccent}券/秒杀/拼团}};
+  \node[node-box,node-warn,below=14mm of s4,minimum width=20mm] (s5) {下单\\{\tiny\color{cAccent}预扣+事务}};
+  \node[node-box,left=of s5,minimum width=20mm] (s6) {支付\\{\tiny\color{cAccent}扣款+记账}};
+  \node[node-box,left=of s6,minimum width=20mm] (s7) {履约\\{\tiny\color{cAccent}发货/收货}};
+  \node[node-box,left=of s7,minimum width=20mm] (s8) {售后\\{\tiny\color{cAccent}退款}};
   \draw[arrow] (s1) -- (s2);
   \draw[arrow] (s2) -- (s3);
   \draw[arrow] (s3) -- (s4);
@@ -49,7 +49,7 @@
   \draw[arrow] (s7) -- (s8);
   % 横切关注点
   \node[node-box,node-bad,below=10mm of s7,minimum width=78mm,font=\tiny] (cc)
-    {贯穿全局：库存防超卖(07) · Outbox 一致性(11) · 流量治理(10) · 优雅降级};
+    {贯穿全局：库存防超卖 · Outbox 一致性 · 流量治理 · 优雅降级};
 \end{tikzpicture}}
 \par\smallskip
 {\centering\srcnote{routes/router.go:58--81 各域自注册 RegisterRoutes(public, authed, admin)}\par}
@@ -143,7 +143,7 @@
 
 
 
-\begin{frame}{全链路：一个下单请求从前端穿到数据层（真实注册顺序）}
+\begin{frame}{中间件洋葱模型：下单请求逐层穿过鉴权打到后端（真实顺序）}
 \keypoint{中间件是\textbf{洋葱模型}：每层验过自己的关就调 \texttt{c.Next()} 递给内层，内层返回后再逐层收回；任一层 \texttt{Abort}，请求在那层原路返回，到不了业务。}
 \resizebox{0.97\textwidth}{0.44\textheight}{%
 \begin{tikzpicture}[font=\scriptsize]
@@ -265,7 +265,7 @@ redis.call('DECRBY', KEYS[1], ARGV[1])         -- available -= n
 redis.call('INCRBY', KEYS[2], ARGV[1])         -- reserved  += n
 return 1
 \end{lstlisting}
-\srcnote{repository/cache/inventory.go:32 reserveScript · :78 ReserveStock 封装 · :98/:113 Commit/Release（deck 07 详解）}
+\srcnote{repository/cache/inventory.go:32 reserveScript · :78 ReserveStock 封装 · :98/:113 Commit/Release}
 \end{frame}
 
 \begin{frame}{硬骨头 2：Outbox —— 解决"订单存了但消息丢了"}
