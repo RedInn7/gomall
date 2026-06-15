@@ -109,9 +109,9 @@
 
 \begin{frame}[t]{业务承诺：我们对外兜什么底（SLO）}
   \keypoint{一个交易系统的可信度，不在功能多，而在敢把哪几条线写进合同——出事要赔的那种。gomall 把承诺分成 P0\textasciitilde P3 四档，资源向核心交易倾斜。}
-  \vspace{0.2em}
+  \vspace{0.1em}
   {\centering\small
-  \renewcommand{\arraystretch}{1.08}
+  \renewcommand{\arraystretch}{1.0}
   \begin{tabular}{@{}llcc@{}}
   \toprule
   \textbf{等级} & \textbf{典型场景} & \textbf{可用率} & \textbf{p99 延迟} \\
@@ -122,7 +122,7 @@
   \textcolor{cGray}{P3 信息类}            & 轮播 / 分类         & 99.5\%  & < 1s \\
   \bottomrule
   \end{tabular}\par}
-  \vspace{0.25em}
+  \vspace{0.15em}
   \begin{columns}[T]
     \column{0.5\textwidth}
     \begin{itemize}\footnotesize
@@ -337,7 +337,7 @@
 \begin{frame}{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
 \keypoint{三段式：\textbf{事务外}算满减、预扣库存（可降级 / 不够即拒）$\to$ \textbf{一个事务}写单 + 扣预算 + 写 outbox $\to$ \textbf{事务后}异步扫 outbox 投 MQ。任一步失败都 \texttt{ReleaseReservation} 退回预扣。}
 \vspace{0.2em}
-\resizebox{0.92\textwidth}{0.56\textheight}{%
+\resizebox{0.92\textwidth}{0.50\textheight}{%
 \begin{sequencediagram}
   \newthread{u}{用户}
   \newinst[1]{api}{订单服务}
@@ -351,7 +351,6 @@
     \end{call}
     \begin{call}{api}{事务：写单 + 扣预算 + 写 outbox(pending)}{db}{COMMIT}
     \end{call}
-    \mess[1]{api}{失败则 ReleaseReservation 补偿}{r}
   \end{call}
   \mess[1]{db}{commit 后异步扫 pending 投递}{mq}
 \end{sequencediagram}}
