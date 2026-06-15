@@ -328,30 +328,27 @@
 \end{frame}
 
 \begin{frame}{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
-\resizebox{0.93\textwidth}{0.62\textheight}{%
-\begin{tikzpicture}[font=\scriptsize]
-  % actor heads
-  \node[node-box,minimum width=20mm] (u)   at (0,0)  {用户};
-  \node[node-box,minimum width=22mm] (api) at (3.2,0){订单服务\\OrderCreate};
-  \node[node-box,node-ok,minimum width=20mm]   (r)  at (6.6,0) {Redis\\库存两桶};
-  \node[node-box,node-warn,minimum width=22mm] (db) at (10,0)  {MySQL 事务\\order+outbox};
-  \node[node-box,minimum width=20mm] (mq)  at (13.4,0){Publisher\\$\to$ MQ};
-  % lifelines
-  \foreach \n in {u,api,r,db,mq} {\draw[lifeline] (\n.south) -- ++(0,-6.6);}
-  % messages
-  \draw[arrow] ($(u.south)+(0,-0.6)$)   -- node[above,font=\tiny]{POST /orders/create（幂等）} ($(api.south)+(0,-0.6)$);
-  % self: 算满减(事务外)
-  \draw[arrow] ($(api.south)+(0,-1.3)$) -- ++(1.1,0) -- ++(0,-0.45) -- ($(api.south)+(0,-1.75)$);
-  \node[font=\tiny,anchor=west] at ($(api.south)+(1.2,-1.5)$) {算满减(事务外,可降级)};
-  \draw[arrow] ($(api.south)+(0,-2.4)$) -- node[above,font=\tiny]{ReserveStock} ($(r.south)+(0,-2.4)$);
-  \draw[arrow-bad] ($(r.south)+(0,-3.0)$) -- node[below,font=\tiny]{不够即拒单} ($(api.south)+(0,-3.0)$);
-  \draw[arrow] ($(api.south)+(0,-3.7)$) -- node[above,font=\tiny]{BEGIN：写单+扣预算+写 outbox(pending)} ($(db.south)+(0,-3.7)$);
-  \draw[arrow] ($(db.south)+(0,-4.3)$)  -- node[below,font=\tiny]{COMMIT} ($(api.south)+(0,-4.3)$);
-  \draw[arrow-bad] ($(api.south)+(0,-4.9)$) -- node[above,font=\tiny]{失败 $\to$ ReleaseReservation 补偿} ($(r.south)+(0,-4.9)$);
-  \draw[arrow] ($(api.south)+(0,-5.6)$) -- node[below,font=\tiny]{返回订单(待付款)} ($(u.south)+(0,-5.6)$);
-  \draw[arrow-async] ($(db.south)+(0,-6.2)$) -- node[above,font=\tiny]{异步扫 pending $\to$ publish} ($(mq.south)+(0,-6.2)$);
-\end{tikzpicture}}
-\par
+\keypoint{三段式：\textbf{事务外}算满减、预扣库存（可降级 / 不够即拒）$\to$ \textbf{一个事务}写单 + 扣预算 + 写 outbox $\to$ \textbf{事务后}异步扫 outbox 投 MQ。任一步失败都 \texttt{ReleaseReservation} 退回预扣。}
+\vspace{0.2em}
+\resizebox{0.92\textwidth}{0.56\textheight}{%
+\begin{sequencediagram}
+  \newthread{u}{用户}
+  \newinst[1]{api}{订单服务}
+  \newinst[1]{r}{Redis 两桶}
+  \newinst[1]{db}{MySQL 事务}
+  \newinst[1]{mq}{Publisher/MQ}
+  \begin{call}{u}{POST /orders/create（幂等）}{api}{订单·待付款}
+    \begin{call}{api}{算满减（事务外·可降级）}{api}{折后价}
+    \end{call}
+    \begin{call}{api}{ReserveStock 预扣（不够即拒单）}{r}{占 reserved}
+    \end{call}
+    \begin{call}{api}{事务：写单 + 扣预算 + 写 outbox(pending)}{db}{COMMIT}
+    \end{call}
+    \mess[1]{api}{失败则 ReleaseReservation 补偿}{r}
+  \end{call}
+  \mess[1]{db}{commit 后异步扫 pending 投递}{mq}
+\end{sequencediagram}}
+\par\smallskip
 {\centering\srcnote{internal/order/service.go:110 Reserve · :117 Tx · :145 outbox · :159 释放补偿 · :172 延迟关单}\par}
 \end{frame}
 
