@@ -307,24 +307,31 @@
 
 
 \begin{frame}{看商品：Cache Aside 读路径 + 更新时延迟双删}
-\keypoint{读：先 Redis，命中即返；未命中回源 MySQL 再写缓存（空值也缓存，挡穿透）。写：先删缓存，过一会儿再删一次，盖掉并发读回填的脏数据。}
-\resizebox{0.82\textwidth}{0.46\textheight}{%
+\vspace{0.3em}
+\begin{center}
+\resizebox{!}{0.66\textheight}{%
 \begin{sequencediagram}
-  \newthread{u}{用户}
+  \newthread{u}{用户 / 运营}
   \newinst[1]{h}{Product Handler}
   \newinst[1]{r}{Redis 缓存}
   \newinst[1]{d}{MySQL}
-  \begin{call}{u}{商品详情 ProductShow}{h}{detail}
-    \begin{call}{h}{GetProductDetail（命中即返）}{r}{miss}
+  \begin{sdblock}{读路径}{Cache Aside}
+    \begin{call}{u}{商品详情 ProductShow}{h}{detail}
+      \begin{call}{h}{GetProductDetail（命中即返）}{r}{miss}
+      \end{call}
+      \begin{call}{h}{回源查库}{d}{product}
+      \end{call}
+      \mess[1]{h}{SetProductDetail 写回（空值也存·TTL 抖动）}{r}
     \end{call}
-    \begin{call}{h}{回源查库}{d}{product}
-    \end{call}
-    \mess[1]{h}{SetProductDetail（写回，TTL 抖动）}{r}
-  \end{call}
-  \mess[1]{h}{更新后：DelProductDetail + DoubleDeleteAsync（延迟再删）}{r}
+  \end{sdblock}
+  \begin{sdblock}{写路径}{改价后延迟双删}
+    \mess[1]{h}{先删缓存 DelProductDetail}{r}
+    \mess[1]{h}{延迟再删 DoubleDeleteAsync（盖脏数据）}{r}
+  \end{sdblock}
 \end{sequencediagram}}
+\end{center}
 \par\smallskip
-\srcnote{internal/product/service.go:41 ProductShow（回源 + 写回 + 更新双删）；repository/cache/product.go GetProductDetail/SetProductDetail/DoubleDeleteAsync}
+{\centering\srcnote{internal/product/service.go:41 ProductShow（回源 + 写回 + 更新双删）；repository/cache/product.go GetProductDetail / SetProductDetail / DoubleDeleteAsync}\par}
 \end{frame}
 
 \begin{frame}{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
