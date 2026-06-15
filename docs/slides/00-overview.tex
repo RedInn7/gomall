@@ -107,28 +107,35 @@
 \end{frame}
 
 
-\begin{frame}{业务承诺：我们对外兜什么底（SLO）}
-  \keypoint{一个交易系统的可信度，不在于功能多，而在于敢把哪几条线写进合同——出了问题要赔的那种。gomall 把承诺分成 P0\textasciitilde P3 四档，资源向核心交易倾斜。}
-  \vspace{0.4em}
-  \begin{table}
-  \centering\small
+\begin{frame}[t]{业务承诺：我们对外兜什么底（SLO）}
+  \keypoint{一个交易系统的可信度，不在功能多，而在敢把哪几条线写进合同——出事要赔的那种。gomall 把承诺分成 P0\textasciitilde P3 四档，资源向核心交易倾斜。}
+  \vspace{0.1em}
+  {\centering\small
+  \renewcommand{\arraystretch}{1.0}
   \begin{tabular}{@{}llcc@{}}
   \toprule
   \textbf{等级} & \textbf{典型场景} & \textbf{可用率} & \textbf{p99 延迟} \\
   \midrule
   \textcolor{cBad}{\textbf{P0 核心交易}}  & 下单 / 支付       & \textbf{99.95\%} & < 500ms \\
   \textcolor{cAccent}{P1 核心读}          & 商品详情 / 订单列表 & 99.9\%  & < 200ms \\
-  \textcolor{cWarn}{P2 营销秒杀}          & 抢券 / 秒杀 / 红包  & 99\%    & < 200ms \\
-  \textcolor{cGray}{P3 信息类}            & 轮播 / 分类         & 99\%    & < 1s \\
+  \textcolor{cWarn}{P2 营销秒杀}          & 抢券 / 秒杀 / 红包  & 99.9\%  & < 200ms \\
+  \textcolor{cGray}{P3 信息类}            & 轮播 / 分类         & 99.5\%  & < 1s \\
   \bottomrule
-  \end{tabular}
-  \end{table}
+  \end{tabular}\par}
+  \vspace{0.15em}
+  \begin{columns}[T]
+    \column{0.5\textwidth}
+    \begin{itemize}\footnotesize
+      \item \textbf{钱货不丢}：支付与库存、流水落同一事务，崩了整笔回滚，绝不"扣了钱没货"。
+      \item \textbf{happy path 不被周边阻断}：优惠 / 搜索 / 通知挂了，下单支付照走。
+    \end{itemize}
+    \column{0.5\textwidth}
+    \begin{itemize}\footnotesize
+      \item \textbf{不能上游 429}：P0 靠缓存 + 削峰扛峰值，宁可下游慢。
+      \item \textbf{阶梯故意压}：每加 1 个 9 成本翻番；限流返业务码\textbf{不算宕机}，故 P2 也 99.9\%。
+    \end{itemize}
+  \end{columns}
   \vspace{0.3em}
-  \begin{itemize}\small
-    \item \textbf{钱货不丢}：支付与库存、资金流水落同一事务，崩了整笔回滚，绝不出现"扣了钱没货"。
-    \item \textbf{happy path 不被周边阻断}：优惠 / 搜索 / 通知挂了，下单支付照走。
-    \item \textbf{宁可下游慢、不能上游 429}：P0 接口（下单 / 支付）靠缓存 + 异步削峰扛峰值。
-  \end{itemize}
   \srcnote{README.md \S 业务承诺（SLO）}
 \end{frame}
 
@@ -194,9 +201,9 @@
 
 
 
-\begin{frame}{中间件洋葱模型：下单请求逐层穿过鉴权打到后端（真实顺序）}
-\keypoint{中间件是\textbf{洋葱模型}：每层验过自己的关就调 \texttt{c.Next()} 递给内层，内层返回后再逐层收回；任一层 \texttt{Abort}，请求在那层原路返回，到不了业务。}
-\resizebox{0.97\textwidth}{0.44\textheight}{%
+\begin{frame}[t]{中间件洋葱模型：下单请求逐层穿过鉴权打到后端（真实顺序）}
+\keypoint{中间件是\textbf{洋葱模型}：逐层 \texttt{c.Next()} 进内层、再原路返回出；任一层 \texttt{Abort} 就在那层折回，到不了业务。}
+\resizebox{0.97\textwidth}{0.36\textheight}{%
 \begin{tikzpicture}[font=\scriptsize]
   % 角色头（自左向右一层层往内）
   \node[node-box,minimum width=22mm] (u)    at (0,0)    {前端\\Web/App};
@@ -221,8 +228,9 @@
   \draw[arrow-bad] ($(auth.south)+(0,-5.9)$) -- node[below,font=\tiny]{token 失效：HTTP 200+鉴权业务码} ($(u.south)+(0,-5.9)$);
 \end{tikzpicture}}
 \par\smallskip
-{\small 真实顺序：\textbf{限流(IP) $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT}；admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层，洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流则在鉴权\textbf{之后}。}
-\srcnote{routes/router.go:41--55 全局链 + 分组；internal/order/routes.go:12 下单叠 Idempotency；被拒统一 HTTP 200+业务码见 ratelimit.go:68 / jwt.go:38}
+{\footnotesize 真实顺序：\textbf{限流(IP) $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT}；admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层、洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流在鉴权\textbf{之后}。}
+\par\smallskip
+{\centering\srcnote{routes/router.go:41--55 全局链；order/routes.go:12 下单叠 Idempotency；被拒一律 HTTP 200+业务码}\par}
 \end{frame}
 
 
@@ -299,51 +307,54 @@
 
 
 \begin{frame}{看商品：Cache Aside 读路径 + 更新时延迟双删}
-\keypoint{读：先 Redis，命中即返；未命中回源 MySQL 再写缓存（空值也缓存，挡穿透）。写：先删缓存，过一会儿再删一次，盖掉并发读回填的脏数据。}
-\resizebox{0.82\textwidth}{0.46\textheight}{%
+\vspace{0.3em}
+\begin{center}
+\resizebox{!}{0.66\textheight}{%
 \begin{sequencediagram}
-  \newthread{u}{用户}
+  \newthread{u}{用户 / 运营}
   \newinst[1]{h}{Product Handler}
   \newinst[1]{r}{Redis 缓存}
   \newinst[1]{d}{MySQL}
-  \begin{call}{u}{商品详情 ProductShow}{h}{detail}
-    \begin{call}{h}{GetProductDetail（命中即返）}{r}{miss}
+  \begin{sdblock}{读路径}{Cache Aside}
+    \begin{call}{u}{商品详情 ProductShow}{h}{detail}
+      \begin{call}{h}{GetProductDetail（命中即返）}{r}{miss}
+      \end{call}
+      \begin{call}{h}{回源查库}{d}{product}
+      \end{call}
+      \mess[1]{h}{SetProductDetail 写回（空值也存·TTL 抖动）}{r}
     \end{call}
-    \begin{call}{h}{回源查库}{d}{product}
-    \end{call}
-    \mess[1]{h}{SetProductDetail（写回，TTL 抖动）}{r}
-  \end{call}
-  \mess[1]{h}{更新后：DelProductDetail + DoubleDeleteAsync（延迟再删）}{r}
+  \end{sdblock}
+  \begin{sdblock}{写路径}{改价后延迟双删}
+    \mess[1]{h}{先删缓存 DelProductDetail}{r}
+    \mess[1]{h}{延迟再删 DoubleDeleteAsync（盖脏数据）}{r}
+  \end{sdblock}
 \end{sequencediagram}}
+\end{center}
 \par\smallskip
-\srcnote{internal/product/service.go:41 ProductShow（回源 + 写回 + 更新双删）；repository/cache/product.go GetProductDetail/SetProductDetail/DoubleDeleteAsync}
+{\centering\srcnote{internal/product/service.go:41 ProductShow（回源 + 写回 + 更新双删）；repository/cache/product.go GetProductDetail / SetProductDetail / DoubleDeleteAsync}\par}
 \end{frame}
 
 \begin{frame}{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
-\resizebox{0.93\textwidth}{0.62\textheight}{%
-\begin{tikzpicture}[font=\scriptsize]
-  % actor heads
-  \node[node-box,minimum width=20mm] (u)   at (0,0)  {用户};
-  \node[node-box,minimum width=22mm] (api) at (3.2,0){订单服务\\OrderCreate};
-  \node[node-box,node-ok,minimum width=20mm]   (r)  at (6.6,0) {Redis\\库存两桶};
-  \node[node-box,node-warn,minimum width=22mm] (db) at (10,0)  {MySQL 事务\\order+outbox};
-  \node[node-box,minimum width=20mm] (mq)  at (13.4,0){Publisher\\$\to$ MQ};
-  % lifelines
-  \foreach \n in {u,api,r,db,mq} {\draw[lifeline] (\n.south) -- ++(0,-6.6);}
-  % messages
-  \draw[arrow] ($(u.south)+(0,-0.6)$)   -- node[above,font=\tiny]{POST /orders/create（幂等）} ($(api.south)+(0,-0.6)$);
-  % self: 算满减(事务外)
-  \draw[arrow] ($(api.south)+(0,-1.3)$) -- ++(1.1,0) -- ++(0,-0.45) -- ($(api.south)+(0,-1.75)$);
-  \node[font=\tiny,anchor=west] at ($(api.south)+(1.2,-1.5)$) {算满减(事务外,可降级)};
-  \draw[arrow] ($(api.south)+(0,-2.4)$) -- node[above,font=\tiny]{ReserveStock} ($(r.south)+(0,-2.4)$);
-  \draw[arrow-bad] ($(r.south)+(0,-3.0)$) -- node[below,font=\tiny]{不够即拒单} ($(api.south)+(0,-3.0)$);
-  \draw[arrow] ($(api.south)+(0,-3.7)$) -- node[above,font=\tiny]{BEGIN：写单+扣预算+写 outbox(pending)} ($(db.south)+(0,-3.7)$);
-  \draw[arrow] ($(db.south)+(0,-4.3)$)  -- node[below,font=\tiny]{COMMIT} ($(api.south)+(0,-4.3)$);
-  \draw[arrow-bad] ($(api.south)+(0,-4.9)$) -- node[above,font=\tiny]{失败 $\to$ ReleaseReservation 补偿} ($(r.south)+(0,-4.9)$);
-  \draw[arrow] ($(api.south)+(0,-5.6)$) -- node[below,font=\tiny]{返回订单(待付款)} ($(u.south)+(0,-5.6)$);
-  \draw[arrow-async] ($(db.south)+(0,-6.2)$) -- node[above,font=\tiny]{异步扫 pending $\to$ publish} ($(mq.south)+(0,-6.2)$);
-\end{tikzpicture}}
-\par
+\keypoint{三段式：\textbf{事务外}算满减、预扣库存（可降级 / 不够即拒）$\to$ \textbf{一个事务}写单 + 扣预算 + 写 outbox $\to$ \textbf{事务后}异步扫 outbox 投 MQ。任一步失败都 \texttt{ReleaseReservation} 退回预扣。}
+\vspace{0.2em}
+\resizebox{0.92\textwidth}{0.50\textheight}{%
+\begin{sequencediagram}
+  \newthread{u}{用户}
+  \newinst[1]{api}{订单服务}
+  \newinst[1]{r}{Redis 两桶}
+  \newinst[1]{db}{MySQL 事务}
+  \newinst[1]{mq}{Publisher/MQ}
+  \begin{call}{u}{POST /orders/create（幂等）}{api}{订单·待付款}
+    \begin{call}{api}{算满减（事务外·可降级）}{api}{折后价}
+    \end{call}
+    \begin{call}{api}{ReserveStock 预扣（不够即拒单）}{r}{占 reserved}
+    \end{call}
+    \begin{call}{api}{事务：写单 + 扣预算 + 写 outbox(pending)}{db}{COMMIT}
+    \end{call}
+  \end{call}
+  \mess[0]{db}{commit 后异步扫 pending 投递}{mq}
+\end{sequencediagram}}
+\par\smallskip
 {\centering\srcnote{internal/order/service.go:110 Reserve · :117 Tx · :145 outbox · :159 释放补偿 · :172 延迟关单}\par}
 \end{frame}
 
