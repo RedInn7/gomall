@@ -302,6 +302,34 @@ ledgerDao.AppendTransaction(bossID, order.ID,
   \srcnote{routes/router.go:41 全局链；middleware/\{jwt,rbac,ratelimit,circuitbreaker,idempotency\}.go；internal/payment/routes.go}
 \end{frame}
 
+\begin{frame}{全链路：一个下单请求从前端穿到数据层（真实注册顺序）}
+\keypoint{中间件是\textbf{洋葱模型}：每层验过自己的关，调 \texttt{c.Next()} 把请求递给内层；内层返回后再逐层往外收。任一层不放行（\texttt{Abort}），请求就在那一层原路返回，根本到不了业务。}
+\resizebox{0.9\textwidth}{0.40\textheight}{%
+\begin{sequencediagram}
+  \newthread{u}{前端 Web/App}
+  \newinst[1]{lim}{限流·按IP}
+  \newinst[1]{mw}{接入层}
+  \newinst[1]{auth}{鉴权层}
+  \newinst[1]{biz}{业务层}
+  \newinst[1]{db}{数据层}
+  \begin{call}{u}{POST /orders/create（带 access\_token）}{lim}{200 + 订单(待付款)}
+    \begin{call}{lim}{令牌足够 $\to$ Next}{mw}{}
+      \begin{call}{mw}{CORS 白名单·开 trace span·Session $\to$ Next}{auth}{}
+        \begin{call}{auth}{JWT 验签+续期+取 user\_id $\to$ Next}{biz}{}
+          \begin{call}{biz}{预扣库存 $\to$ 写订单+outbox（同事务）}{db}{ok}
+          \end{call}
+        \end{call}
+      \end{call}
+    \end{call}
+  \end{call}
+  \mess[1]{lim}{令牌耗尽：HTTP 200+限流业务码，挡在最外层}{u}
+  \mess[1]{auth}{token 无效/过期：HTTP 200+鉴权业务码，到不了业务层}{u}
+\end{sequencediagram}}
+\par\smallskip
+{\small 真实顺序：\textbf{限流(IP) $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT}，admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层 $=$ 洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流则在鉴权\textbf{之后}。}
+\srcnote{routes/router.go:41--55 全局链 + 分组；internal/order/routes.go:12 下单叠 Idempotency；被拒统一 HTTP 200+业务码见 ratelimit.go:68 / jwt.go:38}
+\end{frame}
+
 \begin{frame}{数据层选型与边界：一个 MySQL 为什么不够}
   \keypoint{把全部活儿压给一个 MySQL，要么慢死、要么挂掉。正解按"访问形态"分流：强一致归 MySQL，高并发与检索归旁路，旁路挂了能退回 DB。}
   \vspace{0.2em}
