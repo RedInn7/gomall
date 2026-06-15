@@ -15,6 +15,31 @@
 
 \section{业务全景：gomall 到底在做什么}
 
+\begin{frame}{gomall 是什么：一个讲清"为什么这么选"的电商后端}
+\keypoint{用 \textbf{Go + Gin} 写的电商后端，把一笔订单从\textbf{浏览 $\to$ 搜索 $\to$ 下单 $\to$ 支付 $\to$ 履约}的全链路跑通；再叠上优惠券 / 秒杀 / 红包 / 拼团 / 预售、Web3 支付、ES+Milvus 向量检索。}
+\vspace{0.3em}
+\begin{columns}[T]
+  \column{0.53\textwidth}
+    \textbf{它到底在解决什么}
+    \begin{itemize}\small
+      \item \textbf{不是 toy demo}：盯住真实电商里"该怎么选"的工程决策——超卖、一致性、限流、降级如何权衡。
+      \item \textbf{20 个业务域}按 DDD 垂直切片，每域 \texttt{internal/<域>/} 五件套内聚，跨域写经属主服务落库。
+      \item \textbf{4 条支付通道}（钱包 / Stripe / USDC / ETH）殊途同归，统一汇到\textbf{复式记账台账}，借贷守恒可对账。
+      \item 每个域配\textbf{压测报告 + Beamer deck + 博客}，把当初的取舍也一并写下来。
+    \end{itemize}
+  \column{0.47\textwidth}
+    \textbf{技术栈一览}
+    \begin{itemize}\small
+      \item \textbf{接入}：Gin + 中间件链（限流 / JWT / RBAC / 熔断 / 幂等 / Jaeger）
+      \item \textbf{存储}：MySQL 主从 · Redis · Elasticsearch · Milvus
+      \item \textbf{异步}：RabbitMQ + Outbox 旁路投递
+      \item \textbf{链上}：Web3 Escrow + EVM 对账
+      \item \textbf{可观测}：Jaeger 链路 + SkyWalking
+    \end{itemize}
+\end{columns}
+\srcnote{README.md \S 项目定位 / \S 系统架构；docs/slides/ 15 份域 deck + 本概览}
+\end{frame}
+
 \begin{frame}{先认人：一笔订单背后站着 5 个角色}
 \begin{itemize}
   \item \textbf{C 端用户}：进门 $\to$ 逛 $\to$ 下单 $\to$ 收货。只关心\textbf{快、对、不丢}。
