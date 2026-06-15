@@ -10,7 +10,7 @@
 #   - 每份 deck 跑 xelatex 两遍（解决 TOC / appendixnumberbeamer 引用）
 #   - 任一份失败立即退出
 #   - 清理 .aux / .log / .toc / .nav / .snm / .out / .vrb 中间产物
-#   - 输出每份 PDF 的页数（要求落在 [20, 30]）
+#   - 输出每份 PDF 的页数（要求 ≥ 50）
 
 set -euo pipefail
 
@@ -82,7 +82,7 @@ declare -a BUILT_PDFS=()
 FAILED=0
 
 shopt -s nullglob
-# 注意：合订本封面 00-master-cover.tex 是辅助产物，仅 3 页，不参与 [20, 30]
+# 注意：合订本封面 00-master-cover.tex 是辅助产物，仅 3 页，不参与 ≥50
 # 页数校验；它会在 master.pdf 拼接时单独编译（见 build.sh --master）。
 for src in [0-9][0-9]-*.tex; do
   base="${src%.tex}"
@@ -117,10 +117,10 @@ for src in [0-9][0-9]-*.tex; do
   if command -v pdfinfo >/dev/null 2>&1; then
     pages=$(pdfinfo "$pdf" 2>/dev/null | awk '/^Pages:/ {print $2}')
     if [[ -n "$pages" ]]; then
-      if (( pages < 20 || pages > 30 )); then
-        warn "$pdf 页数 = ${pages}, 超出预期范围 [20, 30]"
+      if (( pages < 50 )); then
+        warn "$pdf 页数 = ${pages}, 低于要求（≥ 50）"
       else
-        ok "$pdf 页数 = ${pages} (OK, 在 [20, 30] 范围内)"
+        ok "$pdf 页数 = ${pages} (OK, ≥ 50)"
       fi
     fi
   else
