@@ -321,12 +321,12 @@
       \end{call}
       \begin{call}{h}{回源查库}{d}{product}
       \end{call}
-      \mess[1]{h}{SetProductDetail 写回（空值也存·TTL 抖动）}{r}
+      \mess[0]{h}{SetProductDetail 写回（空值也存·TTL 抖动）}{r}
     \end{call}
   \end{sdblock}
   \begin{sdblock}{写路径}{改价后延迟双删}
-    \mess[1]{h}{先删缓存 DelProductDetail}{r}
-    \mess[1]{h}{延迟再删 DoubleDeleteAsync（盖脏数据）}{r}
+    \mess[0]{h}{先删缓存 DelProductDetail}{r}
+    \mess[0]{h}{延迟再删 DoubleDeleteAsync（盖脏数据）}{r}
   \end{sdblock}
 \end{sequencediagram}}
 \end{center}
@@ -335,9 +335,10 @@
 \end{frame}
 
 \begin{frame}{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
-\keypoint{三段式：\textbf{事务外}算满减、预扣库存（可降级 / 不够即拒）$\to$ \textbf{一个事务}写单 + 扣预算 + 写 outbox $\to$ \textbf{事务后}异步扫 outbox 投 MQ。任一步失败都 \texttt{ReleaseReservation} 退回预扣。}
+\keypoint{三段式：\textbf{事务外}算满减/预扣库存（可降级）$\to$ \textbf{一个事务}写单+扣预算+outbox $\to$ \textbf{事务后}异步投 MQ；失败则 \texttt{ReleaseReservation} 退预扣。}
 \vspace{0.2em}
-\resizebox{0.92\textwidth}{0.50\textheight}{%
+\begin{center}
+\resizebox{!}{0.54\textheight}{%
 \begin{sequencediagram}
   \newthread{u}{用户}
   \newinst[1]{api}{订单服务}
@@ -354,6 +355,7 @@
   \end{call}
   \mess[0]{db}{commit 后异步扫 pending 投递}{mq}
 \end{sequencediagram}}
+\end{center}
 \par\smallskip
 {\centering\srcnote{internal/order/service.go:110 Reserve · :117 Tx · :145 outbox · :159 释放补偿 · :172 延迟关单}\par}
 \end{frame}
