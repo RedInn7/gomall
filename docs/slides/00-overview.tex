@@ -582,7 +582,7 @@ return 1
 \midrule
 满减计算 & 算不出折扣 & 降级为\textbf{无折扣}，照样下单 \\
 满减预算 & 预算抢光 & 事务内\textbf{改写为无折扣}，不报错 \\
-RabbitMQ & 延迟关单不可用 & Redis ZSet 定时扫描\textbf{兜底关单} \\
+RabbitMQ & 延迟关单不可用 & DB Cron 定时扫描\textbf{兜底关单} \\
 ES / Milvus & 搜索退化 & 退回 \textbf{DB LIKE} 路径 \\
 \bottomrule
 \end{tabular}
@@ -655,9 +655,9 @@ return {1, ''}
 \end{frame}
 
 \begin{frame}{Saga 库存补偿：预扣在事务外，失败必须还回}
-  \keypoint{Redis 预扣库存（available$\to$reserved）发生在 DB 事务\textbf{之外}——高并发下不让 Redis 扣减跟着行锁排队。代价：后续失败必须由代码主动补偿还回，否则库存被"幽灵占用"。}
+  \keypoint{Redis 预扣库存（available$\to$reserved）在 DB 事务\textbf{之外}完成（不让扣减跟着行锁排队）；代价是后续失败必须由代码主动补偿还回，否则库存被"幽灵占用"。}
   \vspace{1mm}
-  \resizebox{0.74\textwidth}{0.3\textheight}{%
+  \resizebox{0.66\textwidth}{0.24\textheight}{%
   \begin{tikzpicture}[node distance=8mm and 16mm]
     \node[node-box] (r) {1. ReserveStock\\available$\to$reserved};
     \node[node-box, right=of r] (tx) {2. DB 事务\\写订单+满减+outbox};
@@ -672,7 +672,7 @@ return {1, ''}
   \begin{itemize}\small
     \item \textbf{两个桶}：\texttt{available}（可下单）/ \texttt{reserved}（已占未付），支付成功才 \texttt{CommitReservation} 真正消耗。
     \item \textbf{补偿点遍布全链路}：同步事务失败、异步消费失败、ticket/publish 失败——每处都调 \texttt{ReleaseReservation}。
-    \item \textbf{对账兜底}：\texttt{ScanReservedProductIDs} 用 SCAN 增量枚举 reserved 桶，定时比对 DB 捞回漏退库存。
+    \item \textbf{对账兜底}：定时 SCAN 巡检 reserved 桶比对 DB，捞回漏退的库存。
   \end{itemize}
   \srcnote{repository/cache/inventory.go Reserve/Commit/Release/Scan；internal/order/service.go 补偿调用；internal/order/consumer.go}
 \end{frame}
