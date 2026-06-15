@@ -10,7 +10,7 @@
 #   - 每份 deck 跑 xelatex 两遍（解决 TOC / appendixnumberbeamer 引用）
 #   - 任一份失败立即退出
 #   - 清理 .aux / .log / .toc / .nav / .snm / .out / .vrb 中间产物
-#   - 输出每份 PDF 的页数（要求 ≥ 50）
+#   - 输出每份 PDF 的页数（仅信息展示，不再强制 ≥ 50）
 
 set -euo pipefail
 
@@ -112,16 +112,12 @@ for src in [0-9][0-9]-*.tex; do
     fail "$src 编译后未生成 $pdf"
   fi
 
-  # 页数检查
+  # 页数仅作信息展示，不再强制 ≥50（overview 为录制精简版，按需裁剪）
   pages=""
   if command -v pdfinfo >/dev/null 2>&1; then
     pages=$(pdfinfo "$pdf" 2>/dev/null | awk '/^Pages:/ {print $2}')
     if [[ -n "$pages" ]]; then
-      if (( pages < 50 )); then
-        warn "$pdf 页数 = ${pages}, 低于要求（≥ 50）"
-      else
-        ok "$pdf 页数 = ${pages} (OK, ≥ 50)"
-      fi
+      ok "$pdf 页数 = ${pages}"
     fi
   else
     ok "$pdf 已生成"

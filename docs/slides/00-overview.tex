@@ -13,9 +13,7 @@
 \tableofcontents
 \end{frame}
 
-% =====================================================================
 \section{业务全景：gomall 到底在做什么}
-% =====================================================================
 
 \begin{frame}{先认人：一笔订单背后站着 5 个角色}
 \begin{itemize}
@@ -57,28 +55,6 @@
 {\centering\srcnote{routes/router.go:58--81 各域自注册 RegisterRoutes(public, authed, admin)}\par}
 \end{frame}
 
-\begin{frame}{15 份 deck 索引：域 $\to$ 在哪深讲}
-\scriptsize
-\begin{tabular}{@{}cll@{}}
-\toprule
-\# & 业务域 & 一句话 \\
-\midrule
-01 & 用户与鉴权 & 注册 / 登录 / JWT 双 token / RBAC \\
-02 & 商品展示 & list / show / Cache Aside + HTTP cache \\
-03 & 商品搜索 & LIKE $\to$ ES $\to$ ES+Milvus 混合召回 \\
-04 & 购物车$\to$下单 & 库存预扣 + DB+outbox 同事务（\textbf{主线核心}）\\
-05 / 06 & 支付（法币 / Web3）& 余额加密 + 熔断幂等 / Escrow + 链上对账 \\
-07 & 库存防超卖 & 两桶 Lua（available / reserved）+ Saga 回滚 \\
-08 / 13 & 营销 / 满减引擎 & 券 / 秒杀 / 红包 / 满减最优解 \\
-09 & 订单生命周期 & 状态机 + 延迟关单双保险 \\
-10 / 11 & 流量治理 / 一致性 & 限流熔断削峰 / Outbox + Saga \\
-12 & 商家后台 & merchant 三层鉴权 + 可观测性 \\
-14 / 15 & 拼团 / 预售 & 成团状态机 / 定金尾款两段付 \\
-\bottomrule
-\end{tabular}
-\par\smallskip
-\srcnote{docs/slides/README.md \S deck 索引；本表为 15 份现有 deck 的横向汇总}
-\end{frame}
 
 \begin{frame}{业务承诺：我们对外兜什么底（SLO）}
   \keypoint{一个交易系统的可信度，不在于功能多，而在于敢把哪几条线写进合同——出了问题要赔的那种。gomall 把承诺分成 P0\textasciitilde P3 四档，资源向核心交易倾斜。}
@@ -105,56 +81,9 @@
   \srcnote{README.md \S 业务承诺（SLO）}
 \end{frame}
 
-\begin{frame}[fragile]{钱怎么流：资金台账与复式记账}
-  \keypoint{一笔支付从来不是"给买家余额减个数"。买家少的钱必须有人多——商家。复式记账让每一分钱都有去向，对账时 SUM(debit) 永远等于 SUM(credit)。}
-  \vspace{0.2em}
-  \begin{lstlisting}[language=Go,caption={同事务内一借一贷，方向相反}]
-// 买家扣款流水：与余额变动同事务追加
-ledgerDao := money.NewLedgerDaoByDB(tx)   // 接管调用方 tx
-ledgerDao.AppendTransaction(uId, order.ID,
-    money.DirectionDebit, payable, buyerBalanceAfter, money.BizTypeOrderPay)
-// 卖家入账流水：方向与买家相反，金额相同
-ledgerDao.AppendTransaction(bossID, order.ID,
-    money.DirectionCredit, payable, bossBalanceAfter, money.BizTypeOrderPay)
-  \end{lstlisting}
-  \vspace{-0.2em}
-  \begin{itemize}\small
-    \item \textbf{同事务}：\texttt{NewLedgerDaoByDB(tx)} 复用余额变动那把锁的同一 tx，流水与余额原子提交。
-    \item \textbf{防重账}：\texttt{(ref\_order\_id, direction, biz\_type)} 唯一索引兜底，重放回调撞唯一键报错 $\to$ 整事务回滚。
-    \item \textbf{外部资金}：Stripe / Web3 买家不走内部钱包，debit 对手方记在清算账户（user\_id=0），守恒不破。
-  \end{itemize}
-  \srcnote{internal/payment/service.go:122 一借一贷；internal/money/ledger\_repo.go AppendTransaction；ledger\_model.go 唯一索引}
-\end{frame}
 
-\begin{frame}{技术栈一览：每个组件解决一类问题}
-  \keypoint{选型不是堆时髦框架，而是"这个痛点用什么扛最划算"。}
-  \vspace{0.2em}
-  \begin{table}
-  \centering\footnotesize
-  \begin{tabular}{@{}lll@{}}
-  \toprule
-  \textbf{组件} & \textbf{职责} & \textbf{为什么用它} \\
-  \midrule
-  Gin            & HTTP 框架 / 路由 / 中间件链 & 裸链路 64K RPS，中间件机制干净 \\
-  GORM           & ORM / 事务 / 读写分离插件   & dbresolver 一行接主从，事务好控 \\
-  MySQL 主从     & 交易事务、权威数据           & 强一致 + 行锁，钱必须落它 \\
-  Redis          & 库存水位、热点缓存、限流      & Lua 原子扣减，零超发 \\
-  RabbitMQ       & 异步下单、延迟关单、领域事件   & TTL+DLX 做延迟队列，削峰解耦 \\
-  Elasticsearch  & 商品全文检索                 & LIKE 扫全表太慢，倒排扛模糊搜 \\
-  Milvus         & 语义向量召回                 & 关键词搜不到的"意思相近"靠它 \\
-  Web3 / go-eth  & 链上签名支付、nonce 防重放    & 钱包签名支付，listener 兜底确认 \\
-  \bottomrule
-  \end{tabular}
-  \end{table}
-  \vspace{0.2em}
-  {\small 共识：\textbf{交易强一致走 MySQL，性能与扩展走旁路}（Redis / MQ / ES / Milvus），旁路挂了核心不挂。}
-  \par\smallskip
-  \srcnote{go.mod 依赖；repository/db/dao/init.go、cache、es、milvus、rabbitmq/init.go}
-\end{frame}
 
-% =====================================================================
 \section{系统架构：分层拓扑与领域地图}
-% =====================================================================
 
 \begin{frame}{gomall 整体架构：一条请求从客户端落到数据层}
 \resizebox{0.97\textwidth}{0.70\textheight}{%
@@ -168,7 +97,7 @@ ledgerDao.AppendTransaction(bossID, order.ID,
   % --- 接入层：Gin Router + 中间件链 ---
   \node[node-box,below=10mm of cli.south,minimum width=110mm,minimum height=10mm]
         (gw) {Gin Router \quad｜\quad
-              中间件链：JWT $\to$ RBAC $\to$ 限流 $\to$ 熔断 $\to$ 幂等 $\to$ Jaeger 链路};
+              中间件链：限流 $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT $\to$ RBAC $\to$ 幂等};
 
   % --- 服务层：四个域分组 ---
   \node[node-box,node-warn,below=11mm of gw.south west,anchor=north west,
@@ -212,151 +141,41 @@ ledgerDao.AppendTransaction(bossID, order.ID,
 \srcnote{routes/router.go 中间件链 + 各域 RegisterRoutes；实线=同步请求，虚线=Outbox 旁路异步投递}
 \end{frame}
 
-\begin{frame}{DDD 领域地图：22 个域按 bounded context 垂直切片}
-\resizebox{0.97\textwidth}{0.68\textheight}{%
-\begin{tikzpicture}[font=\scriptsize,node distance=2.5mm and 5mm,
-    dom/.style={draw=cMain,rounded corners=2pt,minimum height=6mm,
-      minimum width=17mm,align=center,font=\tiny}]
-  % --- 交易上下文 ---
-  \node[dom,node-warn] (order)   {order};
-  \node[dom,node-warn,right=of order] (cart) {cart};
-  \node[dom,node-warn,below=of order] (pay) {payment};
-  \node[dom,node-warn,right=of pay] (refund) {refund};
-  \node[draw=cMain,dashed,rounded corners=3pt,inner sep=2mm,
-        fit=(order)(cart)(pay)(refund),
-        label={[font=\tiny,cMain]above:交易}] (ctxTrade) {};
 
-  % --- 商品上下文 ---
-  \node[dom,node-ok,right=14mm of cart] (product) {product};
-  \node[dom,node-ok,right=of product] (category) {category};
-  \node[dom,node-ok,below=of product] (search) {search};
-  \node[draw=cOK,dashed,rounded corners=3pt,inner sep=2mm,
-        fit=(product)(category)(search),
-        label={[font=\tiny,cOK]above:商品}] (ctxProd) {};
-
-  % --- 营销上下文 ---
-  \node[dom,fill=cAccent!12,draw=cAccent,below=16mm of order] (promo) {promo};
-  \node[dom,fill=cAccent!12,draw=cAccent,right=of promo] (coupon) {coupon};
-  \node[dom,fill=cAccent!12,draw=cAccent,below=of promo] (skill) {skill};
-  \node[dom,fill=cAccent!12,draw=cAccent,right=of skill] (redpacket) {redpacket};
-  \node[draw=cAccent,dashed,rounded corners=3pt,inner sep=2mm,
-        fit=(promo)(coupon)(skill)(redpacket),
-        label={[font=\tiny,cAccent]above:营销}] (ctxMkt) {};
-
-  % --- 用户上下文 ---
-  \node[dom,right=22mm of ctxMkt.east,anchor=west] (user) {user};
-  \node[dom,right=of user] (address) {address};
-  \node[dom,below=of user] (admin) {admin};
-  \node[draw=cMain,dashed,rounded corners=3pt,inner sep=2mm,
-        fit=(user)(address)(admin),
-        label={[font=\tiny,cMain]above:用户}] (ctxUser) {};
-
-  % --- 横切层 ---
-  \node[node-box,fill=cMute,below=8mm of ctxMkt.south west,anchor=north west,
-        minimum width=58mm,minimum height=7mm,font=\tiny] (cross)
-        {横切：shared / outbox（事件一致性）\quad｜\quad money（资金台账，复式记账）};
-
-  % --- 基础设施底座 ---
-  \node[node-box,node-ok,below=6mm of cross.south,anchor=north,
-        minimum width=130mm,minimum height=7mm,font=\tiny] (infra)
-        {基础设施底座：MySQL \quad·\quad Redis \quad·\quad RabbitMQ \quad·\quad ES \quad·\quad Milvus};
-
-  % --- 关键跨域依赖边 ---
-  \draw[arrow] (order.east) to[out=20,in=160]
-        node[above,font=\tiny,pos=0.5]{扣库存} (product.west);
-  \draw[arrow] (order.south) -- node[left,font=\tiny,pos=0.6]{算优惠} (promo.north);
-  \draw[arrow] (pay.south west) to[out=-150,in=180]
-        node[left,font=\tiny,pos=0.4]{资金} (cross.west);
-  \draw[arrow] (pay.east) to[out=0,in=180]
-        node[above,font=\tiny,pos=0.55]{账户} (user.west);
-  \draw[arrow-async] (search.north) -- node[right,font=\tiny]{索引} (product.south);
-\end{tikzpicture}}
-\par\smallskip
-{\centering\small 按域垂直切片，跨域只经属主领域的服务方法调用；product 与 search 已斩环（search 单向订阅 product 索引事件）。\par}
-\srcnote{docs/architecture/DDD\_MIGRATION.md 域划分；跨域边见图中实线箭头}
-\end{frame}
-
-\begin{frame}{中间件链：逐环拆解，顺序即设计}
-  \keypoint{中间件的顺序不是随手排的——每一环只在前一环放行后才有意义，错一步就是漏洞。}
-  \vspace{0.3em}
-  \begin{center}
-  \begin{tikzpicture}[node distance=0.42cm and 0.5cm]
-    \node[node-box] (jwt) {JWT 鉴权};
-    \node[node-box, right=of jwt] (rbac) {RBAC};
-    \node[node-box, right=of rbac] (rate) {限流};
-    \node[node-box, right=of rate] (cb) {熔断};
-    \node[node-box, right=of cb] (idem) {幂等};
-    \draw[arrow] (jwt) -- (rbac);
-    \draw[arrow] (rbac) -- (rate);
-    \draw[arrow] (rate) -- (cb);
-    \draw[arrow] (cb) -- (idem);
-  \end{tikzpicture}
-  \end{center}
-  \vspace{0.2em}
-  \begin{itemize}\small
-    \item \textbf{JWT 鉴权} \texttt{AuthMiddleware()}：解 token 拿 user\_id，挂 \texttt{authed} 组，没登录直接 401（全局：令牌桶限流 + 链路追踪先于一切）。
-    \item \textbf{RBAC} \texttt{RequireRole("admin")}：登录之上叠角色校验，只护 admin 组。\textbf{鉴权必须在限流前}——否则匿名洪水也吃配额。
-    \item \textbf{限流 + 熔断}：全局 \texttt{TokenBucket(100,200)} 防爬虫，秒杀路由再叠滑动窗口；支付路由专用熔断，下游连错 5 次 open 10s。
-    \item \textbf{幂等} \texttt{Idempotency()}：\textbf{放最后}——确认要执行业务时才用 Redis 锁去重，避免给被拒请求白占幂等键。
-  \end{itemize}
-  \srcnote{routes/router.go:41 全局链；middleware/\{jwt,rbac,ratelimit,circuitbreaker,idempotency\}.go；internal/payment/routes.go}
-\end{frame}
 
 \begin{frame}{全链路：一个下单请求从前端穿到数据层（真实注册顺序）}
-\keypoint{中间件是\textbf{洋葱模型}：每层验过自己的关，调 \texttt{c.Next()} 把请求递给内层；内层返回后再逐层往外收。任一层不放行（\texttt{Abort}），请求就在那一层原路返回，根本到不了业务。}
-\resizebox{0.9\textwidth}{0.40\textheight}{%
-\begin{sequencediagram}
-  \newthread{u}{前端 Web/App}
-  \newinst[1]{lim}{限流·按IP}
-  \newinst[1]{mw}{接入层}
-  \newinst[1]{auth}{鉴权层}
-  \newinst[1]{biz}{业务层}
-  \newinst[1]{db}{数据层}
-  \begin{call}{u}{POST /orders/create（带 access\_token）}{lim}{200 + 订单(待付款)}
-    \begin{call}{lim}{令牌足够 $\to$ Next}{mw}{}
-      \begin{call}{mw}{CORS 白名单·开 trace span·Session $\to$ Next}{auth}{}
-        \begin{call}{auth}{JWT 验签+续期+取 user\_id $\to$ Next}{biz}{}
-          \begin{call}{biz}{预扣库存 $\to$ 写订单+outbox（同事务）}{db}{ok}
-          \end{call}
-        \end{call}
-      \end{call}
-    \end{call}
-  \end{call}
-  \mess[1]{lim}{令牌耗尽：HTTP 200+限流业务码，挡在最外层}{u}
-  \mess[1]{auth}{token 无效/过期：HTTP 200+鉴权业务码，到不了业务层}{u}
-\end{sequencediagram}}
+\keypoint{中间件是\textbf{洋葱模型}：每层验过自己的关就调 \texttt{c.Next()} 递给内层，内层返回后再逐层收回；任一层 \texttt{Abort}，请求在那层原路返回，到不了业务。}
+\resizebox{0.97\textwidth}{0.44\textheight}{%
+\begin{tikzpicture}[font=\scriptsize]
+  % 角色头（自左向右一层层往内）
+  \node[node-box,minimum width=22mm] (u)    at (0,0)    {前端\\Web/App};
+  \node[node-box,minimum width=22mm] (lim)  at (3.4,0)  {限流\\按 IP};
+  \node[node-box,minimum width=22mm] (mw)   at (6.8,0)  {接入层\\CORS·链路·Session};
+  \node[node-box,minimum width=22mm] (auth) at (10.2,0) {鉴权\\JWT(+RBAC)};
+  \node[node-box,minimum width=22mm] (biz)  at (13.6,0) {业务\\Handler·Service};
+  \node[node-box,node-warn,minimum width=22mm] (db) at (17,0) {数据层\\Redis·MySQL};
+  % 竖直生命线
+  \foreach \n in {u,lim,mw,auth,biz,db} {\draw[lifeline] (\n.south) -- ++(0,-6.6);}
+  % 请求向内：每段都是水平箭头
+  \draw[arrow] ($(u.south)+(0,-0.6)$)    -- node[above,font=\tiny]{POST /orders/create + token} ($(lim.south)+(0,-0.6)$);
+  \draw[arrow] ($(lim.south)+(0,-1.2)$)  -- node[above,font=\tiny]{令牌足够 $\to$ Next} ($(mw.south)+(0,-1.2)$);
+  \draw[arrow] ($(mw.south)+(0,-1.8)$)   -- node[above,font=\tiny]{校验通过 $\to$ Next} ($(auth.south)+(0,-1.8)$);
+  \draw[arrow] ($(auth.south)+(0,-2.4)$) -- node[above,font=\tiny]{验签+续期 $\to$ Next} ($(biz.south)+(0,-2.4)$);
+  \draw[arrow] ($(biz.south)+(0,-3.0)$)  -- node[above,font=\tiny]{预扣库存·写单+outbox(同事务)} ($(db.south)+(0,-3.0)$);
+  % 返回向外：水平箭头
+  \draw[arrow] ($(db.south)+(0,-3.6)$)   -- node[below,font=\tiny]{ok} ($(biz.south)+(0,-3.6)$);
+  \draw[arrow] ($(biz.south)+(0,-4.2)$)  -- node[below,font=\tiny]{200 + 订单(待付款)} ($(u.south)+(0,-4.2)$);
+  % 两条拒绝分支：原路返回，水平红箭头
+  \draw[arrow-bad] ($(lim.south)+(0,-5.1)$)  -- node[below,font=\tiny]{令牌耗尽：HTTP 200+限流业务码} ($(u.south)+(0,-5.1)$);
+  \draw[arrow-bad] ($(auth.south)+(0,-5.9)$) -- node[below,font=\tiny]{token 失效：HTTP 200+鉴权业务码} ($(u.south)+(0,-5.9)$);
+\end{tikzpicture}}
 \par\smallskip
-{\small 真实顺序：\textbf{限流(IP) $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT}，admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层 $=$ 洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流则在鉴权\textbf{之后}。}
+{\small 真实顺序：\textbf{限流(IP) $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT}；admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层，洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流则在鉴权\textbf{之后}。}
 \srcnote{routes/router.go:41--55 全局链 + 分组；internal/order/routes.go:12 下单叠 Idempotency；被拒统一 HTTP 200+业务码见 ratelimit.go:68 / jwt.go:38}
 \end{frame}
 
-\begin{frame}{数据层选型与边界：一个 MySQL 为什么不够}
-  \keypoint{把全部活儿压给一个 MySQL，要么慢死、要么挂掉。正解按"访问形态"分流：强一致归 MySQL，高并发与检索归旁路，旁路挂了能退回 DB。}
-  \vspace{0.2em}
-  \begin{table}
-  \centering\small
-  \begin{tabular}{@{}lll@{}}
-  \toprule
-  \textbf{存储} & \textbf{扛什么} & \textbf{挂了怎么办} \\
-  \midrule
-  MySQL 主从     & 交易事务、权威读             & 核心依赖，不可降级 \\
-  Redis          & 库存预扣 / 热点缓存 / 限流     & 缓存未命中回源 DB \\
-  Elasticsearch  & 商品全文检索                 & \textbf{退回 DB \texttt{LIKE} 查询} \\
-  Milvus         & 语义向量召回                 & 退回纯 ES 关键词召回 \\
-  \bottomrule
-  \end{tabular}
-  \end{table}
-  \vspace{0.2em}
-  \begin{itemize}\small
-    \item \textbf{读写分离}：\texttt{dbresolver} 写走 Sources、读走 2 个 Replicas，\texttt{RandomPolicy} 负载均衡。
-    \item \textbf{搜索降级}：ES 不可用时落到 DB \texttt{name/info LIKE}；语义召回报错则退回纯向量——周边能力只增强体验，绝不阻断 happy path。
-  \end{itemize}
-  \srcnote{repository/db/dao/init.go dbresolver；service/search/ 降级路径；internal/product/repo.go LIKE}
-\end{frame}
 
-% =====================================================================
 \section{端到端主线：一次成功购物的"黄金路径"}
-% =====================================================================
 
 \begin{frame}{黄金路径：7 跳，每一跳都可能掉链子}
 \begin{enumerate}
@@ -374,67 +193,8 @@ ledgerDao.AppendTransaction(bossID, order.ID,
 \srcnote{internal/order/service.go:63 OrderCreate 是这条线的中枢}
 \end{frame}
 
-\begin{frame}{登录这一跳：密码校验 $\to$ 双 Token 签发 $\to$ 中间件续期}
-\keypoint{access\_token 短命扛日常请求，refresh\_token 长命只用来换新；前端无感续期，服务端无状态。}
-\resizebox{0.82\textwidth}{0.46\textheight}{%
-\begin{sequencediagram}
-  \newthread{u}{用户/前端}
-  \newinst[1]{h}{User Handler}
-  \newinst[1]{s}{UserSrv}
-  \newinst[1]{m}{Auth 中间件}
-  \begin{call}{u}{login（账号+密码）}{h}{access+refresh}
-    \begin{call}{h}{UserLogin}{s}{双 Token}
-    \end{call}
-  \end{call}
-  \begin{call}{u}{业务请求（带 access token）}{m}{放行/续期}
-  \end{call}
-  \mess[1]{m}{access 过期：用 refresh 换新 token}{u}
-\end{sequencediagram}}
-\par\smallskip
-\srcnote{internal/user/service.go:86 UserLogin（CheckPassword $\to$ GenerateToken）；pkg/utils/jwt/jwt.go GenerateToken/ParseRefreshToken；middleware/jwt.go:16 AuthMiddleware 续期}
-\end{frame}
 
-\begin{frame}{看商品：Cache Aside 读路径 + 更新时延迟双删}
-\keypoint{读：先 Redis，命中即返；未命中回源 MySQL 再写缓存（空值也缓存，挡穿透）。写：先删缓存，过一会儿再删一次，盖掉并发读回填的脏数据。}
-\resizebox{0.82\textwidth}{0.46\textheight}{%
-\begin{sequencediagram}
-  \newthread{u}{用户}
-  \newinst[1]{h}{Product Handler}
-  \newinst[1]{r}{Redis 缓存}
-  \newinst[1]{d}{MySQL}
-  \begin{call}{u}{商品详情 ProductShow}{h}{detail}
-    \begin{call}{h}{GetProductDetail（命中即返）}{r}{miss}
-    \end{call}
-    \begin{call}{h}{回源查库}{d}{product}
-    \end{call}
-    \mess[1]{h}{SetProductDetail（写回，TTL 抖动）}{r}
-  \end{call}
-  \mess[1]{h}{更新后：DelProductDetail + DoubleDeleteAsync（延迟再删）}{r}
-\end{sequencediagram}}
-\par\smallskip
-\srcnote{internal/product/service.go:41 ProductShow（回源 + 写回 + 更新双删）；repository/cache/product.go GetProductDetail/SetProductDetail/DoubleDeleteAsync}
-\end{frame}
 
-\begin{frame}{加购与地址校验：下单前的两道业务门槛}
-\keypoint{加购物车与下单，钱和卖家一律以服务端商品表为准，客户端传来的 boss\_id / money 一概不信。}
-\begin{itemize}\small
-  \item \textbf{加购以商品表卖家为准}：CartCreate 先按 product\_id 反查商品，拿真实 BossID 落库；购物车里的 boss\_id 不信客户端，否则脏数据会把货款引到错误卖家。
-  \item \textbf{没地址下不了单}：OrderCreate 第一步就校验收货地址归属——address\_id 同样可篡改，EnsureOwned 校验该地址确属当前登录用户，否则直接拒单。
-  \item \textbf{异步下单同样先校验}：走异步队列下单时，地址归属在入队前同步校验，失败快速拒绝，避免白白预扣库存、投递无效任务。
-\end{itemize}
-\begin{center}\small
-\begin{tabular}{@{}lll@{}}
-\toprule
-\textbf{环节} & \textbf{可信来源} & \textbf{失败处理}\\
-\midrule
-加购卖家 BossID & 商品表 GetProductById & 商品不存在直接拒\\
-下单单价/卖家 & resolveProductPricing & 定价非法拒单，不回退客户端值\\
-收货地址 & EnsureOwned（属当前用户） & 不属本人立即拒单\\
-\bottomrule
-\end{tabular}
-\end{center}
-\srcnote{internal/cart/service.go:31 CartCreate 取真实 BossID；internal/order/service.go:65 OrderCreate 地址校验；internal/address/repo.go EnsureOwned}
-\end{frame}
 
 \begin{frame}{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
 \resizebox{0.93\textwidth}{0.62\textheight}{%
@@ -464,28 +224,6 @@ ledgerDao.AppendTransaction(bossID, order.ID,
 {\centering\srcnote{internal/order/service.go:110 Reserve · :117 Tx · :145 outbox · :159 释放补偿 · :172 延迟关单}\par}
 \end{frame}
 
-\begin{frame}[fragile]{下单中枢的关键代码：顺序就是设计}
-\begin{lstlisting}[language=Go,caption={internal/order/service.go OrderCreate 主体}]
-// 1) 满减在事务外算：纯读路径，失败降级为无折扣，绝不阻断下单
-promoApply, promoErr := s.promo.CalculateBestDiscount(ctx, cartItems)
-
-// 2) Redis 预扣库存：available -> reserved，失败直接拒单，连 DB 都不碰
-if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
-    return nil, err
-}
-
-// 3) 同一个事务：写订单 + 扣满减预算 + 写 outbox 事件（原子一致）
-err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-    NewOrderDaoByDB(tx).CreateOrder(order)
-    s.promo.ApplyDiscountInTx(tx, order.ID, order.PromoRuleID, order.PromoDiscountCents)
-    return outbox.NewOutboxDaoByDB(tx).Insert("order", "OrderCreated", ...)
-})
-if err != nil { // 4) 事务失败：把第 2 步预扣的库存还回去
-    cache.ReleaseReservation(ctx, req.ProductID, int64(req.Num))
-}
-\end{lstlisting}
-\srcnote{internal/order/service.go:63--178 OrderCreate（节选，行内顺序与原文一致）}
-\end{frame}
 
 \begin{frame}{支付这一跳：钱和库存在这里才真正落定}
 \begin{itemize}
@@ -505,61 +243,10 @@ if err != nil { // 4) 事务失败：把第 2 步预扣的库存还回去
 \srcnote{internal/payment/service.go:36 PayDown；repository/cache/inventory.go:98 CommitReservation}
 \end{frame}
 
-\begin{frame}[fragile]{支付事务体：钱、货、状态、事件一把梭}
-\begin{lstlisting}[language=Go,caption={internal/payment/service.go PayDown 事务体（节选）}]
-err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
-    order, _ := orderpkg.NewOrderDaoByDB(tx).GetOrderById(req.OrderId, uId)
-    if order.Type != consts.OrderWaitPay {     // 幂等：非待付款拒绝重复支付
-        return errors.New("订单状态非未支付")
-    }
-    // 扣买家余额（AES 密文解密校验支付密码）+ 加商家余额
-    userDao.UpdateUserById(uId, buyer)          // 买家 - totalMoney
-    userDao.UpdateUserById(bossID, boss)        // 商家 + totalMoney
-    order.Type = consts.OrderWaitShip           // 状态推进：待付款 -> 待发货
-    orderpkg.NewOrderDaoByDB(tx).UpdateOrderById(req.OrderId, uId, order)
-    return outbox.NewOutboxDaoByDB(tx).Insert(  // order.paid 事件同事务落库
-        "order", "OrderPaid", "order.paid", order.ID, events.OrderPaid{...})
-})
-// 事务提交后：把 Redis reserved 桶真正消掉，库存数字最终减少
-cache.CommitReservation(ctx, paidProductID, int64(paidNum))
-\end{lstlisting}
-\srcnote{internal/payment/service.go:54 Tx · :63 幂等校验 · :148 状态推进 · :177 order.paid · :196 CommitReservation}
-\end{frame}
 
-\begin{frame}{履约这一跳：发货 $\to$ 收货，每步都过状态机}
-\keypoint{发货是 admin 权限的运营动作，收货是用户本人动作；两步都只认状态机里的合法迁移，且状态推进与 outbox 事件同事务，杜绝"已发货但下游收不到事件"。}
-\resizebox{0.92\textwidth}{!}{%
-\begin{sequencediagram}
-  \newthread{a}{商家(admin)}
-  \newinst[1]{h}{Shipping Handler}
-  \newinst[1]{s}{ShippingSrv}
-  \newinst[2]{u}{用户}
-  \begin{call}{a}{ship（RequireRole admin）}{h}{已发货}
-    \begin{call}{h}{ShipOrder：待发货到待收货}{s}{ok+outbox}
-    \end{call}
-  \end{call}
-  \begin{call}{u}{确认收货 ConfirmReceive（校验归属）}{s}{待收货到已完成}
-  \end{call}
-\end{sequencediagram}}
-\par\smallskip
-\srcnote{internal/order/shipping.go:36 ShipOrder（状态守卫 + 条件 UPDATE+outbox）、:73 ConfirmReceive（归属校验）；internal/order/state.go:36 CanTransition；routes.go ship 挂 RequireRole("admin")}
-\end{frame}
 
-\begin{frame}{满减最优解：多规则叠加时帮用户算到最便宜}
-\keypoint{用户身上可能同时命中好几条满减规则，系统帮他挑出"减得最多"的那一条；算折扣失败就降级为无折扣，绝不阻断下单。}
-\begin{itemize}\small
-  \item \textbf{先算后下单，两段分工}：结算/购物车实时展示走 CalculateBestDiscount（纯只读、不落库）；真正下单时在事务内 ApplyDiscountInTx 扣减规则预算并落账。
-  \item \textbf{怎么算"最优"}：PickBestPromoRule 遍历所有命中规则，逐条算可减金额，取最大的一条；没有命中或减额 $\le 0$ 就返回原价。
-  \item \textbf{失败降级}：CalculateBestDiscount 报错时记 warn 日志、回退无折扣继续下单；规则畸形导致折扣 > 小计时，兜底把实付夹到 0，不让用户实付为负。
-\end{itemize}
-\vspace{1mm}
-\keypoint{两段分工一句话：\textbf{结算页只读算最优（CalculateBestDiscount，不落库），下单事务内才落账（ApplyDiscountInTx，超支回滚）}；任一异常都降级为无折扣、绝不阻断成交。}
-\srcnote{internal/promo/service.go:64 PickBestPromoRule、:162 CalculateBestDiscount、:234 ApplyDiscountInTx；降级在 internal/order/service.go OrderCreate}
-\end{frame}
 
-% =====================================================================
-\section{贯穿全局的 4 个硬骨头}
-% =====================================================================
+\section{贯穿全局的硬骨头（精选 3 个）}
 
 \begin{frame}[fragile]{硬骨头 1：库存防超卖 —— 为什么不用 \texttt{UPDATE WHERE stock>0}}
 \begin{itemize}
@@ -603,34 +290,7 @@ return 1
 \srcnote{internal/shared/outbox/repo.go:26 Insert · :44 FetchBatch · :53 MarkSent；initialize/outbox.go:15 启动}
 \end{frame}
 
-\begin{frame}{硬骨头 3：优雅降级 —— 核心稳如磐石，边缘随时可弃}
-\begin{tabular}{@{}lll@{}}
-\toprule
-能力 & 挂了会怎样 & gomall 的选择 \\
-\midrule
-满减计算 & 算不出折扣 & 降级为\textbf{无折扣}，照样下单 \\
-满减预算 & 预算抢光 & 事务内\textbf{改写为无折扣}，不报错 \\
-RabbitMQ & 延迟关单不可用 & DB Cron 定时扫描\textbf{兜底关单} \\
-ES / Milvus & 搜索退化 & 退回 \textbf{DB LIKE} 路径 \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-\keypoint{判断标准只有一句：\textbf{它是不是"用户付钱拿货"的必经环节}？\\
-是 $\to$ 进事务、保原子；不是 $\to$ 失败降级，绝不阻断 happy path。}
-\srcnote{internal/order/service.go:78 满减降级 · :126 预算耗尽降级；cmd/main.go:69--102 ES/Milvus 静默跳过}
-\end{frame}
 
-\begin{frame}{硬骨头 4：流量治理 —— 大促洪峰怎么扛}
-\begin{itemize}
-  \item \textbf{限流}：每 IP 令牌桶 100 RPS / 突发 200，挡爬虫与脚本。
-  \item \textbf{幂等}：下单走 \texttt{middleware.Idempotency()}，用户狂点也只成一单。
-  \item \textbf{削峰}：\texttt{/orders/enqueue} 投 MQ，前端拿 ticket 轮询，把洪峰摊平。
-\end{itemize}
-\vspace{1mm}
-\keypoint{压测实证：幂等中间件下 \textbf{755K 次重放请求 $\to$ 恰好 1 笔订单}，
-首单成功后续请求由 Lua 读 done 态返回，\textbf{50K RPS / p95 2.33ms}。}
-\srcnote{routes/router.go:41 令牌桶；internal/order/routes.go 幂等+enqueue；stressTest/REPORT.md \S 幂等中间件}
-\end{frame}
 
 \begin{frame}[fragile]{幂等中间件：755K 次重放只成一单}
   \keypoint{业务痛点：用户手抖狂点"提交订单"、客户端超时自动重试、弱网下 App 补发请求——同一笔下单不能变成三笔。}
@@ -660,114 +320,11 @@ return {1, ''}
   \srcnote{repository/cache/idempotency.go acquireScript；middleware/idempotency.go；stressTest/REPORT.md \S 幂等中间件}
 \end{frame}
 
-\begin{frame}{削峰：下单先拿 ticket，洪峰摊到 MQ}
-  \keypoint{业务背景：大促零点瞬时洪峰，若每个请求都同步写库，DB 连接池秒满。改成"先预扣库存 + 投 MQ 拿 ticket 秒回"，后台慢慢消费落单，把尖峰摊平成平稳的消费速率。}
-  \resizebox{0.8\textwidth}{0.44\textheight}{%
-  \begin{sequencediagram}
-    \newthread{u}{客户端}
-    \newinst[1]{api}{Enqueue API}
-    \newinst[1]{mq}{RabbitMQ}
-    \newinst[1]{c}{异步消费者}
-    \begin{call}{u}{下单请求}{api}{ticket(pending)}
-      \begin{call}{api}{预扣库存+写ticket}{mq}{投递成功}
-      \end{call}
-    \end{call}
-    \mess[1]{mq}{异步派发任务}{c}
-    \mess[1]{c}{落 DB + outbox 后回写 ticket=OK}{mq}
-    \begin{call}{u}{轮询 ticket 状态}{api}{OK / 订单号}
-    \end{call}
-  \end{sequencediagram}}
-  \par\smallskip
-  \keypoint{ticket = 雪花 ID 存 Redis 带 TTL；写 ticket / marshal / publish 三个失败点任一出错都先 \texttt{ReleaseReservation} 退回预扣库存，绝不让库存空占。}
-  \srcnote{internal/order/async.go OrderEnqueue；internal/order/consumer.go HandleAsyncOrderTask；repository/rabbitmq/order\_async.go}
-\end{frame}
 
-\begin{frame}{Saga 库存补偿：预扣在事务外，失败必须还回}
-  \keypoint{Redis 预扣库存（available$\to$reserved）在 DB 事务\textbf{之外}完成（不让扣减跟着行锁排队）；代价是后续失败必须由代码主动补偿还回，否则库存被"幽灵占用"。}
-  \vspace{1mm}
-  \resizebox{0.66\textwidth}{0.24\textheight}{%
-  \begin{tikzpicture}[node distance=8mm and 16mm]
-    \node[node-box] (r) {1. ReserveStock\\available$\to$reserved};
-    \node[node-box, right=of r] (tx) {2. DB 事务\\写订单+满减+outbox};
-    \node[node-box,node-ok, right=of tx] (ok) {3a. 成功\\reserved 保留};
-    \node[node-box,node-bad, below=of tx] (rel) {3b. 失败\\ReleaseReservation\\reserved$\to$available};
-    \draw[arrow] (r) -- (tx);
-    \draw[arrow] (tx) -- (ok);
-    \draw[arrow-bad] (tx) -- node[right,font=\scriptsize]{补偿} (rel);
-    \draw[arrow-bad] (rel.west) -- ++(-1.2,0) |- (r.south west);
-  \end{tikzpicture}}
-  \vspace{1mm}
-  \begin{itemize}\small
-    \item \textbf{两个桶}：\texttt{available}（可下单）/ \texttt{reserved}（已占未付），支付成功才 \texttt{CommitReservation} 真正消耗。
-    \item \textbf{补偿点遍布全链路}：同步事务失败、异步消费失败、ticket/publish 失败——每处都调 \texttt{ReleaseReservation}。
-    \item \textbf{对账兜底}：定时 SCAN 巡检 reserved 桶比对 DB，捞回漏退的库存。
-  \end{itemize}
-  \srcnote{repository/cache/inventory.go Reserve/Commit/Release/Scan；internal/order/service.go 补偿调用；internal/order/consumer.go}
-\end{frame}
 
-\begin{frame}{限流挡爬虫 + 熔断护下游}
-  \keypoint{两道闸门：令牌桶在入口按 IP 限速，挡住脚本刷接口；熔断器在出口监控下游，下游连续报错就快速失败，不让请求堆在垂死的依赖上拖垮自己。}
-  \begin{columns}[T]
-    \column{0.44\textwidth}
-      \textbf{令牌桶限流（每 IP）}
-      \begin{itemize}\small
-        \item 全局 \texttt{TokenBucket(100, 200)}：每 IP 每秒补 100 个令牌，桶容量 200（允许突发）。
-        \item 取不到令牌 $\to$ 直接 \texttt{Abort}，返回"请求过于频繁"。
-        \item 后台 janitor 周期回收 10 分钟无访问的 IP 条目，map 有界，防海量 IP 撑爆内存。
-      \end{itemize}
-    \column{0.56\textwidth}
-      \textbf{熔断器三态}
-      \vspace{1mm}
-      \resizebox{\textwidth}{0.46\textheight}{%
-      \begin{tikzpicture}[node distance=11mm and 15mm]
-        \node[node-state,node-state-normal] (cl) {Closed\\正常放行};
-        \node[node-state,node-state-alert, right=of cl] (op) {Open\\快速失败};
-        \node[node-state,node-state-transition, below=11mm of op] (ho) {Half-Open\\放探测};
-        \draw[arrow-bad] (cl) -- node[above,font=\scriptsize]{连续失败=5} (op);
-        \draw[arrow-async] (op.south west) -- node[left,font=\scriptsize]{等 10s} (ho.north west);
-        \draw[arrow-bad] (ho.north east) -- node[right,font=\scriptsize]{任一失败} (op.south east);
-        \draw[arrow] (ho.west) -- node[below,font=\scriptsize]{3 个全成} ++(-1.6,0) |- (cl.south);
-      \end{tikzpicture}}
-  \end{columns}
-  \vspace{1mm}
-  \keypoint{细节：半开探测带"代际"令牌，上一轮 Open 期的迟到回报会因代际不符被忽略，避免误触发刚恢复 Closed 的熔断器。被限流/被熔断 HTTP 仍是 200，用 status 字段区分。}
-  \srcnote{middleware/ratelimit.go 令牌桶 + janitor；middleware/circuitbreaker.go 三态 + generation 代际}
-\end{frame}
 
-\begin{frame}{可观测性：一次下单串成一条 trace}
-  \keypoint{下单跨了网关、订单、库存、MQ、DB 多个环节。出问题时光看单机日志拼不出全貌——链路追踪给每次请求发一个 traceId，沿调用一路透传，把散落的 span 串成一条完整时间线。}
-  \begin{columns}[T]
-    \column{0.55\textwidth}
-      \textbf{链路怎么串起来}
-      \begin{itemize}\small
-        \item \texttt{cmd/main.go} 引入 SkyWalking agent，自动织入出入站调用埋点。
-        \item track 中间件读请求头 \texttt{uber-trace-id}（Jaeger 透传格式）续上父 span；缺失或解析失败则降级开本地 span，绝不吞掉整条请求。
-        \item span 放进 context 往下传，DB/Redis/MQ 调用挂成子 span。
-      \end{itemize}
-    \column{0.45\textwidth}
-      \textbf{关键指标看板}
-      \begin{table}\small
-      \begin{tabular}{@{}ll@{}}
-        \toprule
-        指标 & 用途 \\
-        \midrule
-        QPS & 吞吐 / 容量水位 \\
-        p95 延迟 & 尾延迟，体感真相 \\
-        错误率 & 非 2xx 占比 \\
-        \bottomrule
-      \end{tabular}
-      \end{table}
-      \vspace{1mm}
-      业务态（限流/熔断/幂等命中）HTTP 仍 200，单独用 status 码区分，避免污染错误率口径。
-  \end{columns}
-  \vspace{1mm}
-  \keypoint{有了 trace，"这一单为什么慢"能精确定位到是 DB 全表 count、还是 MQ 投递抖动；有了三件套指标，限流阈值和熔断参数才有据可调。}
-  \srcnote{cmd/main.go skywalking-go import；middleware/track.go uber-trace-id 续 span + 降级}
-\end{frame}
 
-% =====================================================================
 \section{订单状态机：把 7 跳串成一条可查的线}
-% =====================================================================
 
 \begin{frame}{订单不是一个布尔值，是一台状态机}
 \resizebox{0.95\textwidth}{!}{%
@@ -793,117 +350,11 @@ return {1, ''}
 \srcnote{consts/order.go 状态常量；internal/order/state.go:21 orderStateTransitions 转换表}
 \end{frame}
 
-\begin{frame}{谁来推状态：用户 / 商家 / 系统三方驱动}
-\begin{tabular}{@{}llll@{}}
-\toprule
-迁移 & 触发方 & 入口 & 权限 \\
-\midrule
-待付款$\to$待发货 & 用户 & 支付成功 & 登录 \\
-待发货$\to$待收货 & 商家 & ShipOrder & admin RBAC \\
-待收货$\to$已完成 & 用户 & ConfirmReceive & 登录 \\
-待付款$\to$已关闭 & 系统 & 延迟关单 & MQ / Cron \\
-*$\to$退款中 & 用户/客服 & refund & 登录 \\
-\bottomrule
-\end{tabular}
-\vspace{2mm}
-\keypoint{"系统"这一行最容易被忽略：没人点按钮，
-靠 RabbitMQ 延迟消息 + DB Cron 定时扫描\textbf{双保险}把僵尸订单关掉、库存还回。}
-\srcnote{internal/order/shipping.go:36 ShipOrder · :73 ConfirmReceive；internal/order/cancel.go:19 CancelUnpaidOrder}
-\end{frame}
 
-\begin{frame}{延迟关单：MQ 延迟队列 + DB Cron 双保险}
-\keypoint{业务承诺：下单后 15 分钟不付款，自动关单并把库存预占退回 available，绝不让"占着不买"的单子把库存占死。}
-\vspace{0.3em}
-\resizebox{0.82\textwidth}{0.42\textheight}{%
-\begin{sequencediagram}
-\newthread{biz}{下单流程}
-\newinst[1]{mq}{RabbitMQ 延迟队列}
-\newinst[1]{cron}{Cron 兜底扫描}
-\newinst[1]{cancel}{CancelUnpaidOrder}
-\begin{call}{biz}{建单写 DB(WaitPay)}{cancel}{}
-\end{call}
-\mess[1]{biz}{投递延迟消息 TTL+DLX}{mq}
-\begin{call}{mq}{过期入死信，触发关单}{cancel}{释放预占}
-\end{call}
-\begin{call}{cron}{@every 5m 扫 WaitPay 超时}{cancel}{幂等 no-op}
-\end{call}
-\end{sequencediagram}}
-\vspace{0.2em}
-\begin{itemize}\small
-\item \textbf{主路}：延迟队列 TTL 到期 $\to$ 死信交换机 $\to$ 消费者调 \texttt{CancelUnpaidOrder}。\textbf{兜底}：MQ 挂了也无妨，DB Cron 每 5 分钟扫 \texttt{WaitPay} 超时单补偿关单。
-\item 两路共用同一幂等关单 \texttt{CloseOrderWithCheck}：只对未付款生效，二次调用直接 no-op。
-\end{itemize}
-\srcnote{repository/rabbitmq/order\_delay.go；internal/order/cancel.go CancelUnpaidOrder；internal/order/task.go RunOrderTimeoutCheck；initialize/cron.go}
-\end{frame}
 
-\begin{frame}{退款子状态机：状态推进与资金/库存回退分离}
-\keypoint{退款拆两步走：先在订单事务里推进状态机 + 写 outbox 事件，真正的"还库存 + 退钱"由事件消费者 SettleRefund 单事务原子落地。}
-\vspace{0.3em}
-\begin{center}
-\resizebox{!}{0.25\textheight}{%
-\begin{tikzpicture}[node distance=2.2cm]
-\node[node-state,node-state-alert] (refunding) {退款中\\Refunding};
-\node[node-state,node-state-alert, right=of refunding] (refunded) {已退款\\Refunded};
-\node[node-state,node-state-normal, below=1.1cm of refunding] (completed) {已完成\\Completed};
-\draw[arrow-alert] (refunding) -- node[above,font=\scriptsize]{运营同意} (refunded);
-\draw[arrow-alert] (refunding) -- node[right,font=\scriptsize]{运营驳回} (completed);
-\draw[arrow-alert] (completed.west) to[bend left=35] node[left,font=\scriptsize]{用户申请} (refunding.south west);
-\end{tikzpicture}}
-\end{center}
-\vspace{0.2em}
-\begin{itemize}\small
-\item \textbf{进入}：仅 \texttt{WaitShip / WaitReceive / Completed} 可发起退款（未付款走关单，不走退款）。
-\item \textbf{终态落地}（\texttt{SettleRefund} 单事务原子）：买家 credit / 卖家 debit（复式记账）+ \texttt{RollbackStock} 加回库存；退款额取实付口径 \texttt{FinalCents}，不重复退满减优惠。
-\item \textbf{幂等}：台账 \texttt{(order\_id, credit, refund)} 唯一索引 + 入账前存在性预检，重复投递只退一次。
-\end{itemize}
-\srcnote{internal/refund/service.go 发起校验 + SettleRefund 单事务原子落地}
-\end{frame}
 
-% =====================================================================
-\section{怎么读这套 deck：路线与角色}
-% =====================================================================
 
-\begin{frame}{阅读路线图：主干一条线，支线随用随查}
-\resizebox{0.95\textwidth}{!}{%
-\begin{tikzpicture}[node distance=6mm and 9mm,font=\scriptsize]
-  \node[node-box,node-ok] (d1) {01 鉴权};
-  \node[node-box,node-ok,right=of d1] (d2) {02 展示};
-  \node[node-box,node-ok,right=of d2] (d4) {04 下单};
-  \node[node-box,node-ok,right=of d4] (d5) {05 支付};
-  \node[node-box,node-ok,right=of d5] (d9) {09 生命周期};
-  \draw[arrow] (d1) -- (d2);
-  \draw[arrow] (d2) -- (d4);
-  \draw[arrow] (d4) -- (d5);
-  \draw[arrow] (d5) -- (d9);
-  % 支线
-  \node[node-box,below=12mm of d4] (d7) {07 库存};
-  \node[node-box,left=of d7] (d11) {11 一致性};
-  \node[node-box,right=of d7] (d8) {08/13 营销};
-  \node[node-box,right=of d8] (d10) {10 流量};
-  \draw[arrow-async] (d4) -- (d7);
-  \draw[arrow-async] (d4) to[out=-150,in=60] (d11);
-  \draw[arrow-async] (d4) to[out=-30,in=120] (d8);
-  \node[font=\tiny,cGray] at ($(d7)+(0,-1.0)$) {（下单为枢纽，需要深究时下钻到支线）};
-\end{tikzpicture}}
-\par\smallskip
-\keypoint{第一遍：沿绿色主干 01$\to$02$\to$04$\to$05$\to$09 走一遍，建立全局。\\
-第二遍：哪块想深究，从 04 下钻到 07 / 11 / 08 / 10。}
-\srcnote{各 deck 末页"配套 deck"指向相邻域}
-\end{frame}
 
-\begin{frame}{按角色取你最关心的几份}
-\begin{itemize}
-  \item \textbf{后端新人}：01 $\to$ 02 $\to$ 04，把"一个请求怎么从路由走到 DB"吃透。
-  \item \textbf{做交易的}：04 下单 + 05/06 支付 + 09 生命周期，这是钱货闭环。
-  \item \textbf{做营销的}：08 营销 + 13 满减引擎 + 14 拼团 + 15 预售，看预算与防刷。
-  \item \textbf{SRE / 架构}：07 库存 + 10 流量 + 11 一致性，三份是系统抗压的底座。
-  \item \textbf{面试备战}：每份末尾的 Q\&A 两页 + 本份"硬骨头 4 连"。
-\end{itemize}
-\vspace{1mm}
-\keypoint{不必从头读到尾。先用本份建立地图，再按你的角色挑 3$\sim$4 份深读，\\
-读完任意一份都能回到这张全景图定位自己在哪。}
-\srcnote{docs/slides/ 共 15 份 + 本总览；docs/blog/ 同主题深度补充}
-\end{frame}
 
 \begin{frame}{这套架构的一句话总结}
 \keypoint{\textbf{核心链路（扣库存 + 落单 + 收钱）必须稳如磐石，
@@ -919,101 +370,12 @@ return {1, ''}
 \srcnote{internal/order/service.go:63--178 OrderCreate 一函数浓缩全部原则}
 \end{frame}
 
-% =====================================================================
 \appendix
-% =====================================================================
 
-\begin{frame}{面试 Q\&A（1/2）}
-\small
-\textbf{Q1}：为什么库存预扣放 Redis 而不放 DB 事务里？\\
-\hspace{4mm}A：DB 行锁在高并发下排队、尾延迟爆炸；Redis 两桶 Lua 一次 RTT 原子完成，下单链路不被锁拖住。失败由 ReleaseReservation 补偿 + 对账兜底。
-\vspace{1mm}
 
-\textbf{Q2}：下单为什么要 outbox，不直接发 MQ？\\
-\hspace{4mm}A：直接发会有双写问题 —— 订单落库与消息投递不在一个事务，中间崩溃就丢事件。outbox 把事件写进同一个 DB 事务，再由 publisher 至少一次投递。
-\vspace{1mm}
 
-\textbf{Q3}：满减算挂了为什么不直接报错？\\
-\hspace{4mm}A：优惠是锦上添花，不是下单前提。SLO 承诺保护 happy path，所以算失败、预算耗尽都降级为无折扣，用户照样能成交。
-\end{frame}
 
-\begin{frame}{面试 Q\&A（2/2）}
-\small
-\textbf{Q4}：事务提交后才发 MQ 延迟关单，万一 MQ 挂了订单永远不关？\\
-\hspace{4mm}A：双保险。RabbitMQ 延迟队列（TTL+DLX）为主，DB Cron（每 5min 扫 WaitPay 超时单）兜底，MQ 不可用也能关单释放库存；两路共用幂等关单，重复触发只生效一次。
-\vspace{1mm}
 
-\textbf{Q5}：支付成功后库存是怎么真正减少的？\\
-\hspace{4mm}A：下单只 reserved（预占）；支付事务改完状态后同步 CommitReservation，把 reserved 真正消掉。未支付被关单则 ReleaseReservation 还回 available。
-\vspace{1mm}
 
-\textbf{Q6}：游标分页相比深分页到底强多少？\\
-\hspace{4mm}A：压测里订单列表游标+缓存 58,406 RPS / p95 5ms，旧版深分页 8.3 RPS / p95 15.95s —— 吞吐约 7,000$\times$、p95 约 3,200$\times$。
-\end{frame}
-
-\begin{frame}{压测数据汇总（k6，本地单机，order 表 $\sim$6M 行）}
-\centering
-\renewcommand{\arraystretch}{1.3}
-\begin{tabular}{@{}llrrr@{}}
-\toprule
-\textbf{场景} & \textbf{口径} & \textbf{RPS} & \textbf{p50} & \textbf{p95} \\
-\midrule
-幂等下单 & 同 Key 重放 & 50{,}319 & 0.50ms & 2.33ms \\
-订单列表（游标+缓存） & 新版 & 58{,}406 & 1.04ms & 5.0ms \\
-订单列表（旧版深分页） & OFFSET 2M & 8.3 & 10.5s & 15.95s \\
-商品详情（DB+PK） & 无缓存 & 62{,}226 & 0.73ms & 3.01ms \\
-Ping 基线 & 裸 gin & 64{,}254 & 0.91ms & 3.51ms \\
-\bottomrule
-\end{tabular}
-\vspace{0.6em}
-\begin{itemize}\small
-\item \textbf{幂等中间件}：50 VU 同一 \texttt{Idempotency-Key} 持续打 \texttt{/orders/create}，15s 累计 \textbf{755{,}033 次请求 $\to$ DB 实际只落 1 笔订单}。首单后 Lua 读 \texttt{done} 态缓存返回，成本等同读 Redis 单值。
-\item \textbf{游标分页 vs 深分页}：吞吐 \textbf{$\sim$7{,}000$\times$}、p95 \textbf{$\sim$3{,}200$\times$}。旧版每次 \texttt{COUNT(*)}+\texttt{OFFSET 2M} 扫全表；新版 \texttt{WHERE id<last\_id LIMIT 20} 走 PK 倒序。
-\end{itemize}
-\srcnote{stressTest/REPORT.md（p95 口径 = k6 http\_req\_duration 第 95 百分位）}
-\end{frame}
-
-\begin{frame}{面试 Q\&A（3/3）：一致性 · 熔断 · 检索}
-\small
-\textbf{Q7}：MySQL 主从读写分离下，读一致性怎么保证？\\
-\hspace{4mm}A：普通读走从库分摊负载；对一致性敏感的资金/库存路径全部在事务内 \texttt{FOR UPDATE}（\texttt{LockTwoUsersForUpdate} / \texttt{GetUserByIdForUpdate}），事务与行锁读由 dbresolver 强制路由到主库，绕开从库延迟。
-\vspace{1mm}
-
-\textbf{Q8}：熔断器半开态怎么探测下游恢复？\\
-\hspace{4mm}A：Open 超过 OpenTimeout（默认 10s）转半开，只放 HalfOpenMaxReq（默认 3）个探测；连续成功达阈值回 Closed，任一失败立刻回 Open。代际（generation）机制丢弃上一轮迟到回报，不误触发刚恢复的熔断器。
-\vspace{1mm}
-
-\textbf{Q9}：已有 ES，为什么还要 Milvus 向量召回？\\
-\hspace{4mm}A：ES 擅长关键词精确匹配，"显瘦的连衣裙"这类语义查询命中差；Milvus 走 embedding 语义召回，双路召回后加权融合（min-max 归一）。ES 挂了降级走纯向量，不让语义检索整体不可用。
-\end{frame}
-
-\begin{frame}{面试 Q\&A（4/4）：投递去重 · ID 防撞 · 资金对账}
-\small
-\textbf{Q10}：outbox 至少一次投递，下游怎么防重复消费？\\
-\hspace{4mm}A：不追求"恰好一次"，而是至少一次投递 + 消费端幂等吸收重复。落地手段是业务台账唯一索引——满减退预算 \texttt{promo\_release(order\_id)}、退款台账 \texttt{(ref\_order\_id, direction, biz\_type)}，重复投递撞键即幂等返回。
-\vspace{1mm}
-
-\textbf{Q11}：雪花 ID 多副本部署怎么防 ID 撞车？\\
-\hspace{4mm}A：每副本必须配 \texttt{SNOWFLAKE\_NODE\_ID}（或 \texttt{NODE\_ID}），范围 \texttt{[0,1023]}；启动强校验——未配置或越界直接 \texttt{Fatal} 拒绝启动，仅 \texttt{SNOWFLAKE\_ALLOW\_DEFAULT=true} 时退回 node 0（限本地开发）。
-\vspace{1mm}
-
-\textbf{Q12}：支付为什么要复式记账？解决什么对账问题？\\
-\hspace{4mm}A：余额密文落库不可对账；每次变动追加一条不可变明文流水，一次转移成对出现（买家 debit / 卖家 credit），恒等式 \texttt{SUM(debit)=SUM(credit)}。外部入口（Stripe/Web3）对手方记清算账户（user\_id=0），守恒不破，可逐笔追溯资金来龙去脉。
-\end{frame}
-
-\begin{frame}{代码位置一览}
-\begin{description}\setlength{\itemsep}{0.2mm}
-  \item[登录 / 鉴权]\srcnote{internal/user/service.go:82 UserLogin；pkg/utils/jwt/jwt.go:25 GenerateToken；middleware/jwt.go:16 AuthMiddleware}
-  \item[商品 / 购物车]\srcnote{internal/product/service.go:40 ProductShow；internal/cart/service.go:29 CartCreate}
-  \item[下单中枢]\srcnote{internal/order/service.go:63--178 OrderCreate（满减:110 Reserve · 117 Tx · 145 outbox · 159 补偿 · 172 延迟关单）}
-  \item[库存两桶]\srcnote{repository/cache/inventory.go:78 Reserve · 98 Commit · 113 Release}
-  \item[满减引擎]\srcnote{internal/promo/service.go:162 CalculateBestDiscount · 234 ApplyDiscountInTx}
-  \item[Outbox]\srcnote{internal/shared/outbox/repo.go:26 Insert · 44 FetchBatch · 53 MarkSent；initialize/outbox.go:15 InitOutboxPublisher}
-  \item[支付 / 履约]\srcnote{internal/payment/service.go:36 PayDown；internal/order/shipping.go:36 ShipOrder · 73 ConfirmReceive}
-  \item[状态机 / 关单]\srcnote{internal/order/state.go:21 orderStateTransitions；internal/order/cancel.go:19 CancelUnpaidOrder}
-\end{description}
-\vspace{1mm}
-\keypoint{配套：先读本份建立地图，再下钻 deck 04 / 05 / 07 / 09 / 11。}
-\end{frame}
 
 \end{document}
