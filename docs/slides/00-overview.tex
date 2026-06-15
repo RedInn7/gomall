@@ -107,28 +107,35 @@
 \end{frame}
 
 
-\begin{frame}{业务承诺：我们对外兜什么底（SLO）}
-  \keypoint{一个交易系统的可信度，不在于功能多，而在于敢把哪几条线写进合同——出了问题要赔的那种。gomall 把承诺分成 P0\textasciitilde P3 四档，资源向核心交易倾斜。}
-  \vspace{0.4em}
-  \begin{table}
-  \centering\small
+\begin{frame}[t]{业务承诺：我们对外兜什么底（SLO）}
+  \keypoint{一个交易系统的可信度，不在功能多，而在敢把哪几条线写进合同——出事要赔的那种。gomall 把承诺分成 P0\textasciitilde P3 四档，资源向核心交易倾斜。}
+  \vspace{0.2em}
+  {\centering\small
+  \renewcommand{\arraystretch}{1.08}
   \begin{tabular}{@{}llcc@{}}
   \toprule
   \textbf{等级} & \textbf{典型场景} & \textbf{可用率} & \textbf{p99 延迟} \\
   \midrule
   \textcolor{cBad}{\textbf{P0 核心交易}}  & 下单 / 支付       & \textbf{99.95\%} & < 500ms \\
   \textcolor{cAccent}{P1 核心读}          & 商品详情 / 订单列表 & 99.9\%  & < 200ms \\
-  \textcolor{cWarn}{P2 营销秒杀}          & 抢券 / 秒杀 / 红包  & 99\%    & < 200ms \\
-  \textcolor{cGray}{P3 信息类}            & 轮播 / 分类         & 99\%    & < 1s \\
+  \textcolor{cWarn}{P2 营销秒杀}          & 抢券 / 秒杀 / 红包  & 99.9\%  & < 200ms \\
+  \textcolor{cGray}{P3 信息类}            & 轮播 / 分类         & 99.5\%  & < 1s \\
   \bottomrule
-  \end{tabular}
-  \end{table}
+  \end{tabular}\par}
+  \vspace{0.25em}
+  \begin{columns}[T]
+    \column{0.5\textwidth}
+    \begin{itemize}\footnotesize
+      \item \textbf{钱货不丢}：支付与库存、流水落同一事务，崩了整笔回滚，绝不"扣了钱没货"。
+      \item \textbf{happy path 不被周边阻断}：优惠 / 搜索 / 通知挂了，下单支付照走。
+    \end{itemize}
+    \column{0.5\textwidth}
+    \begin{itemize}\footnotesize
+      \item \textbf{不能上游 429}：P0 靠缓存 + 削峰扛峰值，宁可下游慢。
+      \item \textbf{阶梯故意压}：每加 1 个 9 成本翻番；限流返业务码\textbf{不算宕机}，故 P2 也 99.9\%。
+    \end{itemize}
+  \end{columns}
   \vspace{0.3em}
-  \begin{itemize}\small
-    \item \textbf{钱货不丢}：支付与库存、资金流水落同一事务，崩了整笔回滚，绝不出现"扣了钱没货"。
-    \item \textbf{happy path 不被周边阻断}：优惠 / 搜索 / 通知挂了，下单支付照走。
-    \item \textbf{宁可下游慢、不能上游 429}：P0 接口（下单 / 支付）靠缓存 + 异步削峰扛峰值。
-  \end{itemize}
   \srcnote{README.md \S 业务承诺（SLO）}
 \end{frame}
 
