@@ -43,6 +43,13 @@ func NewRouter() *gin.Engine {
 	r.Use(sessions.Sessions("mysession", store))
 	r.StaticFS("/static", http.Dir("./static"))
 
+	// storefront：ATELIER 前端（Vite + React 构建产物），挂在 /app 下；
+	// base=/app/ 让产物内的资源引用正确解析，根路径重定向过去。
+	r.Static("/app", "./web/dist")
+	r.GET("/", func(c *gin.Context) {
+		c.Redirect(http.StatusFound, "/app/")
+	})
+
 	v1 := r.Group("api/v1")
 	v1.GET("ping", func(c *gin.Context) {
 		c.JSON(200, "success")
