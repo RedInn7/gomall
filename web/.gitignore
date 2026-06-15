@@ -1,0 +1,9 @@
+# 依赖（重装即可）
+node_modules
+
+# 构建产物 dist/ 故意提交：让后端 `go run` 无需 node 工具链即可直接 serve 前端。
+# 若改为 CI 构建，可在此忽略 dist 并在流水线里 npm run build。
+
+*.local
+.DS_Store
+npm-debug.log*
