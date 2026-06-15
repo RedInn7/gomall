@@ -470,8 +470,8 @@ return {1, ''}
     \column{0.55\textwidth}
       \textbf{链路怎么串起来}
       \begin{itemize}\small
-        \item \texttt{cmd/main.go} 引入 SkyWalking agent，自动织入出入站调用埋点。
-        \item track 中间件读请求头 \texttt{uber-trace-id}（Jaeger 透传格式）续上父 span；缺失或解析失败则降级开本地 span，绝不吞掉整条请求。
+        \item \textbf{两套并存}：\texttt{cmd/main.go} 匿名引入 \texttt{skywalking-go} agent（进程级旁路自动埋点，无业务侵入）+ \texttt{track.go} 的 \texttt{Jaeger()} 中间件（OpenTracing）。
+        \item 真正的\textbf{跨服务透传走 Jaeger()}：读请求头 \texttt{uber-trace-id} 续上父 span；缺失或解析失败则降级开本地 span，绝不吞掉整条请求。
         \item span 放进 context 往下传，DB/Redis/MQ 调用挂成子 span。
       \end{itemize}
     \column{0.45\textwidth}
