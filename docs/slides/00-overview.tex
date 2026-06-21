@@ -5,27 +5,6 @@
 \author{gomall · 业务侧 deck}
 \date{}
 
-% ============================================================
-%  根治竖向溢出：全局机制，不再逐页硬编码删字/调字号/缩图
-% ------------------------------------------------------------
-%  (1) 轻量全局样式——紧凑列表与 keypoint 内边距，先把"自然高度"压下来，
-%      让多数页根本不需要缩放、字号保持一致。
-%  (2) 自动适配兜底——所有内容页统一带 shrink（见下方各 \begin{frame}）。
-%      某页内容一旦超过可用高度，beamer 自动按比例把整页缩到刚好放下，
-%      绝不裁切；没超的页则原样不动。新增内容也自动生效，无需再手调。
-% ============================================================
-\renewcommand{\keypoint}[1]{%
-  \begin{tcolorbox}[colback=cMute,colframe=cMain,boxrule=0.5pt,arc=2pt,
-    top=1mm,bottom=1mm,left=2mm,right=2mm,boxsep=0.6mm]%
-  #1\end{tcolorbox}}
-\setlength{\parskip}{0pt}
-\makeatletter
-\def\@listi{\leftmargin\leftmargini \topsep 2pt \parsep 0pt \itemsep 2pt}
-\let\@listI\@listi
-\@listi
-\def\@listii{\leftmargin\leftmarginii \topsep 1pt \parsep 0pt \itemsep 1pt}
-\makeatother
-
 \begin{document}
 
 \maketitle

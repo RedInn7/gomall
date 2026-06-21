@@ -129,9 +129,23 @@
 \usepackage{appendixnumberbeamer}
 
 % ==== 页脚来源标注 ====
-\newcommand{\srcnote}[1]{{\color{cGray}\scriptsize\itshape #1}}
+% 按需求统一隐藏所有来源标注：一处重定义为空，全部 deck 的 \srcnote{...} 立即不再输出。
+% （调用保留在源码中便于日后查阅/恢复；要恢复显示，改回下面被注释掉的定义即可。）
+% \newcommand{\srcnote}[1]{{\color{cGray}\scriptsize\itshape #1}}
+\newcommand{\srcnote}[1]{}
 
-% 关键论点框
+% 关键论点框（收紧上下内边距，配合各 frame 的 [shrink] 减小自动缩放幅度）
 \newcommand{\keypoint}[1]{%
-  \begin{tcolorbox}[colback=cMute,colframe=cMain,boxrule=0.5pt,arc=2pt]%
+  \begin{tcolorbox}[colback=cMute,colframe=cMain,boxrule=0.5pt,arc=2pt,
+    top=1mm,bottom=1mm,left=2mm,right=2mm,boxsep=0.6mm]%
   #1\end{tcolorbox}}
+
+% ==== 全局竖向压缩：配合各 frame 的 [shrink]，先把内容自然高度压下来 ====
+% 多数页因此无需缩放、字号保持一致；仍超高的页由 shrink 自动缩入，绝不裁切。
+\setlength{\parskip}{0pt}
+\makeatletter
+\def\@listi{\leftmargin\leftmargini \topsep 2pt \parsep 0pt \itemsep 2pt}
+\let\@listI\@listi
+\@listi
+\def\@listii{\leftmargin\leftmarginii \topsep 1pt \parsep 0pt \itemsep 1pt}
+\makeatother
