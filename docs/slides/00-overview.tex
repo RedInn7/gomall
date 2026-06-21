@@ -1,21 +1,42 @@
 \input{preamble}
 
 \title{业务全景与端到端主线}
-\subtitle{gomall 一次购物的端到端全景 —— 从进门到收货怎么跑通 / 卡在哪}
+\subtitle{一次购物：从进门到收货怎么跑通、卡在哪}
 \author{gomall · 业务侧 deck}
 \date{}
+
+% ============================================================
+%  根治竖向溢出：全局机制，不再逐页硬编码删字/调字号/缩图
+% ------------------------------------------------------------
+%  (1) 轻量全局样式——紧凑列表与 keypoint 内边距，先把"自然高度"压下来，
+%      让多数页根本不需要缩放、字号保持一致。
+%  (2) 自动适配兜底——所有内容页统一带 shrink（见下方各 \begin{frame}）。
+%      某页内容一旦超过可用高度，beamer 自动按比例把整页缩到刚好放下，
+%      绝不裁切；没超的页则原样不动。新增内容也自动生效，无需再手调。
+% ============================================================
+\renewcommand{\keypoint}[1]{%
+  \begin{tcolorbox}[colback=cMute,colframe=cMain,boxrule=0.5pt,arc=2pt,
+    top=1mm,bottom=1mm,left=2mm,right=2mm,boxsep=0.6mm]%
+  #1\end{tcolorbox}}
+\setlength{\parskip}{0pt}
+\makeatletter
+\def\@listi{\leftmargin\leftmargini \topsep 2pt \parsep 0pt \itemsep 2pt}
+\let\@listI\@listi
+\@listi
+\def\@listii{\leftmargin\leftmarginii \topsep 1pt \parsep 0pt \itemsep 1pt}
+\makeatother
 
 \begin{document}
 
 \maketitle
 
-\begin{frame}{今日大纲}
+\begin{frame}[shrink]{今日大纲}
 \tableofcontents
 \end{frame}
 
 \section{业务全景：gomall 到底在做什么}
 
-\begin{frame}{gomall 是什么：一个讲清"为什么这么选"的电商后端}
+\begin{frame}[shrink]{gomall 是什么：一个讲清"为什么这么选"的电商后端}
 \keypoint{用 \textbf{Go + Gin} 写的电商后端，把一笔订单从\textbf{浏览 $\to$ 搜索 $\to$ 下单 $\to$ 支付 $\to$ 履约}的全链路跑通；再叠上优惠券 / 秒杀 / 红包 / 拼团 / 预售、Web3 支付、ES+Milvus 向量检索。}
 \vspace{0.3em}
 \begin{columns}[T]
@@ -40,7 +61,7 @@
 \srcnote{README.md \S 项目定位 / \S 系统架构；docs/slides/ 15 份域 deck + 本概览}
 \end{frame}
 
-\begin{frame}{先认人：一笔订单背后站着 5 个角色}
+\begin{frame}[shrink]{先认人：一笔订单背后站着 5 个角色}
 \begin{itemize}
   \item \textbf{C 端用户}：进门 $\to$ 逛 $\to$ 下单 $\to$ 收货。只关心\textbf{快、对、不丢}。
   \item \textbf{商家（Boss）}：订单是"我能不能发货"的唯一源头；货卖出去钱要到账。
@@ -54,7 +75,7 @@
 \srcnote{README.md \S 业务全景 / \S 业务承诺(SLO)}
 \end{frame}
 
-\begin{frame}{业务全景图：一次购物穿过的 8 个环节}
+\begin{frame}[shrink]{业务全景图：一次购物穿过的 8 个环节}
 \resizebox{0.97\textwidth}{!}{%
 \begin{tikzpicture}[node distance=7mm and 11mm,font=\scriptsize]
   \node[node-box,minimum width=20mm] (s1) {进门\\{\tiny\color{cAccent}登录/注册}};
@@ -81,7 +102,7 @@
 \end{frame}
 
 
-\begin{frame}[t]{哪里会出事：把"坑"标在主线上（只盯 happy path 时全看不见）}
+\begin{frame}[t,shrink]{哪里会出事：把"坑"标在主线上（只盯 happy path 时全看不见）}
 \vspace{0.3em}
 \begin{center}
 \scriptsize
@@ -93,7 +114,7 @@
 \midrule
 逛 / 详情 & 热点缓存集体失效、回源时击穿/穿透/雪崩 & DB 打挂 & Cache Aside+空值缓存 \\
 优惠 / 秒杀 & 券被脚本超领、预算被刷穿、库存卖超 & 营销亏钱 & 两桶库存 Lua+预算降级 \\
-下单 & \textbf{(1)} 超卖\ \ \textbf{(2)} 双写丢消息\ \ \textbf{(3)} 重试重复下单 & 钱货两失 & 防超卖+Outbox+幂等 \\
+下单 & \textbf{(1)} 超卖\ \ \textbf{(2)} 双写丢消息\ \ \textbf{(3)} 重试重复下单 & 钱货两失 & 防超卖+Outbox（用Outbox 来保证DB 和消息队列发消息的原子性）+幂等 \\
 支付 & 第三方重复回调、扣了钱没货、台账对不平 & 直接资损 & 同事务收钱+复式记账 \\
 履约 / 售后 & 并发改乱订单状态、同一笔退款退两次 & 状态错乱 & 状态机 \texttt{CanTransition} \\
 大促全局 & 零点洪峰打满连接池、下游挂了拖死自己 & 整站雪崩 & 限流+熔断+削峰 \\
@@ -101,13 +122,13 @@
 \end{tabular}
 \end{center}
 \vspace{0.5em}
-{\small \textbf{凡是碰钱、碰库存的地方都会翻车}——越靠近"下单—支付"代价越高，事务 / 原子性 / 资源都堆这段；边缘能力（搜索 / 优惠 / 通知）一律可降级，绝不反过来阻断 happy path。\par}
+{\small \textbf{凡是碰钱、碰库存的地方都会翻车}——越靠近"下单—支付"代价越高，事务 / 原子性 / 资源都堆这段；边缘能力（搜索 / 优惠 / 通知）一律可降级，绝不反过来阻断 happy path。支付作为离钱最近的业务线，只要出问题就是资损问题，就是事故\par}
 \vspace{0.4em}
 \srcnote{逐个拆解见"贯穿全局的硬骨头：超卖·一致·限流·降级"与"订单状态机"两节}
 \end{frame}
 
 
-\begin{frame}[t]{业务承诺：我们对外兜什么底（SLO）}
+\begin{frame}[t,shrink]{业务承诺：我们对外兜什么底（SLO）}
   \keypoint{一个交易系统的可信度，不在功能多，而在敢把哪几条线写进合同——出事要赔的那种。gomall 把承诺分成 P0\textasciitilde P3 四档，资源向核心交易倾斜。}
   \vspace{0.1em}
   {\centering\small
@@ -116,7 +137,7 @@
   \toprule
   \textbf{等级} & \textbf{典型场景} & \textbf{可用率} & \textbf{p99 延迟} \\
   \midrule
-  \textcolor{cBad}{\textbf{P0 核心交易}}  & 下单 / 支付       & \textbf{99.95\%} & < 500ms \\
+  \textcolor{cBad}{\textbf{P0 核心交易}}  & 下单 / 支付       & \textbf{99.999\%} & < 500ms \\
   \textcolor{cAccent}{P1 核心读}          & 商品详情 / 订单列表 & 99.9\%  & < 200ms \\
   \textcolor{cWarn}{P2 营销秒杀}          & 抢券 / 秒杀 / 红包  & 99.9\%  & < 200ms \\
   \textcolor{cGray}{P3 信息类}            & 轮播 / 分类         & 99.5\%  & < 1s \\
@@ -143,7 +164,7 @@
 
 \section{系统架构：分层拓扑与领域地图}
 
-\begin{frame}{gomall 整体架构：一条请求从客户端落到数据层}
+\begin{frame}[shrink]{gomall 整体架构：一条请求从客户端落到数据层}
 \resizebox{0.97\textwidth}{0.70\textheight}{%
 \begin{tikzpicture}[font=\scriptsize,node distance=3mm and 6mm]
   % --- 客户端层 ---
@@ -201,7 +222,7 @@
 
 
 
-\begin{frame}[t]{中间件洋葱模型：下单请求逐层穿过鉴权打到后端（真实顺序）}
+\begin{frame}[t,shrink]{中间件洋葱模型：下单请求逐层穿过鉴权打到后端（真实顺序）}
 \keypoint{中间件是\textbf{洋葱模型}：逐层 \texttt{c.Next()} 进内层、再原路返回出；任一层 \texttt{Abort} 就在那层折回，到不了业务。}
 \resizebox{0.97\textwidth}{0.36\textheight}{%
 \begin{tikzpicture}[font=\scriptsize]
@@ -228,13 +249,12 @@
   \draw[arrow-bad] ($(auth.south)+(0,-5.9)$) -- node[below,font=\tiny]{token 失效：HTTP 200+鉴权业务码} ($(u.south)+(0,-5.9)$);
 \end{tikzpicture}}
 \par\smallskip
-{\footnotesize 真实顺序：\textbf{限流(IP) $\to$ CORS $\to$ Jaeger $\to$ Session $\to$ JWT}；admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层、洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流在鉴权\textbf{之后}。}
-\par\smallskip
-{\centering\srcnote{routes/router.go:41--55 全局链；order/routes.go:12 下单叠 Idempotency；被拒一律 HTTP 200+业务码}\par}
+{\footnotesize 真实顺序：\textbf{限流(IP) $\to$ CORS（网关层次的防护） $\to$ Jaeger $\to$ Session $\to$ JWT}；admin 再叠 \texttt{RequireRole}、下单末端挂 \texttt{Idempotency}。限流在最外层、洪水在最便宜处被拒；按\textbf{用户}的秒杀滑窗限流在鉴权\textbf{之后}。}
+
 \end{frame}
 
 
-\begin{frame}{中间件链：顺序即设计（为什么是这个次序）}
+\begin{frame}[shrink]{中间件链：顺序即设计（为什么是这个次序）}
   \keypoint{顺序不是随手排的——每一环只在前一环放行后才有意义，错一步就是漏洞或浪费。下面按 \texttt{router.go} 真实注册顺序逐环讲。}
   \vspace{0.2em}
   \begin{center}
@@ -252,17 +272,17 @@
   \end{center}
   \begin{itemize}\footnotesize
     \item \textbf{限流·IP} \texttt{TokenBucket(100,200)}：放\textbf{最外层}——匿名洪水在最便宜处被拒，不浪费后面的解析；被拒 HTTP 200 + 限流业务码。
-    \item \textbf{JWT 鉴权} \texttt{AuthMiddleware()}：解 token 拿 user\_id，挂 \texttt{authed} 组；失败 HTTP 200 + 鉴权码（项目统一用 body status，不用 401）。
+    \item \textbf{JWT 鉴权} \texttt{AuthMiddleware()}：解 token 拿 user\_id）。
     \item \textbf{RBAC} \texttt{RequireRole("admin")}：登录之上叠角色校验，只护 admin 组——\textbf{必须先认证再鉴权}。
-    \item \textbf{熔断}：支付等路由对下游调用加熔断，连错 5 次 open 10s，快速失败不被垂死依赖拖垮。
-    \item \textbf{幂等} \texttt{Idempotency()}：\textbf{放最后}——确认要执行业务时才用 Redis 锁去重，避免给被拒请求白占幂等键。
+    \item \textbf{熔断}：支付等路由对下游调用加熔断，连错 5 次立刻熔断，确保不影响其他业务。
+    \item \textbf{幂等} \texttt{Idempotency()}：\textbf{放最后}——确认要执行业务时才用 Redis 锁去重，避免给被拒请求白占幂等键。任何写DB 的操作都需要执行幂等。
     \item \textbf{注}：按\textbf{用户}维度的秒杀滑窗限流在鉴权\textbf{之后}（要先知道是谁），全局按 IP 的令牌桶才放最前。
   \end{itemize}
   \srcnote{routes/router.go:41--55 全局链；middleware/\{ratelimit,jwt,rbac,circuitbreaker,idempotency\}.go}
 \end{frame}
 
-\begin{frame}{数据层选型与边界：一个 MySQL 为什么不够}
-  \keypoint{把全部活儿压给一个 MySQL，要么慢死、要么挂掉。正解按"访问形态"分流：强一致归 MySQL，高并发与检索归旁路，旁路挂了能退回 DB。}
+\begin{frame}[shrink]{数据层选型与边界：一个 MySQL 为什么不够}
+  \keypoint{把全部活儿压给一个 MySQL，要么慢死、要么挂掉。正解按"访问形态"分流：和钱有关的强一致归 MySQL，高并发与检索归旁路比如Redis 和ES，旁路挂了能退回 DB。}
   \vspace{0.2em}
   \begin{table}
   \centering\small
@@ -278,24 +298,21 @@
   \end{tabular}
   \end{table}
   \vspace{0.2em}
-  \begin{itemize}\small
-    \item \textbf{读写分离}：\texttt{dbresolver} 写走 Sources、读走 2 个 Replicas，\texttt{RandomPolicy} 负载均衡。
-    \item \textbf{搜索降级}：ES 不可用时落到 DB \texttt{name/info LIKE}；语义召回报错则退回纯向量——周边能力只增强体验，绝不阻断 happy path。
-  \end{itemize}
+
   \srcnote{repository/db/dao/init.go dbresolver；service/search/ 降级路径；internal/product/repo.go LIKE}
 \end{frame}
 
 \section{端到端主线：一次成功购物的"黄金路径"}
 
-\begin{frame}{黄金路径：7 跳，每一跳都可能掉链子}
+\begin{frame}[shrink]{黄金路径：7 跳，每一跳都可能掉链子}
 \begin{enumerate}
   \item \textbf{登录} —— 拿到 JWT，后续每个请求带着它过鉴权中间件。
   \item \textbf{看商品} —— 详情走 Cache Aside，热点不打穿 DB。
   \item \textbf{加购 / 选地址} —— 没地址下不了单，默认地址兜底。
   \item \textbf{下单} —— 算优惠 $\to$ 预扣库存 $\to$ 一个事务落订单+事件。
   \item \textbf{支付} —— 扣余额 + 改状态 + 真正消库存，同事务发"已支付"事件。
-  \item \textbf{发货 / 收货} —— 状态机推进，每一步只允许合法迁移。
-  \item \textbf{结清} —— 订单 Completed；中途不付钱则 15 分钟自动关单。
+  \item \textbf{发货 / 收货} —— 状态机推进，每一步只允许合法迁移。（有事先定义的订单状态机，后面会讲到）
+  \item \textbf{结清} —— 订单 Completed；中途不付钱则 15 分钟自动关单。一般使用CRON 脚本去DB 里面关单。
 \end{enumerate}
 \vspace{1mm}
 \keypoint{这条线横跨 user / product / cart / promo / order / inventory / payment 七个包，\\
@@ -306,7 +323,7 @@
 
 
 
-\begin{frame}{看商品：Cache Aside 读路径 + 更新时延迟双删}
+\begin{frame}[shrink]{看商品：Cache Aside 读路径 + 更新时延迟双删}
 \vspace{0.3em}
 \begin{center}
 \resizebox{!}{0.66\textheight}{%
@@ -334,8 +351,8 @@
 {\centering\srcnote{internal/product/service.go:41 ProductShow（回源 + 写回 + 更新双删）；repository/cache/product.go GetProductDetail / SetProductDetail / DoubleDeleteAsync}\par}
 \end{frame}
 
-\begin{frame}{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
-\keypoint{三段式：\textbf{事务外}算满减/预扣库存（可降级）$\to$ \textbf{一个事务}写单+扣预算+outbox $\to$ \textbf{事务后}异步投 MQ；失败则 \texttt{ReleaseReservation} 退预扣。}
+\begin{frame}[shrink]{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
+\keypoint{三段式：\textbf{事务外}算满减/预扣库存（可降级），去Redis 扣减库存。$\to$ \textbf{一个事务}写单+扣预算+outbox，保证了 ACID 一致性 $\to$ \textbf{事务后}异步投 MQ；失败则 \texttt{ReleaseReservation} 退预扣。第二阶段失败则释放Redis 里面的库存}
 \vspace{0.2em}
 \begin{center}
 \resizebox{!}{0.54\textheight}{%
@@ -361,7 +378,7 @@
 \end{frame}
 
 
-\begin{frame}{支付这一跳：钱和库存在这里才真正落定}
+\begin{frame}[shrink]{支付这一跳：钱和库存在这里才真正落定}
 \begin{itemize}
   \item 下单时库存只是 \textbf{reserved（预占）}，钱还没动 —— 订单状态 \texttt{WaitPay}。
   \item 支付成功才在\textbf{一个事务里}：扣用户余额 $\to$ 加商家余额 $\to$ 改状态 \texttt{WaitShip} $\to$ 写 \texttt{order.paid} 事件。
@@ -380,7 +397,7 @@
 \end{frame}
 
 
-\begin{frame}[t]{端到端时序：支付这一跳的内部（钱·库存·状态·事件 一个事务落定）}
+\begin{frame}[t,shrink]{端到端时序：支付这一跳的内部（钱·库存·状态·事件 一个事务落定）}
 \begin{center}
 \resizebox{!}{0.48\textheight}{%
 \begin{sequencediagram}
@@ -413,7 +430,7 @@
 
 \section{贯穿全局的硬骨头：超卖·一致·限流·降级·可观测}
 
-\begin{frame}[fragile]{硬骨头 1：库存防超卖 —— 为什么不用 \texttt{UPDATE WHERE stock>0}}
+\begin{frame}[fragile,shrink]{硬骨头 1：库存防超卖 —— 为什么不用 \texttt{UPDATE WHERE stock>0}}
 \begin{itemize}
   \item 高并发下行锁排队 + 尾延迟爆炸；下单链路最怕在事务里等锁。
   \item gomall 把库存搬到 Redis，用 \textbf{两个桶}：\texttt{available}（可卖）/ \texttt{reserved}（已占）。
@@ -433,7 +450,7 @@ return 1
 \srcnote{repository/cache/inventory.go:32 reserveScript · :78 ReserveStock 封装 · :98/:113 Commit/Release}
 \end{frame}
 
-\begin{frame}{硬骨头 2：Outbox —— 解决"订单存了但消息丢了"}
+\begin{frame}[shrink]{硬骨头 2：Outbox —— 解决"订单存了但消息丢了"}
 \textbf{双写问题}：先 \texttt{INSERT order} 再 \texttt{publish MQ}，两个动作不在一个事务里。\\
 进程在中间崩 = 订单有了、下游（搜索/统计/履约）永远收不到通知。
 \vspace{1mm}
@@ -457,7 +474,7 @@ return 1
 
 
 
-\begin{frame}{硬骨头 3：优雅降级 —— 核心稳如磐石，边缘随时可弃}
+\begin{frame}[shrink]{硬骨头 3：优雅降级 —— 核心稳如磐石，边缘随时可弃}
 \begin{tabular}{@{}lll@{}}
 \toprule
 能力 & 挂了会怎样 & gomall 的选择 \\
@@ -474,7 +491,7 @@ ES / Milvus & 搜索退化 & 退回 \textbf{DB LIKE} 路径 \\
 \srcnote{internal/order/service.go:78 满减降级 · :126 预算耗尽降级；cmd/main.go:69--102 ES/Milvus 静默跳过}
 \end{frame}
 
-\begin{frame}[fragile]{幂等中间件：755K 次重放只成一单}
+\begin{frame}[fragile,shrink]{幂等中间件：755K 次重放只成一单}
   \keypoint{业务痛点：用户手抖狂点"提交订单"、客户端超时自动重试、弱网下 App 补发请求——同一笔下单不能变成三笔。}
   \begin{columns}[T]
     \column{0.43\textwidth}
@@ -484,7 +501,8 @@ ES / Milvus & 搜索退化 & 退回 \textbf{DB LIKE} 路径 \\
         \item \texttt{processing}：首单执行中，后到一律挡回
         \item \texttt{done}：已完成，缓存响应直接回放
       \end{itemize}
-      一段 Lua 单次 RTT 原子完成"读态 + 抢锁"。
+      一段 Lua 单次 RTT 原子完成"读态 + 抢锁"。 压测实证：同 \texttt{Idempotency-Key}、50 VU、15s 累计 \textbf{755{,}033} 次请求 $\to$ DB 中\textbf{恰好 1 笔订单}；50K RPS、p95 2.33ms。
+      
     \column{0.57\textwidth}
 \begin{lstlisting}[language=LuaRedis,caption={acquire：init 到 processing 原子推进}]
 local v = redis.call('HGET', KEYS[1], 'state')
@@ -498,15 +516,14 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
 return {1, ''}
 \end{lstlisting}
   \end{columns}
-  \keypoint{压测实证：同 \texttt{Idempotency-Key}、50 VU、15s 累计 \textbf{755{,}033} 次请求 $\to$ DB 中\textbf{恰好 1 笔订单}；50K RPS、p95 2.33ms。}
-  \srcnote{repository/cache/idempotency.go acquireScript；middleware/idempotency.go；stressTest/REPORT.md \S 幂等中间件}
+ 
 \end{frame}
 
 
 
 
 
-\begin{frame}{限流挡爬虫 + 熔断护下游}
+\begin{frame}[shrink]{限流挡爬虫 + 熔断护下游}
   \keypoint{两道闸门：令牌桶在入口按 IP 限速，挡住脚本刷接口；熔断器在出口监控下游，下游连续报错就快速失败，不让请求堆在垂死的依赖上拖垮自己。}
   \begin{columns}[T]
     \column{0.44\textwidth}
@@ -514,7 +531,7 @@ return {1, ''}
       \begin{itemize}\small
         \item 全局 \texttt{TokenBucket(100, 200)}：每 IP 每秒补 100 个令牌，桶容量 200（允许突发）。
         \item 取不到令牌 $\to$ 直接 \texttt{Abort}，返回"请求过于频繁"。
-        \item 后台 janitor 周期回收 10 分钟无访问的 IP 条目，map 有界，防海量 IP 撑爆内存。
+        \item 后台 janitor 周期回收 10 分钟无访问的 IP 条目，map 有界，防海量 IP 撑爆内存。面试考过这个题
       \end{itemize}
     \column{0.56\textwidth}
       \textbf{熔断器三态}
@@ -531,11 +548,10 @@ return {1, ''}
       \end{tikzpicture}}
   \end{columns}
   \vspace{1mm}
-  \keypoint{细节：半开探测带"代际"令牌，上一轮 Open 期的迟到回报会因代际不符被忽略，避免误触发刚恢复 Closed 的熔断器。被限流/被熔断 HTTP 仍是 200，用 status 字段区分。}
-  \srcnote{middleware/ratelimit.go 令牌桶 + janitor；middleware/circuitbreaker.go 三态 + generation 代际}
+
 \end{frame}
 
-\begin{frame}{削峰：下单先拿 ticket，洪峰摊到 MQ}
+\begin{frame}[shrink]{削峰：下单先拿 ticket，洪峰摊到 MQ}
   \keypoint{业务背景：大促零点瞬时洪峰，若每个请求都同步写库，DB 连接池秒满。改成"先预扣库存 + 投 MQ 拿 ticket 秒回"，后台慢慢消费落单，把尖峰摊平成平稳的消费速率。}
   \resizebox{0.8\textwidth}{0.44\textheight}{%
   \begin{sequencediagram}
@@ -557,7 +573,7 @@ return {1, ''}
   \srcnote{internal/order/async.go OrderEnqueue；internal/order/consumer.go HandleAsyncOrderTask；repository/rabbitmq/order\_async.go}
 \end{frame}
 
-\begin{frame}{可观测性：一次下单串成一条 trace}
+\begin{frame}[shrink]{可观测性：一次下单串成一条 trace}
   \keypoint{下单跨了网关、订单、库存、MQ、DB 多个环节。出问题时光看单机日志拼不出全貌——链路追踪给每次请求发一个 traceId，沿调用一路透传，把散落的 span 串成一条完整时间线。}
   \begin{columns}[T]
     \column{0.55\textwidth}
@@ -590,7 +606,7 @@ return {1, ''}
 
 \section{订单状态机：把 7 跳串成一条可查的线}
 
-\begin{frame}{订单不是一个布尔值，是一台状态机}
+\begin{frame}[shrink]{订单不是一个布尔值，是一台状态机}
 \resizebox{0.95\textwidth}{!}{%
 \begin{tikzpicture}[node distance=9mm and 13mm,font=\scriptsize]
   \node[node-state,node-state-normal] (wp) {待付款};
@@ -620,7 +636,7 @@ return {1, ''}
 
 
 
-\begin{frame}{这套架构的一句话总结}
+\begin{frame}[shrink]{这套架构的一句话总结}
 \keypoint{\textbf{核心链路（扣库存 + 落单 + 收钱）必须稳如磐石，
 周边能力（优惠 / 通知 / 搜索 / 关单）全部可降级。}}
 \vspace{3mm}
