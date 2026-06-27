@@ -33,3 +33,6 @@ stressTest/config.json
 
 # macOS
 .DS_Store
+
+# AI 指令文件，不入公开仓库（保留在本地）
+CLAUDE.md
