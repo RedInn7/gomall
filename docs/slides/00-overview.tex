@@ -15,7 +15,8 @@
 
 \section{业务全景：gomall 到底在做什么}
 
-\begin{frame}[shrink]{gomall 是什么：一个讲清"为什么这么选"的电商后端}
+% [shrink=N] 强制缩放：本帧用 columns，bare [shrink] 测不到列内溢出（详见 preamble 说明），故显式给缩放下限
+\begin{frame}[shrink=12]{gomall 是什么：一个讲清"为什么这么选"的电商后端}
 \keypoint{用 \textbf{Go + Gin} 写的电商后端，把一笔订单从\textbf{浏览 $\to$ 搜索 $\to$ 下单 $\to$ 支付 $\to$ 履约}的全链路跑通；再叠上优惠券 / 秒杀 / 红包 / 拼团 / 预售、Web3 支付、ES+Milvus 向量检索。}
 \vspace{0.3em}
 \begin{columns}[T]
@@ -81,7 +82,8 @@
 \end{frame}
 
 
-\begin{frame}[t,shrink]{哪里会出事：把"坑"标在主线上（只盯 happy path 时全看不见）}
+% [shrink=N] 强制缩放：底部结论段贴页脚，显式给缩放下限抬离页码
+\begin{frame}[t,shrink=8]{哪里会出事：把"坑"标在主线上（只盯 happy path 时全看不见）}
 \vspace{0.3em}
 \begin{center}
 \scriptsize
