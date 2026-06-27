@@ -142,6 +142,13 @@
 
 % ==== 全局竖向压缩：配合各 frame 的 [shrink]，先把内容自然高度压下来 ====
 % 多数页因此无需缩放、字号保持一致；仍超高的页由 shrink 自动缩入，绝不裁切。
+%
+% 【已知机制局限 —— 务必看】bare [shrink]（即 shrink=0，仅在测到溢出时才缩）只测量
+% frame 主竖直盒。当一帧用 \begin{columns} 且较高那栏内容溢出时，beamer 不会把列内
+% 溢出计入测量，于是 [shrink] 误判"装得下"而不触发，底部内容被裁（实测：调小
+% \beamer@frametextheight / footline / \textheight 预算均无效，因为问题不在预算）。
+% 对策：含 columns 的密集帧改用显式 [shrink=N]（强制把含 columns 的整个 body 一起按
+% 比例缩，绕开测量缺陷）。N 取 8~12 即可，稀疏帧保持 bare [shrink] 不受影响、字号不变。
 \setlength{\parskip}{0pt}
 \makeatletter
 \def\@listi{\leftmargin\leftmargini \topsep 2pt \parsep 0pt \itemsep 2pt}
