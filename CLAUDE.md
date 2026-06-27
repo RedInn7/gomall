@@ -5,3 +5,19 @@
 不要有太多的数学
 
 这个项目的slide 至少得50页吧
+
+## Agent skills
+
+（由 `/setup-matt-pocock-skills` 生成；配置 Matt Pocock 工程类 skill 在本仓库的运行方式。）
+
+### Issue tracker
+
+issue 存放在 GitHub Issues（仓库 RedInn7/gomall），`to-issues`/`triage`/`to-prd` 用 `gh` CLI 读写；外部 PR **不**纳入 triage 队列。详见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+triage 用 5 个默认标签：`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`。详见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单 context 布局：根目录一份 `CONTEXT.md` + `docs/adr/`（按需由 `/domain-modeling` 惰性创建）。详见 `docs/agents/domain.md`。
