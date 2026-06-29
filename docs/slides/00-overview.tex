@@ -592,26 +592,32 @@ return {1, ''}
 
 \begin{frame}[shrink]{订单不是一个布尔值，是一台状态机}
 \resizebox{0.95\textwidth}{!}{%
-\begin{tikzpicture}[node distance=9mm and 13mm,font=\scriptsize]
+\begin{tikzpicture}[node distance=9mm and 11mm,font=\scriptsize]
   \node[node-state,node-state-normal] (wp) {待付款};
-  \node[node-state,node-state-normal,right=of wp] (ws) {待发货};
+  \node[node-state,draw=cAccent,dashed,fill=cAccent!8,right=of wp] (oh) {OnHold};
+  \node[node-state,node-state-normal,right=of oh] (ws) {待发货};
   \node[node-state,node-state-normal,right=of ws] (wr) {待收货};
   \node[node-state,node-state-normal,right=of wr] (cp) {已完成};
   \node[node-state,node-state-transition,below=of wp] (cl) {已关闭};
   \node[node-state,node-state-alert,below=of wr] (rf) {退款中};
   \node[node-state,node-state-transition,right=of rf] (rd) {已退款};
-  \draw[arrow] (wp) -- node[above,font=\tiny]{支付} (ws);
+  \draw[-{Stealth[length=2mm]},thick,dashed,draw=cAccent] (wp) -- node[above,font=\tiny]{支付} (oh);
+  \draw[-{Stealth[length=2mm]},thick,dashed,draw=cAccent] (oh) -- node[above,font=\tiny]{1h 风控缓冲} (ws);
   \draw[arrow] (ws) -- node[above,font=\tiny]{发货} (wr);
   \draw[arrow] (wr) -- node[above,font=\tiny]{收货} (cp);
   \draw[arrow-bad] (wp) -- node[right,font=\tiny]{15min 未付} (cl);
   \draw[arrow-alert] (wr) -- node[right,font=\tiny]{申请退款} (rf);
-  \draw[arrow-alert] (cp) to[out=-90,in=0] (rf);
+  \draw[arrow-alert] (cp) to[out=-90,in=0] node[right,pos=0.25,font=\tiny]{售后退款} (rf);
   \draw[arrow] (rf) -- node[above,font=\tiny]{同意} (rd);
 \end{tikzpicture}}
 \par\smallskip
 \keypoint{每一次状态变更都走 \texttt{CanTransition} 校验，非法迁移直接报错 ——\\
 "已完成"的订单不可能跳回"待付款"，客服查到的状态永远自洽。}
-\srcnote{consts/order.go 状态常量；internal/order/state.go:21 orderStateTransitions 转换表}
+\begin{itemize}\setlength\itemsep{1pt}
+  \item \textbf{真正的终态只有「已关闭 / 已退款」}；「已完成」\textbf{不是}终态 —— 售后期内仍有 \texttt{已完成 $\to$ 退款中} 这条边（7 天无理由 / 质量问题）。
+  \item 虚线 \texttt{OnHold} = 支付后风控 / 冷静缓冲（\textbf{设计示意}）：当前实现为「待付款」支付成功直接 $\to$「待发货」。
+\end{itemize}
+\srcnote{consts/order.go 状态常量；internal/order/state.go:21 orderStateTransitions 转换表（现行 7 态，OnHold 为设计示意未落地）}
 \end{frame}
 
 
