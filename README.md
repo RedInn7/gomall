@@ -299,7 +299,7 @@ func tryInitES(ctx context.Context) {
 
 | 能力 | 关键代码 |
 |------|---------|
-| Escrow 智能合约（Solidity ≥ 0.8.20） | `contracts/Escrow.sol` |
+| Escrow 智能合约（Solidity ≥ 0.8.20） | `pkg/web3/contracts/Escrow.sol` |
 | EIP-191 personal_sign 验签 + nonce 防重放 | `pkg/web3/signature/verify.go` · `repository/cache/web3.go` |
 | EVM PaymentConfirmed event 链上监听（catch-up + last_block 持久化 + reorg 幂等） | `service/web3/listener.go` |
 | 钱包签名支付 API + 链下 → 链上对账 | `internal/payment/service_crypto.go` · `internal/payment/handler_crypto.go` |

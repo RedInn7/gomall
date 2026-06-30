@@ -39,7 +39,7 @@
 
 ```bash
 # 单合约编译，产物落到 build/
-solc --abi --bin --optimize --overwrite contracts/Escrow.sol -o build/
+solc --abi --bin --optimize --overwrite pkg/web3/contracts/Escrow.sol -o build/
 ```
 
 产物：
