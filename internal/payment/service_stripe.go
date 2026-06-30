@@ -19,13 +19,10 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
-	"github.com/RedInn7/gomall/internal/product"
-	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/service/events"
 )
 
 // Stripe 配置统一走环境变量（与 Web3 listener 读 WEB3_* 的方式一致），密钥不落 yaml。
@@ -119,12 +116,8 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 		return nil, errors.New("订单状态非未支付，无法发起支付")
 	}
 
-	// 实付口径与钱包路径对齐：命中促销(PromoRuleID!=0)即以折后实付 FinalCents 为准。
-	// 不能用 FinalCents>0 判：满减全额抵扣到 0 时 FinalCents==0 是合法实付，用 >0 会误回退折前全价多扣。
-	payable := order.Money * int64(order.Num)
-	if order.PromoRuleID != 0 {
-		payable = order.FinalCents
-	}
+	// 实付口径统一走 orderPayableCents（命中促销取折后 FinalCents），与钱包 / Web3 路径一致。
+	payable := orderPayableCents(order)
 	if payable <= 0 {
 		return nil, errors.New("订单应付金额非法")
 	}
@@ -274,17 +267,12 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 			return nil
 		}
 
-		productID := order.ProductID
-		num := order.Num
 		bossID := order.BossID
-		paidProductID = productID
-		paidNum = num
+		paidProductID = order.ProductID
+		paidNum = order.Num
 
-		// 实付口径与钱包路径对齐：命中促销以折后实付 FinalCents 为准（不用 FinalCents>0 判，防全额抵扣误回退）。
-		payable := order.Money * int64(num)
-		if order.PromoRuleID != 0 {
-			payable = order.FinalCents
-		}
+		// 实付口径统一走 orderPayableCents（命中促销取折后 FinalCents），与钱包 / Web3 路径一致。
+		payable := orderPayableCents(order)
 
 		// 结算前断言会话实付金额 / 币种与订单应付完全一致：签名只证明「来自 Stripe」，
 		// 不保证「金额对得上订单」。币种大小写无关比较（Stripe 回传小写，建会话也用小写）。
@@ -329,67 +317,8 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 			return err
 		}
 
-		// 原子扣减库存（条件 UPDATE 防超卖）。
-		prod, err := product.NewProductDaoByDB(tx).GetProductById(productID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		ok, err := product.NewProductDaoWithDB(tx).DeductStock(productID, num)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		if !ok {
-			return errors.New("存在超卖问题")
-		}
-
-		// 订单状态：WaitPay 守卫塞进 WHERE，杜绝重复支付。
-		paidOK, err := orderpkg.NewOrderDaoByDB(tx).MarkOrderPaidWithCheck(order.ID, userID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		if !paidOK {
-			return errors.New("订单状态已变更，无法重复支付")
-		}
-
-		// 商品归属转移给买家（与钱包路径一致）。
-		buyer, err := userDao.GetUserById(userID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		productUser := product.Product{
-			Name:          prod.Name,
-			CategoryID:    prod.CategoryID,
-			Title:         prod.Title,
-			Info:          prod.Info,
-			ImgPath:       prod.ImgPath,
-			Price:         prod.Price,
-			DiscountPrice: prod.DiscountPrice,
-			Num:           num,
-			OnSale:        false,
-			BossID:        userID,
-			BossName:      buyer.UserName,
-			BossAvatar:    buyer.Avatar,
-		}
-		if err = product.NewProductDaoByDB(tx).CreateProduct(&productUser); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-
-		// outbox：order.paid，投递交给 publisher 异步处理。
-		return outbox.NewOutboxDaoByDB(tx).Insert(
-			"order", "OrderPaid", "order.paid", order.ID,
-			events.OrderPaid{
-				OrderID:   order.ID,
-				OrderNum:  order.OrderNum,
-				UserID:    userID,
-				ProductID: productID,
-				Num:       num,
-			},
-		)
+		// 资金已入账，余下"扣库存 → 标记已付 → 商品归属转移 → outbox order.paid"走三条渠道共享尾段。
+		return finishOrderSettlementTx(tx, order)
 	})
 	if err != nil {
 		log.LogrusObj.Errorf("stripe settle order=%d failed: %v", orderID, err)
@@ -397,10 +326,6 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 	}
 
 	// TX 已把 product.Num 真正扣减；同步把 Redis reserved 桶减掉。
-	if paidProductID > 0 && paidNum > 0 {
-		if cErr := cache.CommitReservation(ctx, paidProductID, int64(paidNum)); cErr != nil {
-			log.LogrusObj.Errorf("commit reservation failed product=%d num=%d err=%v", paidProductID, paidNum, cErr)
-		}
-	}
+	commitReservationBestEffort(ctx, paidProductID, paidNum)
 	return nil
 }
