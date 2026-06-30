@@ -37,7 +37,7 @@
 
 | Feature | 状态 | 关键代码 | 配套 doc |
 |---------|------|----------|---------|
-| **Escrow 合约 (Solidity)** | 🚧 | PR `feat/web3-escrow` (`contracts/Escrow.sol` + `pkg/web3/escrow/`) | blog 08 |
+| **Escrow 合约 (Solidity)** | 🚧 | PR `feat/web3-escrow` (`pkg/web3/contracts/Escrow.sol` + `pkg/web3/escrow/`) | blog 08 |
 | **EVM 链上事件监听** | 🚧 | PR `feat/web3-listener` (`service/web3/listener.go`) | blog 09 |
 | **钱包签名验证 (EIP-191)** | 🚧 | PR `feat/web3-paydown` (`pkg/web3/signature/`) | blog 09 |
 | 多签 / DAO 仲裁 | ❌ | — | 路线图 |
