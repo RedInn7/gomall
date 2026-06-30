@@ -16,12 +16,9 @@ import (
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
-	"github.com/RedInn7/gomall/internal/product"
-	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
-	"github.com/RedInn7/gomall/service/events"
 )
 
 // 链上支付代币与计价配置走环境变量（与 WEB3_* 一致）。
@@ -187,17 +184,12 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 			return nil
 		}
 
-		num := order.Num
 		bossID := order.BossID
-		buyerID := order.UserID
-		productID := order.ProductID
-		paidProductID = productID
-		paidNum = num
+		paidProductID = order.ProductID
+		paidNum = order.Num
 
-		payable := order.Money * int64(num)
-		if order.PromoRuleID != 0 {
-			payable = order.FinalCents
-		}
+		// 实付口径统一走 orderPayableCents（命中促销取折后 FinalCents），与余额 / Stripe 路径一致。
+		payable := orderPayableCents(order)
 
 		// 校验链上金额覆盖订单应付（按所选代币精度换算），不足直接拒绝、不结算。
 		if err := verifyOnchainAmount(payable, onchainAmount); err != nil {
@@ -237,74 +229,15 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 			return err
 		}
 
-		prod, err := product.NewProductDaoByDB(tx).GetProductById(productID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		ok, err := product.NewProductDaoWithDB(tx).DeductStock(productID, num)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		if !ok {
-			return errors.New("存在超卖问题")
-		}
-
-		paidOK, err := orderpkg.NewOrderDaoByDB(tx).MarkOrderPaidWithCheck(order.ID, buyerID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		if !paidOK {
-			return errors.New("订单状态已变更，无法重复支付")
-		}
-
-		buyer, err := userDao.GetUserById(buyerID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		productUser := product.Product{
-			Name:          prod.Name,
-			CategoryID:    prod.CategoryID,
-			Title:         prod.Title,
-			Info:          prod.Info,
-			ImgPath:       prod.ImgPath,
-			Price:         prod.Price,
-			DiscountPrice: prod.DiscountPrice,
-			Num:           num,
-			OnSale:        false,
-			BossID:        buyerID,
-			BossName:      buyer.UserName,
-			BossAvatar:    buyer.Avatar,
-		}
-		if err = product.NewProductDaoByDB(tx).CreateProduct(&productUser); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-
-		return outbox.NewOutboxDaoByDB(tx).Insert(
-			"order", "OrderPaid", "order.paid", order.ID,
-			events.OrderPaid{
-				OrderID:   order.ID,
-				OrderNum:  order.OrderNum,
-				UserID:    buyerID,
-				ProductID: productID,
-				Num:       num,
-			},
-		)
+		// 资金已入账，余下"扣库存 → 标记已付 → 商品归属转移 → outbox order.paid"走三条渠道共享尾段。
+		return finishOrderSettlementTx(tx, order)
 	})
 	if err != nil {
 		log.LogrusObj.Errorf("web3 settle order=%d failed: %v", orderID, err)
 		return err
 	}
 
-	if paidProductID > 0 && paidNum > 0 {
-		if cErr := cache.CommitReservation(ctx, paidProductID, int64(paidNum)); cErr != nil {
-			log.LogrusObj.Errorf("commit reservation failed product=%d num=%d err=%v", paidProductID, paidNum, cErr)
-		}
-	}
+	commitReservationBestEffort(ctx, paidProductID, paidNum)
 	// 结算成功后清掉 Redis pending 占位（best-effort）。
 	if delErr := cache.DelWeb3Pending(ctx, orderID); delErr != nil {
 		log.LogrusObj.Warnf("del web3 pending placeholder order=%d err=%v", orderID, delErr)

@@ -125,14 +125,8 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *CryptoPaydown
 
 	// 3) 同一事务里写 outbox web3.payment.pending，保证消息一定与业务校验“同生共死”
 	walletAddr := web3sig.NormalizeAddress(req.WalletAddr)
-	// 实付口径与余额支付路径保持一致：命中满减时以折后实付 FinalCents 为准，否则单价 * 件数。
-	// 一律用 order.Money*Num（折前价）会把满减优惠吞掉，链上据此向买家多扣。
-	// 判据用 PromoRuleID（与下单侧一致的命中口径），不能用 FinalCents > 0：
-	// 满减立减到 0 / 100% 折扣时 FinalCents == 0 是合法实付，误判为未命中会回退全价。
-	totalAmount := order.Money * int64(order.Num)
-	if order.PromoRuleID != 0 {
-		totalAmount = order.FinalCents
-	}
+	// 实付口径统一走 orderPayableCents（命中促销取折后 FinalCents），与余额 / Stripe 路径一致。
+	totalAmount := orderPayableCents(order)
 	err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "Web3PaymentPending", "web3.payment.pending", order.ID,
