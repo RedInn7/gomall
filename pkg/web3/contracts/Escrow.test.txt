@@ -1,6 +1,6 @@
 Escrow 预期行为清单（无 solc 环境下作为人工验收用）
 
-合约文件: contracts/Escrow.sol
+合约文件: pkg/web3/contracts/Escrow.sol
 
 ================================================================
 A. 部署 / 构造器
