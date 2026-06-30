@@ -1,4 +1,4 @@
-// Package escrow 提供 contracts/Escrow.sol 的 Go 端绑定占位实现。
+// Package escrow 提供 pkg/web3/contracts/Escrow.sol 的 Go 端绑定占位实现。
 //
 // 当前仓库默认不引入 github.com/ethereum/go-ethereum（避免一个 100MB+ 的依赖
 // 进入业务模块），所以本文件只导出以下两类内容：
@@ -7,7 +7,7 @@
 //  2. 接口契约：EscrowCaller / EscrowTransactor / EscrowFilterer，描述真正
 //     的 abigen 产物应当满足的形状，供后续接 EVM listener 时按此接口实现
 //
-// 当 web3 模块正式上线、需要真正调用合约时，按 contracts/README.md 的命令
+// 当 web3 模块正式上线、需要真正调用合约时，按 pkg/web3/contracts/README.md 的命令
 // 重新生成本文件即可覆盖。
 //
 //go:generate abigen --abi escrow.abi.json --pkg escrow --type Escrow --out escrow.gen.go
@@ -88,7 +88,7 @@ type PaymentConfirmedEvent struct {
 }
 
 // ErrBindingNotGenerated 表示本文件仍是占位实现，真正调用前需要按
-// contracts/README.md 的 abigen 命令重新生成 escrow.gen.go。
+// pkg/web3/contracts/README.md 的 abigen 命令重新生成 escrow.gen.go。
 var ErrBindingNotGenerated = errors.New("escrow binding is a placeholder; run go generate to produce escrow.gen.go")
 
 // EscrowCaller 是只读 view / pure 方法的接口契约。
