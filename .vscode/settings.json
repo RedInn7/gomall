@@ -1,4 +1,9 @@
 {
+  // .synctex.gz 必须与 PDF 同目录（LaTeX Workshop 写死了查找位置，挪走=跳转失效），
+  // 故不物理移动，只从资源管理器视图中隐藏。
+  "files.exclude": {
+    "**/*.synctex.gz": true
+  },
   "latex-workshop.latex.recipe.default": "latexmk-xelatex",
   "latex-workshop.latex.recipes": [
     {
