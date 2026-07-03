@@ -126,6 +126,11 @@
 % ==== 三线表与附录页码 ====
 \usepackage{booktabs}
 \usepackage{appendixnumberbeamer}
+% appendixnumberbeamer 默认 \appendixtotalframenumber=0，真实值第二遍才从
+% .aux 读回；冷编译时 \appendix 后的 \section 页会让 metropolis 进度条
+% \ratio 除以 0 触发 Arithmetic overflow。把冷启动默认改成 1 即根治，
+% 热编译 .aux 读回的真实值会覆盖这里。
+\gdef\appendixtotalframenumber{1}
 
 % ==== 页脚来源标注 ====
 % 按需求统一隐藏所有来源标注：一处重定义为空，全部 deck 的 \srcnote{...} 立即不再输出。

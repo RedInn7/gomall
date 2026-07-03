@@ -1,4 +1,6 @@
-# metropolis 进度条在首遍（无 .aux）会 Arithmetic overflow 中断；
-# force 模式让 latexmk 首遍报错继续跑，第二遍有 .aux 后即正常。
-# 真错误最终仍以非零退出码暴露，不会被吞掉。
-$force_mode = 1;
+# 编译成功后自动清中间产物，目录只留 .tex 和 .pdf。
+# .synctex.gz 例外保留：VS Code PDF<->源码双向跳转靠它。
+# 编译失败不触发清理，.log 留下供排错。
+# 代价：删 .aux/.fdb_latexmk 后每次编译都是冷启动固定两遍，保存后重编慢一点是预期行为。
+# （metropolis 冷启动 Arithmetic overflow 已在 preamble.tex 里根治：\appendixtotalframenumber 默认置 1。）
+$success_cmd = 'rm -f %R.aux %R.log %R.nav %R.out %R.snm %R.toc %R.vrb %R.fls %R.fdb_latexmk %R.xdv %R.bbl %R.blg';
