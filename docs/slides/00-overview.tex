@@ -42,7 +42,6 @@
 \end{columns}
 \vspace{0.3em}
 {\centering\small 完整源码 \& 文档：\href{https://github.com/RedInn7/gomall}{\texttt{github.com/RedInn7/gomall}}\par}
-\srcnote{README.md \S 项目定位 / \S 系统架构；docs/slides/ 15 份域 deck + 本概览}
 \end{frame}
 
 \begin{frame}[shrink]{先认人：一笔订单背后站着 5 个角色}
@@ -56,7 +55,6 @@
 \vspace{2mm}
 \keypoint{这份概览把一次购物从\textbf{进门到收货}串成一条线：先看全局怎么连，\\
 再逐段看每一跳背后的技术取舍，以及"出事会卡在哪"。}
-\srcnote{README.md \S 业务全景 / \S 业务承诺(SLO)}
 \end{frame}
 
 \begin{frame}[shrink]{业务全景图：一次购物穿过的 8 个环节}
@@ -82,7 +80,7 @@
     {贯穿全局：库存防超卖 · Outbox 一致性 · 流量治理 · 优雅降级};
 \end{tikzpicture}}
 \par\smallskip
-{\centering\srcnote{routes/router.go:58--81 各域自注册 RegisterRoutes(public, authed, admin)}\par}
+{\centering\par}
 \end{frame}
 
 
@@ -109,7 +107,6 @@
 \vspace{0.5em}
 {\small \textbf{凡是碰钱、碰库存的地方都会翻车}——越靠近"下单—支付"代价越高，事务 / 原子性 / 资源都堆这段；边缘能力（搜索 / 优惠 / 通知）一律可降级，绝不反过来阻断 happy path。支付作为离钱最近的业务线，只要出问题就是资损问题，就是事故\par}
 \vspace{0.4em}
-\srcnote{逐个拆解见"贯穿全局的硬骨头：超卖·一致·限流·降级"与"订单状态机"两节}
 \end{frame}
 
 
@@ -142,7 +139,6 @@
     \end{itemize}
   \end{columns}
   \vspace{0.3em}
-  \srcnote{README.md \S 业务承诺（SLO）}
 \end{frame}
 
 
@@ -202,7 +198,6 @@
 \end{tikzpicture}}
 \par\smallskip
 {\centering\small 核心链路同步落库收钱，事件经 Outbox 旁路异步散给搜索 / 统计 / 履约，主线不被下游拖慢。\par}
-\srcnote{routes/router.go 中间件链 + 各域 RegisterRoutes；实线=同步请求，虚线=Outbox 旁路异步投递}
 \end{frame}
 
 
@@ -263,7 +258,6 @@
     \item \textbf{幂等} \texttt{Idempotency()}：\textbf{放最后}——确认要执行业务时才用 Redis 锁去重，避免给被拒请求白占幂等键。任何写DB 的操作都需要执行幂等。
     \item \textbf{注}：按\textbf{用户}维度的秒杀滑窗限流在鉴权\textbf{之后}（要先知道是谁），全局按 IP 的令牌桶才放最前。
   \end{itemize}
-  \srcnote{routes/router.go:41--55 全局链；middleware/\{ratelimit,jwt,rbac,circuitbreaker,idempotency\}.go}
 \end{frame}
 
 \begin{frame}[shrink]{数据层选型与边界：一个 MySQL 为什么不够}
@@ -284,7 +278,6 @@
   \end{table}
   \vspace{0.2em}
 
-  \srcnote{repository/db/dao/init.go dbresolver；service/search/ 降级路径；internal/product/repo.go LIKE}
 \end{frame}
 
 \section{端到端主线：一次成功购物的"黄金路径"}
@@ -302,7 +295,6 @@
 \vspace{1mm}
 \keypoint{这条线横跨 user / product / cart / promo / order / inventory / payment 七个包，\\
 任何一跳的失败都不能让用户"钱货两失" —— 这是整套设计的第一性原则。}
-\srcnote{internal/order/service.go:63 OrderCreate 是这条线的中枢}
 \end{frame}
 
 
@@ -333,7 +325,7 @@
 \end{sequencediagram}}
 \end{center}
 \par\smallskip
-{\centering\srcnote{internal/product/service.go:41 ProductShow（回源 + 写回 + 更新双删）；repository/cache/product.go GetProductDetail / SetProductDetail / DoubleDeleteAsync}\par}
+{\centering\par}
 \end{frame}
 
 \begin{frame}[shrink]{端到端时序：下单这一跳的内部（先预扣、再事务、后通知）}
@@ -359,7 +351,7 @@
 \end{sequencediagram}}
 \end{center}
 \par\smallskip
-{\centering\srcnote{internal/order/service.go:110 Reserve · :117 Tx · :145 outbox · :159 释放补偿 · :172 延迟关单}\par}
+{\centering\par}
 \end{frame}
 
 
@@ -378,7 +370,6 @@
   \draw[arrow] (b) -- (c);
 \end{tikzpicture}
 \par\smallskip
-\srcnote{internal/payment/service.go:36 PayDown；repository/cache/inventory.go:98 CommitReservation}
 \end{frame}
 
 
@@ -407,7 +398,7 @@
 \par\smallskip
 {\centering\footnotesize 下单只\textbf{预占}库存、不动钱；支付才在\textbf{一个事务}里把扣买家 + 加商家 + 复式记账 + 扣库存 + 改状态 + 写 \texttt{order.paid} 一并落定，全成才 COMMIT，任一守卫失败整笔回滚——绝不"扣了钱没货"。\par}
 \par\smallskip
-{\centering\srcnote{internal/payment/service.go:55 Tx · :87 锁双方 · :123/:150 复式记账 · :162 扣库存 · :173 改状态 · :205 outbox · :224 CommitReservation}\par}
+{\centering\par}
 \end{frame}
 
 
@@ -432,7 +423,6 @@ redis.call('DECRBY', KEYS[1], ARGV[1])         -- available -= n
 redis.call('INCRBY', KEYS[2], ARGV[1])         -- reserved  += n
 return 1
 \end{lstlisting}
-\srcnote{repository/cache/inventory.go:32 reserveScript · :78 ReserveStock 封装 · :98/:113 Commit/Release}
 \end{frame}
 
 \begin{frame}[shrink]{硬骨头 2：Outbox —— 解决"订单存了但消息丢了"}
@@ -454,7 +444,6 @@ return 1
 \par\smallskip
 \keypoint{订单与事件\textbf{同生共死}写进一个事务；投递交给独立 publisher 重试。\\
 至少一次投递 + 下游幂等消费 = 事件不丢。}
-\srcnote{internal/shared/outbox/repo.go:26 Insert · :44 FetchBatch · :53 MarkSent；initialize/outbox.go:15 启动}
 \end{frame}
 
 
@@ -473,7 +462,6 @@ ES / Milvus & 搜索退化 & 退回 \textbf{DB LIKE} 路径 \\
 \vspace{2mm}
 \keypoint{判断标准只有一句：\textbf{它是不是"用户付钱拿货"的必经环节}？\\
 是 $\to$ 进事务、保原子；不是 $\to$ 失败降级，绝不阻断 happy path。}
-\srcnote{internal/order/service.go:78 满减降级 · :126 预算耗尽降级；cmd/main.go:69--102 ES/Milvus 静默跳过}
 \end{frame}
 
 \begin{frame}[fragile,shrink]{幂等中间件：755K 次重放只成一单}
@@ -555,7 +543,6 @@ return {1, ''}
   \end{sequencediagram}}
   \par\smallskip
   \keypoint{ticket = 雪花 ID 存 Redis 带 TTL；写 ticket / marshal / publish 三个失败点任一出错都先 \texttt{ReleaseReservation} 退回预扣库存，绝不让库存空占。}
-  \srcnote{internal/order/async.go OrderEnqueue；internal/order/consumer.go HandleAsyncOrderTask；repository/rabbitmq/order\_async.go}
 \end{frame}
 
 \begin{frame}[shrink]{可观测性：一次下单串成一条 trace}
@@ -586,7 +573,6 @@ return {1, ''}
   \end{columns}
   \vspace{1mm}
   \keypoint{有了 trace，"这一单为什么慢"能精确定位到是 DB 全表 count、还是 MQ 投递抖动；有了三件套指标，限流阈值和熔断参数才有据可调。}
-  \srcnote{cmd/main.go skywalking-go import；middleware/track.go uber-trace-id 续 span + 降级}
 \end{frame}
 
 \section{订单状态机：把 7 跳串成一条可查的线}
@@ -618,7 +604,6 @@ return {1, ''}
   \item \textbf{真正的终态只有「已关闭 / 已退款」}；「已完成」\textbf{不是}终态 —— 售后期内仍有 \texttt{已完成 $\to$ 退款中} 这条边（7 天无理由 / 质量问题）。
   \item 虚线 \texttt{OnHold} = 支付后风控 / 冷静缓冲（\textbf{设计示意}）：当前实现为「待付款」支付成功直接 $\to$「待发货」。
 \end{itemize}
-\srcnote{consts/order.go 状态常量；internal/order/state.go:21 orderStateTransitions 转换表（现行 7 态，OnHold 为设计示意未落地）}
 \end{frame}
 
 
@@ -638,7 +623,6 @@ return {1, ''}
   \item 事务外的副作用必须能补偿 —— 库存释放、延迟关单。
 \end{itemize}
 \vspace{2mm}
-\srcnote{internal/order/service.go:63--178 OrderCreate 一函数浓缩全部原则}
 \end{frame}
 
 \appendix
