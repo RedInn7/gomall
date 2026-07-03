@@ -31,6 +31,26 @@
 \keypoint{鉴权 = 用最少的代码表达\textbf{业务对"信任"的明确表态}：信谁、信多久、信他能干什么。}
 \end{frame}
 
+\begin{frame}[fragile,shrink]{C 端越权下单：一个 HTTP 请求的资损}
+\textbf{攻击者 B}（余额 0）用\textbf{自己合法的} token 下单，却把 body 里的 \texttt{user\_id} 填成受害者 \textbf{A}（余额 ¥5000）：
+\begin{lstlisting}[basicstyle=\scriptsize\ttfamily]
+POST /api/v1/order HTTP/1.1
+access_token: <B's own valid token>   # B's token, NOT A's
+Content-Type: application/json
+
+{ "product_id": 88,
+  "num": 1,
+  "address_id": 999,     # ship to B's home
+  "user_id": 1001 }      # but owner = A's uid !
+\end{lstlisting}
+\begin{itemize}\scriptsize
+  \item \textbf{若服务端信了 body 里的 user\_id}：扣 \textbf{A 的 ¥5000}、发货到 \textbf{B 家} —— A 的钱、B 的货，A 凭空多一笔没下过的订单。
+  \item 这不是一次 5xx，是\textbf{追不回的资损}：钱已划走、货已发出，客服面对的是"我没买过为什么扣我钱"。
+\end{itemize}
+\keypoint{gomall 只信 JWT 解出的 \texttt{u.Id}、\textbf{无视 body 的 user\_id}：\texttt{order.UserID = u.Id}，B 填谁都只记在 B 自己头上，攻击当场失效。}
+\srcnote{internal/order/service.go:66 GetUserInfo；:112 UserID: u.Id；internal/order/dto.go:33 user\_id 字段仅兼容旧报文，服务端不读}
+\end{frame}
+
 \begin{frame}[shrink]{五个角色，五种"鉴权痛"}
 \begin{tabular}{@{}llp{4.6cm}@{}}
 \toprule
