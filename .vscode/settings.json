@@ -14,7 +14,12 @@
   "latex-workshop.latex.tools": [
     {
       "name": "latexmk-xelatex",
-      "command": "latexmk",
+      // 绝对路径 + 注入 PATH：Dock 启动的 VS Code 不继承终端 PATH，
+      // 否则 spawn latexmk ENOENT，且 latexmk 内部还要调 xelatex/xdvipdfmx
+      "command": "/Library/TeX/texbin/latexmk",
+      "env": {
+        "PATH": "/Library/TeX/texbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+      },
       "args": [
         "-xelatex",
         "-interaction=nonstopmode",
