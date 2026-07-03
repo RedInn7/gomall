@@ -52,22 +52,21 @@ Content-Type: application/json
 \srcnote{internal/order/service.go:66 GetUserInfo；:112 UserID: u.Id；internal/order/dto.go:33 user\_id 字段仅兼容旧报文，服务端不读}
 \end{frame}
 
-\begin{frame}[shrink]{五个角色，五种"鉴权痛"}
-\begin{tabular}{@{}llp{4.6cm}@{}}
+\begin{frame}[shrink]{鉴权痛}
+\begin{tabular}{@{}lp{6.2cm}p{4.4cm}@{}}
 \toprule
 角色 & 鉴权诉求 & 出错的真实后果 \\
 \midrule
 C 端用户   & 一次登录管 10 天，改密码立即生效 & 频繁踢登 \(\to\) DAU 流失 \\
-商家       & 只看自家订单 / SKU              & 越权读单 \(\to\) 商业泄密 \\
-运营平台   & 大促撞库不打爆 bcrypt           & 登录 502 \(\to\) GMV 损失 \\
-客服       & 用户怒投诉时能精确定位         & 30001 vs 30002 给一致话术 \\
-SRE       & 鉴权链路不能成性能瓶颈          & 解 token 慢 \(\to\) 全站 p99 抬升 \\
+商家       & 只看自家订单 / SKU              & 越权读单 \(\to\) 商业泄密（订单流水就是经营机密）\\
+运营平台   & 大促撞库不打爆 bcrypt（一个故意设计得很慢的 hash 函数，单次校验耗上百 ms 的 CPU） & 正常用户登录 502 \(\to\) GMV 损失 \\
+SRE       & 鉴权链路不能成性能瓶颈：鉴权是全站请求的第一道关 & 解 token 每慢 1ms \(\to\) 全站 p99 同步抬 1ms \\
 \bottomrule
 \end{tabular}
 \vspace{2mm}
 \begin{itemize}
   \item 本 deck 每个 section 前都会标注\textbf{本节解决谁的痛}。
-  \item 项目 README "业务全景表" 5 行对应的就是这 5 个角色，鉴权是这 5 行的最小公约数。
+  \item 项目 README "业务全景表" 各行对应的就是这几个角色，鉴权是它们的最小公约数。
 \end{itemize}
 \srcnote{routes/router.go:52--55 authed/admin 分组；internal/user/routes.go:10--11 公开路由；middleware/rbac.go RequireRole}
 \end{frame}
@@ -93,19 +92,6 @@ authed 链路 RPS         & $\geq$ 50k（P1 读）   & 实测 58k / p95 5ms \\
 \srcnote{stressTest/REPORT.md /ping 64254 RPS · /orders/list 58406 RPS；middleware/jwt.go:16--64；middleware/rbac.go:22--45}
 \end{frame}
 
-\begin{frame}[shrink]{鉴权侧不做什么（业务边界）}
-诚实列出，对照 README "业务边界" 一节：
-\begin{itemize}
-  \item \textbf{不做扫码登录}：app 跨设备扫码授权（PC 扫手机码）需要长连接 + 设备绑定表，路线图。
-  \item \textbf{不做短信验证码登录}：短信通道 + 风控阈值 + 国际号段适配 = 三件独立工程，路线图。
-  \item \textbf{merchant 自助注册没做}：商家身份借 user 表 Role 字段表达，独立 merchant group 路线图阶段。
-  \item \textbf{不做 SSO / 企业 OIDC}：gomall 是 2C 电商，不接 SAML / Azure AD。
-  \item \textbf{不维护 token 黑名单}：登出 = 客户端丢 token，服务端不主动作废。
-  \item \textbf{找回密码只走邮箱}：手机找回需短信 + 实人认证，路线图。
-\end{itemize}
-\keypoint{"不做什么"和"做什么"一样重要：明确边界，工程才有节奏。}
-\srcnote{README.md 业务边界节；middleware/jwt.go:32--57 无黑名单实现}
-\end{frame}
 
 \begin{frame}[shrink]{业务困局：鉴权不止是"登录拿 token"}
 \begin{itemize}
