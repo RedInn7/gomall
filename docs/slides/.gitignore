@@ -1,0 +1,22 @@
+# docs/slides/ 只保留源码与产物：*.tex / *.pdf / *.md（外加 build.sh）
+# 以下为 LaTeX 编译中间产物，一律忽略，保持目录清爽
+*.aux
+*.log
+*.toc
+*.nav
+*.snm
+*.out
+*.vrb
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.synctex(busy)
+*.bbl
+*.blg
+*.idx
+*.ilg
+*.ind
+*.bcf
+*.run.xml
+*.xdv
+.DS_Store
