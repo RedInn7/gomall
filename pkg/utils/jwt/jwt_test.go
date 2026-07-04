@@ -46,7 +46,7 @@ func TestParseRefreshToken_ExpiredAccessValidRefresh(t *testing.T) {
 	}
 
 	// 签发一个仍然有效的 refresh token（10天有效期）
-	_, refreshToken, err := GenerateToken(42, "alice")
+	_, refreshToken, err := GenerateToken(42, "alice", 0)
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestParseRefreshToken_ExpiredAccessValidRefresh(t *testing.T) {
 
 // TestParseRefreshToken_BothValid 验证两者都有效时正常续签。
 func TestParseRefreshToken_BothValid(t *testing.T) {
-	accessToken, refreshToken, err := GenerateToken(10, "bob")
+	accessToken, refreshToken, err := GenerateToken(10, "bob", 0)
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestParseRefreshToken_InvalidSignatureAccess(t *testing.T) {
 		t.Fatalf("sign tampered: %v", err)
 	}
 
-	_, validRefresh, err := GenerateToken(1, "legit")
+	_, validRefresh, err := GenerateToken(1, "legit", 0)
 	if err != nil {
 		t.Fatalf("GenerateToken: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestParseRefreshToken_UsesAccessClaimsAfterExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("makeTokenWithExpiry: %v", err)
 	}
-	_, validRefresh, err := GenerateToken(77, "carol")
+	_, validRefresh, err := GenerateToken(77, "carol", 0)
 	if err != nil {
 		t.Fatalf("GenerateToken refresh: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestParseRefreshToken_AccessExpiry_Duration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("makeTokenWithExpiry: %v", err)
 	}
-	_, validRefresh, err := GenerateToken(5, "dave")
+	_, validRefresh, err := GenerateToken(5, "dave", 0)
 	if err != nil {
 		t.Fatalf("GenerateToken refresh: %v", err)
 	}
@@ -195,5 +195,54 @@ func TestParseRefreshToken_AccessExpiry_Duration(t *testing.T) {
 	diff := claims.ExpiresAt.Time.Sub(expectedExpiry)
 	if diff < -5*time.Second || diff > 5*time.Second {
 		t.Errorf("new access token expiry %v not within 5s of expected %v", claims.ExpiresAt.Time, expectedExpiry)
+	}
+}
+
+// TestTokenVersion_SignedIntoClaims 验证签发时版本号写入 claims、解析后能取回。
+func TestTokenVersion_SignedIntoClaims(t *testing.T) {
+	access, _, err := GenerateToken(8, "frank", 7)
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	claims, err := ParseToken(access)
+	if err != nil {
+		t.Fatalf("ParseToken: %v", err)
+	}
+	if claims.TokenVersion != 7 {
+		t.Errorf("want TokenVersion=7, got %d", claims.TokenVersion)
+	}
+}
+
+// TestParseRefreshToken_PreservesTokenVersion 验证续签透传旧版本号而非"洗白"：
+// 被 bump 掉的旧 token 即使续签成功，新 token 仍带旧版本号，会被中间件拒绝。
+func TestParseRefreshToken_PreservesTokenVersion(t *testing.T) {
+	expiredClaims := Claims{
+		ID:           9,
+		Username:     "grace",
+		TokenVersion: 5,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(-time.Second)),
+			Issuer:    "mall",
+		},
+	}
+	expiredAccess, err := jwt.NewWithClaims(jwt.SigningMethodHS256, expiredClaims).SignedString(secret())
+	if err != nil {
+		t.Fatalf("sign expired access: %v", err)
+	}
+	_, validRefresh, err := GenerateToken(9, "grace", 5)
+	if err != nil {
+		t.Fatalf("GenerateToken refresh: %v", err)
+	}
+
+	newAccess, _, err := ParseRefreshToken(expiredAccess, validRefresh)
+	if err != nil {
+		t.Fatalf("ParseRefreshToken: %v", err)
+	}
+	claims, err := ParseToken(newAccess)
+	if err != nil {
+		t.Fatalf("parse new access: %v", err)
+	}
+	if claims.TokenVersion != 5 {
+		t.Errorf("续签必须透传版本号：want 5, got %d", claims.TokenVersion)
 	}
 }
