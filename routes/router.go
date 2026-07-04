@@ -44,6 +44,14 @@ func NewRouter() *gin.Engine {
 		}
 		return u.Role, nil
 	})
+	// token 版本号查询同理在组合根注入：AuthMiddleware 逐请求比对实现 token 撤销
+	middleware.SetTokenVersionLookup(func(ctx context.Context, userId uint) (uint, error) {
+		u, err := user.NewUserDao(ctx).GetUserById(userId)
+		if err != nil {
+			return 0, err
+		}
+		return u.TokenVersion, nil
+	})
 
 	r := gin.Default()
 	store := cookie.NewStore([]byte(conf.Config.EncryptSecret.SessionSecret))
