@@ -162,3 +162,29 @@ func (d *UserDao) ExistOrNotByUserName(userName string) (user *User, exist bool,
 func (d *UserDao) CreateUser(user *User) error {
 	return d.DB.Model(&User{}).Create(&user).Error
 }
+
+// safeUserColumns 列表出库的安全投影：密码摘要与余额密文永不出 DAO。
+const safeUserColumns = "id, user_name, nick_name, email, status, role, created_at"
+
+// CountAll 用户总数
+func (d *UserDao) CountAll() (count int64, err error) {
+	err = d.DB.Model(&User{}).Count(&count).Error
+	return
+}
+
+// CountByRole 统计某角色的用户数
+func (d *UserDao) CountByRole(role string) (count int64, err error) {
+	err = d.DB.Model(&User{}).Where("role = ?", role).Count(&count).Error
+	return
+}
+
+// ListPaged 按 id 倒序分页列用户，只出安全列。page/pageSize 由调用方归一化。
+func (d *UserDao) ListPaged(page, pageSize int) (users []*User, err error) {
+	err = d.DB.Model(&User{}).
+		Select(safeUserColumns).
+		Order("id DESC").
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Find(&users).Error
+	return
+}

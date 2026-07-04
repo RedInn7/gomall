@@ -7,7 +7,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -119,7 +118,7 @@ func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]
 	if err != nil {
 		return nil, err
 	}
-	inflightSum, err := s.sumRecentlyPaidNumByProduct(ctx, time.Now().Add(-stockCommitGrace))
+	inflightSum, err := dao.SumRecentlyPaidNumByProduct(time.Now().Add(-stockCommitGrace))
 	if err != nil {
 		return nil, err
 	}
@@ -136,28 +135,6 @@ func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]
 		}
 	}
 	return leak, nil
-}
-
-// sumRecentlyPaidNumByProduct 汇总每个商品「刚支付成功、Redis 预占可能尚未 commit」的在途数量(Σ Num)。
-// 口径：type=WaitShip 且 updated_at 在 since 之后（刚由支付推进而来、仍在 commit 宽限期内）。
-// 仅取宽限期内的新近订单，避免把早已 commit 完成的 WaitShip 也算进基准而漏掉真实泄漏。
-func (s *OrderTaskService) sumRecentlyPaidNumByProduct(ctx context.Context, since time.Time) (map[uint]int64, error) {
-	var rows []struct {
-		ProductID uint
-		Total     int64
-	}
-	if err := NewOrderDao(ctx).DB.Model(&Order{}).
-		Select("product_id, SUM(num) AS total").
-		Where("type = ? AND updated_at >= ?", consts.OrderWaitShip, since).
-		Group("product_id").
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	m := make(map[uint]int64, len(rows))
-	for _, r := range rows {
-		m[r.ProductID] = r.Total
-	}
-	return m, nil
 }
 
 // RunAutoConfirmReceive 对长时间未确认收货的订单兜底自动 Completed。
