@@ -2,17 +2,26 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 )
+
+// roleLookup 按 uid 查角色，由组合根（routes.NewRouter）注入。
+// 依赖倒置：middleware 不 import 领域包，否则领域路由反向挂中间件时会成 import 环。
+var roleLookup func(ctx context.Context, userId uint) (string, error)
+
+// SetRoleLookup 注入角色查询实现，进程启动时调用一次。
+func SetRoleLookup(fn func(ctx context.Context, userId uint) (string, error)) {
+	roleLookup = fn
+}
 
 type roleCacheEntry struct {
 	role    string
@@ -32,11 +41,13 @@ func lookupRole(ctx context.Context, userId uint) (string, error) {
 			return entry.role, nil
 		}
 	}
-	u, err := user.NewUserDao(ctx).GetUserById(userId)
+	if roleLookup == nil { // 未注入即拒绝（fail-closed），而不是放行
+		return "", errors.New("rbac: role lookup not configured")
+	}
+	role, err := roleLookup(ctx, userId)
 	if err != nil {
 		return "", err
 	}
-	role := u.Role
 	if role == "" {
 		role = "user"
 	}
