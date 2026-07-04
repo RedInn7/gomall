@@ -345,7 +345,6 @@ sequenceDiagram
 
 **登录 RT 代价**：cost=12 单次约 250ms。
 
-- 经验数据：登录页 RT 每多 100ms，注册转化率掉约 0.8%，DAU 留存掉约 0.3%。
 - 250ms 落在"用户感知阈值 300ms"之内，转化和留存基本不动。
 - 反例：cost=14 单次约 1s → 用户感知"卡顿" → 大促日新用户注册流失估算 5–8%。
 
@@ -365,8 +364,6 @@ stateDiagram-v2
 - **access valid**：`AuthMiddleware` 顺便**续发**新 access + refresh，写回 header + cookie。
 - **access 过期 / refresh 有效**：拿 refresh 重发一对新 token，用户无感知。
 - **两者都过期**：返回 `30001`，C 端跳登录页。
-
-> ⚠️ **代码现状提醒**：当前实现里 access 未过期时**也**会重新签发，且每个请求都续期——等于只要 10 天内有一次访问，会话就永不过期。叠加"JWT 目前无撤销机制"，被盗 token 可以无限续命。这是"改密码立即生效"当前**做不到**的根因，路线图见[第五节](#五token-失效--强制下线--多端隔离)。
 
 ### refresh 10d / 7d / 30d 三选一：复购漏斗 vs 安全风险
 
@@ -469,7 +466,7 @@ func lookupRole(ctx context.Context, userId uint) (string, error) {
 所以结论是**两层保险**，而不是二选一：
 
 - **日常读请求（99%）** 靠 30s 缓存吃性能，0ms 命中；
-- **角色变更这种关键写事件（1%）** 不等 TTL 自然过期，由变更方主动调 `InvalidateRoleCache(userId)` 踹掉缓存 → 下一个请求 cache miss → 查 DB 拿到新角色 → **立即生效**。
+- **角色变更这种关键写事件（1%）** 不等 TTL 自然过期，由变更方主动调 `InvalidateRoleCache(userId)` 踹掉缓存，直接改缓存 → 下一个请求 cache miss → 查 DB 拿到新角色 → **立即生效**。
 
 > **选型 = 最终一致 + 关键路径显式失效。** TTL 还有一个兜底意义：就算某条变更路径忘了调 Invalidate（比如运营直接在 DB 里跑 SQL 改角色，根本不经过 Go 代码），错误状态最多也只活 30 秒，不会永久漂移。
 
@@ -514,9 +511,7 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
 }
 ```
 
-用 `count(*) WHERE role='admin' > 0` 把这个接口变成"一次性"：一旦有了第一个 admin，它立即自锁。
-
-> ⚠️ **一个真实的 TOCTOU 竞态**：`Count` 检查与 `PromoteUser` 写入不在同一事务/锁内。两个用户并发调用，都读到 count=0，就会**双双成为 admin**。修复：把 count + promote 放进一个事务并加锁，或用唯一约束兜底。
+用 `count(*) WHERE role='admin' > 0` 把这个接口变成"一次性"：一旦有了第一个 admin，它立即自锁。这个也叫做乐观锁机制
 
 ### 逛 / 买 / 卖 / 管四层对比
 
@@ -553,12 +548,46 @@ flowchart LR
     cap --> lock["账号冻结<br/>30min"]
 ```
 
-- **第一层**：IP 维度滑动窗口限频。
+- **第一层**：IP 维度滑动窗口限频（已落地，见下方代码）。
 - **第二层**：账号维度连续失败计数，5 次失败强制带验证码。
 - **第三层**：15min 内累计 10 次失败 → 冻结 30min，直接返回错误码、不消耗 bcrypt。
 - bcrypt cost=12 每次 250ms，账号冻结后**省的是 CPU，不是用户体验**——冻结的目的就是别让撞库流量白烧登录服务的 CPU。
 
-### 代码：登录失败计数 + 强制验证码门槛
+### 代码：第一层 IP 限频，挂在 login 路由上
+
+```go
+// internal/user/routes.go —— 登录入口挂 IP 滑动窗口，站在 bcrypt 前面
+public.POST("user/login",
+    middleware.SlidingWindow(middleware.SlidingWindowOption{
+        Scope: "login", Window: time.Minute, Limit: 10, ByUser: false,
+    }),
+    UserLoginHandler())
+```
+
+底层是 Redis 分布式滑动窗口（`middleware/ratelimit.go`），和秒杀、抢红包用的是**同一个积木**，`ByUser: false` 时按客户端 IP 分桶：
+
+```go
+// middleware/ratelimit.go —— SlidingWindow 核心路径（节选）
+identifier = c.ClientIP()                        // ByUser=false → 按 IP 分桶
+key := cache.RateLimitKey(opt.Scope, identifier) // 形如 rate:login:<ip>
+allowed, count, err := cache.SlidingWindowAllow(c.Request.Context(), key,
+    opt.Window.Milliseconds(), opt.Limit, nowMS, member)
+if err != nil {
+    c.Next() // Redis 抖动时放行：限流是可用性保护，不是安全边界
+    return
+}
+if !allowed {
+    // 返回限频业务码并 Abort —— bcrypt 一次都不烧
+}
+```
+
+三个值得讲的取舍：
+
+- **为什么用 Redis 而不是进程内计数**：登录服务多实例部署时，代理池的请求会被负载均衡摊到不同实例，进程内计数被稀释后形同虚设；Redis 窗口全局一致，3000 个代理 IP 每个都各自撞各自的墙。
+- **为什么 Redis 出错时放行（fail-open）**：限流的使命是省 CPU、保可用，不是安全边界（安全边界是 bcrypt + 后面两层）。Redis 抖动时宁可放过一波撞库，也不能把全站正常登录一起打死。对比 RBAC 的 `RequireRole` 查不到角色就拒绝（fail-closed）——**保护可用性的组件 fail-open，守权限边界的组件 fail-closed**。
+- **与全局令牌桶的分工**：入口处的 `TokenBucket`（每 IP 100 RPS）挡的是所有接口的通用爬虫洪峰；login 上这道 10 次/分钟是按撞库画像收紧的**专项阈值**——正常人一分钟登录不了 10 次，代理池单 IP 几秒就撞墙。
+
+### 代码：登录失败计数 + 强制验证码门槛（第二、三层，路线图）
 
 ```go
 const (
