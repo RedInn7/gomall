@@ -42,8 +42,14 @@ func (s *AdminSrv) ListAllUsers(ctx context.Context, page, pageSize int) (interf
 	return users, err
 }
 
-// PromoteToAdmin 把指定用户提升为 admin。仅 admin 可调用（路由层已限）。
-func (s *AdminSrv) PromoteToAdmin(ctx context.Context, targetUserId uint) error {
+// PromoteUser 把指定用户的角色设为 role（user / merchant / admin，白名单校验）。
+// 设回 user 即降权，升降共用同一入口。仅 admin 可调用（路由层已限）。
+func (s *AdminSrv) PromoteUser(ctx context.Context, targetUserId uint, role string) error {
+	switch role {
+	case user.RoleUser, user.RoleMerchant, user.RoleAdmin:
+	default:
+		return errors.New("非法角色: " + role)
+	}
 	target, err := user.NewUserDao(ctx).GetUserById(targetUserId)
 	if err != nil {
 		return err
@@ -51,12 +57,12 @@ func (s *AdminSrv) PromoteToAdmin(ctx context.Context, targetUserId uint) error 
 	if target == nil || target.ID == 0 {
 		return errors.New("目标用户不存在")
 	}
-	target.Role = user.RoleAdmin
+	target.Role = role
 	if err := user.NewUserDao(ctx).UpdateUserById(targetUserId, target); err != nil {
 		return err
 	}
 	middleware.InvalidateRoleCache(targetUserId)
-	log.LogrusObj.Infof("user %d promoted to admin", targetUserId)
+	log.LogrusObj.Infof("user %d role set to %s", targetUserId, role)
 	return nil
 }
 
@@ -75,5 +81,5 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
 	if count > 0 {
 		return errors.New("系统已存在 admin，禁止使用 bootstrap 接口")
 	}
-	return s.PromoteToAdmin(ctx, u.Id)
+	return s.PromoteUser(ctx, u.Id, user.RoleAdmin)
 }

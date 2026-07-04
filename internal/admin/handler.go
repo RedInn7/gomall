@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/RedInn7/gomall/internal/shared/response"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/service/search"
 )
 
@@ -26,16 +27,21 @@ func AdminPromoteUserHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		type promoteReq struct {
 			UserId uint `json:"user_id" form:"user_id" binding:"required"`
+			// Role 目标角色（user/merchant/admin），缺省 admin 兼容旧调用方
+			Role string `json:"role" form:"role"`
 		}
 		req, ok := response.Bind[promoteReq](c)
 		if !ok {
 			return
 		}
-		if err := GetAdminSrv().PromoteToAdmin(c.Request.Context(), req.UserId); err != nil {
+		if req.Role == "" {
+			req.Role = user.RoleAdmin
+		}
+		if err := GetAdminSrv().PromoteUser(c.Request.Context(), req.UserId, req.Role); err != nil {
 			response.Fail(c, err)
 			return
 		}
-		response.OK(c, gin.H{"promoted": req.UserId})
+		response.OK(c, gin.H{"promoted": req.UserId, "role": req.Role})
 	}
 }
 
