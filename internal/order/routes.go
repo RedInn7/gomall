@@ -6,8 +6,8 @@ import (
 	"github.com/RedInn7/gomall/middleware"
 )
 
-// RegisterRoutes 挂载本领域路由。public 不需登录；authed 已套登录中间件；admin 已套 RequireRole("admin")。
-func RegisterRoutes(public, authed, admin *gin.RouterGroup) {
+// RegisterRoutes 挂载本领域路由。public 不需登录；authed 已套登录中间件；merchant 已套 RequireRole("merchant"/"admin")；admin 已套 RequireRole("admin")。
+func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 	// 订单操作（下单走幂等）
 	authed.POST("orders/create", middleware.Idempotency(), CreateOrderHandler())
 	// 异步下单：MQ 削峰，前端拿 ticket 轮询 status
@@ -20,6 +20,6 @@ func RegisterRoutes(public, authed, admin *gin.RouterGroup) {
 	// 订单状态机扩展：履约 + 退款
 	// 用户主动：确认收货 / 申请退款（幂等）
 	authed.POST("orders/confirm-receive", ConfirmReceiveHandler())
-	// 商家 / 运营：发货 / 同意 / 驳回退款。merchant 角色未落地前先挂 admin RBAC
-	authed.POST("orders/ship", middleware.RequireRole("admin"), ShipOrderHandler())
+	// 商家发货：挂 merchant 墙（admin 天然可过）
+	merchant.POST("orders/ship", ShipOrderHandler())
 }
