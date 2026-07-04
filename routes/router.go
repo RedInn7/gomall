@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-contrib/sessions"
@@ -35,6 +36,15 @@ import (
 // NewRouter 组合根：只负责全局中间件、分组与各领域路由的挂载。
 // 具体路由定义在各领域包的 routes.go（RegisterRoutes），与领域代码同生共死。
 func NewRouter() *gin.Engine {
+	// RBAC 角色查询在组合根注入：middleware 不反向依赖 user 领域包（避免 import 环）
+	middleware.SetRoleLookup(func(ctx context.Context, userId uint) (string, error) {
+		u, err := user.NewUserDao(ctx).GetUserById(userId)
+		if err != nil {
+			return "", err
+		}
+		return u.Role, nil
+	})
+
 	r := gin.Default()
 	store := cookie.NewStore([]byte(conf.Config.EncryptSecret.SessionSecret))
 	// 全局令牌桶：每 IP 100 RPS、突发 200，挡正常流量同时防爬虫脚本
