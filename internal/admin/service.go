@@ -31,15 +31,7 @@ func (s *AdminSrv) ListAllUsers(ctx context.Context, page, pageSize int) (interf
 	if pageSize <= 0 || pageSize > 200 {
 		pageSize = 50
 	}
-	var users []*user.User
-	db := user.NewUserDao(ctx).DB
-	err := db.Model(&user.User{}).
-		Select("id, user_name, nick_name, email, status, role, created_at").
-		Offset((page - 1) * pageSize).
-		Limit(pageSize).
-		Order("id DESC").
-		Find(&users).Error
-	return users, err
+	return user.NewUserDao(ctx).ListPaged(page, pageSize)
 }
 
 // PromoteUser 把指定用户的角色设为 role（user / merchant / admin，白名单校验）。
@@ -73,9 +65,8 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	db := user.NewUserDao(ctx).DB
-	var count int64
-	if err := db.Model(&user.User{}).Where("role = ?", user.RoleAdmin).Count(&count).Error; err != nil {
+	count, err := user.NewUserDao(ctx).CountByRole(user.RoleAdmin)
+	if err != nil {
 		return err
 	}
 	if count > 0 {
