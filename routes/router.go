@@ -55,14 +55,18 @@ func NewRouter() *gin.Engine {
 		c.JSON(200, "success")
 	})
 
-	// authed：登录保护；adminGroup：在登录之上叠加 RBAC
+	// 四层墙，逐层收紧：public（匿名）→ authed（登录）→ merchant（商家/运营）→ admin（管理员）。
+	// merchant 不加路径前缀：商家接口沿用原 URL（orders/ship 等），只是多叠一层 RBAC；
+	// admin 走 /admin 前缀，语义是独立后台。admin 角色天然包含 merchant 权限。
 	authed := v1.Group("/")
 	authed.Use(middleware.AuthMiddleware())
+	merchantGroup := authed.Group("/")
+	merchantGroup.Use(middleware.RequireRole(user.RoleMerchant, user.RoleAdmin))
 	adminGroup := authed.Group("/admin")
-	adminGroup.Use(middleware.RequireRole("admin"))
+	adminGroup.Use(middleware.RequireRole(user.RoleAdmin))
 
-	// 各领域自注册，统一签名 RegisterRoutes(public, authed, admin)。
-	for _, register := range []func(public, authed, admin *gin.RouterGroup){
+	// 各领域自注册，统一签名 RegisterRoutes(public, authed, merchant, admin)。
+	for _, register := range []func(public, authed, merchant, admin *gin.RouterGroup){
 		user.RegisterRoutes,
 		product.RegisterRoutes,
 		search.RegisterRoutes,
@@ -84,7 +88,7 @@ func NewRouter() *gin.Engine {
 		groupbuy.RegisterRoutes,
 		preorder.RegisterRoutes,
 	} {
-		register(v1, authed, adminGroup)
+		register(v1, authed, merchantGroup, adminGroup)
 	}
 
 	return r
