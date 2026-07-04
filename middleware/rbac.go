@@ -76,7 +76,7 @@ func RequireRole(allowed ...string) gin.HandlerFunc {
 			c.JSON(http.StatusOK, gin.H{
 				"status": e.ErrorAuthInsufficientAuthority,
 				"msg":    e.GetMsg(e.ErrorAuthInsufficientAuthority),
-				"data":   "需要管理员权限",
+				"data":   "权限不足",
 			})
 			c.Abort()
 			return

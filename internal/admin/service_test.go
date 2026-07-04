@@ -96,16 +96,17 @@ func TestAdmin_BootstrapPromoteSelf(t *testing.T) {
 	}
 }
 
-// TestAdmin_PromoteToAdmin 验证定向提权：普通用户 -> admin；目标不存在则报错。
-func TestAdmin_PromoteToAdmin(t *testing.T) {
+// TestAdmin_PromoteUser 验证定向设角色：user -> admin、user -> merchant；
+// 非法角色被白名单拦下；目标不存在则报错。
+func TestAdmin_PromoteUser(t *testing.T) {
 	initLogForTest()
 	db, cleanup := setupSQLiteForAdmin(t)
 	defer cleanup()
 	srv := GetAdminSrv()
 
 	target := mustCreateUser(t, db, "promo-target", user.RoleUser)
-	if err := srv.PromoteToAdmin(context.Background(), target.ID); err != nil {
-		t.Fatalf("PromoteToAdmin: %v", err)
+	if err := srv.PromoteUser(context.Background(), target.ID, user.RoleAdmin); err != nil {
+		t.Fatalf("PromoteUser(admin): %v", err)
 	}
 	var got user.User
 	if err := db.First(&got, target.ID).Error; err != nil {
@@ -115,8 +116,26 @@ func TestAdmin_PromoteToAdmin(t *testing.T) {
 		t.Fatalf("role = %q, want %q", got.Role, user.RoleAdmin)
 	}
 
+	// user -> merchant：商家入驻走同一入口
+	shop := mustCreateUser(t, db, "promo-shop", user.RoleUser)
+	if err := srv.PromoteUser(context.Background(), shop.ID, user.RoleMerchant); err != nil {
+		t.Fatalf("PromoteUser(merchant): %v", err)
+	}
+	var gotShop user.User
+	if err := db.First(&gotShop, shop.ID).Error; err != nil {
+		t.Fatalf("reload shop: %v", err)
+	}
+	if gotShop.Role != user.RoleMerchant {
+		t.Fatalf("role = %q, want %q", gotShop.Role, user.RoleMerchant)
+	}
+
+	// 白名单外的角色直接拒绝
+	if err := srv.PromoteUser(context.Background(), shop.ID, "superroot"); err == nil {
+		t.Fatal("非法角色应报错")
+	}
+
 	// 目标不存在
-	err := srv.PromoteToAdmin(context.Background(), 99999)
+	err := srv.PromoteUser(context.Background(), 99999, user.RoleAdmin)
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("提权不存在的用户应返回 not found，got %v", err)
 	}
