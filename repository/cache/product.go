@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -102,6 +103,47 @@ func LoadProductOnce(id uint, load func() (interface{}, error)) (interface{}, er
 		return load()
 	})
 	return v, err
+}
+
+// ProductCountTTL 列表总数缓存的 TTL。与"商家上架→可见 SLA 60s"同一业务口径：
+// 总数最多滞后 60s，本来就在已承诺的最终一致契约内。
+const ProductCountTTL = 60 * time.Second
+
+// productCountGroup 合并同一 key 的并发 COUNT 回源，防 TTL 到期瞬间的计数惊群。
+var productCountGroup singleflight.Group
+
+func ProductCountKey(categoryID uint) string {
+	if categoryID == 0 {
+		return "product:count:all"
+	}
+	return fmt.Sprintf("product:count:cat:%d", categoryID)
+}
+
+// ProductCountCached 读商品总数：Redis 60s 缓存 + 进程内 singleflight 回源。
+// 动机：InnoDB 的 COUNT(*) 没有现成计数、只能全索引扫描（1M 行秒级），而总数与
+// 页码无关——没必要每翻一页都重数一遍；缓存后每类目每 60s 至多回源一次。
+// Redis 故障时直接回源 DB（fail-open：宁可退回慢路径，不能把列表打挂）。
+func ProductCountCached(ctx context.Context, categoryID uint, load func() (int64, error)) (int64, error) {
+	key := ProductCountKey(categoryID)
+	if raw, err := RedisClient.Get(ctx, key).Result(); err == nil {
+		if n, perr := strconv.ParseInt(raw, 10, 64); perr == nil {
+			return n, nil
+		}
+	}
+	v, err, _ := productCountGroup.Do(key, func() (interface{}, error) {
+		n, loadErr := load()
+		if loadErr != nil {
+			return int64(0), loadErr
+		}
+		if setErr := RedisClient.Set(ctx, key, n, ProductCountTTL).Err(); setErr != nil {
+			log.LogrusObj.Warnln("write product count cache failed:", setErr)
+		}
+		return n, nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return v.(int64), nil
 }
 
 // TryProductLock 用 SETNX 抢回源锁，避免缓存击穿时多个请求同时回源
