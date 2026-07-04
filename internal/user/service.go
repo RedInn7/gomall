@@ -11,6 +11,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/middleware"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/email"
 	"github.com/RedInn7/gomall/pkg/utils/jwt"
@@ -99,7 +100,7 @@ func (s *UserSrv) UserLogin(ctx context.Context, req *UserServiceReq) (*UserToke
 		return nil, errors.New("账号/密码不正确")
 	}
 
-	accessToken, refreshToken, err := jwt.GenerateToken(user.ID, req.UserName)
+	accessToken, refreshToken, err := jwt.GenerateToken(user.ID, req.UserName, user.TokenVersion)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
@@ -284,6 +285,16 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserIn
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
+	}
+
+	if operationType == consts.EmailOperationUpdatePassword {
+		// 改密码 = 撤销全部旧会话：版本号 +1 并清中间件缓存，
+		// 所有已签发 token（包括被盗的）下一个请求即被拒。这就是"改密码立即生效"。
+		if err = userDao.BumpTokenVersion(userId); err != nil {
+			log.LogrusObj.Error(err)
+			return nil, err
+		}
+		middleware.InvalidateTokenVersionCache(userId)
 	}
 
 buildResp:
