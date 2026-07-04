@@ -156,3 +156,14 @@ func (d *ProductDao) ListByIDs(ids []uint) (products []*Product, err error) {
 		Find(&products).Error
 	return
 }
+
+// ListAfterID keyset 分页：取 id > lastID 的商品按 id 升序，limit 限量。
+// 供全表遍历型任务（如 ES backfill）游标式拉取。
+func (d *ProductDao) ListAfterID(lastID uint, limit int) (products []*Product, err error) {
+	q := d.DB.Model(&Product{}).Order("id ASC").Limit(limit)
+	if lastID > 0 {
+		q = q.Where("id > ?", lastID)
+	}
+	err = q.Find(&products).Error
+	return
+}

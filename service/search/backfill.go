@@ -5,7 +5,6 @@ import (
 
 	"github.com/RedInn7/gomall/internal/product"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/repository/es"
 )
 
@@ -17,15 +16,11 @@ func BackfillFromDB(ctx context.Context, batchSize int) (indexed int, err error)
 	if err := es.EnsureProductIndex(ctx); err != nil {
 		return 0, err
 	}
-	db := dao.NewDBClient(ctx)
+	productDao := product.NewProductDao(ctx)
 	var lastID uint
 	for {
-		var rows []*product.Product
-		q := db.Model(&product.Product{}).Order("id ASC").Limit(batchSize)
-		if lastID > 0 {
-			q = q.Where("id > ?", lastID)
-		}
-		if e := q.Find(&rows).Error; e != nil {
+		rows, e := productDao.ListAfterID(lastID, batchSize)
+		if e != nil {
 			return indexed, e
 		}
 		if len(rows) == 0 {
