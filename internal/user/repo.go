@@ -131,9 +131,13 @@ func (d *UserDao) LockTwoUsersForUpdate(idA, idB uint) (a, b *User, err error) {
 	return u2, u1, nil
 }
 
-// UpdateUserById 根据 id 更新用户信息
+// UpdateUserById 根据 id 更新用户信息。
+// Omit token_version：struct Updates 会把加载时的旧版本号写回，与并发 BumpTokenVersion
+// 相互覆盖——攻击者持被盗 token 挂慢速请求（如头像上传），受害者同时改密码，
+// 请求落库即把 bump 回滚、被盗 token 复活。版本号只允许 BumpTokenVersion 一条路径写。
 func (d *UserDao) UpdateUserById(uId uint, user *User) (err error) {
 	return d.DB.Model(&User{}).Where("id=?", uId).
+		Omit("token_version").
 		Updates(&user).Error
 }
 
