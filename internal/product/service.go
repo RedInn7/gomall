@@ -212,7 +212,11 @@ func (s *ProductSrv) ProductList(ctx context.Context, req *ProductListReq) (*typ
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	total, err = productDao.CountProductByCondition(condition)
+	// 总数走 60s 缓存 + singleflight：COUNT(*) 是全索引扫描且结果与页码无关，
+	// 不缓存时每翻一页都重数一遍全表——列表 p95 2.5s 的根因就在这。
+	total, err = cache.ProductCountCached(ctx, req.CategoryID, func() (int64, error) {
+		return productDao.CountProductByCondition(condition)
+	})
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
