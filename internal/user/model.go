@@ -29,7 +29,11 @@ type User struct {
 	// 支付密码不再参与加解密，单独存摘要用于支付前的身份校验。
 	MoneyPasswordDigest string
 	Role                string `gorm:"size:16;default:'user';index"`
-	Relations           []User `gorm:"many2many:relation;"`
+	// TokenVersion JWT 撤销版本号：签 token 时写入 claims，AuthMiddleware 逐请求比对。
+	// 改密码/强制下线时 +1（BumpTokenVersion），该用户所有已签发 token 立即作废。
+	// 默认 0 与不带该字段的存量 token（解析为 0）相等，存量会话平滑过渡。
+	TokenVersion uint   `gorm:"not null;default:0"`
+	Relations    []User `gorm:"many2many:relation;"`
 }
 
 const (
