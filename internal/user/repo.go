@@ -137,6 +137,14 @@ func (d *UserDao) UpdateUserById(uId uint, user *User) (err error) {
 		Updates(&user).Error
 }
 
+// BumpTokenVersion 版本号 +1：该用户所有已签发 JWT 立即作废（改密码/强制下线用）。
+// 用 SQL 表达式原子自增：读-改-写会与并发 bump 相互覆盖，且 struct Updates 会跳过
+// 零值导致 0→1 的首次 bump 静默丢失。
+func (d *UserDao) BumpTokenVersion(uId uint) error {
+	return d.DB.Model(&User{}).Where("id=?", uId).
+		UpdateColumn("token_version", gorm.Expr("token_version + ?", 1)).Error
+}
+
 // UpdateUserColumns 按列名 map 更新，支持把字段写成零值（如解绑邮箱写空串），
 // 规避 struct Updates 跳过零值的坑。
 func (d *UserDao) UpdateUserColumns(uId uint, columns map[string]interface{}) error {
