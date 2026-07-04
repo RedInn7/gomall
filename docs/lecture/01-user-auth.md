@@ -9,7 +9,7 @@
 - [一、五角色视角：鉴权到底在为谁工作](#一五角色视角鉴权到底在为谁工作)
 - [二、注册 + 登录 + 双 token：第一道业务边界](#二注册--登录--双-token第一道业务边界)
 - [三、RBAC：30s 缓存为什么业务能接受](#三rbac30s-缓存为什么业务能接受)
-- [四、admin bootstrap + 三层边界路线图](#四admin-bootstrap--三层边界路线图)
+- [四、admin bootstrap + 四层边界](#四admin-bootstrap--四层边界)
 - [五、token 失效 / 强制下线 / 多端隔离](#五token-失效--强制下线--多端隔离)
 - [附录 A：面试 Q&A](#附录-a面试-qa)
 - [附录 B：课后作业](#附录-b课后作业)
@@ -89,6 +89,73 @@ $2a$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW
 > - **自动加盐**——同一个密码，两个用户存出来的摘要也完全不同；
 > - **自包含格式**——版本 / cost / 盐全编码在摘要串里，所以升级 cost 不用迁移存量数据：老摘要按老参数校验，用户下次登录成功时顺手 rehash 到新 cost。
 
+为了让你最直观地感受区别，我们来看一个**黑客拖库（偷走数据库）后，尝试破解密码**的真实场景。
+
+假设数据库里有三个用户（张三、李四、王五），他们过年图吉利，设置的密码居然一模一样，全是 `888888`。
+
+### 场景 A：没有 bcrypt（使用传统 MD5 或 SHA-256）
+
+在没有 bcrypt 的时代，程序员通常直接把密码哈希，顶多手动加一个全站统一的固定盐。
+
+#### 1. 黑客看到的数据库
+
+黑客打开偷来的数据库，看到长这样：
+
+| **用户名** | **数据库存的密文（哈希值）**       |
+| ---------- | ---------------------------------- |
+| 张三       | `21218cca77804d2ba1922c33e0151105` |
+| 李四       | `21218cca77804d2ba1922c33e0151105` |
+| 王五       | `21218cca77804d2ba1922c33e0151105` |
+
+#### 2. 黑客如何破解？（如同割草）
+
+- **特征：** 密文完全一样。黑客一眼就看出：“哦，这三个人用的是同一个密码。”
+
+- **破解手段：【彩虹表 / 批量碰撞】**
+
+  由于 MD5/SHA-256 没有任何时间成本（一台普通电脑一秒钟能算几亿次），黑客手里早就下载好了几十个 G 的“常用密码哈希字典”（彩虹表）。
+
+- **破解过程：** 黑客把数据库丢进破解软件里，软件拿着彩虹表“秒级”完成了匹配：
+
+  > 匹配成功！`21218cca...` 的明文是 `888888`。
+
+- **结果：** **耗时不到 1 秒，三个用户的密码同时告破。** 数据库里有 10 万人胃口一样用这个密码，这 10 万人就会在同一秒被打包破解。
+
+### 场景 B：有了 bcrypt（自动加盐 + Cost 旋钮）
+
+现在我们换成 bcrypt（假设设置 `cost = 12`）。
+
+#### 1. 黑客看到的数据库
+
+黑客打开数据库，看到的是这样一堆天书：
+
+| **用户名** | **数据库存的密文（自包含格式）**          |
+| ---------- | ----------------------------------------- |
+| 张三       | `$2a$12$V7r8...（此处省略22位盐）...oP9q` |
+| 李四       | `$2a$12$Kj2m...（此处省略22位盐）...mN1b` |
+| 王五       | `$2a$12$Ab9x...（此处省略22位盐）...zZ4v` |
+
+### 2. 黑客如何破解？（如同推山）
+
+- **特征：** 哪怕三人明文密码一模一样，因为 bcrypt 底层自动生成的盐（前 22 位）完全不同，导致**最终出来的密文没有一个字是相同的**。黑客根本不知道谁和谁的密码一样。
+
+- **破解手段：【逐个死磕 + 硬件硬刚】**
+
+  黑客之前的“彩虹表字典”彻底废了。因为彩虹表没有针对张三的随机盐 `V7r8...` 提前算过结果。黑客想要破解，只能**针对每个人单独暴力穷举**。
+
+- **破解过程：**
+
+  1. **攻破张三：** 黑客软件必须先提取张三的盐 `V7r8...`。然后开始猜：密码是 `123` 吗？是 `abc` 吗？是 `888888` 吗？
+     - **致命的是：** 因为 `cost = 12`，黑客的显卡每猜**一个**密码，都需要硬生生计算 4096 轮，耗时大约 **0.1 秒**。
+     - 当他终于猜到 `888888` 时，可能已经算了几万次，花了几个小时。
+  2. **攻破李四：** 好了，张三破完了。黑客转头看李四——对不起，李四的盐是 `Kj2m...`。
+     - 黑客刚才为张三算的所有中间结果**全部作废**。
+     - 他必须原地掉头，针对李四的盐，重新从 `123`、`abc` 开始，以每秒只能猜几个的速度，重新死磕几个小时。
+
+- **结果：** 以前秒杀全站的黑客，现在面对 10 万个用户，必须重复“死磕几个小时”的过程 10 万次。**破解成本从“几秒钟”变成了“几百年”，黑客直接放弃。**
+
+
+
 ### 代码：bcrypt 在 gomall 的三处落点
 
 ```go
@@ -125,7 +192,7 @@ func (u *User) SetMoneyPassword(pin string) error {
 
 - User 表只有 `PasswordDigest` 一列，**没有单独的 salt 列**——`CompareHashAndPassword` 从摘要里解析出盐和 cost 再重算比对。`bcrypt` 密文长这样： `$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy`，从中提取出salt
 - **6 位 PIN 只有 100 万种可能**：`10^6 × 300ms` 单核串行也只要约 3.5 天，多核并行按小时计。低熵凭证 bcrypt 只是兜底，真正的防线是在线侧的错误锁定 / 限流——哈希救不了熵不足。
-- **一个真实的兜底陷阱**：`CheckMoneyPassword` 对**空摘要直接放行**（历史 / 种子用户未设支付密码时 `return true`）。这是"兼容优先"的安全默认值，但对资金动作是 fail-open——课堂讨论题：这算 bug 还是权衡？（审计结论：应改成 fail-closed，见[第五节](#五token-失效--强制下线--多端隔离)与代码库审计。）
+- **一个真实的兜底陷阱**：`CheckMoneyPassword` 对**空摘要直接放行**（历史 / 种子用户未设支付密码时 `return true`）。这是"兼容优先"的安全默认值，但对资金动作是 fail-open
 
 ```go
 // internal/user/model.go —— 注意这里的 fail-open
@@ -155,39 +222,47 @@ gomall 的回答，也是本讲义后三节的主线：
 | **角色**（能看见什么） | RBAC + 30s sync.Map 缓存 | 第三节 |
 | **边界**（做不到什么） | 路由分组 + middleware 链 + admin bootstrap | 第四节 |
 
-### gomall 的三层墙：公开 / authed / admin
+### gomall 的四层墙：逛 / 买 / 卖 / 管
+
+一层墙对应一类人、一个动词，越往里人越少、权越大：
 
 ```mermaid
-flowchart LR
-    pub["公开层<br/>GET /product/show<br/>仅全局令牌桶"]
-    auth["authed 层<br/>+ AuthMiddleware"]
-    mer["merchant 层<br/>（路线图，暂无独立 group）"]
-    adm["admin 层<br/>+ RequireRole"]
-    pub --> auth --> mer --> adm
+flowchart TD
+    pub["公开层 · 逛<br/>浏览商品 / 搜索"]
+    auth["authed 层 · 买<br/>下单 / 支付 / 收藏"]
+    mer["merchant 层 · 卖<br/>上架 / 发货 / 审退款"]
+    adm["admin 层 · 管<br/>提权 / 后台运维"]
+    pub -->|"AuthMiddleware：你是谁"| auth
+    auth -->|"RequireRole(merchant, admin)：你是商家吗"| mer
+    auth -->|"RequireRole(admin)：你是管理员吗"| adm
 ```
 
-- **公开层**：能匿名访问，挂 HTTP cache，不挂任何 auth（浏览是转化漏斗顶端，给它加登录墙等于赶客）。
-- **authed 层**：所有 C 端用户登录后能用，挂 `AuthMiddleware`。
-- **merchant 层**：**当前还没有独立 group**，商家身份借 user 表 Role 字段表达。
-- **admin 层**：在 authed 内再嵌一层 `RequireRole("admin")`。
+- **公开层（逛）**：匿名可达，只挂全局令牌桶 + HTTP cache（浏览是转化漏斗顶端，加登录墙等于赶客）。
+- **authed 层（买）**：所有 C 端用户登录后能用，挂 `AuthMiddleware`。
+- **merchant 层（卖）**：与 admin 同构的独立 group，挂 `RequireRole("merchant", "admin")`——上架、发货、审退款这些卖家动作都住这里，admin 天然可过这道墙。
+- **admin 层（管）**：`/admin` 前缀的独立后台，挂 `RequireRole("admin")`，只留管理员。
+- 注意 merchant 和 admin 是 authed 下的**两个平级子组**，不是嵌套——"admin 包含 merchant 权限"靠 `RequireRole` 的允许列表表达，不靠路由嵌套。
 
-### 代码：三层墙是怎么砌的
+### 代码：四层墙是怎么砌的
 
 墙只在**组合根**（composition root，`routes/router.go` 这一个组装点）砌一次：
 
 ```go
-// routes/router.go —— 三层墙一次砌好，每层墙开一道门
-v1 := r.Group("api/v1")                          // 第一道门：公开层，不设锁
+// routes/router.go —— 四层墙一次砌好，每层墙开一道门
+v1 := r.Group("api/v1")                          // 公开层：不设锁
 authed := v1.Group("/")
-authed.Use(middleware.AuthMiddleware())          // 第二道门：验 JWT（你是谁）
+authed.Use(middleware.AuthMiddleware())          // 验身份：你是谁
+merchantGroup := authed.Group("/")
+merchantGroup.Use(middleware.RequireRole(
+    user.RoleMerchant, user.RoleAdmin))          // 验角色：你是商家吗（admin 天然可过）
 adminGroup := authed.Group("/admin")
-adminGroup.Use(middleware.RequireRole("admin"))  // 第三道门：验角色（能干嘛）
+adminGroup.Use(middleware.RequireRole(user.RoleAdmin)) // 验角色：你是管理员吗
 
 // 20 个领域包统一签名自注册，各自只"选墙"、不"砌墙"
-for _, register := range []func(public, authed, admin *gin.RouterGroup){
+for _, register := range []func(public, authed, merchant, admin *gin.RouterGroup){
     user.RegisterRoutes, product.RegisterRoutes, // ...
 } {
-    register(v1, authed, adminGroup)
+    register(v1, authed, merchantGroup, adminGroup)
 }
 ```
 
@@ -199,14 +274,16 @@ public.POST("user/register", UserRegisterHandler())
 public.POST("user/login",    UserLoginHandler())
 authed.GET("user/show_info", ShowUserInfoHandler())
 
-// internal/refund/routes.go —— merchant 墙未落地的临时替身：逐路由挂 admin RBAC
-authed.POST("orders/refund/approve",
-    middleware.RequireRole("admin"), ApproveRefundHandler())
+// internal/refund/routes.go —— 商家动作选 merchant 墙，一行就能看出"这是卖家接口"
+merchant.POST("orders/refund/approve", ApproveRefundHandler())
+
+// internal/product/routes.go —— 上架 / 改价 / 删除同理
+merchant.POST("product/create", CreateProductHandler())
 ```
 
 - 墙只砌一次，领域包只**选墙**、不砌墙——挂错墙在 code review 里就是一行看得见的 diff。
 - public 组不是"忘了鉴权"：login / register 是**发凭证**的入口，必须匿名可达。
-- 上面 merchant"路线图"的现状：`approve` / `ship` 这类商家操作逐路由叠 `RequireRole("admin")` 顶着，将来 merchant 角色落地时要一处处改回。
+- merchant 墙落地前有过一段过渡形态：`approve` / `ship` 逐路由叠 `RequireRole("admin")` 顶着。能用，但"商家"这个语义散在各条路由的中间件参数里；落成独立 group 后，"这是商家接口"写进了**路由结构本身**——这就是分组即策略的价值。
 
 > **分组即策略**：把"谁能进"编码在**路由结构**里（进门就查），而不是散在每个 handler 里（进屋后才想起来查）。前面「C 端越权下单」案例的第一道防线就是这里。
 
@@ -216,7 +293,7 @@ authed.POST("orders/refund/approve",
 2. access 24h / refresh 10d 这两个数字怎么定，怎么影响留存；
 3. RBAC 为什么敢上 30s 内存缓存；
 4. admin bootstrap 这个"一次性接口"为什么必须存在；
-5. C 端 / merchant / admin 三层边界，merchant 还差什么；
+5. C 端 / merchant / admin 的边界怎么画，admin 为什么天然可过 merchant 墙；
 6. token 失效 / 强制下线 / 多端隔离怎么做；
 7. 业务码 `30001 / 30002` 对应的客服话术。
 
@@ -387,7 +464,7 @@ func lookupRole(ctx context.Context, userId uint) (string, error) {
 那么这 30s 窗口能干多大的坏事？逐个看 admin 能力：
 
 - 列用户（读操作，无损）、promote（可再回收）、重灌 ES 索引（重建而已）——都不是"钱瞬间没了"级别。
-- ⚠️ **但有一个真实资金风险**：退款审批 `orders/refund/approve` 已经挂了 `RequireRole("admin")`，而 approve 推进订单到 Refunded 后会触发**真实资金结算**（买家余额 +、卖家余额 −、写复式台账）。也就是说，**一个被降权的 admin 在 30s 窗口内批退款，钱是真的会动的**。（这一条修正了早期讲稿"控钱接口尚未挂 admin、无 30s 资金风险"的说法——退款审批 RBAC 已落地，风险是真实的。）
+- ⚠️ **但有一个真实资金风险**：退款审批 `orders/refund/approve` 挂在 merchant 墙上（merchant / admin 都可过），而 approve 推进订单到 Refunded 后会触发**真实资金结算**（买家余额 +、卖家余额 −、写复式台账）。也就是说，**一个被摘牌的商家或被降权的管理员，在 30s 窗口内批退款，钱是真的会动的**。
 
 所以结论是**两层保险**，而不是二选一：
 
@@ -400,11 +477,11 @@ func lookupRole(ctx context.Context, userId uint) (string, error) {
 
 1. `roleCache` 是**进程内的 sync.Map**——多实例部署时，实例 A 上的 `InvalidateRoleCache` 只清得掉 A 自己的缓存，实例 B 的旧缓存照样活到 TTL。所以多副本下 30s 窗口物理上消不掉，除非上 Redis pub/sub 广播失效。
 2. **缓存无上限、无清理，也没有 singleflight**——key 随见过的 uid 单调增长（内存泄漏隐患）；某个 uid 缓存过期瞬间的并发请求会一起击穿到 DB。同包 `ratelimit.go` 已有 janitor 回收模式可直接照搬。
-3. 而且当前仓库**只有升权 API、没有降权 API**——降权只能直改 DB，缓存不失效，"降权后 30s"因此是理论 + 真实资金风险叠加。
+3. 降权已有正规入口：`users/promote` 带 `role` 参数（user / merchant / admin 白名单），设回 user 即降权，与升权共用 `InvalidateRoleCache` 立即生效。但运营直接在 DB 跑 SQL 改角色仍会绕过失效，只能靠 30s TTL 兜底——这正是 TTL 作为最后一道保险存在的意义。
 
 ---
 
-## 四、admin bootstrap + 三层边界路线图
+## 四、admin bootstrap + 四层边界
 
 ### 冷启动悖论
 
@@ -433,27 +510,27 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
     if count > 0 {
         return errors.New("系统已存在 admin，禁止使用 bootstrap 接口")
     }
-    return s.PromoteToAdmin(ctx, u.Id)
+    return s.PromoteUser(ctx, u.Id, user.RoleAdmin)
 }
 ```
 
 用 `count(*) WHERE role='admin' > 0` 把这个接口变成"一次性"：一旦有了第一个 admin，它立即自锁。
 
-> ⚠️ **一个真实的 TOCTOU 竞态**：`Count` 检查与 `PromoteToAdmin` 写入不在同一事务/锁内。两个用户并发调用，都读到 count=0，就会**双双成为 admin**。修复：把 count + promote 放进一个事务并加锁，或用唯一约束兜底。
+> ⚠️ **一个真实的 TOCTOU 竞态**：`Count` 检查与 `PromoteUser` 写入不在同一事务/锁内。两个用户并发调用，都读到 count=0，就会**双双成为 admin**。修复：把 count + promote 放进一个事务并加锁，或用唯一约束兜底。
 
-### C 端 / merchant / admin 三层对比
+### 逛 / 买 / 卖 / 管四层对比
 
 | 角色 | 路由位置 | 中间件链 | 业务能力 |
 |---|---|---|---|
-| 匿名 user | v1 顶层 | 仅全局令牌桶 | 浏览商品 |
-| C 端 user | authed 组 | + AuthMiddleware | 下单 / 抢券 |
-| merchant | 暂无 | —— | **路线图** |
-| admin | admin 子组 | + RequireRole | 提权 / 后台 |
+| 匿名 user | v1 顶层 | 仅全局令牌桶 | 逛：浏览商品 |
+| C 端 user | authed 组 | + AuthMiddleware | 买：下单 / 抢券 |
+| merchant | merchant 组 | + RequireRole(merchant/admin) | 卖：上架 / 发货 / 审退款 |
+| admin | admin 子组 | + RequireRole(admin) | 管：提权 / 后台 |
 
-- C 端 vs admin 的边界靠 `RequireRole("admin")` 拦下。
-- merchant 身份当前由 user 表 Role 字段表达，单店家阶段够用；多店家时升级为独立 group。
-- **`product/create` 当前挂在 authed 组**——任何登录用户都能建商品，但控权靠的是"创建者即卖家"：`ProductCreate` 把卖家身份直接取自 JWT 解出的 uid（`BossID = GetUserById(u.Id)`），**不从请求体取**，所以冒充别家店铺上架做不到。（早期讲稿说"由 Role 控权"不准确——实际没有 Role 检查，靠的是 BossID 取自 token 这个机制。）
-- 多店家阶段的迁移三件套：迁入 merchant group + 叠加 `RequireRole("merchant")`（垂直墙，防非商家进入）+ DAO 层 `shop_id` 隔离（水平墙，防商家 A 翻商家 B 的货）。**RBAC 只防垂直越权，水平越权要靠数据层归属条件**，两面墙缺一不可。
+- 谁能进哪层，全部编码在**路由结构**里。merchant 墙 admin 天然可过，反过来不行——`RequireRole` 的允许列表是单向包含。
+- 商家怎么产生：admin 调 `users/promote` 把用户 `role` 设为 merchant（对应"入驻审核通过"这个业务动作），设回 user 即摘牌，两个方向都走 `InvalidateRoleCache` 立即生效。
+- **垂直墙 + 水平墙缺一不可**：merchant 墙只回答"你是不是商家"（防垂直越权）；"你是不是**这件商品的**商家"靠 DAO 层 `boss_id` 归属条件（防水平越权）——`UpdateProduct` / `DeleteProduct` 的 WHERE 里都带 `boss_id = ?`，商家 A 改不动商家 B 的货。`ProductCreate` 则把卖家身份直接取自 JWT 解出的 uid（`BossID = GetUserById(u.Id)`），**不从请求体取**，冒充别家店铺上架做不到。
+- 多店铺阶段要升级的不再是鉴权，而是数据建模：把"一人一店"的 `boss_id` 升级为 `shop_id`（一商家多店铺）。
 
 ### 攻击面：登录接口要扛三种黑产打法
 
@@ -573,7 +650,7 @@ sequenceDiagram
 A：access 短，限制单个 token 泄露的损失；refresh 长，覆盖周末/假期回流。10d 是留存与安全的折中，也贴合支付牌照 ≤14d 的合规线。
 
 **Q2：RBAC 30s 内存缓存，admin 误授权 30s 不是漏洞吗？**
-A：常规延迟可接受（提权慢生效无害）。关键路径用 `InvalidateRoleCache(userId)` 显式失效，提权/降权立即生效。真实风险点在退款审批已挂 admin 且触发资金结算，降权必须走显式失效。
+A：常规延迟可接受（提权慢生效无害）。关键路径用 `InvalidateRoleCache(userId)` 显式失效，提权/降权立即生效。真实风险点在退款审批挂 merchant 墙且触发资金结算，摘牌/降权必须走显式失效。
 
 **Q3：登出后老 token 还能用怎么办？**
 A：token 仅控访问、不直接控钱，大额动作有二次验证兜底。根治靠 Claims 加 `token_version`，登出/改密码时 `++`，解析时比对——目前是路线图。
@@ -587,8 +664,8 @@ A：IP + 账号双维度滑动窗口 + 5 次失败强制验证码 + 30min 冻结
 **Q6：admin bootstrap 一次性接口怎么防重？**
 A：`count(*) WHERE role='admin' > 0` 直接返回错。当前有 TOCTOU 竞态，并发需加事务/advisory lock 兜底。
 
-**Q7：merchant 没独立 group 为什么不阻塞上线？**
-A：单店家场景 user 即 merchant，靠"创建者即卖家"（BossID 取自 token）控权。多店家才需要 group + DAO 层 shop_id 双层隔离。
+**Q7：merchant 墙落地之前，商家接口是不是在裸奔？**
+A：没有。过渡期靠两点顶住：发货/审退款逐路由挂 admin RBAC（运营代操作），商品归属靠"创建者即卖家"（BossID 取自 token）。落地 merchant 组只是把散在各路由的商家语义收进路由结构，权限没有放宽——普通 user 从头到尾进不来。
 
 **Q8：业务码 30001 vs 30002 用户视角一样，区分有何意义？**
 A：用户都是重登，但客服要区分"安全事件（被踢）vs 长闲置（自然过期）"，比例异常还能触发审计。
