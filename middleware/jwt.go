@@ -56,6 +56,8 @@ func currentTokenVersion(ctx context.Context, userId uint) (uint, error) {
 }
 
 // InvalidateTokenVersionCache 版本号 bump 后调用，让该用户的旧 token 立即失效。
+// 竞态边界：若 currentTokenVersion 的"读库→写缓存"恰好横跨 bump+本清理，旧版本号
+// 会被缓存至多 TTL（60s）——撤销延迟上限是 TTL，不是绝对零。窗口为毫秒级，可接受。
 // ponytail: 单进程内存缓存；多实例部署时需换 Redis 或 pub/sub 广播失效。
 func InvalidateTokenVersionCache(userId uint) {
 	tokenVerCache.Delete(userId)
