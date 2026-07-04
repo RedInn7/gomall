@@ -35,7 +35,7 @@ warn()  { printf "%s[!]%s %s\n"  "$C_WARN" "$C_RST" "$*"; }
 fail()  { printf "%s[x]%s %s\n"  "$C_BAD"  "$C_RST" "$*" >&2; exit 1; }
 bold()  { printf "%s%s%s\n"      "$C_BOLD" "$*"          "$C_RST"; }
 
-AUX_EXTS=(aux log toc nav snm out vrb fls fdb_latexmk)
+AUX_EXTS=(aux log toc nav snm out vrb fls fdb_latexmk synctex.gz bbl blg)
 
 clean_aux() {
   local base="$1"
@@ -82,8 +82,8 @@ declare -a BUILT_PDFS=()
 FAILED=0
 
 shopt -s nullglob
-# 注意：合订本封面 00-master-cover.tex 是辅助产物，仅 3 页，不参与 ≥50
-# 页数校验；它会在 master.pdf 拼接时单独编译（见 build.sh --master）。
+# 注意：合订本封面 00-master-cover.tex 是辅助产物（仅 3 页），不在此循环单独编译，
+# 会在 master.pdf 拼接时处理（见 build.sh --master）。
 for src in [0-9][0-9]-*.tex; do
   base="${src%.tex}"
   if [[ -n "$FILTER" && "$base" != ${FILTER}* ]]; then
