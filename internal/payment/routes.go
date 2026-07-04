@@ -8,8 +8,8 @@ import (
 	"github.com/RedInn7/gomall/middleware"
 )
 
-// RegisterRoutes 挂载本领域路由。public 不需登录；authed 已套登录中间件；admin 已套 RequireRole("admin")。
-func RegisterRoutes(public, authed, admin *gin.RouterGroup) {
+// RegisterRoutes 挂载本领域路由。public 不需登录；authed 已套登录中间件；merchant 已套 RequireRole("merchant"/"admin")；admin 已套 RequireRole("admin")。
+func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 	// 支付功能：熔断保护下游 + 幂等防重复扣款
 	authed.POST("paydown",
 		middleware.CircuitBreaker(middleware.CircuitBreakerOption{
