@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
@@ -23,6 +24,16 @@ func NewPromoDao(ctx context.Context) *PromoDao {
 
 func NewPromoDaoByDB(db *gorm.DB) *PromoDao {
 	return &PromoDao{db}
+}
+
+// CreateReleaseOnce 幂等落 promo_release 台账（order_id 唯一索引 + ON CONFLICT DO NOTHING）。
+// created=false 表示台账已存在，即同一订单的重复投递。
+func (d *PromoDao) CreateReleaseOnce(rec *PromoRelease) (created bool, err error) {
+	res := d.DB.Clauses(clause.OnConflict{DoNothing: true}).Create(rec)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }
 
 // Create 落规则。运营创建时调用，默认 Status=draft。
