@@ -38,19 +38,13 @@ func (s *UserServer) ListUsers(ctx context.Context, req *userpb.ListUsersRequest
 	if pageSize <= 0 || pageSize > 200 {
 		pageSize = 50
 	}
-	var (
-		users []*user.User
-		total int64
-	)
-	db := user.NewUserDao(ctx).DB
-	if err := db.Model(&user.User{}).Count(&total).Error; err != nil {
+	userDao := user.NewUserDao(ctx)
+	total, err := userDao.CountAll()
+	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	if err := db.Model(&user.User{}).
-		Order("id DESC").
-		Offset((page - 1) * pageSize).
-		Limit(pageSize).
-		Find(&users).Error; err != nil {
+	users, err := userDao.ListPaged(page, pageSize)
+	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	items := make([]*userpb.UserInfo, 0, len(users))

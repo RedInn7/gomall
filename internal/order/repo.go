@@ -112,6 +112,28 @@ func (d *OrderDao) SumWaitPayNumByProduct() (map[uint]int64, error) {
 	return m, nil
 }
 
+// SumRecentlyPaidNumByProduct 汇总每个商品「刚支付成功、Redis 预占可能尚未 commit」的在途数量(Σ Num)。
+// 口径：type=WaitShip 且 updated_at 在 since 之后（刚由支付推进而来、仍在 commit 宽限期内）。
+// 仅取宽限期内的新近订单，避免把早已 commit 完成的 WaitShip 也算进基准而漏掉真实泄漏。
+func (d *OrderDao) SumRecentlyPaidNumByProduct(since time.Time) (map[uint]int64, error) {
+	var rows []struct {
+		ProductID uint
+		Total     int64
+	}
+	if err := d.DB.Model(&Order{}).
+		Select("product_id, SUM(num) AS total").
+		Where("type = ? AND updated_at >= ?", consts.OrderWaitShip, since).
+		Group("product_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	m := make(map[uint]int64, len(rows))
+	for _, r := range rows {
+		m[r.ProductID] = r.Total
+	}
+	return m, nil
+}
+
 // ListOrderByCondition 获取订单List
 func (d *OrderDao) ListOrderByCondition(uId uint, req *OrderListReq) (r *OrderListResp, err error) {
 	req.BasePage.Normalize()

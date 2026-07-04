@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/e"
@@ -264,21 +263,21 @@ func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, di
 	}
 	db := NewPromoDao(ctx).DB
 	return db.Transaction(func(tx *gorm.DB) error {
-		rec := &PromoRelease{
+		txDao := NewPromoDaoByDB(tx)
+		created, err := txDao.CreateReleaseOnce(&PromoRelease{
 			OrderID:       orderID,
 			RuleID:        ruleID,
 			DiscountCents: discountCents,
 			Reason:        reason,
+		})
+		if err != nil {
+			return err
 		}
-		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(rec)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
+		if !created {
 			// 台账已存在：本次是重复投递，预算与事件均已落，幂等返回。
 			return nil
 		}
-		if err := NewPromoDaoByDB(tx).RestoreBudget(tx, ruleID, discountCents); err != nil {
+		if err := txDao.RestoreBudget(tx, ruleID, discountCents); err != nil {
 			return err
 		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
