@@ -36,6 +36,7 @@ const (
 	PassWordCost        = 12       // 密码加密难度
 	Active       string = "active" // 激活用户
 	RoleUser     string = "user"
+	RoleMerchant string = "merchant"
 	RoleAdmin    string = "admin"
 )
 
