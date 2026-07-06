@@ -236,8 +236,8 @@ func TestPreorder_OutOfDepositWindowRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("应当返回不在定金期错误")
 	}
-	if CodeOf(err) != e.ErrPreorderNotInDepositWindow {
-		t.Fatalf("expect code %d, got %d (err=%v)", e.ErrPreorderNotInDepositWindow, CodeOf(err), err)
+	if e.CodeOf(err) != e.ErrPreorderNotInDepositWindow {
+		t.Fatalf("expect code %d, got %d (err=%v)", e.ErrPreorderNotInDepositWindow, e.CodeOf(err), err)
 	}
 
 	// 库存桶不应被改动
@@ -514,9 +514,9 @@ func TestPreorder_CancelAfterDepositEndForfeits(t *testing.T) {
 	if err == nil {
 		t.Fatal("预售期结束后取消应被拒")
 	}
-	if CodeOf(err) != e.ErrPreorderForfeitedDeposit {
+	if e.CodeOf(err) != e.ErrPreorderForfeitedDeposit {
 		t.Fatalf("expect code %d, got %d (err=%v)",
-			e.ErrPreorderForfeitedDeposit, CodeOf(err), err)
+			e.ErrPreorderForfeitedDeposit, e.CodeOf(err), err)
 	}
 }
 
@@ -551,8 +551,8 @@ func TestPreorder_FinalRequiresDepositPaid(t *testing.T) {
 	if err == nil {
 		t.Fatal("应当报未付定金错误")
 	}
-	if CodeOf(err) != e.ErrPreorderDepositNotPaid {
-		t.Fatalf("expect code %d, got %d", e.ErrPreorderDepositNotPaid, CodeOf(err))
+	if e.CodeOf(err) != e.ErrPreorderDepositNotPaid {
+		t.Fatalf("expect code %d, got %d", e.ErrPreorderDepositNotPaid, e.CodeOf(err))
 	}
 }
 
