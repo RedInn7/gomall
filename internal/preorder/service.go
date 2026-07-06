@@ -46,30 +46,6 @@ func GetPreorderSrv() *PreorderSrv {
 	return preorderSrvIns
 }
 
-// codedError 把业务码透出给上层 handler，handler 通过 errors.As 解出。
-type codedError struct {
-	Code int
-	Msg  string
-}
-
-func (c *codedError) Error() string { return c.Msg }
-
-func newCodedError(code int) error {
-	return &codedError{Code: code, Msg: e.GetMsg(code)}
-}
-
-// CodeOf 提取 codedError 里的业务码；非 codedError 返回 e.ERROR。
-func CodeOf(err error) int {
-	if err == nil {
-		return e.SUCCESS
-	}
-	var ce *codedError
-	if errors.As(err, &ce) {
-		return ce.Code
-	}
-	return e.ERROR
-}
-
 // 时钟函数指针，方便测试替换。生产路径恒为 time.Now。
 var nowFn = time.Now
 
@@ -93,7 +69,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 	}
 	now := nowFn()
 	if now.Before(pp.DepositStartAt) || !now.Before(pp.DepositEndAt) {
-		return nil, newCodedError(e.ErrPreorderNotInDepositWindow)
+		return nil, e.New(e.ErrPreorderNotInDepositWindow)
 	}
 
 	// 卖家（定金的收款方）以商品表为准，忽略 req.BossID：定金会打进 boss 钱包，
@@ -199,10 +175,10 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*Pre
 		return nil, errors.New("订单不存在")
 	}
 	if ord.PreorderStage == PreorderStageForfeited {
-		return nil, newCodedError(e.ErrPreorderForfeitedDeposit)
+		return nil, e.New(e.ErrPreorderForfeitedDeposit)
 	}
 	if ord.PreorderStage != PreorderStageDepositPaid {
-		return nil, newCodedError(e.ErrPreorderDepositNotPaid)
+		return nil, e.New(e.ErrPreorderDepositNotPaid)
 	}
 
 	pp, err := NewPreorderDao(ctx).GetPreorderByProductID(ord.ProductID)
@@ -211,7 +187,7 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*Pre
 	}
 	now := nowFn()
 	if now.Before(pp.DepositEndAt) || !now.Before(pp.FinalEndAt) {
-		return nil, newCodedError(e.ErrPreorderNotInFinalWindow)
+		return nil, e.New(e.ErrPreorderNotInFinalWindow)
 	}
 
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
@@ -292,7 +268,7 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *Pr
 	if ord.PreorderStage != PreorderStageDepositPaid {
 		// 已付尾款或已没收，不再走"全退"路径
 		if ord.PreorderStage == PreorderStageForfeited {
-			return nil, newCodedError(e.ErrPreorderForfeitedDeposit)
+			return nil, e.New(e.ErrPreorderForfeitedDeposit)
 		}
 		return nil, errors.New("订单不在可取消的阶段")
 	}
@@ -304,7 +280,7 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *Pr
 	now := nowFn()
 	if now.Before(pp.DepositStartAt) || !now.Before(pp.DepositEndAt) {
 		// 已过定金期：业务上是"定金不退"
-		return nil, newCodedError(e.ErrPreorderForfeitedDeposit)
+		return nil, e.New(e.ErrPreorderForfeitedDeposit)
 	}
 
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
