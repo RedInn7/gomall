@@ -98,7 +98,21 @@ func CommitIdempotencyResult(ctx context.Context, key, result string) error {
 	return err
 }
 
-// ReleaseIdempotencyLock 处理失败时回滚到 init，允许客户端用同一 token 重试
+// releaseScript 原子地把记录回退到 init 并重新附带 TTL。
+// 与 issueScript 同理：HSET 与 EXPIRE 必须同生效——回退发生在处理失败 / 提交失败时，
+// 若 key 已在处理期间过期，裸 HSET 会把它重建成一条“永不过期”的 init 记录，
+// 累积导致无界内存泄漏。ARGV[1]=state，ARGV[2]=TTL 秒。
+var idempotencyReleaseScript = redis.NewScript(`
+redis.call('HSET', KEYS[1], 'state', ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+`)
+
+// ReleaseIdempotencyLock 处理失败时回滚到 init，允许客户端用同一 token 重试。
+// 原子重设 TTL：避免 key 若已过期时被裸 HSET 重建成永不过期的记录（内存泄漏）。
 func ReleaseIdempotencyLock(ctx context.Context, key string) error {
-	return RedisClient.HSet(ctx, key, "state", IdempotencyStateInit).Err()
+	return idempotencyReleaseScript.Run(ctx, RedisClient,
+		[]string{key},
+		IdempotencyStateInit, int(IdempotencyTokenTTL.Seconds()),
+	).Err()
 }
