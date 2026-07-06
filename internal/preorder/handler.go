@@ -9,7 +9,6 @@ import (
 	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
-	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 // PreorderShowHandler 公共预售信息展示。
@@ -47,7 +46,7 @@ func PreorderDepositHandler() gin.HandlerFunc {
 
 		resp, err := GetPreorderSrv().PayDeposit(ctx.Request.Context(), req)
 		if err != nil {
-			respondPreorderErr(ctx, err)
+			response.Fail(ctx, err)
 			return
 		}
 		response.OK(ctx, resp)
@@ -71,7 +70,7 @@ func PreorderFinalHandler() gin.HandlerFunc {
 
 		resp, err := GetPreorderSrv().PayFinal(ctx.Request.Context(), req)
 		if err != nil {
-			respondPreorderErr(ctx, err)
+			response.Fail(ctx, err)
 			return
 		}
 		response.OK(ctx, resp)
@@ -95,7 +94,7 @@ func PreorderCancelHandler() gin.HandlerFunc {
 
 		resp, err := GetPreorderSrv().CancelPreorderInDepositWindow(ctx.Request.Context(), req)
 		if err != nil {
-			respondPreorderErr(ctx, err)
+			response.Fail(ctx, err)
 			return
 		}
 		response.OK(ctx, resp)
@@ -122,14 +121,3 @@ var errMissingPathParam = preorderHandlerErr("missing path param")
 type preorderHandlerErr string
 
 func (p preorderHandlerErr) Error() string { return string(p) }
-
-// respondPreorderErr 把业务码透出给客户端，让前端按 82xxx 拉对应文案。
-func respondPreorderErr(ctx *gin.Context, err error) {
-	log.LogrusObj.Infoln(err)
-	code := CodeOf(err)
-	if code == e.SUCCESS || code == e.ERROR {
-		ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
-		return
-	}
-	ctx.JSON(http.StatusOK, ctl.RespError(ctx, err, e.GetMsg(code), code))
-}
