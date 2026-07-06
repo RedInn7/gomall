@@ -2,16 +2,13 @@ package groupbuy
 
 import (
 	"errors"
-	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/RedInn7/gomall/internal/shared/response"
-	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
-	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 // GroupbuyCreateReq 团长发起拼团请求。
@@ -59,8 +56,7 @@ func GroupbuyCreateHandler() gin.HandlerFunc {
 			req.BossID, req.AddressID,
 		)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			c.JSON(http.StatusOK, groupbuyErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
 		response.OK(c, resp)
@@ -89,8 +85,7 @@ func GroupbuyJoinHandler() gin.HandlerFunc {
 			c.Request.Context(), u.Id, groupID, req.BossID, req.AddressID,
 		)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			c.JSON(http.StatusOK, groupbuyErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
 		response.OK(c, resp)
@@ -107,8 +102,7 @@ func GroupbuyShowHandler() gin.HandlerFunc {
 		}
 		g, members, err := GetGroupbuySrv().ShowGroup(c.Request.Context(), groupID)
 		if err != nil {
-			log.LogrusObj.Infoln(err)
-			c.JSON(http.StatusOK, groupbuyErrorResponse(c, err))
+			response.Fail(c, err)
 			return
 		}
 		response.OK(c, GroupbuyShowResp{Group: g, Members: members})
@@ -123,20 +117,4 @@ func parseGroupID(c *gin.Context) (uint, error) {
 		return 0, errors.New("无效的团 id")
 	}
 	return uint(id), nil
-}
-
-// groupbuyErrorResponse 把 service 层错误翻成 81001-81004 业务码。
-// 客服在工单系统里看到对应 code 直接命中 pkg/e/msg.go 中的话术。
-func groupbuyErrorResponse(c *gin.Context, err error) *ctl.TrackedErrorResponse {
-	switch {
-	case errors.Is(err, ErrGroupbuyFull):
-		return ctl.RespError(c, err, "团已满员", e.ErrGroupbuyFull)
-	case errors.Is(err, ErrGroupbuyExpired):
-		return ctl.RespError(c, err, "团已超时", e.ErrGroupbuyExpired)
-	case errors.Is(err, ErrGroupbuyDuplicateJoin):
-		return ctl.RespError(c, err, "重复加入", e.ErrGroupbuyDuplicateJoin)
-	case errors.Is(err, ErrGroupbuyClosed):
-		return ctl.RespError(c, err, "团已关闭", e.ErrGroupbuyClosed)
-	}
-	return response.ErrorResponse(c, err)
 }
