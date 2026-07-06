@@ -26,5 +26,11 @@ func ErrorResponse(ctx *gin.Context, err error) *ctl.TrackedErrorResponse {
 		return ctl.RespError(ctx, err, "JSON类型不匹配")
 	}
 
+	// 带码错误（e.New 构造）直接透出其业务码 + 客服话术；裸 error 落 500 兜底。
+	// 这一处翻译取代了过去各领域自己写的 error→code 映射。
+	if code := e.CodeOf(err); code != e.ERROR {
+		return ctl.RespError(ctx, err, e.GetMsg(code), code)
+	}
+
 	return ctl.RespError(ctx, err, err.Error(), e.ERROR)
 }
