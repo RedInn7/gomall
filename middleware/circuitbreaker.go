@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/e"
 )
 
@@ -61,11 +62,8 @@ func CircuitBreaker(opt CircuitBreakerOption) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		gen, err := cb.allow()
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"status": e.ErrCircuitOpen,
-				"msg":    e.GetMsg(e.ErrCircuitOpen),
-				"data":   err.Error(),
-			})
+			// 熔断拒绝走统一错误出口：带码 error 自动透出 ErrCircuitOpen + 客服话术。
+			response.Fail(c, e.New(e.ErrCircuitOpen))
 			c.Abort()
 			return
 		}

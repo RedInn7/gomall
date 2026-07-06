@@ -14,6 +14,7 @@ import (
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
+	"github.com/RedInn7/gomall/pkg/e"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -30,13 +31,14 @@ const DefaultGroupbuyTTL = 24 * time.Hour
 // 真正的活动折扣应落到服务端拼团活动配置表，而非信客户端。
 const GroupbuyMinPriceBps = 5000
 
-// 业务错误：service 层向 handler / cron 返回，由 handler 翻成 81001-81004
-// 业务码与客服话术（pkg/e/msg.go）。
+// 业务错误：service 层向 handler / cron 返回。带码 error（e.New）走统一错误出口时
+// 自动透出 81001-81004 业务码与客服话术（pkg/e/msg.go），handler 无需再写映射。
+// 仍是包级 sentinel，errors.Is 判定照常。ErrGroupbuyNotFound 无对应业务码，走 500 兜底。
 var (
-	ErrGroupbuyFull          = errors.New("拼团已满员")
-	ErrGroupbuyExpired       = errors.New("拼团已超时")
-	ErrGroupbuyClosed        = errors.New("拼团已关闭")
-	ErrGroupbuyDuplicateJoin = errors.New("您已加入该团")
+	ErrGroupbuyFull          = e.New(e.ErrGroupbuyFull)
+	ErrGroupbuyExpired       = e.New(e.ErrGroupbuyExpired)
+	ErrGroupbuyClosed        = e.New(e.ErrGroupbuyClosed)
+	ErrGroupbuyDuplicateJoin = e.New(e.ErrGroupbuyDuplicateJoin)
 	ErrGroupbuyNotFound      = errors.New("拼团不存在")
 )
 
