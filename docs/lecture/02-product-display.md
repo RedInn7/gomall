@@ -91,10 +91,12 @@ HTTP 404 不会让 `fetch` 自动抛异常。当前代码把非 2xx 响应转成
 
 这张表要纠正两个误解：商品首页不是一个接口；挂了 HTTP cache，也不代表 Redis 中一定保存了数据。
 
+下面只画本讲追踪的商品列表与详情主路径。相册没有挂 HTTP cache，分类和轮播也有各自的 Handler，不经过 Product Handler。
+
 ```mermaid
 flowchart LR
     B[浏览器] --> R[Gin Router]
-    R --> H[HTTP Cache]
+    R --> H[HTTP Cache<br/>仅列表与详情]
     H --> P[Product Handler]
     P --> S[Product Service]
     S --> C[(Redis)]
@@ -168,9 +170,7 @@ SELECT COUNT(*) FROM product WHERE category_id = ?;
 
 ### 3.3 Redis 也会出现 N+1
 
-每组装一个商品 DTO，代码都会调用一次 `View()`，读取一个 Redis key。一页 15 件商品，就会产生 15 次串行 Redis GET。
-
-修复前先问产品：列表卡片真的需要浏览量吗？如果需要，可用 pipeline/MGET；如果不需要，就只在详情读取。技术方案应该服务页面需求，而不是保留一个没人验证过的字段。
+每组装一个商品 DTO，代码都会调用一次 `View()`。一页 15 件商品，就会产生 15 次串行 Redis GET。修复前先问产品：卡片真的需要浏览量吗？需要就批量读取，不需要就从列表移除。本讲不展开实现。
 
 > 过渡问题：列表可以每次查一页，但热门详情被几千人同时打开时，还能直接查 MySQL 吗？
 
@@ -243,13 +243,13 @@ if !locked {
 ### 演示 2：比较冷缓存与热缓存（5 分钟）
 
 ```bash
-redis-cli -n 4 DEL product:detail:42
+redis-cli -n 4 DEL product:detail:42 product:lock:42
 curl -i 'http://localhost:5002/api/v1/product/show?id=42'
-redis-cli -n 4 TTL product:detail:42
+redis-cli -n 4 PTTL product:detail:42
 curl -i 'http://localhost:5002/api/v1/product/show?id=42'
 ```
 
-观察三件事：第一次是否出现 MySQL 查询，第二次是否从 Redis 返回，TTL 是否落在 600–690 秒。不要只比两次 curl 的耗时，本机网络抖动可能掩盖差异。
+观察三件事：第一次是否出现 MySQL 查询，第二次是否从 Redis 返回，刚写入时 PTTL 是否接近 600000–690000ms（命令执行会消耗少量时间）。不要只比两次 curl 的耗时，本机网络抖动可能掩盖差异。
 
 ### 4.3 缓存中的库存只是展示值
 
