@@ -1,495 +1,239 @@
 # 用户与鉴权的业务边界
 
-> gomall · 五角色视角 / 注册 / 双 token / RBAC / admin bootstrap
->
-> 这份讲义不讲"怎么写一个 JWT 库"，讲的是**每条鉴权决策背后的业务取舍**——信谁、信多久、信他能干什么，以及每个决策错了会赔多少钱、客服要说什么话、SLO 会怎么抖。
+目录
 
-## 目录
+- [一、越权为什么比“登录失败”更危险](#一越权为什么比登录失败更危险)
+- [二、注册、登录与双 token](#二注册登录与双-token)
+- [三、JWT 中间件与会话撤销](#三jwt-中间件与会话撤销)
+- [四、RBAC 与 admin bootstrap](#四rbac-与-admin-bootstrap)
+- [五、演示、复盘与课后延伸](#五演示复盘与课后延伸)
 
-- [一、五角色视角：鉴权到底在为谁工作](#一五角色视角鉴权到底在为谁工作)
-- [二、注册 + 登录 + 双 token：第一道业务边界](#二注册--登录--双-token第一道业务边界)
-- [三、RBAC：30s 缓存为什么业务能接受](#三rbac30s-缓存为什么业务能接受)
-- [四、admin bootstrap + 四层边界](#四admin-bootstrap--四层边界)
-- [五、token 失效 / 强制下线 / 多端隔离](#五token-失效--强制下线--多端隔离)
-- [附录 A：面试 Q&A](#附录-a面试-qa)
-- [附录 B：课后作业](#附录-b课后作业)
+## 本讲安排（60 分钟）
+
+| 时间 | 内容 | 讲完要能回答 |
+|---|---|---|
+| 0–7 分钟 | 身份、角色与资源归属 | “已登录”为什么仍可能越权？ |
+| 7–17 分钟 | 密码保存与注册登录 | 数据库为什么不能存明文密码？ |
+| 17–29 分钟 | access / refresh token | token 过期后如何续期？ |
+| 29–41 分钟 | AuthMiddleware 与 token_version | 改密码后怎样让旧 token 失效？ |
+| 41–51 分钟 | RBAC、角色缓存与 bootstrap | admin 从哪里来，降权多久生效？ |
+| 51–57 分钟 | 两个代码演示 | 亲眼看到鉴权通过与撤销 |
+| 57–60 分钟 | 边界复盘 | 哪些机制已经落地，哪些仍是路线图？ |
+
+本讲不展开 OAuth、验证码服务、多设备独立踢出和审计系统实现；这些内容放在课后延伸里。
 
 ---
 
-## 一、五角色视角：鉴权到底在为谁工作
+## 一、越权为什么比“登录失败”更危险
 
-### 为什么把"用户鉴权"放在第一份 deck
+用户鉴权不是 JWT 语法课。真正的问题有三层：
 
-一笔 100 元的订单，从浏览到收货要经过 20 多个技术环节。**鉴权是第一环**——它错了，后面 19 环全建在危房上。
+1. **身份**：请求来自哪个用户？
+2. **角色**：这个用户是普通用户、商家还是管理员？
+3. **资源归属**：即使角色允许，他能否操作这一笔订单、这个地址或这件商品？
 
-而且鉴权失败的代价从来不是一个 5xx 报错，是真金白银：
-
-- **C 端越权下单** → 用户用 A 账号的余额买走了 B 账号想要的商品；
-- **商家越权发货** → 把别家的订单标成"已发"，钱货两失；
-- **admin 误授权** → 客服把全场红包发给了自己。
-
-> **鉴权 = 用最少的代码表达业务对"信任"的明确表态：信谁、信多久、信他能干什么。**
-
-### C 端越权下单：一个 HTTP 请求的资损
-
-先看一个具体攻击，它会贯穿整份讲义。**攻击者 B**（余额 0）用**自己合法的** token 下单，却把请求体里的 `user_id` 填成受害者 **A**（余额 ¥5000）：
-
-```http
-POST /api/v1/order HTTP/1.1
-access_token: <B 自己的合法 token>   # 是 B 的 token，不是 A 的
-Content-Type: application/json
-
-{
-  "product_id": 88,
-  "num": 1,
-  "address_id": 999,     // 收货到 B 家
-  "user_id": 1001        // 但订单归属写成 A 的 uid
-}
-```
-
-**如果服务端信了 body 里的 `user_id`**：扣 **A 的 ¥5000**、发货到 **B 家**——A 的钱、B 的货，A 账上凭空多出一笔自己从没下过的订单。
-
-这不是一次可以重试的 5xx，是**追不回的资损**：钱已划走、货已发出，客服面对的是一句"我没买过为什么扣我钱"。
-
-> gomall 的防线：**只信 JWT 解出的 `u.Id`，无视 body 里的 `user_id`**。下单时 `order.UserID = u.Id`，B 填谁都只会记在 B 自己头上，攻击当场失效。这就是本讲义反复强调的"信 JWT，不信报文"。
-
-### 五角色，五种"鉴权痛"
-
-同一套鉴权代码，五个利益相关者各自的诉求和"出错后果"完全不同。把技术词"鉴权"翻译成每个角色的业务痛，才知道为什么值得讲一整份 deck：
-
-| 角色 | 鉴权诉求 | 出错的真实后果 |
-|---|---|---|
-| C 端用户 | 一次登录管 10 天，改密码立即生效 | 频繁踢登 → DAU 流失 |
-| 商家 | 只看自家订单 / SKU | 越权读单 → 商业泄密（订单流水就是经营机密） |
-| 运营平台 | 大促撞库不打爆 bcrypt（一个故意设计得很慢的 hash 函数，单次校验耗上百 ms CPU） | 正常用户登录 502 → GMV 损失 |
-| SRE | 鉴权链路不能成性能瓶颈：它是全站请求的第一道关 | 解 token 每慢 1ms → 全站 p99 同步抬 1ms |
-
-本讲义每一节前都会标注**本节解决谁的痛**。项目 README 的"业务全景表"各行对应的就是这几个角色——鉴权是它们的最小公约数。
-
-### 存密码的前提：拖库是"何时"，不是"是否"
-
-密码存储的威胁模型不是"有人在线猜密码"，而是**整张 user 表被泄密**（SQL 注入 / 内网渗透 / 备份泄露）。拖库之后比的只有一件事：**把摘要还原成密码要花多少钱**。
-
-- **存明文**：拖库 = 全体用户裸奔。人们到处复用密码，你这泄露的密码会被拿去撞他的支付宝。
-- **MD5 / SHA-256**：这类函数是为"快"设计的（校验文件完整性要算得快）——一张消费级显卡每秒能算**几百亿次**，常见密码字典几小时就扫完，等于白给。
-- **加盐的快哈希**：盐只能废掉彩虹表——攻击者提前把常见密码 → 摘要算成一张大表、拖库后直接反查；盐让每个用户都得单独重算，预计算白做。但对着**单个账户**现场跑字典，盐（随机生成的字符串）拦不住。
-- **bcrypt 的答案**：把"算一次"故意变贵。合法用户登录只算 1 次（两三百 ms 无感），拖库者字典里**每个词**都要付两三百 ms——成本差出几个数量级。而且 bcrypt 每轮都要反复读写 4KB 内部状态表，GPU 的海量核心被内存访问卡死、并行加速失效，这是它敢慢的底气。
-
-一条 bcrypt 摘要长这样，所有参数都自包含在这 60 个字符里：
-
-```
-$2a$12$R9h/cIPz0gi.URNNX3kh2OPST9/PgBkqquzi.Ss7KIUgO2t0jWMUW
- ^^ ^^ \--------------------/\-----------------------------/
- ver cost=12    22 字符 salt          31 字符 hash
-```
-
-> **bcrypt 三件套**：
->
-> - **cost 旋钮**——内部循环`2^12 = 4096` 轮，硬件变快就把 12 改成 13，成本翻倍，安全性随硬件水涨船高；
-> - **自动加盐**——同一个密码，两个用户存出来的摘要也完全不同；
-> - **自包含格式**——版本 / cost / 盐全编码在摘要串里，所以升级 cost 不用迁移存量数据：老摘要按老参数校验，用户下次登录成功时顺手 rehash 到新 cost。
-
-为了让你最直观地感受区别，我们来看一个**黑客拖库（偷走数据库）后，尝试破解密码**的真实场景。
-
-假设数据库里有三个用户（张三、李四、王五），他们过年图吉利，设置的密码居然一模一样，全是 `888888`。
-
-### 场景 A：没有 bcrypt（使用传统 MD5 或 SHA-256）
-
-在没有 bcrypt 的时代，程序员通常直接把密码哈希，顶多手动加一个全站统一的固定盐。
-
-#### 1. 黑客看到的数据库
-
-黑客打开偷来的数据库，看到长这样：
-
-| **用户名** | **数据库存的密文（哈希值）**       |
-| ---------- | ---------------------------------- |
-| 张三       | `21218cca77804d2ba1922c33e0151105` |
-| 李四       | `21218cca77804d2ba1922c33e0151105` |
-| 王五       | `21218cca77804d2ba1922c33e0151105` |
-
-#### 2. 黑客如何破解？（如同割草）
-
-- **特征：** 密文完全一样。黑客一眼就看出：“哦，这三个人用的是同一个密码。”
-
-- **破解手段：【彩虹表 / 批量碰撞】**
-
-  由于 MD5/SHA-256 没有任何时间成本（一台普通电脑一秒钟能算几亿次），黑客手里早就下载好了几十个 G 的“常用密码哈希字典”（彩虹表）。
-
-- **破解过程：** 黑客把数据库丢进破解软件里，软件拿着彩虹表“秒级”完成了匹配：
-
-  > 匹配成功！`21218cca...` 的明文是 `888888`。
-
-- **结果：** **耗时不到 1 秒，三个用户的密码同时告破。** 数据库里有 10 万人胃口一样用这个密码，这 10 万人就会在同一秒被打包破解。
-
-### 场景 B：有了 bcrypt（自动加盐 + Cost 旋钮）
-
-现在我们换成 bcrypt（假设设置 `cost = 12`）。
-
-#### 1. 黑客看到的数据库
-
-黑客打开数据库，看到的是这样一堆天书：
-
-| **用户名** | **数据库存的密文（自包含格式）**          |
-| ---------- | ----------------------------------------- |
-| 张三       | `$2a$12$V7r8...（此处省略22位盐）...oP9q` |
-| 李四       | `$2a$12$Kj2m...（此处省略22位盐）...mN1b` |
-| 王五       | `$2a$12$Ab9x...（此处省略22位盐）...zZ4v` |
-
-### 2. 黑客如何破解？（如同推山）
-
-- **特征：** 哪怕三人明文密码一模一样，因为 bcrypt 底层自动生成的盐（前 22 位）完全不同，导致**最终出来的密文没有一个字是相同的**。黑客根本不知道谁和谁的密码一样。
-
-- **破解手段：【逐个死磕 + 硬件硬刚】**
-
-  黑客之前的“彩虹表字典”彻底废了。因为彩虹表没有针对张三的随机盐 `V7r8...` 提前算过结果。黑客想要破解，只能**针对每个人单独暴力穷举**。
-
-- **破解过程：**
-
-  1. **攻破张三：** 黑客软件必须先提取张三的盐 `V7r8...`。然后开始猜：密码是 `123` 吗？是 `abc` 吗？是 `888888` 吗？
-     - **致命的是：** 因为 `cost = 12`，黑客的显卡每猜**一个**密码，都需要硬生生计算 4096 轮，耗时大约 **0.1 秒**。
-     - 当他终于猜到 `888888` 时，可能已经算了几万次，花了几个小时。
-  2. **攻破李四：** 好了，张三破完了。黑客转头看李四——对不起，李四的盐是 `Kj2m...`。
-     - 黑客刚才为张三算的所有中间结果**全部作废**。
-     - 他必须原地掉头，针对李四的盐，重新从 `123`、`abc` 开始，以每秒只能猜几个的速度，重新死磕几个小时。
-
-- **结果：** 以前秒杀全站的黑客，现在面对 10 万个用户，必须重复“死磕几个小时”的过程 10 万次。**破解成本从“几秒钟”变成了“几百年”，黑客直接放弃。**
-
-
-
-### 代码：bcrypt 在 gomall 的三处落点
-
-```go
-const PassWordCost = 12 // 2^12 = 4096 轮，单次校验数百 ms CPU
-
-// 注册 / 改密码
-func (u *User) SetPassword(password string) error {
-    bytes, err := bcrypt.GenerateFromPassword([]byte(password), PassWordCost)
-    if err != nil {
-        return err // 失败绝不写脏摘要
-    }
-    u.PasswordDigest = string(bytes) // 盐已编码在摘要里
-    return nil
-}
-
-// 登录（internal/user/service.go:98 调用）
-func (u *User) CheckPassword(password string) bool {
-    return bcrypt.CompareHashAndPassword(
-        []byte(u.PasswordDigest), []byte(password)) == nil
-}
-
-// 6 位支付密码，同样只存 bcrypt 摘要
-func (u *User) SetMoneyPassword(pin string) error {
-    bytes, err := bcrypt.GenerateFromPassword([]byte(pin), PassWordCost)
-    if err != nil {
-        return err
-    }
-    u.MoneyPasswordDigest = string(bytes)
-    return nil
-}
-```
-
-三个要点：
-
-- User 表只有 `PasswordDigest` 一列，**没有单独的 salt 列**——`CompareHashAndPassword` 从摘要里解析出盐和 cost 再重算比对。`bcrypt` 密文长这样： `$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy`，从中提取出salt
-- **6 位 PIN 只有 100 万种可能**：`10^6 × 300ms` 单核串行也只要约 3.5 天，多核并行按小时计。低熵凭证 bcrypt 只是兜底，真正的防线是在线侧的错误锁定 / 限流——哈希救不了熵不足。
-- **一个真实的兜底陷阱**：`CheckMoneyPassword` 对**空摘要直接放行**（历史 / 种子用户未设支付密码时 `return true`）。这是"兼容优先"的安全默认值，但对资金动作是 fail-open
-
-```go
-// internal/user/model.go —— 注意这里的 fail-open
-func (u *User) CheckMoneyPassword(pin string) bool {
-    if u.MoneyPasswordDigest == "" {
-        return true // 未设支付密码就放行——支付二次校验被整体跳过
-    }
-    return bcrypt.CompareHashAndPassword([]byte(u.MoneyPasswordDigest), []byte(pin)) == nil
-}
-```
-
-> **同一个"慢"的两面**：**离线是武器**（拖库还原成本以年计），**在线是软肋**（CPU 被撞库打满）。所以全局令牌桶（`routes/router.go:41`，每 IP 100 RPS）必须站在 bcrypt **前面**——这正是"鉴权痛"表里运营平台那一行的答案。
-
-### 鉴权 = 身份 / 角色 / 边界
-
-鉴权其实是三件事，单挑都不难，难在配合：
-
-- 身份对了、角色错了 → 客服越权补券给自己；
-- 角色对了、边界错了 → admin 接口暴露给 C 端；
-- 身份角色都对、边界没画清 → 商家 A 看见商家 B 的订单。
-
-gomall 的回答，也是本讲义后三节的主线：
-
-| 维度 | 回答 | 讲解位置 |
-|---|---|---|
-| **身份**（客户在不在） | 双 token + bcrypt cost=12 | 第二节 |
-| **角色**（能看见什么） | RBAC + 30s sync.Map 缓存 | 第三节 |
-| **边界**（做不到什么） | 路由分组 + middleware 链 + admin bootstrap | 第四节 |
-
-### gomall 的四层墙：逛 / 买 / 卖 / 管
-
-一层墙对应一类人、一个动词，越往里人越少、权越大：
-
-```mermaid
-flowchart TD
-    pub["公开层 · 逛<br/>浏览商品 / 搜索"]
-    auth["authed 层 · 买<br/>下单 / 支付 / 收藏"]
-    mer["merchant 层 · 卖<br/>上架 / 发货 / 审退款"]
-    adm["admin 层 · 管<br/>提权 / 后台运维"]
-    pub -->|"AuthMiddleware：你是谁"| auth
-    auth -->|"RequireRole(merchant, admin)：你是商家吗"| mer
-    auth -->|"RequireRole(admin)：你是管理员吗"| adm
-```
-
-- **公开层（逛）**：匿名可达，只挂全局令牌桶 + HTTP cache（浏览是转化漏斗顶端，加登录墙等于赶客）。
-- **authed 层（买）**：所有 C 端用户登录后能用，挂 `AuthMiddleware`。
-- **merchant 层（卖）**：与 admin 同构的独立 group，挂 `RequireRole("merchant", "admin")`——上架、发货、审退款这些卖家动作都住这里，admin 天然可过这道墙。
-- **admin 层（管）**：`/admin` 前缀的独立后台，挂 `RequireRole("admin")`，只留管理员。
-- 注意 merchant 和 admin 是 authed 下的**两个平级子组**，不是嵌套——"admin 包含 merchant 权限"靠 `RequireRole` 的允许列表表达，不靠路由嵌套。
-
-### 代码：四层墙是怎么砌的
-
-墙只在**组合根**（composition root，`routes/router.go` 这一个组装点）砌一次：
-
-```go
-// routes/router.go —— 四层墙一次砌好，每层墙开一道门
-v1 := r.Group("api/v1")                          // 公开层：不设锁
-authed := v1.Group("/")
-authed.Use(middleware.AuthMiddleware())          // 验身份：你是谁
-merchantGroup := authed.Group("/")
-merchantGroup.Use(middleware.RequireRole(
-    user.RoleMerchant, user.RoleAdmin))          // 验角色：你是商家吗（admin 天然可过）
-adminGroup := authed.Group("/admin")
-adminGroup.Use(middleware.RequireRole(user.RoleAdmin)) // 验角色：你是管理员吗
-
-// 20 个领域包统一签名自注册，各自只"选墙"、不"砌墙"
-for _, register := range []func(public, authed, merchant, admin *gin.RouterGroup){
-    user.RegisterRoutes, product.RegisterRoutes, // ...
-} {
-    register(v1, authed, merchantGroup, adminGroup)
-}
-```
-
-领域包拿到的是已套好中间件的 group：
-
-```go
-// internal/user/routes.go —— 发凭证的门自己不能锁
-public.POST("user/register", UserRegisterHandler())
-public.POST("user/login",    UserLoginHandler())
-authed.GET("user/show_info", ShowUserInfoHandler())
-
-// internal/refund/routes.go —— 商家动作选 merchant 墙，一行就能看出"这是卖家接口"
-merchant.POST("orders/refund/approve", ApproveRefundHandler())
-
-// internal/product/routes.go —— 上架 / 改价 / 删除同理
-merchant.POST("product/create", CreateProductHandler())
-```
-
-- 墙只砌一次，领域包只**选墙**、不砌墙——挂错墙在 code review 里就是一行看得见的 diff。
-- public 组不是"忘了鉴权"：login / register 是**发凭证**的入口，必须匿名可达。
-- merchant 墙落地前有过一段过渡形态：`approve` / `ship` 逐路由叠 `RequireRole("admin")` 顶着。能用，但"商家"这个语义散在各条路由的中间件参数里；落成独立 group 后，"这是商家接口"写进了**路由结构本身**——这就是分组即策略的价值。
-
-> **分组即策略**：把"谁能进"编码在**路由结构**里（进门就查），而不是散在每个 handler 里（进屋后才想起来查）。前面「C 端越权下单」案例的第一道防线就是这里。
-
-### 本 deck 的回答顺序
-
-1. 注册 + 登录链路，密码加密 / 邮箱验证的业务边界画在哪；
-2. access 24h / refresh 10d 这两个数字怎么定，怎么影响留存；
-3. RBAC 为什么敢上 30s 内存缓存；
-4. admin bootstrap 这个"一次性接口"为什么必须存在；
-5. C 端 / merchant / admin 的边界怎么画，admin 为什么天然可过 merchant 墙；
-6. token 失效 / 强制下线 / 多端隔离怎么做；
-7. 业务码 `30001 / 30002` 对应的客服话术。
-
----
-
-## 二、注册 + 登录 + 双 token：第一道业务边界
-
-### 注册 / 登录 / 颁发 token 的时序
+假设下单请求同时带着 JWT 中的 `user_id=17` 和请求体中的 `user_id=23`。服务端若相信请求体，就允许 17 号用户替 23 号用户下单，甚至读取或修改对方资源。这类问题叫 IDOR，根因不是 token 失效，而是业务层信错了身份来源。
 
 ```mermaid
 sequenceDiagram
-    participant C as Client
-    participant API as 注册登录接口
-    participant S as UserSrv
-    participant DB as users 表
-
-    Note over C,DB: 注册
-    C->>API: username / password
-    API->>S: 转发
-    S->>DB: bcrypt cost=12 存 PasswordDigest
-
-    Note over C,DB: 登录
-    C->>API: username / password
-    API->>S: 校验
-    S->>DB: 取 PasswordDigest，CompareHashAndPassword
-    DB-->>S: 命中
-    S-->>C: 颁发双 token（access + refresh）
+    actor C as 客户端
+    participant A as AuthMiddleware
+    participant O as 订单服务
+    participant D as 数据库
+    C->>A: JWT(uid=17) + body(user_id=23)
+    A->>O: context 写入可信 uid=17
+    O->>D: 按 uid=17 校验地址归属并创建订单
+    D-->>O: 允许或拒绝
+    O-->>C: 业务结果
+    Note over O,D: 请求体中的 user_id 不进入归属判断
 ```
 
-### 密码是怎么存的：bcrypt cost=12
+gomall 的路由可以看成四层墙：
 
-- **bcrypt** 自带 salt、单向、不可还原。重置密码只能让用户重新设置，后台永远拿不到明文。
-- `PassWordCost = 12`：单次哈希约 250ms（M 系列 Mac）。
-  - 业务收益：撞库脚本一秒只能猜 4 次，10 位密码组合在合理时间内不可穷举。
-  - 业务代价：登录接口 RT 多 250ms，落在用户感知阈值内，C 端可接受。
-- 注册存哈希，登录拿明文重算 hash 再 compare。被拖库后撞库代价巨大。
-- **找回密码必须走邮箱验证 + token 写新摘要**：`EmailClaims` 携带的是 bcrypt 摘要而非明文，TTL 仅 **15 分钟**，远短于 access token。
+| 层级 | 谁可以进 | 典型操作 |
+|---|---|---|
+| public | 未登录用户 | 注册、登录、浏览商品 |
+| authed | 任意已登录用户 | 地址、购物车、下单、用户资料 |
+| merchant | `merchant` 或 `admin` | 商家侧商品与履约操作 |
+| admin | 仅 `admin` | 用户管理、角色变更、搜索回填 |
 
-### bcrypt cost=12 的业务后果（用钱算账）
+注意：角色墙解决“哪类人能进”，资源归属校验解决“能动哪一条数据”。两者缺一不可。
 
-**被拖库情景**：黑产拿到 `password_digest` 全表，离线撞库。
+## 二、注册、登录与双 token
 
-| 配置 | 1 万弱密码账号破解成本 | 破解时长 |
-|---|---:|---:|
-| 明文 / MD5 | ~0 美元 | 秒级 |
-| bcrypt cost=10 | ~600 美元 GPU | ~8 小时 |
-| **bcrypt cost=12** | **~9,600 美元 GPU** | **~5 天** |
-| bcrypt cost=14 | ~150,000 美元 | ~80 天 |
+### 2.1 密码只存摘要
 
-**登录 RT 代价**：cost=12 单次约 250ms。
+`internal/user/model.go` 中，登录密码和支付密码都使用 bcrypt，cost 为 12。bcrypt 每次自动带盐，同一密码通常得到不同摘要；验证时用 `CompareHashAndPassword`，业务代码不需要解密密码。
 
-- 250ms 落在"用户感知阈值 300ms"之内，转化和留存基本不动。
-- 反例：cost=14 单次约 1s → 用户感知"卡顿" → 大促日新用户注册流失估算 5–8%。
+```go
+const PassWordCost = 12
 
-> 选 cost=12，本质是在"离线撞库成本"和"在线登录延迟"之间找那个既让黑产亏得肉疼、又让用户无感的点。
+func (u *User) SetPassword(password string) error {
+    digest, err := bcrypt.GenerateFromPassword(
+        []byte(password), PassWordCost,
+    )
+    if err != nil {
+        return err
+    }
+    u.PasswordDigest = string(digest)
+    return nil
+}
 
-### 双 token 续期的状态机
+func (u *User) CheckPassword(password string) bool {
+    return bcrypt.CompareHashAndPassword(
+        []byte(u.PasswordDigest), []byte(password),
+    ) == nil
+}
+```
+
+为什么不用普通 SHA-256？因为它太快，攻击者拿到摘要后也能高速离线猜测。bcrypt 故意把每次尝试变贵，而且 cost 可以随硬件升级调整。cost=12 是否适合生产环境，必须在目标机器上测登录延迟和 CPU，再决定容量；讲义不拿未经当前环境验证的毫秒数作承诺。
+
+### 2.2 注册和登录分别信什么
+
+注册流程会检查用户名是否已存在，构造用户模型，分别设置登录密码摘要和支付密码摘要，然后用服务端密钥加密初始余额。这里有一个重要分界：密码用于验证身份，余额密文用于保护数据，二者不能共用用户输入的支付密码作为加密密钥。
+
+登录流程按用户名查用户，比较 bcrypt 摘要，成功后把当前 `TokenVersion` 写进 access token，并返回 access / refresh 两个 token。
+
+```mermaid
+sequenceDiagram
+    actor U as 用户
+    participant H as UserHandler
+    participant S as UserSrv
+    participant D as UserDao
+    participant J as JWT工具
+    U->>H: 用户名 + 密码
+    H->>S: UserLogin
+    S->>D: 按用户名查询
+    D-->>S: user + password_digest + token_version
+    S->>S: bcrypt 比对
+    alt 密码正确
+        S->>J: GenerateToken(id, name, version)
+        J-->>S: access + refresh
+        S-->>U: 用户信息与两个 token
+    else 密码错误
+        S-->>U: 账号或密码不正确
+    end
+```
+
+当前常量是 access token 24 小时、refresh token 10 天。数字不是越长越好：access 越长，被盗后的可用窗口越大；refresh 越短，用户越容易被迫重新登录。产品和安全要共同决定。
+
+### 2.3 续期状态机
+
+`ParseRefreshToken` 先解析 access token。如果 access 仍有效，代码会直接重新签发两个 token；若 access 仅仅是过期，再严格校验 refresh token，refresh 有效才续签。签名错误等非过期异常不会被放过。
 
 ```mermaid
 stateDiagram-v2
-    [*] --> AccessValid: 登录颁发
-    AccessValid --> AccessExpired: 每次请求滑动续期
-    AccessExpired --> AccessValid: refresh 有效，重发一对新 token（用户无感）
-    AccessExpired --> RefreshExpired: refresh 也过期
-    RefreshExpired --> [*]: 返回 30001，跳登录页
+    [*] --> 检查Access
+    检查Access --> 重新签发: 签名合法且仍有效
+    检查Access --> 检查Refresh: 仅过期
+    检查Access --> 拒绝: 签名或格式错误
+    检查Refresh --> 重新签发: refresh有效
+    检查Refresh --> 重新登录: refresh无效或过期
 ```
 
-- **access valid**：`AuthMiddleware` 顺便**续发**新 access + refresh，写回 header + cookie。
-- **access 过期 / refresh 有效**：拿 refresh 重发一对新 token，用户无感知。
-- **两者都过期**：返回 `30001`，C 端跳登录页。
+续签时 `TokenVersion` 原样透传。它不是重新验证密码，不能把已被撤销的旧会话“洗白”。
 
-### refresh 10d / 7d / 30d 三选一：复购漏斗 vs 安全风险
+## 三、JWT 中间件与会话撤销
 
-| refresh 取值 | 业务收益 | 安全代价 |
-|---|---|---|
-| 7d | 周一上班大概率重登，复购漏斗在登录页流失约 8% | 偷设备最多 7d 危险窗 |
-| **10d** | 黄金周 + 双休回流用户无感登录（电商目标用户群行为吻合） | 偷设备 10d 危险窗，可接受 |
-| 30d | 月活用户几乎不重登，登录页流失约 2% | 偷设备 30d → 客诉激增，黑产"账号即资产" |
-
-- gomall 选 10d 是**业务行为画像决定的**：电商用户两周内打开 app 的概率 > 85%。
-- 30d 看似友好，实际放大**被偷账号挂闲鱼"包登录"黑产**：盗号后 24h 内不修改资料，老主人完全感知不到。
-- 10d 也是合规线：很多支付牌照要求 token 有效期 ≤ 14d。
-
-### 代码：AuthMiddleware 主链路
+### 3.1 AuthMiddleware 的真实执行顺序
 
 ```go
-// middleware/jwt.go
-accessToken := c.GetHeader("access_token")
-refreshToken := c.GetHeader("refresh_token")
-if accessToken == "" {
-    code = e.InvalidParams
-    c.JSON(200, gin.H{"status": code /* ... */})
-    c.Abort()
-    return
-}
+func AuthMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        access := c.GetHeader("access_token")
+        refresh := c.GetHeader("refresh_token")
+        newAccess, newRefresh, err := util.ParseRefreshToken(access, refresh)
+        if err != nil {
+            c.Abort()
+            return
+        }
 
-newAccessToken, newRefreshToken, err :=
-    util.ParseRefreshToken(accessToken, refreshToken)
-if err != nil {
-    code = e.ErrorAuthCheckTokenFail
+        claims, err := util.ParseToken(newAccess)
+        if err != nil {
+            c.Abort()
+            return
+        }
+        current, err := currentTokenVersion(c.Request.Context(), claims.ID)
+        if err != nil || claims.TokenVersion != current {
+            c.Abort()
+            return
+        }
+
+        SetToken(c, newAccess, newRefresh)
+        c.Request = c.Request.WithContext(
+            ctl.NewContext(c.Request.Context(), &ctl.UserInfo{Id: claims.ID}),
+        )
+        c.Next()
+    }
 }
-// ...（解析成功后这里还有一道 token_version 撤销门，见第五节）
-SetToken(c, newAccessToken, newRefreshToken)
-c.Request = c.Request.WithContext(
-    ctl.NewContext(c.Request.Context(), &ctl.UserInfo{Id: claims.ID}))
 ```
 
-注意最后两行：中间件把**从 JWT 解出的 `claims.ID`** 塞进 request context，下游 handler 一律从 context 取 `u.Id`。这就是"信 JWT、不信报文"落地的地方——[越权下单](#c-端越权下单一个-http-请求的资损)填的 `body.user_id` 从头到尾没人读。
+讲这段代码时分清四个失败点：缺 access token、token 解析或续期失败、新 access token 解析失败、版本号不一致。全部失败都 `Abort`，业务 Handler 不会执行。
 
----
+当前接口习惯用 HTTP 200 携带业务错误码，客户端不能只看 HTTP 状态；这是项目现状，不是通用推荐。监控也要按业务码统计鉴权失败，否则错误率会被低估。
 
-## 三、RBAC：30s 缓存为什么业务能接受
+### 3.2 为什么纯 JWT 还需要 `token_version`
 
-### 30s 内存缓存命中链路
-
-`RequireRole` 在每个受保护请求上都要回答"这个 uid 现在是什么角色"。角色存在 DB 里，每请求查库会让鉴权变成全站最热路径上的瓶颈（SRE 那行的痛）。于是加一层短 TTL 内存缓存：
+纯 JWT 不查服务端会话，读取快、便于横向扩容，但已经签发的 token 不容易主动撤销。gomall 在 `users` 表保存版本号，签发时写入 Claims；中间件每次比较 token 版本与当前版本。改密码后执行原子 `+1`，旧 token 即使完成续签，也仍带旧版本。
 
 ```mermaid
-flowchart LR
-    req[请求] --> mw[RequireRole]
-    mw -->|命中 30s| pass[放行]
-    mw -.未命中.-> db["查 users.role"]
-    db --> store["写回 sync.Map"]
-    store -.-> pass
+sequenceDiagram
+    actor U as 用户
+    participant S as 用户服务
+    participant D as users表
+    participant C as 本地版本缓存
+    participant A as AuthMiddleware
+    U->>S: 验证邮箱并修改密码
+    S->>D: 更新密码摘要
+    S->>D: token_version = token_version + 1
+    S->>C: 删除该用户缓存
+    U->>A: 携带旧 token 再请求
+    A->>D: 查询当前版本
+    D-->>A: 新版本
+    A-->>U: 版本不一致，要求重登
 ```
 
-### 代码：lookupRole + 30s sync.Map 缓存
+版本查询使用 60 秒进程内缓存，并在改密码后主动删除。这里不能宣称“绝对零延迟”：若一次“读库后写缓存”恰好跨过版本自增与删缓存，旧值可能再次写回，理论上最多保留一个 TTL。多实例部署还需要 Redis 或 pub/sub 广播失效，当前 `sync.Map` 只管本进程。
+
+版本号适合“让这个用户全部设备下线”。若只想踢掉一台手机，需要给 token 加会话 ID，再维护按会话粒度的撤销记录；当前代码没有完成这条路径。
+
+## 四、RBAC 与 admin bootstrap
+
+### 4.1 RBAC 为什么还要查服务端
+
+角色会变化。若把角色永久写进 JWT，降权要等 token 过期；gomall 让 `RequireRole` 根据可信 `user_id` 查当前角色，并缓存 30 秒。角色变更后 `InvalidateRoleCache` 主动删除本进程缓存。
 
 ```go
-// middleware/rbac.go
-var (
-    roleCache    sync.Map
-    roleCacheTTL = 30 * time.Second
-)
-
-func lookupRole(ctx context.Context, userId uint) (string, error) {
-    if v, ok := roleCache.Load(userId); ok {
-        e := v.(roleCacheEntry)
-        if time.Now().Before(e.expires) {
-            return e.role, nil
+func RequireRole(allowed ...string) gin.HandlerFunc {
+    allowSet := make(map[string]struct{}, len(allowed))
+    for _, role := range allowed {
+        allowSet[role] = struct{}{}
+    }
+    return func(c *gin.Context) {
+        u, err := ctl.GetUserInfo(c.Request.Context())
+        if err != nil {
+            c.Abort()
+            return
         }
+        role, err := lookupRole(c.Request.Context(), u.Id)
+        if err != nil {
+            c.Abort()
+            return
+        }
+        if _, ok := allowSet[role]; !ok {
+            c.Abort()
+            return
+        }
+        c.Next()
     }
-    u, err := user.NewUserDao(ctx).GetUserById(userId)
-    if err != nil {
-        return "", err
-    }
-    role := u.Role
-    if role == "" {
-        role = "user"
-    }
-    roleCache.Store(userId, roleCacheEntry{role, time.Now().Add(roleCacheTTL)})
-    return role, nil
 }
 ```
 
-**为什么用标准库 `sync.Map` 而不是 freecache / bigcache 这类缓存库**：这个缓存的画像是"key 集合稳定（活跃用户 uid）、条目 ~50 字节、极端读多写少、几 MB 封顶"——正是 `sync.Map` 文档写明的适用场景，读路径完全无锁。缓存库的卖点（容量上限 + LRU 淘汰、抗 GC 的 off-heap 存储、高命中率算法）在这里一个都用不上，反而白添依赖和序列化开销。选型不是比功能多，是比能力集合跟工作负载贴得多紧。
+未注入角色查询函数时，代码选择 fail-closed，也就是拒绝，而不是默认放行。30 秒缓存换来少查数据库；代价与 token 版本缓存相似，多实例之间没有共享失效通知。
 
-### 30s 在业务上意味着什么 + 显式失效兜底
+### 4.2 第一个 admin 从哪里来
 
-这 30s 是"最终一致"——不是时刻正确，而是保证 30s 内收敛到正确。它有两个方向，风险完全不对称：
-
-- **提权**（user → admin）：管理员把客服 A 升为 admin，最长 30s 后 A 才享受 admin 权限。后果只是"怎么还没生效"，**零风险**。
-- **降权 / 回收**（admin → user）：一个已经不该是 admin 的人，缓存还放他进门最长 30s。这才是需要论证的**安全窗口**。
-
-那么这 30s 窗口能干多大的坏事？逐个看 admin 能力：
-
-- 列用户（读操作，无损）、promote（可再回收）、重灌 ES 索引（重建而已）——都不是"钱瞬间没了"级别。
-- ⚠️ **但有一个真实资金风险**：退款审批 `orders/refund/approve` 挂在 merchant 墙上（merchant / admin 都可过），而 approve 推进订单到 Refunded 后会触发**真实资金结算**（买家余额 +、卖家余额 −、写复式台账）。也就是说，**一个被摘牌的商家或被降权的管理员，在 30s 窗口内批退款，钱是真的会动的**。
-
-所以结论是**两层保险**，而不是二选一：
-
-- **日常读请求（99%）** 靠 30s 缓存吃性能，0ms 命中；
-- **角色变更这种关键写事件（1%）** 不等 TTL 自然过期，由变更方主动调 `InvalidateRoleCache(userId)` 踹掉缓存，直接改缓存 → 下一个请求 cache miss → 查 DB 拿到新角色 → **立即生效**。
-
-> **选型 = 最终一致 + 关键路径显式失效。** TTL 还有一个兜底意义：就算某条变更路径忘了调 Invalidate（比如运营直接在 DB 里跑 SQL 改角色，根本不经过 Go 代码），错误状态最多也只活 30 秒，不会永久漂移。
-
-**两个当前实现的真实天花板**（比选型更值得讲）：
-
-1. `roleCache` 是**进程内的 sync.Map**——多实例部署时，实例 A 上的 `InvalidateRoleCache` 只清得掉 A 自己的缓存，实例 B 的旧缓存照样活到 TTL。所以多副本下 30s 窗口物理上消不掉，除非上 Redis pub/sub 广播失效。
-2. **缓存无上限、无清理，也没有 singleflight**——key 随见过的 uid 单调增长（内存泄漏隐患）；某个 uid 缓存过期瞬间的并发请求会一起击穿到 DB。同包 `ratelimit.go` 已有 janitor 回收模式可直接照搬。
-3. 降权已有正规入口：`users/promote` 带 `role` 参数（user / merchant / admin 白名单），设回 user 即降权，与升权共用 `InvalidateRoleCache` 立即生效。但运营直接在 DB 跑 SQL 改角色仍会绕过失效，只能靠 30s TTL 兜底——这正是 TTL 作为最后一道保险存在的意义。
-
----
-
-## 四、admin bootstrap + 四层边界
-
-### 冷启动悖论
-
-- 上线一个全新 gomall 实例，users 表是空的。
-- 想给"运维大佬"开 admin 权限，必须调 `/admin/users/promote`。
-- 但 `/admin/...` 子组的中间件链是 `Auth + RequireRole("admin")`。
-- **此时一个 admin 都没有，谁也进不去 admin 子组** → 没人能把别人提升为 admin。
-
-> 这就是 admin bootstrap 必须存在的原因：**先有第一个 admin，后面 RBAC 才能转起来**。（生产上另一种做法是直接在线上 DB 里跑一条 SQL 授权，绕开这个接口。）
-
-### 代码：BootstrapPromoteSelf 一次性校验
+如果所有管理接口都要求 admin，空数据库里没人能创建第一个 admin。`POST admin/bootstrap` 挂在已登录路由上：系统中没有 admin 时，当前用户可以把自己提升为 admin；一旦存在 admin，接口立即拒绝。
 
 ```go
 func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
@@ -497,11 +241,8 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
     if err != nil {
         return err
     }
-    db := user.NewUserDao(ctx).DB
-    var count int64
-    if err := db.Model(&user.User{}).
-        Where("role = ?", user.RoleAdmin).
-        Count(&count).Error; err != nil {
+    count, err := user.NewUserDao(ctx).CountByRole(user.RoleAdmin)
+    if err != nil {
         return err
     }
     if count > 0 {
@@ -511,281 +252,32 @@ func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
 }
 ```
 
-用 `count(*) WHERE role='admin' > 0` 把这个接口变成"一次性"：一旦有了第一个 admin，它立即自锁。这个也叫做乐观锁机制
+这段实现有并发窗口：两个请求可能同时看到 `count=0`。生产方案应在数据库事务里加锁、使用唯一约束或一次性部署凭据。课堂上要把它讲成当前实现的已知边界，而不是完备的初始化协议。
 
-### 逛 / 买 / 卖 / 管四层对比
+## 五、演示、复盘与课后延伸
 
-| 角色 | 路由位置 | 中间件链 | 业务能力 |
-|---|---|---|---|
-| 匿名 user | v1 顶层 | 仅全局令牌桶 | 逛：浏览商品 |
-| C 端 user | authed 组 | + AuthMiddleware | 买：下单 / 抢券 |
-| merchant | merchant 组 | + RequireRole(merchant/admin) | 卖：上架 / 发货 / 审退款 |
-| admin | admin 子组 | + RequireRole(admin) | 管：提权 / 后台 |
+### 演示一：认证与授权不是一回事（约 3 分钟）
 
-- 谁能进哪层，全部编码在**路由结构**里。merchant 墙 admin 天然可过，反过来不行——`RequireRole` 的允许列表是单向包含。
-- 商家怎么产生：admin 调 `users/promote` 把用户 `role` 设为 merchant（对应"入驻审核通过"这个业务动作），设回 user 即摘牌，两个方向都走 `InvalidateRoleCache` 立即生效。
-- **垂直墙 + 水平墙缺一不可**：merchant 墙只回答"你是不是商家"（防垂直越权）；"你是不是**这件商品的**商家"靠 DAO 层 `boss_id` 归属条件（防水平越权）——`UpdateProduct` / `DeleteProduct` 的 WHERE 里都带 `boss_id = ?`，商家 A 改不动商家 B 的货。`ProductCreate` 则把卖家身份直接取自 JWT 解出的 uid（`BossID = GetUserById(u.Id)`），**不从请求体取**，冒充别家店铺上架做不到。
-- 多店铺阶段要升级的不再是鉴权，而是数据建模：把"一人一店"的 `boss_id` 升级为 `shop_id`（一商家多店铺）。
+1. 不带 token 请求 authed 路由，确认 Handler 没有执行。
+2. 用普通用户 token 请求 admin 路由，观察 RBAC 拒绝。
+3. 用 admin token 请求同一路由，确认放行。
 
-### 攻击面：登录接口要扛三种黑产打法
+### 演示二：修改密码撤销旧 token（约 3 分钟）
 
-| 攻击类型 | 特征 | 单点拦截手段 |
-|---|---|---|
-| 撞库 (credential stuffing) | 用泄露库扫所有用户 | 失败限频 + 二次验证 |
-| 密码喷洒 (spraying) | 用弱密码扫上万人 | 全局账号失败计数 |
-| 账号枚举 | 靠错误码差异爆破用户名 | 错误码归一 / 时序对齐 |
+1. 登录并保存旧 access token。
+2. 完成邮箱验证与改密码，让 `token_version` 自增。
+3. 再用旧 token 请求用户资料接口，观察版本不一致。
 
-- 登录基线：bcrypt cost=12 已让单次猜测代价约 250ms，离线撞库极不经济。
-- 错误码归一：`10003`（用户不存在）/ `10005`（密码错）对外统一话术，杜绝靠回包差异枚举用户名（对内保留具体码做审计）。
-- 行业通用的下一层是**失败限频**：3000 IP 代理池 × 5 RPS = 15k RPS 的高频试探，靠 IP + 账号双维度限频在打到 bcrypt 之前就拦掉。
+如果邮件环境没配好，就直接在测试或数据库事务中触发 `BumpTokenVersion`，重点验证中间件行为，不要把录制时间耗在 SMTP 配置上。
 
-### 撞库防御三段式：限频 + 验证码 + 冻结
+### 三句话收束
 
-```mermaid
-flowchart LR
-    ip["IP 限频<br/>10/min"] -->|触发| user["账号限频<br/>5 失败/15min"]
-    user --> cap["强制验证码<br/>hCaptcha"]
-    cap --> lock["账号冻结<br/>30min"]
-```
+- 身份来自已验证 token，资源归属来自服务端查询；请求体自报的用户 ID 不可信。
+- access / refresh 解决体验与有效期的取舍，`token_version` 解决按用户撤销旧会话。
+- RBAC 只解决角色权限，商家商品、用户地址和订单仍要逐条校验归属。
 
-- **第一层**：IP 维度滑动窗口限频（已落地，见下方代码）。
-- **第二层**：账号维度连续失败计数，5 次失败强制带验证码。
-- **第三层**：15min 内累计 10 次失败 → 冻结 30min，直接返回错误码、不消耗 bcrypt。
-- bcrypt cost=12 每次 250ms，账号冻结后**省的是 CPU，不是用户体验**——冻结的目的就是别让撞库流量白烧登录服务的 CPU。
+## 课后延伸
 
-### 代码：第一层 IP 限频，挂在 login 路由上
-
-```go
-// internal/user/routes.go —— 登录入口挂 IP 滑动窗口，站在 bcrypt 前面
-public.POST("user/login",
-    middleware.SlidingWindow(middleware.SlidingWindowOption{
-        Scope: "login", Window: time.Minute, Limit: 10, ByUser: false,
-    }),
-    UserLoginHandler())
-```
-
-底层是 Redis 分布式滑动窗口（`middleware/ratelimit.go`），和秒杀、抢红包用的是**同一个积木**，`ByUser: false` 时按客户端 IP 分桶：
-
-```go
-// middleware/ratelimit.go —— SlidingWindow 核心路径（节选）
-identifier = c.ClientIP()                        // ByUser=false → 按 IP 分桶
-key := cache.RateLimitKey(opt.Scope, identifier) // 形如 rate:login:<ip>
-allowed, count, err := cache.SlidingWindowAllow(c.Request.Context(), key,
-    opt.Window.Milliseconds(), opt.Limit, nowMS, member)
-if err != nil {
-    c.Next() // Redis 抖动时放行：限流是可用性保护，不是安全边界
-    return
-}
-if !allowed {
-    // 返回限频业务码并 Abort —— bcrypt 一次都不烧
-}
-```
-
-三个值得讲的取舍：
-
-- **为什么用 Redis 而不是进程内计数**：登录服务多实例部署时，代理池的请求会被负载均衡摊到不同实例，进程内计数被稀释后形同虚设；Redis 窗口全局一致，3000 个代理 IP 每个都各自撞各自的墙。
-- **为什么 Redis 出错时放行（fail-open）**：限流的使命是省 CPU、保可用，不是安全边界（安全边界是 bcrypt + 后面两层）。Redis 抖动时宁可放过一波撞库，也不能把全站正常登录一起打死
-- **与全局令牌桶的分工**：入口处的 `TokenBucket`（每 IP 100 RPS）挡的是所有接口的通用爬虫洪峰；login 上这道 10 次/分钟是按撞库画像收紧的**专项阈值**——正常人一分钟登录不了 10 次，代理池单 IP 几秒就撞墙。
-
-### 代码：登录失败计数 + 强制验证码门槛（第二、三层，路线图）
-
-```go
-const (
-    loginFailKeyPrefix = "auth:login:fail:"
-    loginFailThreshold = 5 // 15min 内
-)
-
-func (s *UserSrv) preflight(ctx context.Context, name, cap string) error {
-    fails, _ := cache.RedisClient.Get(ctx, loginFailKeyPrefix+name).Int()
-    if fails >= loginFailThreshold && cap == "" {
-        return ErrCaptchaRequired // 业务码 10011
-    }
-    if fails >= loginFailThreshold {
-        if ok, _ := captchaVerify(ctx, cap); !ok {
-            return ErrCaptchaInvalid
-        }
-    }
-    return nil
-}
-```
-
----
-
-## 五、token 失效 / 强制下线 / 多端隔离
-
-### token 黑名单方案：版本号 vs SET
-
-无状态 JWT 的固有代价是"失效慢"——签出去的 token 在自然过期前一直有效。要做到"改密码/登出/被盗立即失效"，需要额外的撤销机制：
-
-| 方案 | 实现 | 代价 |
-|---|---|---|
-| A. Redis SET 黑名单 | `SISMEMBER jti` | 每请求 1 RTT，TTL 难管 |
-| B. 用户 token 版本号 | `users.token_version`，签进 claims | 每请求查 DB / 本地缓存 |
-| C. 用户最早签发时间戳 | `users.token_min_iat`，对比 iat | 改密码只写一次 |
-
-- A 按 token 粒度（应对被偷单个 token 的场景），`jti` 数随活跃用户线性增长。
-- B/C 按用户粒度（改密码 / 强制下线），改一次字段全部作废。
-- gomall 落地了 **B+C 合并**：版本号 `++` 即生效，本地 sync.Map 命中 0ms。
-
-> ✅ **已落地（PR #25 / #26）**：`users` 表加 `token_version`，签 token 时写进 Claims，`AuthMiddleware` 逐请求比对；改密码时原子 `++` 并清本地缓存，该用户**所有**已签发 token（包括被盗的、包括续签出来的）下一个请求即被拒。第一节讲的"改密码立即生效"从路线图变成了现状。
-
-### 代码：B+C 落地——版本号从签发到拦截的完整链路
-
-**签发侧**（`pkg/utils/jwt/jwt.go`）：版本号进 Claims；续签时**原样透传**，不做"洗白"：
-
-```go
-type Claims struct {
-    ID           uint   `json:"id"`
-    Username     string `json:"username"`
-    TokenVersion uint   `json:"token_version"` // 与 users.token_version 比对
-    jwt.RegisteredClaims
-}
-
-// ParseRefreshToken 续签分支——续签不是重新认证，版本号原样带走：
-// 被 bump 掉的旧 token 就算续签成功，新 token 仍带旧版本号，照样被中间件拒绝
-return GenerateToken(accessClaim.ID, accessClaim.Username, accessClaim.TokenVersion)
-```
-
-**拦截侧**（`middleware/jwt.go`）：AuthMiddleware 在解析成功后多一道撤销门，查询走组合根注入 + sync.Map 缓存——和第三节 RBAC 的 `lookupRole` 是同一套三件套（注入、缓存、主动失效），middleware 不反向依赖 user 包：
-
-```go
-// 撤销检查：claims 版本号必须等于用户当前版本号
-curVer, err := currentTokenVersion(c.Request.Context(), claims.ID)
-if err != nil || claims.TokenVersion != curVer {
-    // "登录已失效，请重新登录" → Abort，续签出的新 token 也不会写回 cookie
-}
-```
-
-**撤销侧**（`internal/user/repo.go` + `service.go`）：改密码后 SQL 原子 `++` + 清缓存，改一次字段全端作废：
-
-```go
-// 版本号只允许这一条路径写入（原因见下面第四个取舍）
-func (d *UserDao) BumpTokenVersion(uId uint) error {
-    return d.DB.Model(&User{}).Where("id=?", uId).
-        UpdateColumn("token_version", gorm.Expr("token_version + ?", 1)).Error
-}
-
-// service.go 改密码分支：先落库 bump，再清中间件缓存
-userDao.BumpTokenVersion(userId)
-middleware.InvalidateTokenVersionCache(userId)
-```
-
-四个值得讲的取舍：
-
-- **为什么续签透传版本号，而不是续签时取当前值**：中间件里续签发生在版本检查**之前**。若续签"顺手"把版本号刷成最新，被 bump 的旧 token 续签一次就洗白复活，撤销机制形同虚设。续签只延长寿命，不重建信任——重建信任只能走登录。
-- **为什么这道门 fail-closed**：lookup 未注入或查库失败时直接拒绝。它和第四节 IP 限频的 fail-open 正好相反——限流坏了顶多多烧点 CPU，撤销门坏了等于被盗 token 畅通无阻，安全边界失联必须拒。
-- **存量怎么平滑过渡**：旧 token 里没有 `token_version` 字段，JSON 解码为零值 0；AutoMigrate 加列时存量行回填默认值 0——两边相等，放行。已登录用户完全无感，直到第一次改密码才会被强制重登。
-- **审查抓到的隐藏漏洞（写回滚撤销）**：`UpdateUserById` 用 struct `Updates` 全字段落库，会把请求开始时加载的旧 `token_version` 写回。攻击场景：持被盗 token 挂一个慢速头像上传（读用户 → 传文件 → 写用户，秒级窗口），与受害者改密码并发——上传落库瞬间把 bump 覆盖回旧值，被盗 token 复活。修复一行 `Omit("token_version")`。这一行收在 DAO 一处，同时堵住了全仓 **18 处**整行回写调用点——支付、退款、拼团、红包、预售结算都在写用户行，任何一处都可能成为回滚通道。教训：**撤销字段必须单写路径**，通用 Update 一律 Omit。
-
-两个已标注的边界：本地缓存"读库→写缓存"恰好横跨 bump 时，撤销延迟上限退化为 60s TTL（窗口毫秒级）；sync.Map 是单进程的，多实例部署要换 Redis 或 pub/sub 广播失效——下面时序图里的多实例路线就是为这一步准备的。
-
-### 客服强制下线时序（接口为路线图，机制已就位）
-
-```mermaid
-sequenceDiagram
-    participant CS as 客服后台
-    participant API as 强制下线接口
-    participant DB as 写 token_version
-    participant Cache as 失效本地缓存
-    participant U as 被踢用户下一次请求
-
-    CS->>API: 调 /admin/users/force_logout（目标 uid）
-    API->>DB: BumpTokenVersion（单条 UPDATE ++，行锁毫秒级）
-    DB->>Cache: InvalidateTokenVersionCache 删槽
-    U->>Cache: 携旧 token 请求
-    Cache-->>U: token_version 不匹配 → 30002 回登录页
-```
-
-- 机制已就位：`BumpTokenVersion` + `InvalidateTokenVersionCache` 就是改密码链路在用的那两个函数，强制下线接口只是把它们暴露给 admin——剩下的是一行调用 + RBAC 墙（路线图）。
-- 失效本地缓存：与 RBAC 的 `InvalidateRoleCache` 同款模式，按 userId 删本地 sync.Map 槽。
-- 多实例场景：写 Redis pub/sub 让所有实例 Del 本地缓存槽，最终一致延迟 < 100ms。
-
-### 为什么 gomall 选纯 JWT，不走 session cookie
-
-| 维度 | Server Session | JWT（双 token） |
-|---|---|---|
-| 鉴权 RT | 读 Redis 1 RTT | 解 HS256 零 RTT |
-| 失效粒度 | 删 session，O(1) | 黑名单 / token_version |
-| 水平扩缩 | 共享存储瓶颈 | 无状态，加机器即可 |
-| 跨域 / 多端 | cookie SameSite | header 跨域无障碍 |
-
-- gomall 的优先级：**鉴权延迟 + 水平扩展 + 多端** → JWT。
-- 代价：失效慢——已用 `token_version` 版本号兜底（用户粒度，B+C 已落地）；按 token 粒度的黑名单留给"只踢一端"的场景。
-- 反例：银行类业务选 session 更合理——那里失效粒度比延迟重要。
-
-### 审计日志：admin 操作必须留痕
-
-- 当前 admin 3 个接口（promote / backfill / users）**无审计写入**——这是个缺口。
-- 合规字段：`operator_id / target_id / action / reason / before / after / ts / ip / UA`。
-- 路线图：`admin_audit` 表 + `AuditMiddleware` 挂 admin 子组自动入表。
-- 索引：`(operator_id, ts)` 供客服自查；`(target_id, ts)` 供投诉反查。
-- 不允许 DELETE，按月分区，异地冷备 7 年。审计是补券 / 强制下线的前置依赖。
-
----
-
-## 附录 A：面试 Q&A
-
-**Q1：access 24h / refresh 10d 这两个数字怎么定？**
-A：access 短，限制单个 token 泄露的损失；refresh 长，覆盖周末/假期回流。10d 是留存与安全的折中，也贴合支付牌照 ≤14d 的合规线。
-
-**Q2：RBAC 30s 内存缓存，admin 误授权 30s 不是漏洞吗？**
-A：常规延迟可接受（提权慢生效无害）。关键路径用 `InvalidateRoleCache(userId)` 显式失效，提权/降权立即生效。真实风险点在退款审批挂 merchant 墙且触发资金结算，摘牌/降权必须走显式失效。
-
-**Q3：登出后老 token 还能用怎么办？**
-A：改密码场景已根治：Claims 带 `token_version`，`BumpTokenVersion` 原子 `++`，AuthMiddleware 逐请求比对，全端立即失效。登出目前靠客户端丢弃 token（token 仅控访问、不直接控钱，大额动作有二次验证兜底）；要做"登出即全端失效"，复用同一个 bump 即可。
-
-**Q4：bcrypt cost=12 怎么选？怎么无痛升 14？**
-A：250ms 在 300ms 感知阈值内，离线穷举不现实。登录成功路径探测旧 hash 顺便 re-hash，约 90 天自然升完，无需停机迁移。
-
-**Q5：登录接口怎么扛 15k RPS 撞库？**
-A：IP + 账号双维度滑动窗口 + 5 次失败强制验证码 + 30min 冻结，让撞库流量在打到 bcrypt 之前就被拦掉。
-
-**Q6：admin bootstrap 一次性接口怎么防重？**
-A：`count(*) WHERE role='admin' > 0` 直接返回错。当前有 TOCTOU 竞态，并发需加事务/advisory lock 兜底。
-
-**Q7：merchant 墙落地之前，商家接口是不是在裸奔？**
-A：没有。过渡期靠两点顶住：发货/审退款逐路由挂 admin RBAC（运营代操作），商品归属靠"创建者即卖家"（BossID 取自 token）。落地 merchant 组只是把散在各路由的商家语义收进路由结构，权限没有放宽——普通 user 从头到尾进不来。
-
-**Q8：业务码 30001 vs 30002 用户视角一样，区分有何意义？**
-A：用户都是重登，但客服要区分"安全事件（被踢）vs 长闲置（自然过期）"，比例异常还能触发审计。
-
-**Q9：客服强制下线如何实现？多端怎么隔离？**
-A：机制已落地——`users.token_version` 签进 claims，改密码时 `++` 全端作废；强制下线接口复用 `BumpTokenVersion`，只差一行调用 + admin 墙（路线图）。多端隔离按 `client_type` 分桶存 `token_version_map`（路线图）。
-
-**Q10：为什么 gomall 选 JWT 不选 session？**
-A：零 RTT + 无状态扩展 + 多端 header 无跨域。代价是失效慢，用 `token_version` 兜底。银行业务选 session 更合理。
-
-**Q11：第三方登录怎么接入？**
-A：OAuth 拿 `external_id` → 查/建 `user_oauth` → 复用 `GenerateToken`。后续仍走 AuthMiddleware。
-
-**Q12：100k QPS 鉴权怎么扩？瓶颈在哪？**
-A：HS256 + sync.Map 单机约 58k RPS，100k 扩 4 实例够用。瓶颈始终在下单/支付/库存，不在鉴权。
-
----
-
-## 附录 B：课后作业
-
-### 编程题（可上 OJ 判题）
-
-**题 1 · 越权下单的身份判定（IDOR）**
-下单请求同时带两处身份：JWT 解出的可信 `uid`，与请求体里的 `body_uid`。实现 `resolveOwner`，返回订单真正的归属用户，并说明为何忽略 `body_uid`。
-- 输入：每行 `uid body_uid`（多组）
-- 输出：每组订单归属 uid
-- 判分点：无论 `body_uid` 填谁，归属恒等于 `uid`（信 JWT，不信报文）。
-
-**题 2 · 双 token 续期状态机**
-给定 `access_ttl / refresh_ttl` 与一串带时间戳的请求，输出每次请求后的动作 `PASS / REFRESH / RELOGIN`：access 过期且 refresh 有效 → REFRESH；两者皆过期 → RELOGIN。
-
-**题 3（选做）· 登录失败计数 + 强制验证码**
-滑动窗口内失败达阈值即要求验证码，冻结期请求直接拒绝、不消耗 bcrypt。输入事件流，逐条输出：放行 / 要求验证码 / 冻结。
-
-### 概念思考题（检测是否学懂）
-
-用一两句话回答，重点讲"为什么"，不是"是什么"：
-
-1. bcrypt 为什么选 cost=12，而不是更快的 10 或更慢的 14？升到 14 如何做到用户无感？
-2. 登出后老 access 还能用，为什么这不算致命漏洞？兜底手段是什么？
-3. RBAC 用 30s 内存缓存，admin 误授权 30s 才生效——为什么业务能接受？哪条路径必须绕过缓存立即失效？
-4. admin 冷启动悖论是什么？`BootstrapPromoteSelf` 用什么条件保证只能被"占用"一次？它现在有什么并发缺陷？
-5. 下单接口为什么只信 JWT 里的 uid、无视请求体的 `user_id`？若信了会发生什么资损？
-6. gomall 为什么用无状态 JWT 而不用 session？这个选择在什么业务（如银行）下应该反过来？
+- 给 bootstrap 增加并发安全约束，并写两个用户同时请求的测试。
+- 设计 `session_id + token_version` 组合，使客服既能全端下线，也能只踢一台设备。
+- 为登录接口补账号与 IP 两个维度的失败限频。验证码和冻结在本讲只作为设计题，不视为当前已落地能力。
