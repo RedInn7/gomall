@@ -6,15 +6,15 @@
 
 | 时间 | 内容 | 核心问题 |
 |---|---|---|
-| 0–7 分钟 | 为什么另开 Web3 通道 | 它与余额支付的差异在哪里 |
-| 7–18 分钟 | nonce、签名与 pending | 后端怎样证明“这是这个钱包的请求” |
-| 18–28 分钟 | 托管合约与事件 | 钱上链后，订单 ID 怎样带回来 |
-| 28–42 分钟 | listener：确认、回扫与去重 | 链重组、断连、重复日志怎么处理 |
-| 42–52 分钟 | 消费者与结算事务 | 怎样防错人付款、少付和重复入账 |
-| 52–56 分钟 | 当前实现边界 | 哪些代码可运行，哪些仍是占位或风险 |
-| 56–60 分钟 | 演示、回顾和提问 | 用伪造事件验证三道校验 |
+| 0–6 分钟 | 为什么另开 Web3 通道 | 它与余额支付的差异在哪里 |
+| 6–16 分钟 | nonce、签名与 pending | 后端怎样证明“这是这个钱包的请求” |
+| 16–23 分钟 | 合约事件 | 钱上链后，订单 ID 怎样带回来 |
+| 23–35 分钟 | listener：确认、回扫与去重 | 链重组和重复日志怎么处理 |
+| 35–47 分钟 | 消费者与结算事务 | 怎样防错人付款、少付和重复入账 |
+| 47–53 分钟 | 当前实现边界 | 哪些代码可运行，哪些仍有风险 |
+| 53–60 分钟 | 演示、回顾和提问 | 验证正常事件与重复事件 |
 
-正文约 56 分钟，最后 4 分钟用于演示和收束。不要在课堂上展开钱包发展史、代币经济学或完整合规讨论。
+正文按 53 分钟准备，最后 7 分钟用于演示、停顿和收束。钱包发展史、代币经济学、合约履约后半程和 listener 修复方案都放到课后。
 
 ## 一、业务旅程：链上付款不是同步接口
 
@@ -31,15 +31,7 @@
 
 ## 二、授权段：nonce 为什么要一次性消费
 
-Web3 路由提供两个入口：
-
-```go
-authed.GET("paydown/crypto/nonce", CryptoPaydownNonceHandler())
-authed.POST("paydown/crypto",
-    middleware.Idempotency(),
-    CryptoPaydownHandler(),
-)
-```
+Web3 路由有两个入口：先取 nonce，再携带钱包地址、签名和 chain ID 提交授权。提交接口还经过幂等中间件。
 
 ### 取 nonce：先验订单归属和状态
 
@@ -95,36 +87,15 @@ if err != nil || !ok {
 
 nonce 用原子 `GET+DEL` 消费，同一份授权不能重放。验签通过后，服务在 MySQL 事务中写 `web3.payment.pending` outbox，再把规范化钱包地址放进 Redis pending 占位，TTL 为 30 分钟。
 
-```go
-err = orderDao.Transaction(func(tx *gorm.DB) error {
-    return outbox.NewOutboxDaoByDB(tx).Insert(
-        "order", "Web3PaymentPending", "web3.payment.pending", order.ID,
-        events.Web3PaymentPending{OrderID: order.ID, UserID: u.Id,
-            Amount: orderPayableCents(order), WalletAddr: walletAddr,
-            ChainID: req.ChainID, Nonce: req.Nonce},
-    )
-})
-if err != nil {
-    return nil, err
-}
-_ = cache.SetWeb3Pending(ctx, order.ID, walletAddr)
-```
-
 这里的边界很重要：pending Redis 写失败只记日志，接口仍返回成功；而后续结算强制要求这个占位存在。若占位写失败或 30 分钟后过期，链上钱已付也会被拒绝自动结算，需要人工对账。设计上应补可靠重建或把绑定关系落到持久存储。
 
 ## 三、链上段：合约只提供付款事实
 
-合约事件约定为：
-
-```text
-PaymentConfirmed(bytes32 orderID, address buyer, uint256 amount)
-```
-
-`orderID` 放进 indexed topic，buyer 和 amount 放在 data。listener 用事件签名的 Keccak 哈希筛选日志，再解码这三个结算字段。
+合约事件是 `PaymentConfirmed(bytes32 orderID, address buyer, uint256 amount)`。listener 用事件签名筛选日志，再解码订单、付款钱包和金额。
 
 项目的 `pkg/web3/escrow/escrow.go` 目前是 binding 占位实现。它嵌入 ABI、声明 `FundWithOrderID` 等接口形状，但没有真正发送交易；文件注释明确要求上线前运行 `abigen` 生成绑定。课堂上可以讲协议契约，不能演示成“后端已经能用这个类型调用主网合约”。
 
-合约状态包括 `Created`、`Funded`、`Released`、`Refunded` 和 `Disputed`。本讲只跟到 `Funded/PaymentConfirmed`；收货放款、退款和仲裁留作课后。
+本讲只跟到付款确认；收货放款、退款和争议等合约状态放到课后。
 
 ## 四、标准交互时序：签名、上链、确认、入账
 
@@ -181,30 +152,11 @@ logs, err := client.FilterLogs(ctx, l.query(
 ))
 ```
 
-默认确认深度是 12，环境变量 `WEB3_CONFIRM_DEPTH` 可覆盖为正整数。游标只推进到成功处理区块之前；某区块处理失败，下一轮会重新扫它。
-
-订阅断开后，`run` 按 1 秒到 1 分钟指数退避重连。连接恢复会立即回扫一次，定时器也会周期触发回扫，因此不依赖“每条实时推送都收到”。
-
-但冷启动有明确边界：没有 `last_block` 时从当前 `safeHead` 起步，不会扫描全部历史。如果 Redis 游标丢失，旧的 pending 事件不会自动找回，必须从持久化游标或指定区块补扫。
+默认确认深度是 12。游标只推进到成功处理区块之前，失败区块会在下一轮重扫。订阅断线会重连并触发回扫，但首次启动没有游标时只从当前 `safeHead` 开始，历史事件需要指定起点补扫。
 
 ### 日志去重
 
-每条事件用 `txHash + logIndex` 组成 Redis key，`SETNX` 成功才写 outbox，TTL 是 72 小时。
-
-```go
-dedupeKey := fmt.Sprintf("web3:event:%s:%d", lg.TxHash.Hex(), lg.Index)
-if first, err := l.tryClaim(ctx, dedupeKey); err == nil && !first {
-    return nil
-}
-return l.outbox(ctx).Insert(
-    "web3_payment", "PaymentConfirmed",
-    "web3.payment.confirmed", 0, ev,
-)
-```
-
-Redis 不可用时，代码选择继续写 outbox，让下游订单状态和流水唯一约束收口。这是“宁可重复，不要漏单”的取舍。
-
-当前实现还有一处风险：先 `SETNX`，再写 outbox。若占位成功而 outbox 插入失败，下一轮回扫会把事件判为重复并跳过。修复方向是 outbox 失败时删除占位，或用持久化事件唯一键把去重与写入放到同一个数据库事务。这一点应在课堂上诚实指出。
+每条事件用 `txHash + logIndex` 做 Redis SETNX 去重，TTL 72 小时；Redis 不可用时继续写 outbox，让订单状态和流水唯一约束处理重复。当前顺序是先 SETNX、后写 outbox，如果后者失败，重扫会误判重复并漏掉事件。本讲记住这个风险，修法放到课后。
 
 ## 六、消费者：事件还不能直接变成 Paid
 
@@ -256,25 +208,16 @@ Web3 没有从站内买家余额扣款，所以台账对手方是外部清算账
 
 ## 七、当前实现的可信边界
 
-| 能确认的行为 | 仍需补齐或监控的边界 |
-|---|---|
-| EIP-191 验签与 nonce 一次性消费已有代码 | nonce 预览由前端替换 chain ID，协议可能漂移 |
-| listener 按确认深度回扫并保存游标 | 游标只在 Redis，冷启动不回扫全部历史 |
-| buyer、金额、订单状态都有结算校验 | pending 只存 30 分钟 Redis，丢失后拒绝自动结算 |
-| 消费者有 DLQ 与有限重投 | listener 的 SETNX 与 outbox 写入不是原子动作 |
-| ABI 和接口形状已存在 | `escrow.go` binding 仍是占位，不能直接发真实交易 |
-
-这张表比夸大“链上永不丢单”更有教学价值。区块链保存了事件证据，但链下 listener、游标、去重和数据库仍然会失败。
+课堂只核对四件事：pending 钱包只存 Redis，丢失后拒绝自动结算；listener 游标也只存 Redis，冷启动不会补全历史；SETNX 与 outbox 写入不原子；`escrow.go` 只是 binding 占位，不能直接发送真实交易。链上证据还在，不代表链下程序不会漏处理。
 
 ## 八、课堂演示（3 分钟）
 
 不用连真实链。调用 `DispatchWeb3SettleEvent` 或对应测试替身，依次投递：
 
 1. buyer 与 pending 地址一致、金额足够的事件；
-2. 同订单重复事件；
-3. buyer 不匹配的事件。
+2. 同订单重复事件。
 
-观察正常事件把订单推进一次，重复事件安全退出，地址不匹配进入毒消息路径。课堂只演示前两个也可以，把第三个作为提问。
+观察正常事件只把订单推进一次，重复事件安全退出。buyer 不匹配的情况改成提问，不再现场执行。
 
 ## 九、收束（1 分钟）
 

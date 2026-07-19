@@ -52,7 +52,7 @@ authed.POST("paydown",
 这能挡住双击和网络重试，但支付服务仍要自己设防，因为中间件缓存或网络都可能失效。代码中有两层业务兜底：
 
 - `order.Type` 必须是 `OrderWaitPay`；
-- 资金流水用订单和方向的唯一约束拒绝重复 debit 或 credit。
+- 资金流水用 `(ref_order_id, direction, biz_type)` 组合唯一约束拒绝同类重复 debit 或 credit。
 
 ### 熔断防持续故障拖垮进程
 
@@ -249,7 +249,7 @@ commitReservationBestEffort(ctx, paidProductID, paidNum)
 
 - 第二次是否回放响应，或被订单 `WaitPay` 守卫拒绝；
 - 买家和卖家余额各只变化一次；
-- `account_transactions` 中只有一条 debit 和一条 credit；
+- `account_transaction` 中只有一条 debit 和一条 credit；
 - `outbox` 中只有一条对应的 `order.paid`。
 
 环境不便运行时，可以在事务闭包入口和 `MarkOrderPaidWithCheck` 设置断点完成同样的讲解。

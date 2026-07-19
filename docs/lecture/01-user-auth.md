@@ -17,8 +17,8 @@
 | 17–29 分钟 | access / refresh token | token 过期后如何续期？ |
 | 29–41 分钟 | AuthMiddleware 与 token_version | 改密码后怎样让旧 token 失效？ |
 | 41–51 分钟 | RBAC、角色缓存与 bootstrap | admin 从哪里来，降权多久生效？ |
-| 51–57 分钟 | 两个代码演示 | 亲眼看到鉴权通过与撤销 |
-| 57–60 分钟 | 边界复盘 | 哪些机制已经落地，哪些仍是路线图？ |
+| 51–56 分钟 | 一个串联演示 | 亲眼看到授权拒绝与会话撤销 |
+| 56–60 分钟 | 边界复盘 | 哪些机制已经落地，哪些仍是路线图？ |
 
 本讲不展开 OAuth、验证码服务、多设备独立踢出和审计系统实现；这些内容放在课后延伸里。
 
@@ -66,24 +66,8 @@ gomall 的路由可以看成四层墙：
 `internal/user/model.go` 中，登录密码和支付密码都使用 bcrypt，cost 为 12。bcrypt 每次自动带盐，同一密码通常得到不同摘要；验证时用 `CompareHashAndPassword`，业务代码不需要解密密码。
 
 ```go
-const PassWordCost = 12
-
-func (u *User) SetPassword(password string) error {
-    digest, err := bcrypt.GenerateFromPassword(
-        []byte(password), PassWordCost,
-    )
-    if err != nil {
-        return err
-    }
-    u.PasswordDigest = string(digest)
-    return nil
-}
-
-func (u *User) CheckPassword(password string) bool {
-    return bcrypt.CompareHashAndPassword(
-        []byte(u.PasswordDigest), []byte(password),
-    ) == nil
-}
+digest, err := bcrypt.GenerateFromPassword([]byte(password), 12)
+ok := bcrypt.CompareHashAndPassword(digest, []byte(password)) == nil
 ```
 
 为什么不用普通 SHA-256？因为它太快，攻击者拿到摘要后也能高速离线猜测。bcrypt 故意把每次尝试变贵，而且 cost 可以随硬件升级调整。cost=12 是否适合生产环境，必须在目标机器上测登录延迟和 CPU，再决定容量；讲义不拿未经当前环境验证的毫秒数作承诺。
@@ -132,6 +116,8 @@ stateDiagram-v2
 ```
 
 续签时 `TokenVersion` 原样透传。它不是重新验证密码，不能把已被撤销的旧会话“洗白”。
+
+当前实现还不是完整的双 token 协议：refresh token 没有绑定 uid、token 类型、`token_version` 或 jti；access 仍有效时甚至不会校验 refresh，access 过期时也只是验证“另一个同密钥 token 有效”，再沿用旧 access 的身份。课堂把它当作待修的安全边界，不能讲成可以直接上线的续期方案。
 
 ## 三、JWT 中间件与会话撤销
 
@@ -203,31 +189,7 @@ sequenceDiagram
 
 角色会变化。若把角色永久写进 JWT，降权要等 token 过期；gomall 让 `RequireRole` 根据可信 `user_id` 查当前角色，并缓存 30 秒。角色变更后 `InvalidateRoleCache` 主动删除本进程缓存。
 
-```go
-func RequireRole(allowed ...string) gin.HandlerFunc {
-    allowSet := make(map[string]struct{}, len(allowed))
-    for _, role := range allowed {
-        allowSet[role] = struct{}{}
-    }
-    return func(c *gin.Context) {
-        u, err := ctl.GetUserInfo(c.Request.Context())
-        if err != nil {
-            c.Abort()
-            return
-        }
-        role, err := lookupRole(c.Request.Context(), u.Id)
-        if err != nil {
-            c.Abort()
-            return
-        }
-        if _, ok := allowSet[role]; !ok {
-            c.Abort()
-            return
-        }
-        c.Next()
-    }
-}
-```
+执行顺序很短：从 context 取可信用户，查询当前角色，角色不在允许集合就 `Abort`；只有通过后才调用 `c.Next()`。
 
 未注入角色查询函数时，代码选择 fail-closed，也就是拒绝，而不是默认放行。30 秒缓存换来少查数据库；代价与 token 版本缓存相似，多实例之间没有共享失效通知。
 
@@ -235,38 +197,15 @@ func RequireRole(allowed ...string) gin.HandlerFunc {
 
 如果所有管理接口都要求 admin，空数据库里没人能创建第一个 admin。`POST admin/bootstrap` 挂在已登录路由上：系统中没有 admin 时，当前用户可以把自己提升为 admin；一旦存在 admin，接口立即拒绝。
 
-```go
-func (s *AdminSrv) BootstrapPromoteSelf(ctx context.Context) error {
-    u, err := ctl.GetUserInfo(ctx)
-    if err != nil {
-        return err
-    }
-    count, err := user.NewUserDao(ctx).CountByRole(user.RoleAdmin)
-    if err != nil {
-        return err
-    }
-    if count > 0 {
-        return errors.New("系统已存在 admin，禁止使用 bootstrap 接口")
-    }
-    return s.PromoteUser(ctx, u.Id, user.RoleAdmin)
-}
-```
+代码先统计 admin 数量；为零时，把当前登录用户提升为 admin，否则拒绝。
 
 这段实现有并发窗口：两个请求可能同时看到 `count=0`。生产方案应在数据库事务里加锁、使用唯一约束或一次性部署凭据。课堂上要把它讲成当前实现的已知边界，而不是完备的初始化协议。
 
 ## 五、演示、复盘与课后延伸
 
-### 演示一：认证与授权不是一回事（约 3 分钟）
+### 串联演示（约 5 分钟）
 
-1. 不带 token 请求 authed 路由，确认 Handler 没有执行。
-2. 用普通用户 token 请求 admin 路由，观察 RBAC 拒绝。
-3. 用 admin token 请求同一路由，确认放行。
-
-### 演示二：修改密码撤销旧 token（约 3 分钟）
-
-1. 登录并保存旧 access token。
-2. 完成邮箱验证与改密码，让 `token_version` 自增。
-3. 再用旧 token 请求用户资料接口，观察版本不一致。
+先用普通用户 token 请求 admin 路由，观察 RBAC 拒绝；随后保存该用户旧 access token，触发 `BumpTokenVersion`，再用旧 token 请求用户资料接口，观察版本不一致。一次演示分别证明“有身份仍可能无权限”和“已签发 token 仍可按用户撤销”。
 
 如果邮件环境没配好，就直接在测试或数据库事务中触发 `BumpTokenVersion`，重点验证中间件行为，不要把录制时间耗在 SMTP 配置上。
 
