@@ -96,7 +96,7 @@ subtotalCents := unitCents * int64(req.Num)
 
 ## 三、订单号和订单状态
 
-数据库主键解决表内关联，`OrderNum` 才是暴露给用户、客服和消息系统的业务编号。gomall 用雪花算法本地生成它：时间戳、机器号和同毫秒序号拼成一个趋势递增的 `int64`。
+数据库主键解决表内关联，`OrderNum` 才是暴露给用户、客服和消息系统的业务编号。gomall 用雪花算法生成趋势递增的 `int64`，再转成模型里的 `uint64`。
 
 ```go
 func InitSnowflake(machineID int64) {
@@ -110,7 +110,7 @@ func InitSnowflake(machineID int64) {
 }
 ```
 
-这里真正要盯的是部署配置：多实例若使用同一个 `machineID`，同毫秒内可能生成重复编号。启动时失败比运行中偶发撞号更安全。
+这里真正要盯的是部署配置：多实例若使用同一个 `machineID`，同毫秒内可能生成重复编号。当前 `OrderNum` 没有数据库唯一索引，撞号时数据库也不会兜底；生产环境应保证 machine ID 唯一，并给业务编号加唯一约束。
 
 新订单的初始状态是 `OrderWaitPay`。下单不会直接改成已支付，也不会真正消耗商品库存；它先为用户保留一段付款窗口。
 

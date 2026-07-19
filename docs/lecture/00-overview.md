@@ -61,22 +61,16 @@ MySQL 保存交易事实；Redis 承担可以重建的高速状态；ES 和 Milv
 
 ### 2.2 中间件顺序就是安全边界
 
-以需要登录的写接口为例，请求先过便宜的入口保护，再确认身份和角色，最后才占用幂等状态并进入业务代码。
+仓库里没有一条路由同时经过 RBAC 和幂等。两类写接口在鉴权后分开：订单创建需要幂等，商家和管理员接口需要角色校验。
 
 ```mermaid
-sequenceDiagram
-    actor U as 客户端
-    participant L as IP限流
-    participant A as JWT鉴权
-    participant R as RBAC
-    participant I as 幂等中间件
-    participant B as 业务服务
-    U->>L: 写请求 + token + Idempotency-Key
-    L->>A: 流量允许
-    A->>R: 写入可信 user_id
-    R->>I: 角色允许
-    I->>B: 首次请求获得执行权
-    B-->>U: 业务结果
+flowchart LR
+    U[客户端] --> L[TokenBucket]
+    L --> A[AuthMiddleware]
+    A --> I[订单接口：Idempotency]
+    I --> O[Order Handler]
+    A --> R[商家/管理接口：RequireRole]
+    R --> M[Merchant / Admin Handler]
 ```
 
 学生容易把“认证”和“授权”混在一起。JWT 回答“你是谁”，RBAC 回答“你能做什么”；订单归属必须取鉴权上下文里的 `user_id`，不能相信请求体自报的身份。
