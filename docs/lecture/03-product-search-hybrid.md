@@ -88,7 +88,7 @@ for id, h := range fused {
 
 同一路所有分数相等时，当前 `minMaxNormalize` 会把它们都记为 1，而不是 0。课堂不推公式，只讨论后果：这个候选集内部没有区分度，但仍然被视为有效命中。
 
-还有一道需要用实验确认的排序缺口：`SearchProductVector` 使用 L2 距离，距离通常越小表示越接近；当前融合代码没有先把距离转成“越大越相关”的相似度，归一化后却按高分优先排序。如果 SDK 返回的是原始距离，语义顺序会反过来。评审向量检索时，先确认分数方向，再讨论权重。
+这里有一个确定的排序缺口：milvus-sdk-go 的 `SearchResult.Scores` 实际保存 distance，而 `SearchProductVector` 使用 L2，距离越小越接近。当前代码直接 min-max 后按大分降序，语义方向会反转。接入生产 searcher 前，应先把距离转成“越大越相关”的分数，例如 `1 - normalizedDistance`，再参与融合。
 
 0.5 / 0.5 是调优入口，不是客观真理。权重、每路候选数量与类目过滤都需要查询集验证。
 
@@ -104,12 +104,11 @@ for id, h := range fused {
 
 生产接入仍有明显边界：
 
-- 未配置 `MILVUS_ADDR` 时，Milvus 客户端保持 nil；
-- `service/search` 默认注册的是 `nopMilvusSearcher`，搜索返回空候选；
+- `service/search` 默认注册 `nopMilvusSearcher`，仓库没有生产 `SetSearcher` 调用，也没有把 `SearchProductVector` 适配进来；
 - 未配置 embedding 服务时，代码会用 SHA-256 生成 768 维占位向量，它适合联通代码路径，不代表真实语义；
 - 当前 `product.changed` 消费者只更新 ES，没有生产级 Milvus 向量写入链路。
 
-因此，在默认配置中 Hybrid 很可能只剩 ES 关键词候选。课上可以演示接口抽象和融合单测，但不能声称商品修改后向量索引会自动更新。
+因此，即使配置 `MILVUS_ADDR`，当前应用也不会自动获得向量候选；除非测试或外部代码手动注入 searcher，Hybrid 实际只有 ES 关键词候选。课上可以演示接口抽象和融合单测，但不能声称商品修改后向量索引会自动更新。
 
 要补齐生产链，至少需要：商品文本生成 embedding、向量 Upsert/Delete、失败重试与死信、历史回填、模型或维度变更时的重建策略。这里点出责任即可，不继续扩课。
 
@@ -122,7 +121,7 @@ for id, h := range fused {
 | embedding 失败 | Hybrid 返回错误 | 语义入口不可用 | 超时、状态码、错误类型 |
 | Milvus searcher 返回错误 | Hybrid 返回错误 | 语义入口不可用 | 向量查询错误率 |
 | 默认 nop searcher | 返回空向量候选，继续 ES | 看似 Hybrid，实际纯关键词 | 两路候选数量 |
-| 索引消费者积压 | ES 或向量副本落后 | 新商品暂时搜不到 | 最老事件年龄、队列深度 |
+| 索引消费者积压 | ES 副本落后 | 新商品暂时搜不到 | 最老事件年龄、队列深度 |
 
 空结果与系统故障含义不同。把 embedding 超时吞掉再返回空数组，会让用户以为平台没有商品，也让错误率看起来很漂亮。更合理的协议应明确：退到 ES、退到普通 DB，还是返回可识别的业务错误；同时在响应或内部指标中记录实际使用了哪些召回源。
 
