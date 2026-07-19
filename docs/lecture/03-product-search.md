@@ -6,29 +6,6 @@
 
 这份讲义从 `POST /api/v1/product/search` 开始，顺着读请求追到 ES 和 MySQL，再回头看商品修改后怎样进入索引。语义召回、Milvus 和 Hybrid 融合留到[商品搜索（下）](./03-product-search-hybrid.md)。
 
-## 录制安排
-
-### 第一段：搜索请求与降级（40–45 分钟）
-
-| 时间 | 内容 | 现场检查 |
-|---|---|---|
-| 0–6 分钟 | 搜索与交易的边界 | ES 返回的价格能不能用于下单？ |
-| 6–17 分钟 | 请求入口与两条查询路径 | 什么情况会从 ES 退到 MySQL？ |
-| 17–28 分钟 | 关键词、分页和 `multi_match` | DTO 里的字段是否都参与了搜索？ |
-| 28–40 分钟 | ES 排序与 MySQL `LIKE` | 两条路径的结果为什么不等价？ |
-| 40–45 分钟 | 咖啡壶停顿题与读链复盘 | 只传 `name` 时，故障前后各搜什么？ |
-
-### 第二段：索引同步与故障窗口（35–40 分钟）
-
-| 时间 | 内容 | 现场检查 |
-|---|---|---|
-| 0–5 分钟 | 从 MySQL 到 ES 的更新链 | 商品改完为什么不会立刻可搜？ |
-| 5–18 分钟 | Indexer 的 Ack、Nack 与重试 | 重复消息会不会写出两份文档？ |
-| 18–30 分钟 | ES refresh 与 Outbox 窗口 | 事件在哪种情况下会永久缺失？ |
-| 30–40 分钟 | backfill 和排查证据 | 接口返回 200 为什么仍不健康？ |
-
-文末的完整源码走读约需 10–15 分钟，单独录成补充视频；课后练习不计入录制时间。
-
 学生需要能读懂 Go 函数调用、GORM 链式查询和 JSON。第一次接触 ES 时先记住两个词就够了：召回负责找候选，排序负责决定候选的先后。过滤则是另一回事，类目和上下架状态属于硬规则，不该交给相关性分数碰运气。
 
 ---
@@ -216,9 +193,9 @@ func (d *ProductDao) SearchProduct(info string, page types.BasePage) (
 | 上架过滤 | 未使用 | 未使用 |
 | 总数 | ES `hits.total.value` | 单独执行 `COUNT` |
 
-### 停一下（约 30 秒）
+### 想一想
 
-请求只传 `name=咖啡壶`。ES 正常和 ES 故障时，后端分别会搜索什么？老师可以在这里停半分钟，让学生沿着两条分支口头回答。
+请求只传 `name=咖啡壶`。先沿着两条分支判断：ES 正常和 ES 故障时，后端分别会搜索什么？
 
 <details>
 <summary>参考答案</summary>
@@ -288,17 +265,15 @@ ES 长期保留旧文档
 
 项目还提供全量 backfill：按 ID 升序分批读取 MySQL，再逐条 Upsert 到 ES。默认批大小为 200；单条写入成功后才推进游标，任何一次 loader 失败都会终止本轮回填。它适合初始化索引和修复历史缺口，运行时要留意 MySQL 与 ES 压力，不能拿它代替持续可靠的增量链路。
 
-## 五、录制结束前看哪些证据
+## 五、怎样判断搜索链路是否健康
 
 接口返回 HTTP 200，不代表索引仍在更新。旧文档照样能被搜到，刚上架的商品却可能一直缺席。排查时沿数据流看：普通搜索的 ES 错误与 MySQL 降级次数、最老 pending Outbox 的年龄、`search.product.indexer` 队列积压和重复重入队、indexer 失败日志，以及商品写入时间到 ES 可搜索时间的差值。还应定期抽样比较 MySQL 商品与 ES 文档，查缺失、残留和字段不一致。
 
-主视频讲到这里结束，后面的源码走读另录。
+## 沿源码完整走一遍
 
-## 补充视频：沿源码完整走一遍（10–15 分钟）
+从 `service/search/routes.go` 开始，依次打开 `handler.go`、`product_query.go`、`service.go`、`repository/es/product_index.go` 和 `internal/product/repo.go`；然后换到写链，追 `emitProductChanged` 与 `service/search/indexer.go`。
 
-这部分不要塞进 45 分钟主视频。录制时从 `service/search/routes.go` 开始，依次打开 `handler.go`、`product_query.go`、`service.go`、`repository/es/product_index.go` 和 `internal/product/repo.go`；然后换到写链，追 `emitProductChanged` 与 `service/search/indexer.go`。
-
-走读时用下面四种输入检查分支，不必再重复讲一遍概念：
+用下面四种输入检查分支：
 
 1. ES 客户端存在，但查询返回 500。`ProductSearch` 会记录错误并查数据库；数据库也失败时，接口仍然失败。
 2. 删除消息重复投递。第二次 ES Delete 返回 404，仓储层视为成功，消费者 Ack，不会持续重试。
