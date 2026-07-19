@@ -1,45 +1,83 @@
-# Web3 支付：从钱包签名到订单入账
+# Web3 支付（上）：怎样产生可核验的链上付款意图
 
-> 这一讲只跟一笔 Web3 订单：后端发 nonce，钱包签名，用户在链上付款，listener 等够确认数，消费者校验 buyer 与金额，最后复用订单结算尾段。目标是看懂链下系统怎样接受一条链上事实，而不是介绍整套区块链生态。
+> 这一讲停在合约发出 `PaymentConfirmed`。我们不急着让订单变成 Paid，先回答一件更基础的事：后端如何确认“这个登录用户控制这个钱包，而且这次授权只对应这张订单和这条链”。
 
-## 本讲安排（60 分钟）
+## 本讲目标
 
-| 时间 | 内容 | 核心问题 |
+讲完后，学生应该能解释：
+
+- 钱包签名、链上交易和订单入账为什么是三件事；
+- nonce 怎样挡住重放，`orderID` 与 `chainID` 又分别绑定什么；
+- 为什么签名校验通过后接口只返回 `pending`；
+- 合约事件里哪些字段能成为链下核验材料；
+- 当前合约、ABI 与 Go binding 还差哪些上线工作。
+
+## 时间安排（约 43 分钟，最长不超过 60 分钟）
+
+| 时间 | 内容 | 课堂产出 |
 |---|---|---|
-| 0–6 分钟 | 为什么另开 Web3 通道 | 它与余额支付的差异在哪里 |
-| 6–16 分钟 | nonce、签名与 pending | 后端怎样证明“这是这个钱包的请求” |
-| 16–23 分钟 | 合约事件 | 钱上链后，订单 ID 怎样带回来 |
-| 23–35 分钟 | listener：确认、回扫与去重 | 链重组和重复日志怎么处理 |
-| 35–47 分钟 | 消费者与结算事务 | 怎样防错人付款、少付和重复入账 |
-| 47–53 分钟 | 当前实现边界 | 哪些代码可运行，哪些仍有风险 |
-| 53–60 分钟 | 演示、回顾和提问 | 验证正常事件与重复事件 |
+| 0–5 分钟 | 一笔 Web3 订单为什么不能同步完成 | 区分授权、付款、入账 |
+| 5–14 分钟 | nonce 与待签消息 | 找出三类重放风险 |
+| 14–25 分钟 | 钱包签名、后端验签与 pending | 沿代码走完授权段 |
+| 25–35 分钟 | `fundWithOrderID` 与合约事件 | 判断一条日志能证明什么 |
+| 35–40 分钟 | 当前实现边界 | 识别 ABI、binding、Redis 风险 |
+| 40–43 分钟 | 承接题与收束 | 把问题交给下一讲 |
 
-正文按 53 分钟准备，最后 7 分钟用于演示、停顿和收束。钱包发展史、代币经济学、合约履约后半程和 listener 修复方案都放到课后。
+剩余时间用于代码停顿和提问。release、refund、争议仲裁以及 listener 结算放到第二讲或课后。
 
-## 一、业务旅程：链上付款不是同步接口
+## 一、先把三个“成功”分开
 
-余额支付在一个数据库事务里完成；Web3 支付必须等区块打包和确认。API 返回 `pending` 时，钱还没有被 gomall 当作到账，商家也不能据此发货。
+余额支付可以在一个数据库事务里完成扣款与订单更新。Web3 支付跨过钱包、RPC、区块链和链下数据库，API 无法在一次请求里等完这些系统。
 
-这条通道适合已经持有链上资产、愿意自己支付 gas 的用户。它不替代 `/paydown`，只是另一种资金来源。项目也不托管私钥、不换币、不做跨链桥。
+| 页面上发生的事 | 它能证明什么 | 还不能证明什么 |
+|---|---|---|
+| 钱包签名成功 | 用户控制某个私钥，并同意一段消息 | 钱已经转出 |
+| 交易被打包 | 合约执行过这笔交易 | 链下订单已经入账 |
+| 后端完成结算 | gomall 接纳了链上事实 | 合约后续已经放款给卖家 |
 
-整条链可以拆成两段：
+所以 `/crypto/paydown` 的成功响应是 `pending`。它只表示后端接受了付款意图，不能拿来发货。
 
-- **授权段**：订单用户取 nonce，在钱包本地签名，后端验签并记录 pending；
-- **结算段**：用户调用合约，listener 读取已确认事件，消费者推进订单。
+先让学生判断：用户截图显示“Signature successful”，客服能否把订单手动改成 Paid？答案是否定的，截图甚至不是链上证据。
 
-最容易讲错的一点：签名不等于付款。签名只证明某个钱包同意为指定订单在指定链上操作，真正到账证据来自合约事件。
+## 二、授权段的业务约束
 
-## 二、授权段：nonce 为什么要一次性消费
+这段流程有两个 HTTP 入口：先领取 nonce，再提交地址、签名、nonce 与 chain ID。两次请求都必须基于当前登录用户检查订单归属和 `WaitPay` 状态。
 
-Web3 路由有两个入口：先取 nonce，再携带钱包地址、签名和 chain ID 提交授权。提交接口还经过幂等中间件。
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant Wallet as 钱包
+    participant API as Crypto Pay API
+    participant Redis as Redis
+    participant Outbox as MySQL Outbox
+    participant Chain as Escrow 合约
 
-### 取 nonce：先验订单归属和状态
+    User->>API: 领取 nonce(order_id)
+    API->>API: 检查订单归属与 WaitPay
+    API->>Redis: 保存 user + order 绑定的 nonce
+    API-->>User: nonce、消息预览、有效期
+    User->>Wallet: 用真实 chainID 组装消息
+    Wallet-->>User: personal_sign 签名
+    User->>API: 地址、签名、nonce、chainID
+    API->>Redis: 原子校验并删除 nonce
+    API->>API: 恢复签名地址并核对 wallet
+    API->>Outbox: 写 web3.payment.pending
+    API->>Redis: 保存 order → wallet 占位
+    API-->>User: pending
+    User->>Chain: fundWithOrderID(orderID)
+    Chain-->>Chain: 校验 caller、金额与状态
+    Chain-->>Chain: 发出 PaymentConfirmed
+```
 
-`IssueNonce` 只给当前登录用户自己的未支付订单颁 nonce。随机数写 Redis，并带有限时 TTL。
+图到事件为止。下一讲从“谁来可靠地看到这条事件”开始。
+
+## 三、nonce：一次性挑战，而不是订单密码
+
+`IssueNonce` 先查订单，再生成 16 字节随机数。Redis key 同时绑定 `userID` 和 `orderID`，有效期是 5 分钟；同一订单再次领取会覆盖旧值。
 
 ```go
-order, err := orderDao.GetOrderById(req.OrderId, u.Id)
-if err != nil || order == nil {
+order, err := orderpkg.NewOrderDao(ctx).GetOrderById(req.OrderId, u.Id)
+if err != nil || order == nil || order.ID == 0 {
     return nil, errors.New("订单不存在")
 }
 if order.Type != consts.OrderWaitPay {
@@ -47,23 +85,45 @@ if order.Type != consts.OrderWaitPay {
 }
 
 nonce, err := randomNonce()
-if err != nil {
-    return nil, err
-}
 if err := cache.PutWeb3Nonce(ctx, u.Id, req.OrderId, nonce); err != nil {
     return nil, err
 }
 ```
 
-签名明文把订单、nonce 和 chain ID 一起绑定：
+待签明文是：
 
 ```text
 gomall:paydown:order={orderID}:nonce={nonce}:chain={chainID}
 ```
 
-`chainID` 防止同一签名跨链重放，nonce 防止在同一条链重复使用。当前 nonce 接口返回的预览里 `chain=0`，前端要用真实 chain ID 重新拼消息；生产协议最好由后端直接返回最终待签字符串，减少两端模板漂移。
+四个字段各自有职责：
 
-### 验签并 park
+| 字段 | 防住的问题 |
+|---|---|
+| 固定业务前缀 | 签名不容易被其他功能误用 |
+| `orderID` | 不能把 A 订单的授权挪给 B 订单 |
+| `nonce` | 同一订单的旧授权不能重复提交 |
+| `chainID` | 同一签名不能原样搬到另一条链 |
+
+消费 nonce 用 Lua 完成“读取、比较、删除”，而不是先 GET 再 DEL：
+
+```lua
+local cur = redis.call('GET', KEYS[1])
+if cur == false then return -1 end
+if cur ~= ARGV[1] then return -2 end
+redis.call('DEL', KEYS[1])
+return 1
+```
+
+两个并发请求即使带着同一份正确签名，也只有一个能拿到返回值 `1`。
+
+### 一个协议摩擦点
+
+nonce 接口返回的消息预览使用 `chain=0`，前端要替换成钱包的真实 chain ID 后再签；后端验签则按请求中的真实值重新构造消息。这能工作，但两端稍有模板差异就会验签失败。更稳妥的接口是：前端先提交 chain ID，后端直接返回最终待签字符串。
+
+## 四、验签：证明“控制钱包”，不证明“付过钱”
+
+`VerifyAndPark` 再次检查订单归属和状态，然后先消费 nonce，再恢复签名地址：
 
 ```go
 if err := cache.ConsumeWeb3Nonce(
@@ -77,165 +137,98 @@ sigBytes, err := decodeSignature(req.Signature)
 if err != nil {
     return nil, err
 }
-ok, err := web3sig.VerifyPersonalSign(
-    req.WalletAddr, msg, sigBytes,
-)
+ok, err := web3sig.VerifyPersonalSign(req.WalletAddr, msg, sigBytes)
 if err != nil || !ok {
     return nil, errors.New("签名校验失败")
 }
 ```
 
-nonce 用原子 `GET+DEL` 消费，同一份授权不能重放。验签通过后，服务在 MySQL 事务中写 `web3.payment.pending` outbox，再把规范化钱包地址放进 Redis pending 占位，TTL 为 30 分钟。
+这里采用 EIP-191 `personal_sign`。钱包在本地签名，私钥不交给 gomall；后端根据签名恢复地址，再与请求中的 `WalletAddr` 比较。
 
-这里的边界很重要：pending Redis 写失败只记日志，接口仍返回成功；而后续结算强制要求这个占位存在。若占位写失败或 30 分钟后过期，链上钱已付也会被拒绝自动结算，需要人工对账。设计上应补可靠重建或把绑定关系落到持久存储。
+为什么先消费 nonce？失败签名也会烧掉 nonce，用户需要重新领取。这样做偏保守，攻击者拿到请求内容后不能反复试签；代价是网络抖动或格式错误会增加一次交互。
 
-## 三、链上段：合约只提供付款事实
+## 五、为什么要 park
 
-合约事件是 `PaymentConfirmed(bytes32 orderID, address buyer, uint256 amount)`。listener 用事件签名筛选日志，再解码订单、付款钱包和金额。
-
-项目的 `pkg/web3/escrow/escrow.go` 目前是 binding 占位实现。它嵌入 ABI、声明 `FundWithOrderID` 等接口形状，但没有真正发送交易；文件注释明确要求上线前运行 `abigen` 生成绑定。课堂上可以讲协议契约，不能演示成“后端已经能用这个类型调用主网合约”。
-
-本讲只跟到付款确认；收货放款、退款和争议等合约状态放到课后。
-
-## 四、标准交互时序：签名、上链、确认、入账
-
-```mermaid
-sequenceDiagram
-    actor User as 用户钱包
-    participant API as Crypto Pay API
-    participant Redis as Redis
-    participant Chain as Escrow 合约
-    participant Listener as Web3 Listener
-    participant Outbox as Outbox / RabbitMQ
-    participant Settle as Web3 Settle Consumer
-    participant DB as MySQL 事务
-
-    User->>API: GET nonce(order_id)
-    API->>Redis: 保存一次性 nonce
-    API-->>User: nonce 与消息模板
-    User->>User: EIP-191 本地签名
-    User->>API: POST 钱包地址、签名、chain_id
-    API->>Redis: 原子消费 nonce
-    API->>API: ecrecover 校验地址
-    API->>Outbox: 写 web3.payment.pending
-    API->>Redis: 保存 order → wallet pending
-    API-->>User: pending
-    User->>Chain: fundWithOrderID(orderID)
-    Chain-->>Listener: PaymentConfirmed 日志
-    Listener->>Listener: 等到 safeHead，再回扫解码
-    Listener->>Outbox: web3.payment.confirmed
-    Outbox->>Settle: 至少一次投递
-    Settle->>Redis: 校验链上 buyer == parked wallet
-    Settle->>DB: 校验金额并完成结算事务
-    DB-->>Settle: Paid + ledger + order.paid
-    Settle->>Redis: 删除 pending，核销 reserved
-```
-
-三道闸依次是：一次性 nonce 防重放，确认深度降低 reorg 风险，结算消费者校验 buyer 与金额。少任何一道，链上有一条“看起来像付款”的日志都可能错误推进订单。
-
-## 五、listener：订阅只负责叫醒，回扫才负责入账
-
-### 为什么不直接消费刚订阅到的日志
-
-新日志尚未达到确认深度，可能被链重组移除。listener 收到订阅消息后只把它当作唤醒信号，随后调用 `scanConfirmed`：
+验签成功后，服务写出 `web3.payment.pending` 事件，并把规范化钱包地址保存到 Redis：
 
 ```go
-safeHead := head - l.confirmDepth
-last := l.loadLastBlock(ctx)
-from := last + 1
-if last == 0 {
-    from = safeHead
-}
-logs, err := client.FilterLogs(ctx, l.query(
-    new(big.Int).SetUint64(from),
-    new(big.Int).SetUint64(safeHead),
-))
-```
-
-默认确认深度是 12。游标只推进到成功处理区块之前，失败区块会在下一轮重扫。订阅断线会重连并触发回扫，但首次启动没有游标时只从当前 `safeHead` 开始，历史事件需要指定起点补扫。
-
-### 日志去重
-
-每条事件用 `txHash + logIndex` 做 Redis SETNX 去重，TTL 72 小时；Redis 不可用时继续写 outbox，让订单状态和流水唯一约束处理重复。当前顺序是先 SETNX、后写 outbox，如果后者失败，重扫会误判重复并漏掉事件。本讲记住这个风险，修法放到课后。
-
-## 六、消费者：事件还不能直接变成 Paid
-
-消费者先把 bytes32 订单 ID 解析成 gomall 的 `uint`，再执行两项业务校验。
-
-### buyer 必须等于签名阶段的钱包
-
-```go
-parked, err := cache.RedisClient.HGet(
-    ctx, cache.Web3PendingKey(orderID), "addr",
-).Result()
-if errors.Is(err, redis.Nil) {
-    return ErrWeb3PendingMissing
-}
-if !strings.EqualFold(parked, onchainBuyer) {
-    return ErrWeb3BuyerMismatch
-}
-```
-
-没有 pending 绑定就拒绝结算，而不是“看到金额够了就算成功”。否则攻击者可以构造一笔匹配金额的事件去推进别人的订单。
-
-### 链上金额必须覆盖订单应付
-
-`verifyOnchainAmount` 按配置的 USDC 精度或 ETH 喂价，把订单分值转换为代币最小单位，并允许配置少量容差。少付、喂价缺失或 buyer 不匹配都作为毒消息进入 DLQ；数据库暂时故障则 Nack 重排。
-
-### 结算仍复用数据库事务
-
-```go
-err := orderDao.Transaction(func(tx *gorm.DB) error {
-    order, err := orderDaoByTx.GetOrderByIdOnly(orderID)
-    if err != nil {
-        return err
-    }
-    if order.Type != consts.OrderWaitPay {
-        return nil // 已结算，重复事件安全退出
-    }
-    payable := orderPayableCents(order)
-    if err := verifyOnchainAmount(payable, onchainAmount); err != nil {
-        return err
-    }
-
-    // 卖家 credit，外部清算账户 debit
-    // 然后复用扣库存、Paid 状态守卫与 order.paid outbox
-    return finishOrderSettlementTx(tx, order)
+err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
+    return outbox.NewOutboxDaoByDB(tx).Insert(
+        "order", "Web3PaymentPending", "web3.payment.pending", order.ID,
+        events.Web3PaymentPending{
+            OrderID: order.ID, UserID: u.Id,
+            Amount: orderPayableCents(order),
+            WalletAddr: walletAddr, ChainID: req.ChainID,
+            Nonce: req.Nonce,
+        },
+    )
 })
+if err := cache.SetWeb3Pending(ctx, order.ID, walletAddr); err != nil {
+    log.LogrusObj.Errorf("set web3 pending placeholder fail: %v", err)
+}
 ```
 
-Web3 没有从站内买家余额扣款，所以台账对手方是外部清算账户：卖家 credit，清算账户 debit。事务提交后再尽力核销 Redis 库存预占并删除 pending。
+这个 pending 占位把“签过名的钱包”留给结算阶段，TTL 是 30 分钟。链上事件里的 buyer 只有与它一致，订单才允许入账。
 
-## 七、当前实现的可信边界
+但顺序存在缺口：outbox 写成功后，Redis 写失败只记日志，接口照样返回 pending；占位过期也会失去 buyer 绑定。第二讲会看到，消费者遇到缺失占位时拒绝自动结算。因此链上可能已经付钱，订单却要进入人工对账。
 
-课堂只核对四件事：pending 钱包只存 Redis，丢失后拒绝自动结算；listener 游标也只存 Redis，冷启动不会补全历史；SETNX 与 outbox 写入不原子；`escrow.go` 只是 binding 占位，不能直接发送真实交易。链上证据还在，不代表链下程序不会漏处理。
+## 六、合约怎样带回订单号
 
-## 八、课堂演示（3 分钟）
+`fundWithOrderID` 要求调用者就是构造合约时写入的 buyer，金额必须精确等于 `amount`，状态也必须是 `Created`。通过后，合约进入 `Funded` 并发事件：
 
-不用连真实链。调用 `DispatchWeb3SettleEvent` 或对应测试替身，依次投递：
+```solidity
+function fundWithOrderID(bytes32 _orderID)
+    external payable onlyBuyer inState(State.Created)
+{
+    if (msg.value != amount) revert WrongAmount(amount, msg.value);
+    orderID = _orderID;
+    state = State.Funded;
+    emit Funded(msg.value);
+    emit PaymentConfirmed(_orderID, msg.sender, msg.value);
+}
+```
 
-1. buyer 与 pending 地址一致、金额足够的事件；
-2. 同订单重复事件。
+`PaymentConfirmed` 提供三项链下核验材料：
 
-观察正常事件只把订单推进一次，重复事件安全退出。buyer 不匹配的情况改成提问，不再现场执行。
+```solidity
+event PaymentConfirmed(
+    bytes32 indexed orderID,
+    address indexed buyer,
+    uint256 amount
+);
+```
 
-## 九、收束（1 分钟）
+- `orderID` 把链上付款指向 gomall 订单；
+- `buyer` 要与 park 阶段的钱包地址相等；
+- `amount` 要覆盖订单应付金额。
 
-学生应能说清：
+交易哈希、日志序号和区块高度来自 EVM 日志元数据，listener 会在第二讲用它们去重和判断确认范围。
 
-- 钱包签名为什么不是付款证明？
-- listener 为什么等确认深度，并通过回扫而非实时日志入账？
-- 为什么结算前必须同时核对 order、buyer 和 amount？
-- Redis 去重、outbox、订单状态守卫各挡住哪一层重复？
-- 链上证据还在，为什么链下系统仍可能漏处理？
+### 事件证明的边界
 
-一句话记忆：**链上事件提供付款证据，链下系统负责谨慎接纳；先验身份与金额，再用可重试事件把订单推进一次。**
+当前事件没有 token 地址和 recipient 字段。链下能校验 buyer 与 amount，却无法只靠事件确认“使用了预期代币并付给预期收款方”。而且当前 `Escrow.sol` 收的是原生币 `msg.value`，讲 USDC 时不能把它说成已经接通的合约路径。
 
-## 课后延伸
+代码里还有一处必须当场指出的契约漂移：Solidity 把 `buyer` 声明为 `indexed`，`service/web3/listener.go` 内嵌 ABI 却把 buyer 写成非 indexed。真实日志会把 buyer 放进 topic，当前解码器试图从 data 取 buyer，可能直接解码失败。上线前必须让合约 ABI、listener ABI 和测试样本来自同一个构建产物。
 
-- 修正 listener“SETNX 成功、outbox 失败”可能漏事件的问题，并补失败重试测试。
-- 把 `last_block` 改成可审计的持久化游标，设计首次部署的回扫起点。
-- 为 pending 钱包绑定增加持久化记录，说明它与 Redis 缓存的读写顺序。
-- 阅读 `Escrow.sol` 的 release、refund、dispute 状态迁移，画出履约后半程。
+## 七、哪些已经实现，哪些只是接口形状
 
-代码入口：`internal/payment/service_crypto.go`、`service/web3/listener.go`、`internal/payment/consumer_web3.go`、`internal/payment/service_web3_settle.go`、`pkg/web3/escrow/escrow.go`。
+`pkg/web3/escrow/escrow.go` 嵌入 ABI，并声明 `FundWithOrderID`、事件过滤等接口，但它明确是 binding 占位实现。仓库当前可以讲协议，也能测试签名和链下逻辑；不能把这个文件演示成已经会向真实 EVM 网络发送交易。正式接链需要用 `abigen` 生成绑定，并补部署地址、RPC、gas 与链 ID 配置。
+
+## 八、承接题（3 分钟）
+
+假设区块高度 1,000 出现了 `PaymentConfirmed`，listener 当场看见它。随后节点断线，恢复时链头已经到 1,020；同一日志又被 RPC 返回了一次。
+
+请学生先写下答案：
+
+1. 高度 1,000 的日志什么时候才允许推动订单？
+2. 断线期间的日志怎样补回来？
+3. 同一日志出现两次，哪一层负责让它只入账一次？
+4. buyer 正确但金额少了，应该重试还是进入人工处理？
+
+下一讲沿着这四个问题，从 listener 一直走到数据库结算与 DLQ。
+
+## 本讲收束
+
+签名解决“谁授权”，合约交易产生“付了什么”的候选证据；两者都没有直接修改 gomall 订单。真正可核验的付款意图由订单、一次性 nonce、chain ID、钱包地址和合约事件字段共同组成。
+
+代码入口：`internal/payment/handler_crypto.go`、`internal/payment/service_crypto.go`、`repository/cache/web3.go`、`pkg/web3/contracts/Escrow.sol`、`pkg/web3/escrow/escrow.go`。
