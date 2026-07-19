@@ -258,9 +258,16 @@ func (d *ProductDao) SearchProduct(info string, page types.BasePage) (
 | 上架过滤 | 未使用 | 未使用 |
 | 总数 | ES `hits.total.value` | 单独执行 `COUNT` |
 
-### 代码走读：只传 `name=咖啡壶` 会发生什么？
+### 停一下（约 30 秒）
+
+请求只传 `name=咖啡壶`。ES 正常和 ES 故障时，后端分别会搜索什么？老师可以在这里停半分钟，让学生沿着两条分支口头回答。
+
+<details>
+<summary>参考答案</summary>
 
 ES 正常时，`firstNonEmpty` 会选到 `name`，搜索“咖啡壶”。ES 故障后，降级分支只把空的 `req.Info` 传给数据库，条件变成 `LIKE '%%'`。大多数记录都会满足条件，接口可能返回近似全量商品，而不是继续搜索“咖啡壶”。
+
+</details>
 
 这是一处真实的契约偏差。修复时应先在服务层计算一次规范化关键词，再把同一个值交给两个仓储实现；类目和上架条件也应定义成共同的搜索契约，而不是分别猜测。
 
