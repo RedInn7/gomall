@@ -62,7 +62,7 @@ flowchart TB
     service --> mysql["MySQL：交易事实"]
     service --> redis["Redis：缓存与短期状态"]
     service -. "Outbox / MQ" .-> async["索引、通知、统计"]
-    async --> search["Elasticsearch / Milvus"]
+    async --> search["Elasticsearch（现役） / Milvus（仅仓储代码）"]
 ```
 
 课堂上从一个路由往下追，不需要背目录：
@@ -70,9 +70,9 @@ flowchart TB
 1. Router 决定请求进入哪个业务域，并串起中间件。
 2. Handler 负责解析输入与返回 HTTP 响应，不应该偷偷决定价格。
 3. Service 组织交易规则，例如地址归属、商品反查和状态推进。
-4. Repository 读写 MySQL、Redis、ES、Milvus 与 MQ。
+4. Repository 封装 MySQL、Redis、ES、Milvus 与 MQ；有仓储代码不代表生产链已经装配。
 
-MySQL 保存订单、商品、余额等权威事实。Redis 中的商品缓存丢了可以回源；幂等状态和库存桶虽然也在 Redis，却需要明确 TTL、补偿与对账。ES、Milvus 是检索副本，下单不能信它们给出的价格。
+MySQL 保存订单、商品、余额等权威事实。Redis 中的商品缓存丢了可以回源；幂等状态和库存桶虽然也在 Redis，却需要明确 TTL、补偿与对账。ES 是当前检索副本；Milvus 只有仓储代码，尚未接入生产读写链。无论副本是否接通，下单都不能信它给出的价格。
 
 ### 2.2 中间件顺序会改变安全语义
 
@@ -111,7 +111,7 @@ sequenceDiagram
     P-->>O: 当前商品事实
     O->>R: 预扣数量
     R-->>O: 成功 / 库存不足
-    O->>D: 写订单与明细
+    O->>D: 写订单 + order.created Outbox
     alt 事务提交
         D-->>O: 待付款订单
         O-->>U: 返回订单信息
@@ -122,7 +122,7 @@ sequenceDiagram
     end
 ```
 
-客户端只表达“我要买什么、买多少、送到哪个地址”。用户 ID 来自鉴权上下文；地址要检查归属；价格、卖家和商品状态从服务端数据读取。把这些字段直接相信请求体，相当于让客户端参与记账。
+客户端只表达“我要买什么、买多少、送到哪个地址”。当前是单商品订单模型，没有独立订单明细表；命中促销时，促销应用也随订单事务写入。用户 ID 来自鉴权上下文，价格、卖家和商品状态则从服务端数据读取。
 
 ### 3.3 支付：先检查状态，再动钱和账
 
