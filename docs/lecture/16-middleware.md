@@ -1,178 +1,223 @@
-# 接入层护栏：一次请求怎样穿过中间件
+# 接入层护栏（上）：请求怎样安全进入业务
 
-> 中间件的价值不是“少写几行重复代码”，而是把鉴权、限流、幂等和缓存放在统一入口，让每个业务 handler 在同一套规则下运行。
+> 这一讲只回答一个问题：请求到达 handler 以前，系统怎样限制流量、确认身份、检查权限，并避免把不该缓存的内容交给浏览器。
 
-## 课堂节奏（60 分钟以内）
+## 本讲目标
 
-| 时间 | 内容 | 学生要带走的判断 |
+讲完后，学生应该能：
+
+- 用洋葱模型解释 `c.Next()`、`c.Abort()` 和响应后处理；
+- 根据业务范围选择全局、路由组或单路由挂载；
+- 说清 TokenBucket、Auth、RBAC 和 HTTP cache 各挡什么；
+- 为一个新接口排出基本中间件顺序，并指出项目的 HTTP 200 业务失败缺口。
+
+## 课堂节奏（约 46 分钟）
+
+| 时间 | 内容 | 课堂问题 |
 |---:|---|---|
-| 0–8 分钟 | 横切关注点与洋葱模型 | `c.Next()` 前后分别做什么 |
-| 8–15 分钟 | 全局、分组、路由级挂载 | 中间件为何不能全挂全局 |
-| 15–22 分钟 | 流量入口：TokenBucket | 哪些请求应尽早挡掉 |
-| 22–32 分钟 | 身份入口：Auth 与 RequireRole | 认证、撤销、授权怎样分层 |
-| 32–45 分钟 | 交易入口：滑窗、熔断、幂等 | 三种保护解决不同故障 |
-| 45–51 分钟 | 只读入口：HTTPCache | 304 为什么不一定省计算 |
-| 51–60 分钟 | 真实支付链、演示与复盘 | 能为一个新接口选择中间件 |
+| 0–5 分钟 | 为什么 handler 前面需要护栏 | 哪些规则不该散落在业务代码里 |
+| 5–12 分钟 | 洋葱模型 | `c.Next()` 前后有什么区别 |
+| 12–19 分钟 | 全局、分组、单路由挂载 | 挂载位置怎样表达业务范围 |
+| 19–26 分钟 | TokenBucket | 洪峰为何要尽早拒绝 |
+| 26–38 分钟 | Auth 与 RequireRole | 身份和权限为什么要分开 |
+| 38–44 分钟 | HTTPCache | 304 究竟省了什么 |
+| 44–46 分钟 | 新接口选择题与收束 | 哪些中间件该挂，顺序如何排 |
 
-课堂只做一个链路演示。各算法的完整实现、参数压测与改造题放到课后。
+内容按正常语速约 42–46 分钟；课堂追问可控制在 50 分钟内。滑动窗口、熔断和幂等放到下讲，避免一小时内塞进两套问题线。
 
 ---
 
-## 一、先理解洋葱：代码顺序不是返回顺序
+## 一、先从一次越权请求看问题
 
-假设没有中间件，每个 handler 都要手写跨域头、读取 token、检查角色、记录耗时。规则一改，就要寻找所有副本；漏掉一个后台接口，权限墙便开了洞。
+假设商家修改商品的 handler 只做参数绑定和数据库更新。请求体里若带 `boss_id`，handler 能否直接相信？不能。攻击者可以换一个 id；即使 token 合法，也不代表他能修改别人的商品。
 
-Gin 中间件把这类横切逻辑包在 handler 外面：
+安全入口至少要逐层回答这些问题：
+
+1. 这个 IP 是否正在持续灌流量？
+2. token 对应谁，是否已经被撤销？
+3. 这个人是否拥有商家角色？
+4. 进入 handler 后，DAO 是否仍按资源归属限制更新？
+
+前三项适合在中间件统一处理，最后一项必须留在业务和数据层。中间件能挡垂直越权，却不能代替 `WHERE boss_id = ?` 这样的水平越权检查。
+
+---
+
+## 二、洋葱模型：进去和回来不是同一个顺序
+
+Gin 中间件不是一串只向前执行的过滤器。每次调用 `c.Next()`，控制权进入下一层；下游返回后，当前中间件才继续执行剩余代码。
 
 ```go
 func Audit() gin.HandlerFunc {
     return func(c *gin.Context) {
-        start := time.Now()       // 请求阶段
-        c.Next()                  // 进入下一层
-        cost := time.Since(start) // 响应阶段
+        start := time.Now()       // 请求进入时
+        c.Next()                  // 交给下一层
+        cost := time.Since(start) // 响应已经写好
         log.Println(c.FullPath(), c.Writer.Status(), cost)
     }
 }
 ```
 
-若注册顺序是 `A → B → Handler`，实际执行是 `A前 → B前 → Handler → B后 → A后`。鉴权和限流通常在 `c.Next()` 前拒绝请求；耗时统计、响应录制和 ETag 需要等下游写完响应，所以在它后面工作。
+若注册顺序是 `A → B → Handler`，执行顺序就是：
+
+```text
+A 前 → B 前 → Handler → B 后 → A 后
+```
+
+鉴权、授权和限流都要在 `c.Next()` 前决定是否放行；耗时统计、响应录制和 ETag 则要等下游返回。
 
 ```mermaid
 sequenceDiagram
-    actor C as Client
-    participant A as 全局中间件
-    participant B as 路由中间件
+    actor Client
+    participant G as 全局中间件
+    participant R as 路由中间件
     participant H as Handler
-    C->>A: Request
-    A->>B: c.Next()
-    B->>H: c.Next()
-    H-->>B: Response
-    B-->>A: 后处理
-    A-->>C: 后处理后返回
+    Client->>G: HTTP Request
+    G->>R: c.Next()
+    R->>H: c.Next()
+    H-->>R: 写入响应
+    R-->>G: 响应后处理
+    G-->>Client: HTTP Response
 ```
 
-`c.Abort()` 只阻止尚未执行的后续 handler，当前函数仍会继续；因此拒绝后通常紧跟 `return`。
+`c.Abort()` 只阻止尚未运行的后续 handler，并不会立刻退出当前 Go 函数。所以拒绝分支通常写成：
+
+```go
+c.JSON(http.StatusOK, errorBody)
+c.Abort()
+return
+```
+
+漏掉 `return`，当前中间件仍会继续执行，后续代码可能修改本应结束的响应。
 
 ---
 
-## 二、挂载位置就是业务范围
+## 三、挂载层级就是规则的业务范围
 
-中间件有成本，也有语义。给商品查询强制登录会破坏公开浏览；给下单响应加 HTTP 缓存更可能返回别人的交易结果。
+gomall 在组合根中先挂全局规则，再建立逐层收紧的路由组：
 
-| 层级 | 适合的规则 | gomall 中的例子 |
+```go
+r.Use(middleware.TokenBucket(rate.Limit(100), 200))
+r.Use(middleware.Cors(), middleware.Jaeger())
+r.Use(sessions.Sessions("mysession", store))
+
+v1 := r.Group("api/v1")
+authed := v1.Group("/")
+authed.Use(middleware.AuthMiddleware())
+
+merchant := authed.Group("/")
+merchant.Use(middleware.RequireRole("merchant", "admin"))
+
+admin := authed.Group("/admin")
+admin.Use(middleware.RequireRole("admin"))
+```
+
+```text
+api/v1（匿名可访问）
+└── authed（已登录）
+    ├── merchant（merchant 或 admin）
+    └── admin（仅 admin，路径带 /admin）
+```
+
+| 层级 | gomall 中的规则 | 为什么放这里 |
 |---|---|---|
-| 全局 | 每个请求都需要 | TokenBucket、CORS、Jaeger |
-| 路由组 | 一类身份共享 | `authed` 的 Auth，merchant/admin 的 RequireRole |
-| 单路由 | 只属于某个业务动作 | 登录/秒杀滑窗、支付熔断、下单与支付幂等、商品读取缓存 |
+| 全局 | TokenBucket、CORS、Jaeger、Session | 每个动态请求都经过；越早拒绝越省资源 |
+| 路由组 | Auth、RequireRole | 一批接口共享身份边界 |
+| 单路由 | HTTPCache | 只有公开只读响应适合交给浏览器或 CDN 缓存 |
 
-为新接口选中间件时先问业务问题：谁能调用，会不会重试，是否调用脆弱下游，响应能否公开缓存。不要从“项目里有哪些中间件”倒推全部挂上。
+商品浏览不能强制登录，下单结果也不能公开缓存。中间件有运行成本，更有业务语义；不是“有就全挂上”。
 
 ---
 
-## 三、流量入口：TokenBucket 先挡持续洪峰
+## 四、TokenBucket：用很低的成本挡住持续洪峰
 
-路由全局使用按 IP 的令牌桶：
+全局令牌桶按客户端 IP 建 limiter：
 
 ```go
 r.Use(middleware.TokenBucket(rate.Limit(100), 200))
 ```
 
-桶按每秒 100 枚补充，最多存 200 枚。正常用户短时间连点可以消耗积攒的令牌；持续洪峰最终只能以 100 请求/秒进入后端。拿不到令牌时，中间件写错误响应、`Abort` 并返回，业务 handler 不会运行。
+桶每秒补 100 枚令牌，最多存 200 枚。一个正常用户偶尔并发加载资源，可以消耗先前积攒的令牌；若脚本持续灌入，请求最终只能以约 100 次/秒进入后端。拿不到令牌时，中间件直接响应，handler、数据库和下游服务都不会运行。
 
-实现为每个 IP 保存一个 limiter。IP 基数没有上限，所以代码还需定时删除长时间未访问的条目；否则保护服务的 map 反而会吃光内存。
-
-这是一套单实例状态。多个应用实例各有自己的桶，全站上限会随实例数增加。需要全局精确配额时，应使用共享存储或网关限流。
-
----
-
-## 四、身份入口：认证与授权分开
-
-### AuthMiddleware：身份只能来自 token
-
-鉴权中间件读取 access/refresh token，解析 claims，再把可信用户 id 放进请求 context。后续业务从 `ctl.GetUserInfo(ctx)` 读取身份，不信 body 中的 `user_id`。
-
-JWT 签发后本来无法主动撤销。gomall 在 claims 中保存 `TokenVersion`，每次请求与用户当前版本比较；改密码或强制下线时提升版本号，旧 token 随即失效。
-
-版本查询带短 TTL 的进程内缓存。查询函数未注入或查询失败时选择 fail-closed：宁可拒绝，也不能悄悄跳过撤销检查。多实例缓存与短暂竞态是当前边界，升级可选 Redis 或失效广播。
-
-### RequireRole：登录不等于有后台权限
-
-路由组逐层收紧：
-
-```text
-public
-  └── authed       AuthMiddleware
-        ├── merchant  RequireRole(merchant, admin)
-        └── admin     RequireRole(admin)
-```
-
-角色查询同样从 context 中的可信 user id 出发。`RequireRole` 接受允许角色集合，角色不在集合就拒绝。
-
-中间件包没有直接 import 用户领域包，而是声明 `SetRoleLookup`、`SetTokenVersionLookup` 让组合根注入查询函数。原因很实际：领域路由依赖中间件，如果中间件反向 import 领域包，Go 会形成循环依赖。
-
-课堂对比：Auth 回答“你是谁”，RequireRole 回答“你能否做这件事”。不要把角色字段塞回请求体再让业务自己相信。
-
----
-
-## 五、交易入口：限流、熔断与幂等各管一件事
-
-### SlidingWindow：按业务维度做分布式限流
-
-登录要按 IP 限制密码尝试，秒杀和红包要按用户限制操作频率。滑动窗口把请求时间写进 Redis ZSet，用 Lua 原子完成删除过期记录、计数和写入，因此多个应用实例共享同一个窗口。
-
-它与全局 TokenBucket 不重复：前者保护具体业务规则并跨实例，后者用很低的本地成本削掉全站洪峰。
-
-当前实现遇到 Redis 错误会记录日志后放行，也就是 fail-open。这样不会因限流依赖故障让登录和交易全部停摆，但失去了业务限流；监控必须立刻发现这次降级。
-
-### CircuitBreaker：下游已经坏了，就暂停继续施压
-
-支付调用外部网关。若下游持续 5xx，继续把每个请求压过去会占满连接和 goroutine。熔断器有三态：
-
-```mermaid
-stateDiagram-v2
-    Closed --> Open: 连续失败达到阈值
-    Open --> HalfOpen: 等待 OpenTimeout
-    HalfOpen --> Closed: 探测全部成功
-    HalfOpen --> Open: 任一探测失败
-```
-
-默认参数是连续失败 5 次、打开 10 秒、半开最多 3 个探测请求。中间件在 `c.Next()` 后把 `c.Errors` 或 HTTP 5xx 视为失败。当前 payment handler 的 `response.Fail` 只写 HTTP 200，也不调用 `c.Error`，所以业务失败不会触发熔断；这是现有缺口。
-
-实现还带 `generation` 代际号，忽略上一轮探测迟到的回报，防止旧失败污染已经恢复的新一轮状态。
-
-### Idempotency：同一张票只能产生一次副作用
-
-客户端先取得幂等 token，提交交易时放进 `Idempotency-Key`。中间件将用户 id 与 token 组成 Redis key，状态机返回四种结果：
-
-| 状态 | 行为 |
-|---|---|
-| token 不存在或过期 | 拒绝 |
-| `init` 并成功抢锁 | 执行业务 |
-| `processing` | 告知请求处理中 |
-| `done` | 回放上次响应并设置 `X-Idempotent-Replay: true` |
+关键实现只有两个判断：
 
 ```go
-state, cached, err := cache.AcquireIdempotencyLock(ctx, key)
-// done: 回放 cached；processing: 拒绝；拿到锁: c.Next()
-c.Next()
-if len(c.Errors) > 0 || recorder.Status() >= http.StatusBadRequest {
-    releaseIdempotencyLock(key)
+limiter := get(c.ClientIP())
+if !limiter.Allow() {
+    c.JSON(http.StatusOK, rateLimitBody)
+    c.Abort()
     return
 }
-commitIdempotencyResult(key, recorder.body.String())
+c.Next()
 ```
 
-中间件把没有 `c.Errors` 且 HTTP 状态小于 400 的响应当成成功，再最多重试 3 次保存结果。payment 的业务失败仍是 HTTP 200，因此当前会被错误缓存为 `done`。即使修正成功判定，资金操作仍要用数据库唯一约束或业务流水号兜底，防止 Redis 结果保存失败后重复执行。
+但这里还有两个边界：
+
+- limiter 存在进程内，多实例各算各的；扩容后全站可通过的流量随实例数增加。
+- IP 种类可能不断增长，因此代码每分钟清理超过 10 分钟未访问的条目，防止 map 无界占用内存。
+
+它适合做便宜的入口粗筛，不适合表达“每个用户每分钟只能抢三次红包”这种跨实例业务规则。后者留到下讲的 Redis 滑动窗口。
 
 ---
 
-## 六、只读入口：HTTP cache
+## 五、Auth 与 RBAC：先证明是谁，再判断能做什么
 
-只读公开接口可挂 `HTTPCache(maxAge)`。它先用 buffer 录下下游响应，计算 SHA-256 前 16 字节生成弱 ETag；客户端下次带相同 `If-None-Match` 时返回 304，不再发送 body。
+### 5.1 AuthMiddleware 不相信请求体里的身份
+
+Auth 读取 access token 和 refresh token，解析 claims，并把可信用户 id 写进请求 context：
+
+```go
+claims, err := util.ParseToken(newAccessToken)
+// 省略错误分支与版本检查
+c.Request = c.Request.WithContext(
+    ctl.NewContext(c.Request.Context(), &ctl.UserInfo{Id: claims.ID}),
+)
+c.Next()
+```
+
+后续 service 使用 `ctl.GetUserInfo(ctx)` 取当前用户，不从 JSON 中接受任意 `user_id`。这是身份来源的边界。
+
+JWT 签发后本来会一直有效到过期。gomall 在 claims 中保存 `TokenVersion`，每次请求将它与数据库中的当前版本比较；改密码或强制下线时提升版本，旧 token 随即不再匹配。
+
+查询失败时实现选择 fail-closed，也就是拒绝请求。版本查询有 60 秒进程内缓存，并在版本提升时主动删除；代码仍注明一个竞态边界：一次跨越“读库、提升版本、删缓存、写回旧值”的请求，可能让旧版本短暂留到 TTL 到期。多实例还需要 Redis 或失效广播。
+
+### 5.2 RequireRole 不重复做登录
+
+登录只回答“你是谁”，角色检查回答“你能否进入这组接口”：
+
+```go
+user, err := ctl.GetUserInfo(c.Request.Context())
+role, err := lookupRole(c.Request.Context(), user.Id)
+if _, ok := allowSet[role]; !ok {
+    c.JSON(http.StatusOK, permissionDeniedBody)
+    c.Abort()
+    return
+}
+c.Next()
+```
+
+角色查询带 30 秒进程内缓存，查询函数未注入或数据库失败时同样拒绝。`middleware` 包通过 `SetRoleLookup` 和 `SetTokenVersionLookup` 接收组合根注入的函数，没有反向 import `internal/user`；否则领域路由依赖 middleware，而 middleware 又依赖领域包，Go 会形成 import 环。
+
+商家修改商品的完整防线因此有两面：路由组的 `RequireRole` 挡住普通用户，DAO 的资源归属条件挡住商家互改。只做任何一面都不够。
+
+---
+
+## 六、HTTPCache：304 省的是响应体，不是回源计算
+
+公开商品接口按数据变化速度设置缓存时间：
+
+```go
+public.GET("product/list", middleware.HTTPCache(30*time.Second), handler)
+public.GET("product/show", middleware.HTTPCache(60*time.Second), handler)
+public.GET("category/list", middleware.HTTPCache(300*time.Second), handler)
+public.GET("carousels", middleware.HTTPCache(300*time.Second), handler)
+```
+
+中间件先换掉 writer，等待 handler 写完响应，再计算弱 ETag：
 
 ```go
 c.Writer = buf
-c.Next()                    // handler 已经执行
+c.Next() // handler 和数据库查询已经执行
+
 etag := weakETag(buf.body.Bytes())
 if c.GetHeader("If-None-Match") == etag {
     original.WriteHeader(http.StatusNotModified)
@@ -180,69 +225,48 @@ if c.GetHeader("If-None-Match") == etag {
 }
 ```
 
-因为 ETag 在 `c.Next()` 后计算，304 只节省网络传输，数据库和业务计算已经发生。中间件仅处理 GET/HEAD 且 HTTP 状态为 200 的响应；项目不少业务错误也使用 HTTP 200，它们可能被当成可缓存响应，这是接口状态码约定与缓存策略共同造成的边界。
+客户端再次携带相同 `If-None-Match` 时会收到 304，不再下载 body；可是 `c.Next()` 已经跑完，所以数据库和序列化开销仍在。若目标是减少回源计算，还需 CDN、反向代理缓存或服务端结果缓存。
+
+### 当前项目必须明说的缺口
+
+`HTTPCache` 只看 HTTP 状态是否为 200。统一错误出口 `response.Fail` 也始终返回 HTTP 200，把业务错误放在 JSON 的 `status` 字段里。因此，一个“HTTP 200 + 业务失败”的 GET 响应也可能收到 ETag 和公开缓存头。
+
+修复方向有两种：让 HTTP 状态表达失败，或让缓存中间件解析统一响应结构并只缓存业务成功。前一种让网关、监控和熔断器也能获得正确语义，代价是要统一改造客户端约定。
 
 ---
 
-## 七、把一条支付请求串起来
+## 七、两分钟接口评审
 
-```mermaid
-flowchart LR
-    C[Client] --> T[TokenBucket]
-    T --> O[CORS]
-    O --> J[Jaeger]
-    J --> S[Sessions]
-    S --> A[Auth]
-    A --> B[CircuitBreaker]
-    B --> I[Idempotency]
-    I --> H[Paydown Handler]
+给出一个“商家修改商品价格”的新接口，学生现场决定：
+
+```text
+TokenBucket → Auth → RequireRole(merchant, admin) → Handler
 ```
 
-这是当前 `/api/v1/paydown` 的真实顺序：它没有 RequireRole 或 SlidingWindow，CircuitBreaker 位于 Idempotency 外层。其他路由会选择不同组合；HTTP cache 绝不能进入支付链。
+不挂 HTTPCache，因为它是写操作；DAO 仍要按 `product_id + boss_id` 更新，不能把资源归属交给角色中间件。
 
-## 八、课堂演示（5 分钟）
+换成“公开读取分类列表”，链路变成：
 
-演示前准备一个属于当前用户的待付款订单和测试支付密钥。先颁发 token，把响应中的 `data.idempotency_key` 复制到后续两个请求：
-
-```bash
-curl -i 'http://localhost:5002/api/v1/idempotency/token' \
-  -H 'access_token: ...' -H 'refresh_token: ...'
-
-curl -i -X POST 'http://localhost:5002/api/v1/paydown' \
-  -H 'access_token: ...' -H 'refresh_token: ...' \
-  -H 'Idempotency-Key: 复制上一步返回值' \
-  -H 'Content-Type: application/json' \
-  -d '{"order_id":42,"key":"测试支付密钥"}'
+```text
+TokenBucket → HTTPCache → Handler
 ```
 
-用同一个 token 再执行一次 paydown。第二次应带 `X-Idempotent-Replay: true` 并回放结果。录制前必须验证订单、用户和支付密钥，课堂不临时造数据。
+不用 Auth，也不能因为全站已经有 TokenBucket 就省掉业务自己的权限判断。
 
----
+## 课后延伸（不计入课堂时间）
 
-## 九、60 秒收束
-
-- `c.Next()` 把请求送进下一层，返回后才能观察或改写响应。
-- 全局、分组、路由级是业务范围，不是代码摆放偏好。
-- Auth 建立身份，RequireRole 做授权；失败方向偏向拒绝。
-- TokenBucket、滑窗、熔断、幂等分别处理洪峰、业务频率、下游故障和重复副作用，不能互相替代。
-- HTTPCache 当前只省响应体；CORS、Jaeger 的细节放在课后走读。
-
-## 课后延伸（不计入 60 分钟）
-
-- 阅读 `middleware/ratelimit.go`，解释清理 goroutine 怎样限制 map 规模。
-- 为熔断器画出迟到回报场景，说明 `generation` 为什么存在。
-- 给幂等交易增加数据库唯一业务号，验证 Redis 提交失败时仍不会重复扣款。
-- 比较商品接口首次 200 与随后 304 的服务端耗时，证明当前 ETag 不省回源计算。
-- 走读 CORS 白名单和 Jaeger 降级逻辑，解释为什么它们不能替代鉴权，也不该阻断交易。
+- 阅读 `middleware/cors.go` 和 `middleware/track.go`，说明 CORS、追踪与鉴权为何互不替代。
+- 用两次带 `If-None-Match` 的请求比较服务端日志，验证当前 304 仍会执行 handler。
+- 设计一次 token 版本缓存竞态，解释注释所说的 60 秒上界。
+- 为商品更新接口写一张表，分别列出角色检查与资源归属检查的位置。
 
 ## 代码索引
 
 | 主题 | 文件 |
 |---|---|
-| 全局限流、CORS、追踪 | `middleware/ratelimit.go`、`middleware/cors.go`、`middleware/track.go` |
-| 鉴权与角色 | `middleware/jwt.go`、`middleware/rbac.go` |
-| 滑动窗口 | `middleware/ratelimit.go`、`repository/cache/ratelimit.go` |
-| 熔断 | `middleware/circuitbreaker.go` |
-| 幂等 | `middleware/idempotency.go`、`repository/cache/idempotency.go` |
-| HTTP 缓存 | `middleware/httpcache.go` |
-| 组合与挂载 | `routes/router.go`、各领域 `routes.go` |
+| 全局挂载与分组 | `routes/router.go` |
+| TokenBucket | `middleware/ratelimit.go` |
+| Auth 与 token 版本 | `middleware/jwt.go` |
+| RBAC | `middleware/rbac.go` |
+| HTTP cache | `middleware/httpcache.go` |
+| 公开缓存路由 | `internal/product/routes.go`、`internal/category/routes.go`、`internal/carousel/routes.go` |
