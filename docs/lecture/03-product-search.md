@@ -1,53 +1,41 @@
 # 商品搜索（上）：关键词检索与索引同步
 
-用户输入“苹果手机”时，商城不能把整张商品表搬到应用层再筛选。它需要先找出可能相关的商品，再决定排列顺序，并排除不允许展示的商品。这个过程看起来像一次查询，实际牵涉两份数据：MySQL 中的商品事实，以及 Elasticsearch（下文简称 ES）中的搜索副本。
+用户只传 `name=咖啡壶`，ES 正常时能搜到咖啡壶；ES 一旦故障，同一请求却可能从 MySQL 返回近似全量商品。接口没有换，请求也没有换，答案为什么变了？这处真实偏差正好能把商品搜索的读链和降级边界串起来。
 
-本章沿着一次普通商品搜索向下阅读代码，回答四个问题：请求如何选择 ES 或 MySQL，字段权重如何影响排序，商品修改后怎样进入索引，以及当前实现在哪些情况下会返回口径不同的结果。语义搜索、Milvus 和 Hybrid 融合在[商品搜索（下）](./03-product-search-hybrid.md)中讨论。
+商城搜索要从大量商品中找出候选，按相关性排列，并排除不该展示的商品。gomall 为此保留了两份数据：MySQL 记录商品事实，Elasticsearch（下文简称 ES）保存用于检索的副本。
 
-学生顺序阅读正文约需 35 分钟；录制时需要边讲边打开源码，不要把全部内容塞进一个视频。建议拆成两段：第一段用 40–45 分钟讲第 1–7 节，第二段用 10–15 分钟完成第 8 节的完整代码走读。第 9 节是课后实践，不计入录制时间。
+这份讲义从 `POST /api/v1/product/search` 开始，顺着读请求追到 ES 和 MySQL，再回头看商品修改后怎样进入索引。语义召回、Milvus 和 Hybrid 融合留到[商品搜索（下）](./03-product-search-hybrid.md)。
 
-## 阅读前需要知道什么
+## 录制安排
 
-读者应当能看懂 Go 的函数调用、GORM 链式查询和 JSON。不了解 ES 也可以继续读，先记住下面几个词：
+### 第一段：搜索请求与降级（40–45 分钟）
 
-- **召回**：从全部商品中找出一批候选。漏掉的商品无法靠后续排序补回来。
-- **排序**：决定候选商品的先后次序。普通搜索主要使用文本相关性。
-- **过滤**：执行类目、上下架状态等硬性业务规则。过滤条件不应靠相关性分数表达。
-- **索引**：ES 为检索建立的数据结构。项目里的 `product` 索引也是一份可重建的商品副本。
-- **最终事实源**：交易环节认可的数据来源。本项目中是 MySQL，不是 ES。
+| 时间 | 内容 | 现场检查 |
+|---|---|---|
+| 0–6 分钟 | 搜索与交易的边界 | ES 返回的价格能不能用于下单？ |
+| 6–17 分钟 | 请求入口与两条查询路径 | 什么情况会从 ES 退到 MySQL？ |
+| 17–28 分钟 | 关键词、分页和 `multi_match` | DTO 里的字段是否都参与了搜索？ |
+| 28–40 分钟 | ES 排序与 MySQL `LIKE` | 两条路径的结果为什么不等价？ |
+| 40–45 分钟 | 咖啡壶停顿题与读链复盘 | 只传 `name` 时，故障前后各搜什么？ |
 
-建议按“读请求，再读写同步”的顺序学习：
+### 第二段：索引同步与故障窗口（35–40 分钟）
 
-1. 从 `ProductSearch` 找到 ES 与数据库两条分支。
-2. 进入 `SearchProducts`，确认关键词和分页怎样转换。
-3. 查看 ES 查询 JSON，再与数据库的 `LIKE` 对照。
-4. 最后追踪 `product.changed`，理解搜索副本为何会暂时落后。
+| 时间 | 内容 | 现场检查 |
+|---|---|---|
+| 0–5 分钟 | 从 MySQL 到 ES 的更新链 | 商品改完为什么不会立刻可搜？ |
+| 5–18 分钟 | Indexer 的 Ack、Nack 与重试 | 重复消息会不会写出两份文档？ |
+| 18–30 分钟 | ES refresh 与 Outbox 窗口 | 事件在哪种情况下会永久缺失？ |
+| 30–40 分钟 | backfill 和排查证据 | 接口返回 200 为什么仍不健康？ |
 
-涉及的代码集中在这些文件：
+文末的完整源码走读约需 10–15 分钟，单独录成补充视频；课后练习不计入录制时间。
 
-| 文件 | 负责什么 |
-|---|---|
-| `service/search/product_query.go` | 选择 ES 或数据库，并转换响应 |
-| `service/search/service.go` | 选择关键词，计算 ES 分页偏移量 |
-| `repository/es/product_index.go` | 索引结构、搜索、Upsert 与删除 |
-| `internal/product/repo.go` | 数据库 `LIKE` 降级查询 |
-| `internal/product/service.go` | 商品写入后产生 `product.changed` 事件 |
-| `service/search/indexer.go` | 消费事件并更新 ES |
+学生需要能读懂 Go 函数调用、GORM 链式查询和 JSON。第一次接触 ES 时先记住两个词就够了：召回负责找候选，排序负责决定候选的先后。过滤则是另一回事，类目和上下架状态属于硬规则，不该交给相关性分数碰运气。
 
-下面用一条请求贯穿读链：
+---
 
-```http
-POST /api/v1/product/search
-Content-Type: application/x-www-form-urlencoded
+## 一、先把搜索放回购物流程里
 
-info=露营咖啡壶&category_id=7&page_num=2&page_size=10
-```
-
-读到每一层时都可以回来看这四个值。按当前实现，关键词“露营咖啡壶”和分页会进入 ES，`category_id=7` 却不会进入普通搜索条件；如果 ES 报错，数据库继续使用 `info` 做 `LIKE` 查询。
-
-## 1. 先划清搜索与交易的边界
-
-一次搜索可以拆成下面这条链：
+搜索结果是导购信息，不是交易凭证。索引经由异步事件更新，可能暂时落后于 MySQL；客户端也能修改请求中的价格。用户点下“购买”以后，订单服务仍要从 MySQL 重新读取商品状态、价格和库存，并执行交易校验。
 
 ```text
 用户输入
@@ -65,15 +53,22 @@ info=露营咖啡壶&category_id=7&page_num=2&page_size=10
 返回展示字段 ── 名称、图片、标价、库存展示值
 ```
 
-这里最容易犯的错误，是把 ES 返回的价格和库存当成下单依据。索引通过异步事件更新，天然可能比 MySQL 慢；即使两边暂时一致，客户端也能修改请求中的金额。因此搜索结果只用于展示和引导点击，下单仍要重新从 MySQL 读取商品状态、价格与库存，并在交易逻辑中完成校验。
+因此，ES 丢失后可以根据 MySQL 重建；MySQL 中的商品事实丢失，ES 文档不能反过来充当完整备份。这也是搜索服务可以接受短暂数据延迟，而订单计价不能接受的原因。
 
-换句话说，ES 丢失时可以由 MySQL 重建；MySQL 中的商品事实丢失，ES 文档不能反过来充当完整备份。
+下面一直用这条请求读代码：
 
-## 2. 一次普通搜索怎样选择数据源
+```http
+POST /api/v1/product/search
+Content-Type: application/x-www-form-urlencoded
 
-路由在 `service/search/routes.go` 注册为匿名可访问的 `POST /api/v1/product/search`。`service/search/handler.go` 中的 `SearchProductsHandler` 先把请求绑定为 `ProductSearchReq`，页大小为 0 时补上默认值，然后调用 `ProductSearch`。绑定失败由统一响应模块处理，业务函数不会执行。
+info=露营咖啡壶&category_id=7&page_num=2&page_size=10
+```
 
-真正选择数据源的逻辑位于 `service/search/product_query.go`。下面保留了决定分支的部分，省略响应字段转换：
+按当前实现，关键词“露营咖啡壶”和分页会进入 ES，`category_id=7` 不会进入普通搜索条件。ES 报错后，数据库继续使用 `info` 做 `LIKE` 查询。
+
+路由在 `service/search/routes.go` 注册，`POST /api/v1/product/search` 可以匿名访问。`service/search/handler.go` 中的 `SearchProductsHandler` 把请求绑定为 `ProductSearchReq`，页大小为 0 时补默认值，然后调用 `ProductSearch`。绑定失败后统一响应模块会结束请求，业务函数不会执行。
+
+数据源选择位于 `service/search/product_query.go`。下面只保留分支，响应字段转换在真实文件中直接展开：
 
 ```go
 func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (
@@ -96,24 +91,19 @@ func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (
 }
 ```
 
-`buildESResponse` 和 `buildDBResponse` 是为了阅读而写的代称，真实文件中直接展开了字段转换。先看 `if` 的含义，再看两个返回点：
+`buildESResponse` 和 `buildDBResponse` 是讲义中的代称，不是仓库函数名。这里有三种结果需要分清：
 
-- ES 客户端没有初始化，直接查 MySQL。
-- ES 客户端存在，先查 ES；请求、解析或 ES 状态码出错时，再查 MySQL。
-- ES 正常返回空数组，不触发降级。空结果是一种成功响应。
-- 两条路径都失败，接口才向上返回错误。
+- `EsClient == nil`，直接查 MySQL；
+- ES 客户端存在，但请求、解析或 ES 状态码出错，记录日志后查 MySQL；
+- ES 成功返回空数组，接口直接返回空结果，不会降级。
 
-### 代码走读：为什么不能用 `len(docs) == 0` 触发降级？
+空数组表示“没有匹配商品”，不是搜索服务故障。若把 `len(docs) == 0` 当成降级条件，每次搜不存在的型号都会让交易库再做一次模糊匹配，而且两套引擎还可能给出不同答案。只有两条路径都失败时，错误才继续向上传递。
 
-假设用户输入了一个确实不存在的型号，ES 正确结果就是空数组。如果空数组触发数据库查询，每次无结果搜索都会给交易库增加一次模糊匹配，而且两套引擎可能给出不同答案。降级应针对“搜索服务不可用”，不应把“没有匹配商品”误判成故障。
+MySQL 在这里保住的是接口可用性，不是完整的搜索体验。它没有复刻 ES 的分词、字段权重和相关性排序；后面还会看到，两条路径目前连关键词来源都不完全相同。
 
-### 降级不等于等价替换
+## 二、DTO 能接收，不等于查询会使用
 
-数据库分支让接口在 ES 故障时继续工作，但它并没有复刻 ES 的全部语义。服务降级时，产品通常接受“搜索能力变弱”，不能假装用户完全无感。后面的对照会看到，本项目两条路径连关键词来源都不相同。
-
-## 3. 请求字段和分页怎样传入 ES
-
-`ProductSearchReq` 定义了不少字段：
+`ProductSearchReq` 看起来字段很多：
 
 ```go
 type ProductSearchReq struct {
@@ -127,7 +117,7 @@ type ProductSearchReq struct {
 }
 ```
 
-字段出现在 DTO 中，只代表框架能够接收它，不代表搜索实现已经使用它。普通 ES 路径真正读取的是 `Info`、`Title`、`Name` 和分页字段：
+框架能绑定这些字段，查询实现却只读取 `Info`、`Title`、`Name` 和分页参数。`service/search/service.go` 的处理如下：
 
 ```go
 func SearchProducts(ctx context.Context, req *product.ProductSearchReq) (
@@ -140,33 +130,21 @@ func SearchProducts(ctx context.Context, req *product.ProductSearchReq) (
 }
 ```
 
-`firstNonEmpty` 按 `info → title → name` 的顺序取第一个非空字符串。若请求同时传入：
+`firstNonEmpty` 按 `info → title → name` 取第一个非空字符串。请求若同时携带 `info=露营`、`title=咖啡壶`、`name=手冲壶`，ES 最终只搜索“露营”，不会组合三个条件。
 
-```text
-info=露营
-title=咖啡壶
-name=手冲壶
-```
-
-ES 收到的关键词只有“露营”。这不是把三个条件组合查询。
-
-`Normalize` 会把小于 1 的页码改为 1，把非正数页大小换成默认值，并限制最大页大小。随后用常见的 offset 分页公式计算 `from`：
+`Normalize` 把小于 1 的页码改为 1，把非正数页大小换成默认值，并限制最大页大小。之后计算 offset：
 
 ```text
 from = (page_num - 1) × page_size
 ```
 
-例如第 3 页、每页 20 条，`from` 为 40，ES 跳过前 40 条后再取 20 条。浅分页足够直观；页数很深时，ES 需要维护并丢弃大量前置结果，通常要改用 `search_after` 等方式。本章不展开深分页实现，因为当前项目没有使用它。
+第 3 页、每页 20 条时，`from=40`，ES 跳过前 40 条再取 20 条。这适合浅分页；页数很深时，ES 需要维护并丢弃大量前置结果，通常会改用 `search_after`。当前项目没有实现深分页，本讲不展开。
 
-### 代码走读：`category_id` 去了哪里？
+回到开头的请求，`category_id=7` 到这里就断了。`SearchProducts` 没把它传给仓储层，`on_sale` 也没有被读取，所以普通搜索可能返回其他类目的商品或下架商品。下半讲使用的 `SearchProductsWithScore` 会把可选的 `category_id` 放入 ES 的 `bool.filter`，那是另一条实现，不能用来证明普通搜索已经支持类目过滤。
 
-答案是没有进入普通 ES 查询。`ProductSearchReq` 虽然接收 `category_id`，`SearchProducts` 却没有把它传给仓储层。`on_sale` 也一样。于是下架商品、其他类目商品仍可能出现在普通搜索结果中。
+## 三、ES 排序与 MySQL 降级
 
-下半讲使用的 `SearchProductsWithScore` 是另一条实现，它会把可选的 `category_id` 放入 ES 的 `bool.filter`。不能据此推断普通搜索已经具备相同过滤能力。
-
-## 4. ES 文档与 `multi_match`
-
-项目创建名为 `product` 的索引。`name`、`title` 和 `info` 使用 `text` 类型与 `standard` analyzer；`category_id`、`num`、`boss_id` 等字段用于结构化数据，价格目前以 `keyword` 保存。
+项目创建名为 `product` 的索引。`name`、`title` 和 `info` 使用 `text` 类型与 `standard` analyzer；`category_id`、`num`、`boss_id` 等保存结构化数据，价格目前以 `keyword` 保存。
 
 ```go
 type ProductDoc struct {
@@ -176,18 +154,14 @@ type ProductDoc struct {
     Info          string `json:"info"`
     CategoryID    uint   `json:"category_id"`
     Price         string `json:"price"`
-    DiscountPrice string `json:"discount_price"`
     OnSale        bool   `json:"on_sale"`
-    Num           int    `json:"num"`
-    BossID        uint   `json:"boss_id"`
-    ImgPath       string `json:"img_path"`
-    CreatedAt     int64  `json:"created_at"`
+    // 其余展示字段省略
 }
 ```
 
-`text` 字段参与分词检索，`keyword` 字段保留整体值，适合精确匹配或聚合。价格保存为 `keyword` 意味着它并不适合直接做数值范围查询；如果要支持“100 到 300 元”，应先明确金额存储单位，再改用合适的数值映射。
+`text` 字段参与分词检索，`keyword` 保留整体值，适合精确匹配或聚合。价格存成 `keyword` 后不适合直接做数值范围查询；如果产品要支持“100 到 300 元”，应先确定金额单位，再调整映射类型。
 
-普通搜索最终发给 ES 的查询主体如下：
+普通搜索发给 ES 的主体是一个 `multi_match`：
 
 ```go
 q := map[string]any{
@@ -202,27 +176,13 @@ q := map[string]any{
 }
 ```
 
-`multi_match` 让同一个关键词同时检索多个文本字段。字段名后的 `^3`、`^2` 是 boost：其他条件接近时，名称命中得到的贡献高于标题命中，标题又高于详情命中。
+同一个关键词会检索三个文本字段。`name^3` 和 `title^2` 是 boost；其他条件接近时，名称命中的得分贡献高于标题，标题又高于详情。比如搜索“苹果手机”，商品名就是“苹果手机”的 A 通常应排在标题含“苹果手机配件”的 B 和详情写着“兼容苹果手机”的 C 前面。
 
-可以用下面三件商品理解它：
+`3` 和 `2` 表达业务偏好，不是放之四海皆准的参数。商品标题写法、分词器或样本分布变化后，要用真实查询样本重新评估。
 
-| 商品 | `name` | `title` | `info` |
-|---|---|---|---|
-| A | 苹果手机 | 新款智能终端 | 支持快充 |
-| B | 透明保护壳 | 苹果手机配件 | 防摔材质 |
-| C | 数据线 | 编织充电线 | 兼容苹果手机 |
+相关性也不能代替过滤。`on_sale=false` 的商品即使名称完全命中，也应该直接排除，而不是降低一点分数。合适的 ES 结构是 `bool` 查询：文本条件放进 `must`，类目和上架状态放进 `filter`。当前普通查询还没这样做。
 
-搜索“苹果手机”时，A 的名称直接命中，通常应排在 B、C 前面。boost 表达的正是这个业务偏好，但它不是可靠性证明。商品标题的写法、分词器和样本分布变化后，`3` 与 `2` 也需要通过查询样本重新评估。
-
-### 文本相关性不能代替业务过滤
-
-`on_sale=false` 的商品即使名称高度匹配，也不该靠一个较低分数沉到列表末尾，而应直接排除。比较稳妥的 ES 结构是 `bool` 查询：把文本条件放进 `must`，把类目与上架状态放进 `filter`。过滤不参与相关性打分，语义也更清楚。
-
-当前普通查询还没这样做。读代码时要区分“仓储文档里有字段”和“查询真正使用字段”，二者差一段明确的实现。
-
-## 5. 数据库降级能保住什么
-
-ES 不可用时，`internal/product/repo.go` 执行两次相同条件的查询，一次取当前页，一次统计总数：
+`internal/product/repo.go` 用相同条件执行两次查询，一次取当前页，一次统计总数：
 
 ```go
 func (d *ProductDao) SearchProduct(info string, page types.BasePage) (
@@ -245,9 +205,7 @@ func (d *ProductDao) SearchProduct(info string, page types.BasePage) (
 }
 ```
 
-它能保住基本的包含匹配和分页，却没有 ES 的分词、字段权重与相关性排序。`LIKE '%关键词%'` 前面带通配符，普通 B-Tree 索引往往难以有效缩小扫描范围；数据量增大后，它会把搜索压力带回交易数据库。
-
-两条路径的实际差异如下：
+`LIKE '%关键词%'` 可以完成基本的包含匹配和分页，但前置通配符通常让普通 B-Tree 索引难以缩小扫描范围。商品量增大后，搜索压力会回到交易数据库。
 
 | 对比项 | ES 正常路径 | MySQL 降级路径 |
 |---|---|---|
@@ -269,22 +227,20 @@ ES 正常时，`firstNonEmpty` 会选到 `name`，搜索“咖啡壶”。ES 故
 
 </details>
 
-这是一处真实的契约偏差。修复时应先在服务层计算一次规范化关键词，再把同一个值交给两个仓储实现；类目和上架条件也应定义成共同的搜索契约，而不是分别猜测。
+这已经超出排序差异，两条路径执行的查询契约并不一致。修复时可以在服务层只计算一次规范化关键词，再把同一个值交给两个仓储实现；类目和上架条件也应有共同定义。
 
-## 6. 商品为什么不会修改后立刻可搜
+## 四、商品修改后，索引慢在哪儿
 
-### 主线：从商品表到搜索索引
-
-商品写入 MySQL 后，服务调用 `emitProductChanged` 向 Outbox 表插入一条事件。后台发布器把事件投递到 RabbitMQ，搜索索引消费者再读取 MySQL 的最新商品并写入 ES。
+商品写入 MySQL 后，`internal/product/service.go` 调用 `emitProductChanged`，向 Outbox 表插入事件。后台发布器把事件投递到 RabbitMQ，`service/search/indexer.go` 再读取 MySQL 中的最新商品并写入 ES。
 
 ```text
 商品创建 / 修改 / 删除
         │
         ▼
       MySQL
-        │ 商品写入后调用 emitProductChanged
+        │ emitProductChanged
         ▼
-   Outbox 记录（routing key: product.changed）
+   Outbox（routing key: product.changed）
         │ 后台发布
         ▼
      RabbitMQ
@@ -296,7 +252,7 @@ ES 正常时，`firstNonEmpty` 会选到 `name`，搜索“咖啡壶”。ES 故
         └─ delete ───────────► ES Delete
 ```
 
-`StartProductIndexer` 将队列的 prefetch 设为 32，并关闭自动确认。消息处理规则值得逐行看：
+`StartProductIndexer` 把 prefetch 设为 32，并关闭自动确认：
 
 ```go
 for d := range msgs {
@@ -313,15 +269,13 @@ for d := range msgs {
 }
 ```
 
-删除事件直接调用 `es.DeleteProduct`；创建与更新事件先按商品 ID 查询 MySQL，再调用 `es.UpsertProduct`。ES 文档 ID 使用商品 ID，所以重复收到同一创建或更新事件时，后一次 Index 会覆盖同一文档。删除一个已经不存在的 ES 文档会得到 404，仓储层把它视为成功。两项处理让消费者具备了基本幂等性，符合 RabbitMQ 至少一次投递可能重复消息的现实。
+删除事件调用 `es.DeleteProduct`；创建和更新事件先按商品 ID 查询 MySQL，再调用 `es.UpsertProduct`。ES 文档 ID 就是商品 ID，重复的创建或更新消息会覆盖同一文档。删除已经不存在的文档会返回 404，仓储层把 404 当作成功。RabbitMQ 至少一次投递可能产生重复消息，这两处处理让消费者具备了基本幂等性。
 
-`UpsertProduct` 和 `DeleteProduct` 都设置 `Refresh: "false"`。写请求成功不代表下一次搜索马上看见变更；ES 会按照自己的 refresh 周期让新文档进入可搜索状态。因此链路中至少有事件等待、消息消费和 ES refresh 三段延迟。
+`UpsertProduct` 和 `DeleteProduct` 都设置 `Refresh: "false"`。写请求成功以后，新文档还要等 ES refresh 才能被搜索看见。因此一件商品从 MySQL 变化到可搜索，中间至少要经过事件等待、消息消费和 ES refresh。
 
-### 进阶观察：Outbox 还没有封住的窗口
+### Outbox 仍然留着一个窗口
 
-`ProductCreate`、`ProductUpdate`、`ProductDelete` 先完成商品写入，随后调用 `emitProductChanged`。商品写入与 Outbox 插入不在同一个数据库事务里；而且 `emitProductChanged` 插入失败时只记录日志，不让商品操作失败。
-
-于是存在下面这种状态：
+当前 `ProductCreate`、`ProductUpdate`、`ProductDelete` 先完成商品写入，随后才调用 `emitProductChanged`；商品写入与 Outbox 插入不在同一个数据库事务里。若插入失败，代码只记日志，不会让商品操作回滚。
 
 ```text
 MySQL 商品已更新
@@ -330,99 +284,42 @@ Outbox 插入失败
 ES 长期保留旧文档
 ```
 
-Outbox 能重试已经写入表中的事件，无法发布一条从未成功落盘的事件。严格的事务 Outbox 应让业务写入和事件记录使用同一个本地事务，二者一起提交或一起回滚。
+发布器只能重试已经进入 Outbox 表的记录，补不出一条从未写成功的事件。严格的事务 Outbox 要让业务写入和事件记录共用一个本地事务，一起提交或一起回滚。
 
-### 为什么还需要全量回填
+项目还提供全量 backfill：按 ID 升序分批读取 MySQL，再逐条 Upsert 到 ES。默认批大小为 200；单条写入成功后才推进游标，任何一次 loader 失败都会终止本轮回填。它适合初始化索引和修复历史缺口，运行时要留意 MySQL 与 ES 压力，不能拿它代替持续可靠的增量链路。
 
-增量事件只覆盖事件机制启用之后的变化，也可能受上述窗口影响。项目提供 backfill：按 ID 升序分批从 MySQL 扫描商品，再逐条 Upsert 到 ES。默认批大小为 200；单条写入成功后才推进游标，任何一次 loader 失败都会终止本轮回填。
+## 五、录制结束前看哪些证据
 
-回填适合初始化索引和修复历史缺口，但不能替代稳定的增量链路。运行它时还要留意对 MySQL 与 ES 的压力。
+接口返回 HTTP 200，不代表索引仍在更新。旧文档照样能被搜到，刚上架的商品却可能一直缺席。排查时沿数据流看：普通搜索的 ES 错误与 MySQL 降级次数、最老 pending Outbox 的年龄、`search.product.indexer` 队列积压和重复重入队、indexer 失败日志，以及商品写入时间到 ES 可搜索时间的差值。还应定期抽样比较 MySQL 商品与 ES 文档，查缺失、残留和字段不一致。
 
-## 7. 如何判断搜索系统是否健康
+主视频讲到这里结束，后面的源码走读另录。
 
-只看接口 HTTP 状态码不够。ES 中的旧文档仍能正常返回 200，用户却搜不到刚上架的商品。排查时可以沿数据流观察：
+## 补充视频：沿源码完整走一遍（10–15 分钟）
 
-- 普通搜索的 ES 错误率，以及触发 MySQL 降级的次数；
-- Outbox 中最老 pending 记录的年龄，而不只是记录条数；
-- `search.product.indexer` 的队列积压和重复重入队情况；
-- indexer 处理失败日志，以及商品写入时间到 ES 可搜索时间的差值；
-- 定期抽样比较 MySQL 商品与 ES 文档，检查缺失、残留和字段不一致。
+这部分不要塞进 45 分钟主视频。录制时从 `service/search/routes.go` 开始，依次打开 `handler.go`、`product_query.go`、`service.go`、`repository/es/product_index.go` 和 `internal/product/repo.go`；然后换到写链，追 `emitProductChanged` 与 `service/search/indexer.go`。
 
-第一项反映读链故障，后四项用来发现“接口活着，但索引不再更新”。
+走读时用下面四种输入检查分支，不必再重复讲一遍概念：
 
-## 8. 完整代码走读
+1. ES 客户端存在，但查询返回 500。`ProductSearch` 会记录错误并查数据库；数据库也失败时，接口仍然失败。
+2. 删除消息重复投递。第二次 ES Delete 返回 404，仓储层视为成功，消费者 Ack，不会持续重试。
+3. 请求为 `title=防水跑鞋&page_num=2&page_size=10`。ES 使用“防水跑鞋”、`from=10`、`size=10`；降级路径读取空的 `req.Info`，查询条件变为 `name LIKE '%%' OR info LIKE '%%'`。
+4. 商品更新成功，Outbox 插入失败。重启发布器也补不出消息，因为表中根本没有这条 Outbox 记录；只能依靠对账或回填修复 ES。
 
-读下面的场景，先自己写出答案，再展开提示。
+## 课后练习
 
-### 场景 A：ES 客户端存在，但查询返回 500
+### 1. 固定普通搜索的现有契约
 
-调用链会怎样走？最终响应一定成功吗？
+为 ES 正常和 ES 故障设计表驱动测试，覆盖只传 `name`、只传 `info`、同时传多个关键词字段、指定 `category_id` 和分页越界值。除了响应，还要断言仓储层收到的关键词、分页参数、过滤条件与总数。
 
-<details>
-<summary>答案</summary>
+先用测试记录现状：ES 路径按 `info → title → name` 取值，数据库只接收 `req.Info`，普通 ES 与数据库路径都没有使用 `category_id`。之后再增加一组理想契约的失败用例，避免修改实现时把原问题一并改进测试里。
 
-`ProductSearch` 记录 ES 错误，然后调用 `ProductDao.SearchProduct`。数据库查询成功才返回商品列表；数据库也失败时，错误继续向上传递。因此“有降级”不等于“一定成功”。
+### 2. 补上结构化过滤
 
-</details>
+把普通 ES 查询改为 `bool`：`multi_match` 放进 `must`，`category_id` 和 `on_sale=true` 放进 `filter`。数据库降级也要在同一个 GORM 查询上追加对应的 `WHERE`，列表和 `COUNT` 共用相同条件。
 
-### 场景 B：商品删除事件被重复投递两次
+### 3. 合并商品写入与事件记录
 
-第二次删除 ES 文档得到 404，消费者会持续重试吗？
-
-<details>
-<summary>答案</summary>
-
-不会。`DeleteProduct` 把 404 当作幂等成功，`handleProductChanged` 返回 `nil`，消费者 Ack 第二条消息。
-
-</details>
-
-### 场景 C：请求为 `title=防水跑鞋&page_num=2&page_size=10`
-
-ES 正常时使用什么关键词和分页参数？ES 失败后又会搜索什么？
-
-<details>
-<summary>答案</summary>
-
-ES 路径选中 `title` 的“防水跑鞋”，`from=10`、`size=10`。降级路径只读取空的 `req.Info`，数据库条件成为 `name LIKE '%%' OR info LIKE '%%'`。这再次说明两条路径目前没有共享同一套查询契约。
-
-</details>
-
-### 场景 D：商品更新成功，Outbox 插入失败
-
-稍后重启 Outbox 发布器能自动补出这条消息吗？
-
-<details>
-<summary>答案</summary>
-
-不能。发布器只能扫描已经存在的 Outbox 记录。若没有对账或回填，ES 可能长期保留旧值。
-
-</details>
-
-## 9. 课后实践（不计入本次阅读时间）
-
-### 练习一：写出普通搜索的契约测试
-
-为 ES 正常和 ES 故障两种情况设计测试，至少覆盖：只传 `name`、只传 `info`、同时传多个关键词字段、指定 `category_id`、分页越界值。检查项除了状态码，还包括传给仓储层的关键词、分页参数、过滤条件和结果总数。
-
-<details>
-<summary>最小参考骨架</summary>
-
-至少准备两组表驱动用例：ES 成功时断言 `info → title → name` 的关键词优先级、`from/size` 和返回 `total`；ES 失败时断言 DAO 只接收 `req.Info`。另加 `category_id` 用例，确认普通 ES 与 DB 路径当前都没有使用它。测试先固定现状，再单独写理想契约的失败用例，避免一边改实现一边改掉证据。
-
-</details>
-
-### 练习二：补上结构化过滤
-
-把普通 ES 查询改成 `bool`：文本 `multi_match` 放入 `must`，`category_id` 和 `on_sale=true` 放入 `filter`。思考数据库降级应该怎样保持相同语义。
-
-**答案提示：** `on_sale` 属于结构化过滤条件，应当放入 `bool.filter`，而非 `multi_match`。数据库侧应在同一个 GORM 查询上追加结构化 `WHERE`，列表查询与 `COUNT` 必须共用相同条件。
-
-### 练习三：消除 Outbox 丢事件窗口
-
-设计一次商品更新，使商品表修改与 Outbox 插入在同一个事务里完成。列出需要改变的 DAO 构造方式与错误传播方式。
-
-<details>
-<summary>参考事务骨架</summary>
+设计一次商品更新，让商品表修改与 Outbox 插入使用同一个事务：
 
 ```go
 err := db.Transaction(func(tx *gorm.DB) error {
@@ -433,18 +330,8 @@ err := db.Transaction(func(tx *gorm.DB) error {
 })
 ```
 
-商品 DAO 与 Outbox DAO 必须绑定同一个 `tx`；Outbox 插入失败应让事务回滚。RabbitMQ 发布仍由事务外的后台发布器完成，不能把网络请求塞进数据库事务。
+两个 DAO 都要绑定同一个 `tx`，Outbox 插入失败应使事务回滚。RabbitMQ 发布仍交给事务外的后台发布器，不要把网络请求塞进数据库事务。
 
-</details>
+### 4. 排查“刚上架却搜不到”
 
-### 练习四：解释一次“搜索不到刚上架商品”的排查顺序
-
-写出你会查看的四类证据，并说明每项能排除哪一段故障。
-
-**答案提示：** 从 MySQL 商品记录开始，依次检查 Outbox、RabbitMQ 队列与消费者日志、ES 文档和 refresh 后的查询结果。按链路排查比反复调用 HTTP 接口更容易定位断点。
-
-## 本章结论
-
-普通商品搜索有一条清楚的主路径：ES 可用时执行多字段相关性查询，ES 出错时退到 MySQL `LIKE`。这条退路保证了部分可用性，却没有保证查询等价；关键词选择、匹配字段与排序都可能改变，类目和上架过滤则在两条路径中都缺失。
-
-写链通过 Outbox、RabbitMQ 和 indexer 把 MySQL 变化同步到 ES，所以搜索副本允许短暂落后。当前实现用商品 ID Upsert、删除 404 成功和手动 Ack 处理重复消息，但业务写入与 Outbox 插入不在同一事务，仍可能永久漏掉事件。理解这些边界后，再进入 Hybrid 搜索会轻松许多：它增加了新的召回方式，却仍要服从同一套商品事实与过滤规则。
+从 MySQL 商品记录开始，依次检查 Outbox、RabbitMQ 队列与消费者日志、ES 文档，以及 refresh 后的查询结果。写清每项证据能排除哪一段故障。
