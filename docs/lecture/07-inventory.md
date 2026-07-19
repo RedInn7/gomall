@@ -1,623 +1,245 @@
-# 库存与防超发
+# 库存与防超发：把“还有货”变成可信承诺
 
-> gomall · 业务承诺 / 客诉自愈 / 两桶语义 / Saga 退回 / 启动重建
->
-> 这份讲义不讲"怎么写一段扣库存的 Redis Lua"，讲的是**库存这个数字背后的五条业务承诺**——它对五个角色各意味着什么、一次超卖要赔多少钱、客服面对"加购还有货、下单说缺货"该说什么话，以及为什么所有工程选择都往"宁可误锁不可超卖"这一侧倒。
+> 这一讲只回答一件事：用户下单到付款之间，平台怎样既不超卖，也不把库存永久锁死。
 
-## 目录
+## 课堂节奏（60 分钟以内）
 
-- [一、库存对五个角色意味着什么](#一库存对五个角色意味着什么)
-- [二、超卖：一笔订单的真实业务代价](#二超卖一笔订单的真实业务代价)
-- [三、两桶库存的业务语义](#三两桶库存的业务语义)
-- [四、下单 reserve：业务承诺的工程化](#四下单-reserve业务承诺的工程化)
-- [五、Saga 退回：避免"凭空缺货"事故](#五saga-退回避免凭空缺货事故)
-- [六、关单释放：15 / 30 / 60 分钟的业务权衡](#六关单释放15--30--60-分钟的业务权衡)
-- [七、启动重建：服务重启时的业务窗口](#七启动重建服务重启时的业务窗口)
-- [八、客服 SOP：三类高频工单的自查路径](#八客服-sop三类高频工单的自查路径)
-- [九、业务承诺 SLO 与超卖应急](#九业务承诺-slo-与超卖应急)
-- [十、业务边界与路线图](#十业务边界与路线图)
-- [附录 A：面试 Q&A](#附录-a面试-qa)
-- [附录 B：代码位置一览](#附录-b代码位置一览)
+| 时间 | 内容 | 讲完后学生能回答 |
+|---:|---|---|
+| 0–6 分钟 | 业务冲突 | 为什么下单不能立刻算售出 |
+| 6–14 分钟 | `available / reserved` 两桶模型 | 页面库存和预占库存分别是什么 |
+| 14–27 分钟 | Redis Lua 原子预占 | 并发请求为何不会把库存扣成负数 |
+| 27–38 分钟 | 下单事务与 Saga 补偿 | Redis 成功、MySQL 失败怎么办 |
+| 38–48 分钟 | 支付、取消与超时关单 | `commit` 和 `release` 为什么不同 |
+| 48–55 分钟 | 启动重建与一致性边界 | Redis 丢数据后怎样恢复 |
+| 55–60 分钟 | 演示与收束 | 用两个桶复述完整链路 |
+
+演示只做一个，约 5 分钟。压测、客服 SOP 和扩展库存模型放到课后。
 
 ---
 
-## 一、库存对五个角色意味着什么
+## 一、先看业务矛盾：下单不等于卖出
 
-### 同一个"库存数字"，五个角色五种关心点
+假设商品只剩 1 件。小王提交订单后去切换支付方式，小李在这几分钟内也点了购买。平台必须同时守住两句话：
 
-"库存"看起来只是商品详情页上的一个整数，但它其实是**五条不同业务承诺的交叉点**。同一个数字，五个利益相关者盯着它问的是完全不同的问题：
+- 小王已经拿到订单，这件货不能再答应给小李；
+- 小王还没付款，这件货也不能永久算作售出。
 
-| 角色 | 关心的事 | 库存系统该回答的问题 |
-|---|---|---|
-| **C 端用户** | 加购了还能不能买 | 提交订单时不能"突然没货" |
-| **商家** | 我卖了多少 / 还剩多少 | 哪个 SKU 跌破阈值要补货 |
-| **运营 / 平台** | 缺货 SKU 看板 / 补货决策 | 哪些热品长期 reserved 高 |
-| **客服** | 超卖怎么补偿 / 误锁怎么解释 | 给出可执行话术 + 工单根因定位 |
-| **SRE** | Redis 跟 DB 一致吗 | 启动重建 / 巡检对账 / 告警分级 |
+只用一个 `stock` 数字很难表达“占着但还没卖”的状态。等付款时再扣会超卖；下单时直接从数据库永久扣除，未付款订单又会制造缺货。
 
-本 deck 就顺着这五个角色，把每件事一件件摊开——你会看到同一段 Lua、同一条 Saga，为五个角色各自解决一个痛点。
+gomall 把运行时库存分成两个 Redis 桶：
 
-### 下单到付款，中间那 15 分钟的业务窗
-
-先理解一个最容易被工程忽略、却是整套设计出发点的业务事实：**用户点"提交订单"到点"立即支付"，中间有一段缓冲时间**。gomall 给这段时间的业务定义是——
-
-- 这段时间里，商品**不能再被别人买走**（否则用户去付款时发现没货了，体验崩）；
-- 但它也**还没真正卖出**（用户可能最终不付款）。
-
-这个"占着但没消耗"的中间态，正是库存建模的难点。如果只用一个 `stock=N` 表达，你只有两个坏选择：
-
-- **误锁**——用户一提交就当卖出扣掉，结果他没付款，这份库存就白白丢了；
-- **超卖**——提交时不扣，等付款才扣，结果这 15 分钟里另一个人也提交了同一件。
-
-gomall 的答案是把库存切成两个桶：`available`（可售）与 `reserved`（预占）。下一节起，所有设计都是围绕这两个桶展开的。
-
-### 本 deck 七条业务问题
-
-带着这七个问题往下看，每一节都在回答其中一条：
-
-1. 1 个超卖订单的业务后果到底有多严重？工时、补偿、商誉怎么计？
-2. 为什么把库存切成 available + reserved 两桶？业务意义是什么？
-3. Redis 重启 / 副本扩容时，库存数字怎么从 DB 重建？期间能下单吗？
-4. 下单成功但 DB 落库失败，预占的库存会不会泄漏成"凭空缺货"？
-5. 关单（超时 / 用户主动）触发的库存退回，业务上几分钟是合适的？
-6. 客服收到"加购后还有 5 件，下单时说缺货"工单，怎么自查 + 怎么回？
-7. 库存对外业务承诺（SLO）是什么？哪些场景超过 SLO 就要赔？
-
----
-
-## 二、超卖：一笔订单的真实业务代价
-
-### 1 笔超卖订单 = 一连串的钱、工时、品牌损失
-
-工程师容易把超卖当成"少扣了一次库存"的技术 bug。但从业务侧看，一笔超卖订单一旦发生，是一连串成本同时引爆：
-
-| 环节 | 业务后果 | 估算成本 |
-|---|---|---|
-| 客服工单 | 用户怒打电话 / 在线投诉，平均 1 单 25 min | 客服工时 |
-| 用户补偿 | 退款 + 道歉券（10 / 30 / 50 元档） | 10--50 元 |
-| 商家发不出货 | 商家 SLA 违约罚款 / 自掏腰包补货 | 商品成本 + 罚金 |
-| 平台代偿 | 同档替代品差价 / 自营仓兜底 | 差价 + 物流 |
-| 品牌口碑 | 社交平台截图传播，新用户转化下滑 | 长期 GMV 损失 |
-| **单笔 100 元商品超卖** | 直接现金 **≈ 60--150 元** + 不可量化口碑 | 远超商品本身利润 |
-
-这张表就是库存系统工程目标的全部理由：**宁可误锁不可超卖**。两者的性质根本不对称——误锁只是一个体验事件（用户转身去别家买），超卖却是法律 / 合同 / 财务 / 品牌四件事一起爆。
-
-### 零超卖怎么证明：500 个用户同时抢 100 件
-
-业务承诺不能只写在 PPT 上，得能被测出来。gomall 用一个并发压测把"零超卖"钉成 CI 红线：
-
-| 业务指标 | 实测 |
-|---|---|
-| 活动准备库存 | 100 件 |
-| 同时下单用户数 | 500 |
-| **成功下单数** | **恰好 100** |
-| 拒单数（业务码：库存不足） | 400 |
-| 活动结束 available 桶 | 0 |
-| 活动结束 reserved 桶 | 100（等待支付） |
-
-关键在"**恰好 100**"这个断言：少 1 个是少卖（商家的货没卖完）、多 1 个是超卖（发不出货），两个方向 CI 都判红。这条断言代表的不是一个技术指标，而是**对商家"我备货 100 件就只卖 100 件"这句承诺的工程化兑现**。
-
-### 尾延迟为什么是业务问题：Redis Lua vs DB 行锁
-
-同样是防超卖，用 Redis Lua 原子扣减，还是用 DB 的 `SELECT ... FOR UPDATE` 行锁？看平均值几乎分不出来，但业务真正在意的是**最差那个用户**：
-
-| | Redis Lua | DB `SELECT FOR UPDATE` |
-|---|---:|---:|
-| 平均延迟 | 1.24 ms | 1.29 ms |
-| p95 延迟 | 3.52 ms | 3.65 ms |
-| **最差用户体验** | **136 ms** | **453 ms** |
-| 吞吐 (RPS) | 51,362 | 50,142 |
-
-平均 / p95 看不出差距，但最差那个用户从 136ms 涨到 453ms——这是 **3.3 倍的体验差**。业务后果很直接：大促 100k 并发时，DB 锁路径会让**尾部几百个用户**看到 1--2 秒转圈，转化率就在这里掉点；Redis Lua 路径把"最差体验"压在 150ms 以内。所以这不是一次技术选型的偏好，而是尾延迟直接换算成掉单。
-
----
-
-## 三、两桶库存的业务语义
-
-### available / reserved 翻译成业务话
-
-两个桶不是技术名词，它们各自对应一句**能对客服讲清楚**的业务话：
-
-```mermaid
-flowchart LR
-    av["available = 80<br/>还能卖给下一个人"]
-    rv["reserved = 20<br/>答应给某人但还没收钱"]
-    total["product.num = 100<br/>商家备货总量"]
-    av -->|下单| rv
-    rv -->|"超时未付 / 取消"| av
+```text
+stock:available:{productID}  还能接多少新订单
+stock:reserved:{productID}   已下单、尚未支付的数量
 ```
 
-- **available = 80**：还能卖给下一个人；
-- **reserved = 20**：答应给某人但还没收钱；
-- **product.num = 100**：商家备货总量（DB 里的初始水位）。
-
-这套模型的客服价值在于：当用户问"为什么我加购后看见还有 5 件，下单却说没货"，客服可以**直接翻译成人话**回答——"其他 5 件被别的客户下单未付款占着，30 分钟内若对方不付款会自动放回来"。两桶模型让"缺货"从一个技术黑箱变成一句可解释的承诺。
-
-### 物理库存 vs 可售库存：商家 / 客服 / 财务的语言对齐
-
-再往下拆，一件商品的"库存"其实分散在好几个状态里，每个状态的读者不同、语义不同：
-
-| 桶 | 谁在看 | 业务含义 |
-|---|---|---|
-| **available** | C 端 / 商详页 | "还能下单的数字"——唯一可对外曝光 |
-| **reserved** | 客服 / 商家后台 | "已下单未支付"——客服查"为什么缺货" |
-| committed | 财务 / 商家 | "已支付未发货"——进 GMV / 应发货量 |
-| in_transit | 物流 (WMS) | 在途，归 WMS 仓储系统 |
-| defective | 仓储 (WMS) | 残次，不入可售 |
-
-> **业务对齐三原则**：
-> 1. C 端**只看 available**——商详页绝不显示 reserved（会让用户"焦虑性下单"）。
-> 2. 商家后台看 available + reserved——知道"承诺出去了多少"才好备货。
-> 3. 财务对账盯恒等式：`available + reserved + committed = product.num`。
-
-### 三态生命周期：业务侧四件事
-
-把这些状态连起来，就是一份库存的完整生命周期。本仓库真正负责的是前三态之间的流转，发货之后的部分交给 WMS：
+MySQL 的 `product.num` 是持久化水位，Redis 是下单时的快速账本。
 
 ```mermaid
 stateDiagram-v2
-    available --> reserved: 下单 reserve
-    reserved --> committed: 支付 commit
-    reserved --> available: 超时 / 取消 release
-    committed --> in_transit: 发货 ship
-    in_transit --> available: 退货回仓
-    in_transit --> defective: 破损
+    [*] --> Available: 商品可售
+    Available --> Reserved: 下单 reserve
+    Reserved --> [*]: 支付 commit
+    Reserved --> Available: 取消或超时 release
 ```
 
-四个关键动作，对应四件业务事实：
-
-- **下单 reserve**：占住一份库存，承诺给该用户。
-- **支付 commit**：钱到账，库存真正消耗，不再可退回 available。
-- **超时 / 取消 release**：承诺取消，库存退回再卖给下一个人。
-- **发货 ship / 退货 / 破损**：归 WMS 仓储系统，本仓库**不做**（路线图）。
+讲到这里先问学生：商品页应该展示哪个数？答案是 `available`。`reserved` 是客服和系统排障要看的数，不是还能卖的数。
 
 ---
 
-## 四、下单 reserve：业务承诺的工程化
+## 二、预占：一段 Lua 守住“不超卖”
 
-### 8 行 Lua = "宁可误锁不可超卖"的工程化
+预占必须把“检查够不够”和“两个桶一起变化”做成一个原子动作。若先 `GET` 再由 Go 发两条写命令，两个请求可能同时读到最后 1 件，然后都成功。
 
-"宁可误锁不可超卖"这句业务红线，落到代码就是这 8 行 Lua——关键是**先判断、再扣减**：
+当前实现位于 `repository/cache/inventory.go`：
 
 ```lua
-local avail = redis.call('GET', KEYS[1])    -- 1. 读 available
+local avail = redis.call('GET', KEYS[1])
 if avail == false then
-    return -2                                -- 2. 库存未初始化 -> ErrStockNotInit
+    return -2
 end
 local need = tonumber(ARGV[1])
 if tonumber(avail) < need then
-    return -1                                -- 3. 不足 -> ErrStockInsufficient
+    return -1
 end
-redis.call('DECRBY', KEYS[1], need)          -- 4. available -= n
-redis.call('INCRBY', KEYS[2], need)          -- 5. reserved  += n
-return 1                                     -- 6. 占位成功
+redis.call('DECRBY', KEYS[1], need)
+redis.call('INCRBY', KEYS[2], need)
+return 1
 ```
 
-业务侧关键在第 2 / 第 3 步：它们**站在扣减之前**，宁可拒单也绝不允许扣穿——这就是"宁可误锁"的工程化。Redis 单线程 + Lua 原子执行，保证 500 个并发请求排队进入这段脚本，第 101 个进来时 `avail` 已经是 0，直接拒。
+返回值把三种业务结果分开：
 
-> **业务码口径**：库存不足在代码里是 `cache.ErrStockInsufficient` 错误对象，由上层 handler 统一映射成业务码后下发。注意 `50001` 是 `ErrorOss`（对象存储错误），与库存无关，两者语义独立。业务码维度的细分（如把库存类错误单列到 `90001` 段，与满减引擎占用的 `80001--80003` 区隔）属于业务码体系的演进项。
+| 返回值 | Go 层结果 | 对用户的含义 |
+|---:|---|---|
+| `1` | 成功 | 库存已经为这笔订单留好 |
+| `-1` | `ErrStockInsufficient` | 当前可售数量不足 |
+| `-2` | `ErrStockNotInit` | 库存账本尚未初始化，应告警而非当成售罄 |
 
-### 下单链路 + 失败自愈：业务侧三步走
+Lua 在 Redis 内一次执行完判断和修改，其他请求不能插进中间。100 件库存面对 500 个并发请求，前 100 个把 `available` 依次扣到 0，后面的请求只能拿到库存不足。
 
-下单不是一次 Redis 扣减就完事，它是一条链路：`用户点提交 → Redis 占库存 → DB 写订单 + outbox → MQ 排关单延迟`。链路的关键纪律是——**任何一步失败，已占的库存必须退回**，否则商家会"凭空缺货"。
+注意，这里证明的是 Redis 账本不会扣穿，并不等于整条下单链天然一致。下一段才是最容易出事故的地方。
+
+---
+
+## 三、下单链路：跨 Redis 与 MySQL 的补偿
+
+一次下单跨了两个资源：Redis 预占库存，MySQL 写订单和 outbox。它们没有共同事务，因此代码采取 Saga：先做，后续失败再执行反向动作。
+
+```mermaid
+sequenceDiagram
+    actor U as 用户
+    participant O as OrderService
+    participant R as Redis库存
+    participant D as MySQL
+    U->>O: 提交订单
+    O->>R: ReserveStock(productID, num)
+    alt 库存不足或未初始化
+        R-->>O: error
+        O-->>U: 下单失败
+    else 预占成功
+        O->>D: 事务写 order + outbox
+        alt DB 事务失败
+            D-->>O: rollback
+            O->>R: ReleaseReservation
+            O-->>U: 下单失败
+        else DB 事务成功
+            D-->>O: commit
+            O-->>U: 返回订单
+        end
+    end
+```
+
+业务代码的骨架如下，细节以 `internal/order/service.go` 为准：
 
 ```go
-// 1) Redis 预扣: available -> reserved，失败直接拒单
-if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
-    return nil, err                       // ErrStockInsufficient
+if err := cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
+    return nil, err
 }
-// 2) 同事务写订单 + 应用满减 + 写 outbox（ApplyDiscountInTx 段略）
-err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-    if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil { return e }
+
+err := dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+    if err := NewOrderDaoByDB(tx).CreateOrder(order); err != nil {
+        return err
+    }
     return outbox.NewOutboxDaoByDB(tx).Insert(/* OrderCreated */)
 })
 if err != nil {
-    // 3) 事务失败：必须释放刚扣的预占（Saga 补偿）
-    if relErr := cache.ReleaseReservation(ctx,
-            req.ProductID, int64(req.Num)); relErr != nil {
-        util.LogrusObj.Errorf("release on tx failure: %v", relErr)
+    if releaseErr := cache.ReleaseReservation(
+        ctx, req.ProductID, int64(req.Num),
+    ); releaseErr != nil {
+        util.LogrusObj.Errorf("release reservation failed: %v", releaseErr)
     }
-    return
+    return nil, err
 }
 ```
 
-为什么是"**先 Redis 后 DB**"而不是反过来？两个业务理由：DB 慢的时候 Redis 直接拒单，不把过载请求继续压给 DB；而 DB 是真理之源，如果让热写流量直接打进 DB，会让"全平台"一起慢。Redis 站在前面当闸门，把过载拦在 DB 之外。
-
-> 这里 `order.UserID` / `order.BossID` 都取自 JWT 解出的可信身份，不信请求体里的 `user_id` / `boss_id`——与第一份鉴权 deck 讲的"信 JWT，不信报文"是同一条纪律。
+这里有一个必须讲清的边界：补偿失败只会记录日志，当前请求无法保证 Redis 已恢复。项目已有每 5 分钟运行一次的库存预占对账，负责回收这类 orphan reserved；故障仍会最多延迟一个对账周期，也必须配告警。
 
 ---
 
-## 五、Saga 退回：避免"凭空缺货"事故
+## 四、订单的三个结局
 
-### 业务事故：DB 落库失败而预占未退 = 库存泄漏
+### 1. 支付成功：只减少 reserved
 
-上一节那第 3 步"失败就退回"，看着像防御性代码，其实防的是一个真实的 P1 事故。下单是一个跨 Redis + DB 的两阶段动作，如果 Redis 占了、DB 写失败、却不补偿退回，会发生什么：
-
-```mermaid
-flowchart LR
-    s1["step1 Redis 占位<br/>available--, reserved++"]
-    s2["step2 DB 写订单<br/>order + outbox"]
-    s3["step3 MQ 排关单"]
-    c1["补偿 退回<br/>reserved--, available++"]
-    s1 --> s2 --> s3
-    s2 -->|tx 失败| c1
-    c1 -->|回滚 step1| s1
-```
-
-**如果不补偿**：available 数字永远比真实可售小，每一次这样的失败都锁死一份库存，长期堆积到**所有 Redis 库存被锁死**——商家明明备了 100 件，前台却只显示"还剩 0"。这是真实会发生的 P1 事故。
-
-客服侧的定位路径：用户来投诉时，先查 outbox 是否有同 orderNum 的 `OrderCreated` 事件，再看 Redis snapshot 的 reserved 是否异常偏高，据此判断是否发生了"占了没退"的泄漏。
-
-### commit / release 成对设计的业务理由
-
-reserve 是把库存从 available 挪进 reserved。它的两个"逆操作"——支付成功的 commit、取消超时的 release——必须成对设计，动的桶不一样：
+钱已到账，这份库存不再回到可售池：
 
 ```lua
--- commitScript：支付成功，reserved 真正消耗（钱到账，不退）
-local r = redis.call('GET', KEYS[1])           -- KEYS[1]=reserved
+local r = redis.call('GET', KEYS[1])
 if r == false or tonumber(r) < tonumber(ARGV[1]) then
     return -1
 end
-redis.call('DECRBY', KEYS[1], ARGV[1])         -- reserved -= n
-return 1
--- releaseScript：取消 / 超时，reserved 退回 available
-local r = redis.call('GET', KEYS[1])           -- KEYS[1]=reserved
-if r == false or tonumber(r) < tonumber(ARGV[1]) then
-    return -1
-end
-redis.call('DECRBY', KEYS[1], ARGV[1])         -- reserved -= n
-redis.call('INCRBY', KEYS[2], ARGV[1])         -- available += n
+redis.call('DECRBY', KEYS[1], ARGV[1])
 return 1
 ```
 
-差别是有业务含义的：**commit 只动 reserved**（钱付了、承诺兑现，这份库存不再属于"可退回"池）；**release 两桶都动**（承诺取消，库存重新可卖）。两段脚本开头都先 check `r ≥ n`，是为了避免 reserved 跌成负数——reserved 跌负等于"同一笔订单退了两次"，等于库存凭空多出来，又会绕回超卖。
+`CommitReservation` 只做 `reserved -= n`，`available` 不变。数据库支付结算完成后再调用它；数据库仍是业务事实，Redis 清理失败需要后续对账。
 
----
+### 2. 主动取消：reserved 退回 available
 
-## 六、关单释放：15 / 30 / 60 分钟的业务权衡
+```lua
+redis.call('DECRBY', KEYS[1], ARGV[1])
+redis.call('INCRBY', KEYS[2], ARGV[1])
+```
 
-### 关单超时定多少分钟：商家利用率 vs 用户犹豫时间
+`ReleaseReservation` 同时移动两个桶。脚本先检查 `reserved >= n`，避免同一订单重复释放时把库存凭空加出来。
 
-reserved 不能永远占着，用户不付款就得关单退回。关单超时定几分钟，是一道**用户犹豫时间 vs 商家库存利用率**的权衡：
+### 3. 超时未付：幂等关单后再释放
 
-| 档位 | 用户体验 | 商家库存利用率 |
-|---|---|---|
-| **15 分钟** | 大促时用户来不及付款 / 充值，关单率偏高 | 库存周转最快，热品多卖一轮 |
-| **30 分钟**（业界中位） | 给用户去切支付方式 / 看评论的时间 | 周转中等 |
-| **60 分钟** | 用户犹豫期长，关单率低 | 热品被锁太久，错过下一波流量 |
+gomall 有两条关单路径：RabbitMQ 延迟消息使用 30 分钟 TTL，Cron 则调用 `GetTimeoutOrders(15, 100)` 扫描超过 15 分钟仍待付款的订单。两个时间口径目前并不一致，实际效果是 Cron 可能先关单；讲课时要把它当作当前实现边界，而不是包装成标准设计。
 
-gomall 当前实现是**双保险双口径**，两条路各司其职：
-
-- **RMQ TTL 延迟队列** `OrderCancelDelay = 30 * time.Minute`：主路径，到点精准投递关单。
-- **Cron 兜底扫表** `GetTimeoutOrders(15, 100)`：DB 驱动的兜底，扫 WaitPay 超过 15min 的订单。
-
-两路都汇到同一个幂等入口 `CancelUnpaidOrder`：先到者关单，后到者命中 `WHERE type=待付款` 条件 update 自然 no-op，**库存不会被退两次**。Cron 口径（15min）取得比主路径（30min）更短，是**有意让兜底先于主路径触发**——即便建单后的延迟消息因进程崩溃丢失，DB 扫表仍能在 15min 内补偿关单、退还预占，避免库存被永久占死。
-
-### 关单释放的幂等保证：客服可以放心"再点一次"
-
-关单这个动作会被**四个调用口**触发：客服在工单系统点"立即关单"（可能前端超时连点两次）、RMQ 重投同 orderNum、Cron 兜底扫到、用户自己主动取消。它们随时可能撞在一起，所以必须保证**多次执行结果一致，库存绝不退第二次**：
+两条路径最终汇到幂等关单逻辑。只有条件更新真的把订单从“待付款”改成“已关闭”，代码才释放库存；迟到的第二次关单得到 no-op，不会再释放一遍。
 
 ```go
-err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
-    ok, err := NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
-    if err != nil { return err }
-    if !ok { return nil }                  // 1. 已关 -> 短路 no-op
-    closed = true
-    return outbox.NewOutboxDaoByDB(tx).Insert(/* OrderCancelled 载荷含 promo 字段 */)
-})
+ok, err := NewOrderDaoByDB(tx).CloseOrderWithCheck(orderNum)
 if err != nil { return err }
-if !closed { return nil }                  // 2. 没真关 -> 不退库存
+if !ok { return nil }
+closed = true
+// 同一事务写 OrderCancelled outbox
 
-if relErr := cache.ReleaseReservation(ctx,
-    order.ProductID, int64(order.Num)); relErr != nil {
-    util.LogrusObj.Errorf("release on cancel failed: %v", relErr)
+if closed {
+    _ = cache.ReleaseReservation(ctx, order.ProductID, int64(order.Num))
 }
 ```
 
-`closed` 标志位是幂等的关键：`CloseOrderWithCheck` 只对 WaitPay（待付款）状态生效，二次调用返回 `ok=false`，整段逻辑 no-op，库存**不会退第二次**。四个调用口统一从这一个入口走——所以客服可以放心"再点一次"，不会把商家的库存退穿。
-
-### 关单延迟链路：MQ 主动 + Cron 兜底
-
-把两条关单路径画成一张图，就能看清"双保险"的分工：
-
-```mermaid
-flowchart LR
-    ord["下单"]
-    mq["RMQ TTL 30min"]
-    cron["Cron 兜底 15min 扫表"]
-    worker["CancelWorker"]
-    rel["ReleaseReservation<br/>reserved -> available"]
-    ord --> mq
-    mq -->|到点投递| worker
-    cron --> worker
-    worker --> rel
-```
-
-为什么非要两条：
-
-- **只有 RMQ**：进程重启 / 消息丢 = 漏关 = 商家"凭空缺货"。
-- **只有 Cron**：扫表有间隔，最差用户付完款几分钟后才看到 available 回补。
-- **双保险**：MQ 主路径秒级精准，Cron 兜底分钟级托底，两路汇到同一个幂等 `CancelUnpaidOrder` 入口，谁先到都对。
+课堂追问：为什么不能先释放 Redis，再改订单状态？因为两个关单请求可能都先释放成功，随后只有一个更新订单成功，库存就被多加了一次。
 
 ---
 
-## 七、启动重建：服务重启时的业务窗口
+## 五、Redis 重启后：重建不是简单覆盖
 
-### 业务场景：Redis 重启，库存数字从哪儿来？
+服务启动时，库存同步器从 MySQL 读取商品水位，再初始化 Redis。这里必须区分两种场景：
 
-Redis 是内存账本，重启会丢。那重启后 available 该等于几？答案是从 DB 复制回来：
+- Redis 确实丢失了对应 key，可以从数据库建立账本；
+- 滚动发布时，旧实例仍在处理订单，Redis 已有实时 `available / reserved`，新实例不能用初始水位覆盖它。
 
-```mermaid
-flowchart LR
-    boot["gomall 启动"]
-    seed["SeedFromDB"]
-    db["MySQL product.num<br/>真理之源"]
-    rd["Redis stock:available"]
-    boot --> seed
-    db -->|游标分页扫表| seed
-    seed -->|"InitStock（跳过已存在）"| rd
-```
+因此讲解 `SeedFromDB` 时要盯住两个设计点：游标分页避免一次把商品全读进内存；初始化前检查 key 是否存在，已有库存跳过。`InitStock` 本身是覆盖写，所以“先判断再初始化”的调用纪律很重要，而且检查与写入之间仍有竞态窗口。
 
-- **真理之源**是 MySQL 的 `product.num`（商家后台维护，binlog 持久化）。
-- Redis 是**运行时账本**，重启会丢，必须能从 DB 复制回来。
-- **已经在跑的实例不能被覆盖**——多副本滚动重启时，新实例绝不能抹掉旧实例正在用的 reserved。
-
-### SeedFromDB 主循环：游标分页 + EXISTS 跳过
-
-重建的两个业务保护，都体现在这段主循环里：
-
-```go
-func SeedFromDB(ctx context.Context, batchSize int) error {
-    if batchSize <= 0 { batchSize = 500 }            // 默认页 500
-    d := dao.NewDBClient(ctx); var lastID uint
-    for {
-        var rows []*product.Product
-        q := d.Model(&product.Product{}).Order("id ASC").Limit(batchSize)
-        if lastID > 0 { q = q.Where("id > ?", lastID) }  // 游标分页
-        if err := q.Find(&rows).Error; err != nil { return err }
-        if len(rows) == 0 { break }
-        for _, p := range rows {
-            lastID = p.ID
-            exists, _ := cache.RedisClient.Exists(ctx,
-                cache.StockAvailableKey(p.ID)).Result()
-            if exists == 1 { continue }              // 跳过运行期数据
-            cache.InitStock(ctx, p.ID, int64(p.Num)) // 覆盖写 0
-        }
-    }
-    return nil
-}
-```
-
-两个业务保护：（1）**游标分页**（`id > lastID`）避免重启时把 DB CPU 一次性打满；（2）**EXISTS 跳过**保护"运行期已经在卖的实例"——如果这个 key 已经存在，说明有实例正在用它做买卖，新副本起来时直接跳过，防止抹平别人的 reserved。
-
-### 重建窗口里能不能下单？客服怎么解释？
-
-重建不是瞬间完成的，1M SKU 全量重建约 100s。这段窗口里下单会怎样、客服怎么说：
-
-| 窗口阶段 | C 端体感 | 客服话术 |
-|---|---|---|
-| 0--100s（重建中） | 部分商品返"库存未初始化" | "系统刚刚重启，1 分钟内会恢复" |
-| 重建完成 | 全量 available 已回灌 | 正常下单 |
-| 重建失败（DB 慢） | 持续返"库存未初始化" | "高峰期个别商品暂时不可下单，建议稍后" |
-
-**业务取舍**：重建窗口内下单返 `ErrStockNotInit`，触发前端降级 banner——**宁可少卖 1 分钟也不允许超卖**。这条选择又回到那条不对称红线。
-
-**SRE 预案**：大促前一天手动跑 SeedFromDB 灌全量；活动前 5min 锁住商家改库存入口，避免"商家改 product.num"与"重建写 Redis"双写竞态。
+这也暴露了模型边界：`product.num` 是数据库剩余库存，reserve 时不会立即变化，支付成功后才由结算事务扣减；静止时应满足 `available + reserved == product.num`。若 Redis 在有待付款订单时丢失，需要结合这些订单重算两只桶，不能只把 `product.num` 全写进 available。
 
 ---
 
-## 八、客服 SOP：三类高频工单的自查路径
+## 六、课堂演示（5 分钟）
 
-### 工单 A："我加购后还有 5 件，下单时说缺货"
+目标：让学生亲眼看到一次 reserve 和一次 release，不做长时间压测。
 
-**业务真相**：商详页缓存了 5min 前的快照，实际 available 已经被别人下单变成 0。
+```bash
+# 将 42 换成测试商品 ID；Redis DB 号以本地配置为准
+redis-cli GET stock:available:42
+redis-cli GET stock:reserved:42
 
-客服自查 3 步：
+# 调用一次下单接口后再次查看两个 key
+redis-cli GET stock:available:42
+redis-cli GET stock:reserved:42
+```
 
-1. 查商品 ID → `GetStockSnapshot` 看 available / reserved；
-2. 若 reserved 很高（如 80%）→ 大量预占未付款，30 分钟内会自愈；
-3. 若 available = 0、reserved = 0 → 真的卖完了，建议同档替代。
+预期现象：下单成功后 `available` 减少、`reserved` 增加；取消订单后两个变化反向恢复。若重复取消，数值不应再变化。
 
-对应话术：
-
-- **reserved 偏高**：_"该商品 80% 库存被其他用户下单未付款占着，半小时内若对方不付款会回补，建议您 30 分钟后再试。"_
-- **真没了**：_"该商品已全部售出，为您推荐同款……"_
-
-**自愈机制**：MQ TTL + Cron 双保险确保 30 分钟内一定释放，客服不需要人工介入。
-
-### 工单 B："我下单成功了为什么显示缺货"
-
-**业务真相**：该用户的订单成功进了 reserved，但商详页 available = 0。用户在订单列表看到"已下单"、在商详页看到"已售罄"，体感矛盾。
-
-客服自查：
-
-1. 查 orderNum → 订单状态 = WaitPay；
-2. 查 `GetStockSnapshot`，reserved 包含该用户的 num；
-3. **确认是正常占位**，不是事故。
-
-话术：_"您的订单已成功提交（在 reserved 状态），库存已经为您锁定。商详页显示售罄表示其他用户暂时不能再下单。请 30 分钟内完成支付。"_
-
-**业务设计意图**：商详页**只看 available** 是有意的——不能给"焦虑性下单"开口子。
-
-### 工单 C："我退款了为什么库存没还回去"
-
-**业务真相**：用户在支付后退款，资金侧的退款状态机已经完整落地（`internal/refund/service.go`，含 `order.refunded` outbox 事件按实付口径退款）。而库存侧的"从 committed 回到 available"是**有意与退货物流解耦**的一段——物理货是否回仓、是否残次，要等仓储确认，不能在退款那一刻就盲目把库存放回可售池。
-
-- **现行处理**：库存回填由商家 / SRE 在确认货品状态后操作 `InitStock` 覆盖 available（这条路径恪守"误锁可接受、超卖不可"的红线）。
-- **话术**：_"您的退款已生效，库存回填会在 24 小时内由商家确认完成（避免在途货退回错位）。"_
-- **扩展方向**：`order.refunded` outbox 事件已就位 → 由消费侧触发 `ReleaseFromCommitted` Lua（commit 的逆操作）做自动回流；退货寄回 / 残次品分流与 WMS 对接；售后工单 → 评价 → 二次售后的全链路见 deck 09。
-
-### 业务码 / 错误的客服对照表（含诚实标注）
-
-| 状态码 / 错误 | 现行实现 | 客服话术 |
-|---|---|---|
-| **ErrStockInsufficient**（库存不足） | Go 错误对象，handler 统一映射下发 | "本商品已售罄" |
-| **ErrStockNotInit**（库存未初始化） | 重建窗口内出现 | "系统恢复中请稍候" |
-| 60002 ErrIdempotencyInProgress | 同 key 重复下单 | "您已下单成功" |
-| 70001 ErrRateLimitExceeded | 限流命中 | "活动太火爆请稍后" |
-| 70002 ErrCircuitOpen | 支付熔断 Open | "支付服务暂忙 1 分钟后" |
-
-> **口径说明**：`50001` 在本仓库是 `ErrorOss`（对象存储错误），与库存语义独立；库存不足由 `cache.ErrStockInsufficient` 错误对象经 handler 统一映射下发。业务码维度的进一步细分（如把库存类错误单列到 `90001` / `90002` 段，与满减引擎占用的 `80001--80003` 区隔），可让客服 / 监控 / 链路追踪更精准地分类。
+演示失败时按顺序排查：商品库存 key 是否初始化、请求是否通过鉴权、订单是否仍处于待付款状态。不要在录制中临时跑 500 并发，压测结果不稳定会吞掉整节课。
 
 ---
 
-## 九、业务承诺 SLO 与超卖应急
+## 七、60 秒收束
 
-### 库存子系统的业务 SLO
+库存设计可以压缩成四句话：
 
-把前面所有承诺汇总成一张可度量的 SLO 表，每一行都对应前面讲过的一个机制：
+1. `available` 回答“还能卖多少”，`reserved` 回答“已经答应但尚未收钱多少”。
+2. Lua 把判断与两桶迁移做成原子动作，防止并发扣穿。
+3. 下单跨 Redis 和 MySQL，事务失败必须执行 `release`；补偿仍可能失败，所以还要对账。
+4. 支付走 `commit`，取消和超时走 `release`，关单状态更新负责挡住重复释放。
 
-| 业务承诺 | 指标 | 目标 |
-|---|---|---|
-| **零超卖** | 单测 NoOversell 必须绿 | 100%（CI 红线） |
-| 下单库存判断 p99 | ReserveStock 端到端 | < 10 ms |
-| 最差体验 | Redis Lua max | < 200 ms（实测 136 ms） |
-| Saga 退回窗口 | DB 失败到 release 完成 | < 1s |
-| 启动重建 SLA | 1M SKU 全量重建 | < 120s |
-| 关单释放及时性 | 30min TTL + 15min Cron 兜底 | MQ p99 < 31min |
-| 对账偏差告警 | available + reserved + committed = product.num | 偏差 > 1% 告警 |
+## 课后延伸（不计入 60 分钟）
 
-"零超卖"在工程上就是 `TestInventory_NoOversellUnderConcurrency` 写死 `success == exactly 100`——少卖 / 超卖 CI 都判红，业务红线工程化。
+- 阅读 `repository/cache/inventory.go`，给三个 Lua 脚本补齐并发测试。
+- 对照 `internal/order/cancel.go`，解释 `closed` 标志如何保护库存。
+- 设计“Redis 全量丢失但仍有待付款订单”时的重建算法。
+- 把 RabbitMQ 30 分钟与 Cron 15 分钟改成同一配置源，并写出迁移方案。
 
-### 发生超卖了：4 小时应急 SOP
+## 代码索引
 
-万一还是超卖了（比如库存被绕过 Redis 直改 DB），要有一套按分钟推进的止血流程：
-
-| 时间窗 | 动作 | 责任方 |
-|---|---|---|
-| T+0 min | 监控告警：可发货量 < 已支付订单量 | SRE on-call |
-| T+5 min | 锁定问题 SKU：停下单入口（动态开关） | SRE 改路由 |
-| T+15 min | 跑对账脚本：超卖量 + 影响订单数 | DBA + 库存 owner |
-| T+30 min | 客服话术下发：哪些订单发货 / 赔付 | 客服中心 |
-| T+1h | 给被超卖用户发**补偿券 + 致歉短信** | 营销 + 客服 |
-| T+4h | 复盘 + 修复脚本上线 | 库存 owner |
-
-> **关键指标**：T+5 min 内能锁单是底线。商详页"下单入口"必须是动态开关，不能等发版（动态开关本身也是路线图）。
->
-> **补偿档位**：< 24h = 退款 + 10 元券；24--72h = 退款 + 30 元券 + 致歉短信；> 72h = 退款 + 50 元券 + 同档替代 + 1v1 客服。
-
-### 对账恒等式 + 巡检阈值
-
-日常怎么提前发现偏差？靠一条恒等式和分级告警：
-
-**恒等式**：`available + reserved + committed = product.num`。前两项来自 `GetStockSnapshot`，committed = DB `SUM(num)`（type 取已付各态，自 OrderWaitShip 起）。
-
-| 偏差 | 处理 |
+| 主题 | 文件 |
 |---|---|
-| < 0.1% | 日志记录，不告警 |
-| 0.1%--1% | 钉钉提醒，T+1 复查 |
-| 1%--5% | 钉钉 P3，立即排查 |
-| **> 5%** | **电话 P1**，启动超卖应急 SOP |
-| 大促前 > 0.1% | 拦截活动开始 |
-
-**校验时机**：10min 抽样 100 个热门 SKU + 凌晨 3:00 全量对账。
-
-**修复**：SRE 用 `InitStock(pid, 真实可售)` 人工覆盖；优先选"误锁"侧而非"超卖"侧——误锁可挽回，超卖只能补偿。
-
----
-
-## 十、业务边界与路线图
-
-### 本库存系统不做什么（诚实清单）
-
-教学项目要诚实标注边界。当前库存模块**明确不做**以下这些，每一条都写清了为什么和将来怎么扩：
-
-- **不做多仓库**：当前 Redis key 是 `stock:available:{pid}`，没有 warehouse 维度；多仓分布 + 智能选仓 + 跨仓凑单是路线图。
-- **不做 SKU 多规格**：当前以 product_id 代 SKU，颜色 / 尺寸 / 套餐没有独立扣减；扩展需新增 sku_id + 订单表迁移。
-- **不做期货 / 排队购**：普通商品库存必须实物到仓才上架（预售定金 / 尾款两段式已另行落地，见 deck 15）。
-- **不做跨仓调拨 / 在途回流**：发货后的在途、退货寄回、残次品分流统一归 WMS 仓储系统。
-- **不做商家自助补货 API**：商家想加 100 件库存只能找运营手动改 `product.num` + 跑 `InitStock`。
-- **不做冻结库存**：质押 / 财务冻结 / 法务冻结这些 B 端需求都没建模。
-- **不做防黄牛单用户上限**：库存预扣按件扣减、不绑单用户限购；需要时可直接复用优惠券 `claimScript` 里成熟的 `owned < perUser` 范式（`repository/cache/coupon.go:30--44`）。
-
-### 业务路线图：库存能力扩展
-
-按业务价值排优先级，路线图长这样：
-
-| 能力 | 业务价值 | 优先级 |
-|---|---|---|
-| 独立库存业务码 90001/90002 | 客服 / 监控 / 链路精准分类 | P0 |
-| 库存预警事件 | SKU < 10 件推送商家 | P1 |
-| 商家自助补货 API | 商家后台直接加库存 | P1 |
-| 运营缺货 SKU 看板 | 补货决策可视化 | P1 |
-| 售后库存回流 | 退款 → committed 退回 available | P1 |
-| SKU 多规格扩展 | 颜色 / 尺寸 / 套餐独立扣减 | P2 |
-| 多仓库 + 智能选仓 | 就近发货 + 凑单优化 | P2 |
-| 单用户限购 Lua | 防黄牛批量下单 | P2 |
-| 秒杀独立 Redis | 大促隔离主集群 | P2 |
-| 冷热库存分离 | 普通商品 / 秒杀物理隔离 | P3 |
-
-**P0** 是把库存错误从 Go 错误对象升级到独立业务码——不写业务逻辑也能在 5min 内做完。**P1 三件**（库存预警 / 自助补货 / 缺货看板）是"商家入驻"业务的核心，直接影响 GMV。
-
-### 业务承诺：超卖 vs 误锁，两条不同的红线
-
-整份 deck 收束到一张对比表，它是所有设计选择的源头：
-
-| 事故 | 用户体感 | 业务代价 |
-|---|---|---|
-| **超卖** | 下单成功，无法发货 | 真金白银赔 + 商誉 |
-| **误锁** | 显示"已售罄" | 转化率轻微下降 |
-
-- 超卖 = 法律 / 合同事件，**零容忍**（NoOversell 单测是这条红线的工程化）。
-- 误锁 = 体验事件，**可以容忍**（高峰过后 / 关单超时后自愈）。
-- 这条不对称是**所有设计选择的源头**：选 Redis 单线程、选先 reserve 后 commit、选 EXISTS 跳过、选先 Redis 后 DB——全部都在向"宁可误锁不可超卖"这一侧倾斜。
-
----
-
-## 附录 A：面试 Q&A
-
-**Q1：1 笔超卖订单的真实业务代价多大？**
-A：100 元商品超卖 ≈ 60--150 元直接现金（客服工时 25min + 补偿 10--50 元 + 商家差价 / 罚金 + 平台代偿）+ 不可量化的品牌口碑。这是为什么"零超卖"是 CI 红线。
-
-**Q2：用户工单"加购后还有 5 件下单却说缺货"，客服怎么自查？**
-A：3 步——（1）`GetStockSnapshot` 看 available / reserved；（2）reserved 高 = 别人占着未付款，30min 自愈；（3）都为 0 = 真卖完，推同款。
-
-**Q3：用户工单"下单成功为什么显示缺货"，是不是事故？**
-A：不是。该用户已进 reserved，商详只看 available，是**有意的产品设计**（避免焦虑性下单）。话术：库存已为您锁定，30 分钟内付款。
-
-**Q4：发生超卖了应急多久？**
-A：4 小时 SOP。底线：T+5min 锁定问题 SKU（动态关下单入口），T+30min 发客服话术，T+1h 发补偿券。最关键是"下单入口动态可关"，不能等发版。
-
-**Q5：50001 是不是缺货码？**
-A：**不是**。50001 在本仓库是 `ErrorOss`（对象存储错误），与库存语义独立。库存不足由 `cache.ErrStockInsufficient` 错误对象经 handler 统一映射下发；业务码维度可进一步细分到 90001 段（与满减引擎占用的 80001--80003 区隔）。代码：`pkg/e/code.go` + `repository/cache/inventory.go:25`。
-
-**Q6：当前关单超时是 15 还是 30 分钟？**
-A：**双保险双口径**。RMQ TTL 30min 是主路径精准关单，Cron 兜底 15min 是 DB 驱动的兜底扫表；Cron 口径更短是**有意让兜底先触发**，两路汇到同一个幂等 `CancelUnpaidOrder`，后到者 no-op、库存不会退两次。代码：`repository/rabbitmq/order_delay.go:22` + `internal/order/task.go:24`。
-
-**Q7：用户退款后库存怎么回？**
-A：资金侧退款状态机已完整落地；库存回流**有意与退货物流解耦**，由商家 / SRE 确认货品状态后用 `InitStock` 覆盖（恪守"误锁可接受、超卖不可"）。`order.refunded` outbox 事件已就位，消费侧 `ReleaseFromCommitted` Lua 自动回流是后续扩展项。
-
-**Q8：商家想加库存怎么操作？**
-A：当前没有商家自助 API，得找运营手动改 `product.num` + 跑 `InitStock`。商家自助补货 + 缺货 SKU 看板 + 库存预警事件三件是"商家入驻"P1 路线图。
-
-**Q9：怎么证明 500 并发不会超卖？**
-A：`NoOversellUnderConcurrency` 单测写死 `success == exactly 100`，少卖 / 超卖 CI 都红。本质是 Redis 单线程 + Lua 原子。代码：`inventory_test.go:52--82`。
-
----
-
-## 附录 B：代码位置一览
-
-**核心实现**
-
-- reserve / commit / release Lua（`repository/cache/inventory.go`）
-- InitStock + GetStockSnapshot
-- SeedFromDB + 启动注入
-- OrderCreate reserve + Saga 补偿（`internal/order/service.go`）
-- CancelUnpaidOrder release（幂等）
-
-**关单口径（双保险双口径）**
-
-- RMQ TTL 30 分钟（主路径）
-- Cron 兜底 15 分钟（DB 驱动兜底）
-
-**业务码（口径说明）**
-
-- 50001 = ErrorOss，与库存语义独立
-- 库存错误统一映射，可细分 90001 段
-
-**测试 & 压测**
-
-- NoOversell 500 抢 100 = 恰好 100
-- Lua vs DB 尾延迟 136ms vs 453ms
-
-> 配套业务 deck：`09-order-lifecycle` / `11-consistency` / `12-merchant-ops`。
+| 两桶 Lua 与快照 | `repository/cache/inventory.go` |
+| 下单预占及失败补偿 | `internal/order/service.go` |
+| 幂等关单 | `internal/order/cancel.go` |
+| 超时订单查询 | `internal/order/repo.go` |
+| 启动重建与对账 | `service/inventory/syncer.go` |
