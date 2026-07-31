@@ -146,3 +146,5 @@ sequenceDiagram
 ## 课后小练习
 
 任选一个写接口，画出“身份从哪里来、权威数据在哪里、事务在哪里结束”。只画现有实现，不补想象中的组件。
+
+配套代码实验：[00.01 谁说了算](../../exercises/00-overview/00.01-authoritative-order/problem/readme.md)。学生需要补完订单组装逻辑，并用测试证明伪造的用户 ID、价格和卖家不会进入订单。
