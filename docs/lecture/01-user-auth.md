@@ -739,3 +739,11 @@ A：HS256 + sync.Map 单机约 58k RPS，100k 扩 4 实例够用。瓶颈始终�
 4. admin 冷启动悖论是什么？`BootstrapPromoteSelf` 用什么条件保证只能被"占用"一次？它现在有什么并发缺陷？
 5. 下单接口为什么只信 JWT 里的 uid、无视请求体的 `user_id`？若信了会发生什么资损？
 6. gomall 为什么用无状态 JWT 而不用 session？这个选择在什么业务（如银行）下应该反过来？
+
+### 配套代码实验
+
+- [01.01 双 token 续期](../../exercises/01-user-auth/01.01-dual-token/problem/readme.md)
+- [01.02 角色缓存](../../exercises/01-user-auth/01.02-rbac-cache/problem/readme.md)
+- [01.03 让旧 JWT 立即失效](../../exercises/01-user-auth/01.03-token-version/problem/readme.md)
+
+每题都有公开测试和参考实现。正式布置时可以只发 `problem/`，再补一组隐藏测试检查到期边界、缓存失效和伪造角色。
