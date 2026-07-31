@@ -150,3 +150,10 @@ stateDiagram-v2
 ## 课后小练习
 
 用一张表记录某个订单的 MySQL 状态、Outbox 状态、ticket 状态、库存两桶和 traceId，写出“正常、卡住、补偿中”三种快照。不要只列日志关键词。
+
+配套代码实验：
+
+- [00.02 两桶库存](../../exercises/00-overview/00.02-inventory-buckets/problem/readme.md)
+- [00.03 订单和消息要一起落地](../../exercises/00-overview/00.03-transactional-outbox/problem/readme.md)
+
+两题都带故障分支测试，重点不是跑通正常路径，而是确保失败后不留下半状态。
