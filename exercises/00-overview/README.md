@@ -5,6 +5,8 @@
 - `docs/lecture/00-overview.md`
 - `docs/lecture/00-overview-architecture.md`
 
+第一次做实验请先阅读[代码实验使用说明](../README.md)，里面写了作答目录、运行命令和提交要求。
+
 形式参考 CMU 15-445：每题的 `problem/` 是学生代码，函数签名和公开测试已经给出；学生只补 `TODO`。`solution/` 保存参考实现。评分时还应加入隐藏测试，避免只针对公开样例写死答案。
 
 练习使用 `exercise` build tag，不影响项目默认测试：
