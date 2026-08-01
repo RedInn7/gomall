@@ -1,4 +1,4 @@
-# 用户与鉴权的业务边界
+# 01 用户与鉴权的业务边界
 
 > gomall · 五角色视角 / 注册 / 双 token / RBAC / admin bootstrap
 >
