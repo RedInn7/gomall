@@ -328,6 +328,8 @@ func tryInitES(ctx context.Context) {
 
 ## 业务侧 Deck（15 份 + 总览，按业务域拆）
 
+录制顺序以 [`docs/lecture/README.md`](docs/lecture/README.md) 为准；下面的编号是现有 deck 文件编号，不代表授课顺序。支付在正式课程的第二讲。
+
 | # | 主题 | 文件 |
 |---|------|------|
 | 01 | 用户与鉴权 | `docs/slides/01-user-auth.{tex,pdf}` |
