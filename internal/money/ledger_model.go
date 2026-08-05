@@ -15,9 +15,14 @@ const (
 	BizTypeOrderPay  = "order_pay"
 	BizTypeStripePay = "stripe_pay"
 	BizTypeWeb3Pay   = "web3_pay"
+	// 普通订单资金分两段：支付确认时先清算进商户托管，履约完成后再结算给卖家。
+	// 两个 biz_type 分开进入唯一索引，保证同一订单可以各落一组借贷分录，且各阶段只执行一次。
+	BizTypeOrderClear  = "order_clear"
+	BizTypeOrderSettle = "order_settle"
 	// 出账 / 退款 / 两阶段：biz_type 进唯一索引，使同一订单可有多笔不同业务的流水
 	// （如预售定金 + 尾款两次 debit），同业务同方向仍只入账一次。
 	BizTypeRefund          = "refund"           // 退款获批：买家 credit / 卖家 debit
+	BizTypeEscrowRefund    = "escrow_refund"    // 结算前退款：买家 credit / 商户托管 debit
 	BizTypePreorderDeposit = "preorder_deposit" // 预售定金
 	BizTypePreorderFinal   = "preorder_final"   // 预售尾款
 	BizTypePreorderRefund  = "preorder_refund"  // 预售定金退还
@@ -36,6 +41,15 @@ const (
 // 保持 SUM(debit)=SUM(credit) 守恒。
 const ExternalClearingUserID uint = 0
 
+// 系统账户共用 user_id=0，但资金语义不能混在一起。account_code 用来区分：
+// external_clearing 表示 Stripe/Web3 等外部已收资金；merchant_escrow 表示支付后、履约前暂不归卖家的托管款。
+const (
+	AccountCodeUserWallet       = "user_wallet"
+	AccountCodeExternalClearing = "external_clearing"
+	AccountCodeMerchantEscrow   = "merchant_escrow"
+	AccountCodeLegacySystem     = "legacy_system"
+)
+
 // StripeClearingUserID 保留兼容旧引用，语义同 ExternalClearingUserID。
 const StripeClearingUserID = ExternalClearingUserID
 
@@ -50,6 +64,7 @@ const StripeClearingUserID = ExternalClearingUserID
 type AccountTransaction struct {
 	dbmodel.Model
 	UserID            uint   `gorm:"not null;index:idx_acct_tx_user"`
+	AccountCode       string `gorm:"size:32;not null;default:user_wallet;index:idx_acct_tx_account"`
 	Direction         string `gorm:"size:8;not null;uniqueIndex:uniq_acct_tx_order_dir,priority:2"`
 	AmountCents       int64  `gorm:"not null"`
 	RefOrderID        uint   `gorm:"not null;uniqueIndex:uniq_acct_tx_order_dir,priority:1"`

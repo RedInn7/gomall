@@ -3,12 +3,16 @@ package refund
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
+	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/clearing"
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
@@ -56,22 +60,23 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 		return err
 	}
 	baseDao := orderpkg.NewOrderDao(ctx)
-	order, err := baseDao.GetOrderByOrderNum(orderNum)
-	if err != nil {
-		return err
-	}
-	if order == nil || order.ID == 0 {
-		return errors.New("订单不存在")
-	}
-	if order.UserID != u.Id {
-		return errors.New("无权操作该订单")
-	}
-	if !inUintSlice(order.Type, refundAllowedFrom) {
-		return orderpkg.ErrInvalidOrderStateTransition
-	}
-	fromType := order.Type
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := orderpkg.NewOrderDaoByDB(tx).RequestRefund(orderNum, refundAllowedFrom)
+		orderDao := orderpkg.NewOrderDaoByDB(tx)
+		order, err := orderDao.GetOrderByOrderNumForUpdate(orderNum)
+		if err != nil {
+			return err
+		}
+		if order == nil || order.ID == 0 {
+			return errors.New("订单不存在")
+		}
+		if order.UserID != u.Id {
+			return errors.New("无权操作该订单")
+		}
+		fromType := order.Type
+		if !inUintSlice(fromType, refundAllowedFrom) {
+			return orderpkg.ErrInvalidOrderStateTransition
+		}
+		ok, err := orderDao.RequestRefund(orderNum, fromType)
 		if err != nil {
 			return err
 		}
@@ -145,8 +150,8 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 	return nil
 }
 
-// RejectRefund 运营驳回退款，订单回到 Completed。
-//   - 仅允许 Refunding -> Completed
+// RejectRefund 运营驳回退款，订单回到申请退款前的状态。
+//   - 仅允许 Refunding -> RefundFromType（WaitShip / WaitReceive / Completed）
 //   - 写 outbox(order.refund_rejected) 让客服 / 用户系统得知
 func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason string) error {
 	baseDao := orderpkg.NewOrderDao(ctx)
@@ -160,8 +165,13 @@ func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason st
 	if order.Type != consts.OrderRefunding {
 		return orderpkg.ErrInvalidOrderStateTransition
 	}
+	restoreType := order.RefundFromType
+	if !inUintSlice(restoreType, refundAllowedFrom) {
+		// 兼容迁移前已经处于 Refunding、没有记录来源状态的旧订单，沿用旧行为恢复 Completed。
+		restoreType = consts.OrderCompleted
+	}
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := orderpkg.NewOrderDaoByDB(tx).RejectRefund(orderNum)
+		ok, err := orderpkg.NewOrderDaoByDB(tx).RejectRefund(orderNum, restoreType)
 		if err != nil {
 			return err
 		}
@@ -171,10 +181,11 @@ func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason st
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefundRejected", "order.refund_rejected", order.ID,
 			events.OrderRefundRejected{
-				OrderID:  order.ID,
-				OrderNum: order.OrderNum,
-				UserID:   order.UserID,
-				Reason:   reason,
+				OrderID:      order.ID,
+				OrderNum:     order.OrderNum,
+				UserID:       order.UserID,
+				Reason:       reason,
+				RestoredType: restoreType,
 			},
 		)
 	})
@@ -190,15 +201,9 @@ func refundAmount(o *orderpkg.Order) int64 {
 	return o.Money * int64(o.Num)
 }
 
-// SettleRefund 真正落地一笔已获批退款的资金回退，由 order.refunded 消费者驱动，全程单事务原子：
-//  1. 幂等守卫：订单须已处于 Refunded 终态（ApproveRefund 已推进）；台账 (order_id, credit, refund)
-//     唯一索引 + 入账前存在性预检共同保证同一订单只退一次，重复投递幂等返回 nil。
-//  2. 买家 credit：解密余额 + 退款额，加密写回，追加 credit 流水(BizTypeRefund)。
-//  3. 卖家 debit：解密余额 - 退款额，加密写回，追加 debit 流水(BizTypeRefund)。
-//  4. 库存回补：把订单数量加回 product.Num。
-//
-// 取舍：买家一定能退到钱优先。卖家可能已提现导致余额不足，这里仍按需扣（即使记账余额转负也照记），
-// 由平台清算兜底负差，绝不因卖家余额不足而阻塞买家退款。
+// SettleRefund 真正落地一笔已获批退款，由 order.refunded 消费者驱动，全程单事务原子。
+// 资金来源由清算单决定：尚在托管时从 merchant_escrow 退；已经结算给卖家时才从卖家余额扣。
+// 这样 WaitShip / WaitReceive 阶段的退款不会制造卖家负余额，重复事件由清算状态与台账唯一键共同吸收。
 //
 // 不做项（留待后续）：买家购买时生成的商品归属副本不在此回退——买家可能已改价 / 已转售，
 // 删除副本不安全，需配套的副本溯源与人工/对账流程，本期不动。
@@ -224,88 +229,122 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 		}
 
 		ledgerDao := money.NewLedgerDaoByDB(tx)
+		var clearingRecord clearing.PaymentClearing
+		clearingFound := true
+		if err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("order_id = ?", orderID).First(&clearingRecord).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// 兼容迁移前已经支付的旧订单：没有清算单时按“已结算给卖家”处理。
+				clearingFound = false
+			} else {
+				return err
+			}
+		}
+		if clearingFound && clearingRecord.Status == clearing.StatusRefunded {
+			return nil
+		}
+		if clearingFound && clearingRecord.Status != clearing.StatusCleared && clearingRecord.Status != clearing.StatusSettled {
+			return fmt.Errorf("%w: %s", clearing.ErrInvalidClearingState, clearingRecord.Status)
+		}
+		fromEscrow := clearingFound && clearingRecord.Status == clearing.StatusCleared
+		refundBizType := money.BizTypeRefund
+		if fromEscrow {
+			refundBizType = money.BizTypeEscrowRefund
+		}
+
 		// 幂等预检：买家 credit 流水已存在即视为已退过，直接放行（唯一索引为最终兜底）。
 		var settled int64
 		if err = tx.Model(&money.AccountTransaction{}).
-			Where("ref_order_id=? AND direction=? AND biz_type=?", orderID, money.DirectionCredit, money.BizTypeRefund).
+			Where("ref_order_id=? AND direction=? AND biz_type=?", orderID, money.DirectionCredit, refundBizType).
 			Count(&settled).Error; err != nil {
 			util.LogrusObj.Error(err)
 			return err
 		}
 		if settled > 0 {
-			util.LogrusObj.Infof("refund settle skip: order=%d already settled", orderID)
 			return nil
 		}
 
 		amount := refundAmount(o)
-		if amount <= 0 {
-			// 实付为 0（如满减全额抵扣）：无资金可退，仅回补库存后返回。
-			if _, rerr := product.NewProductDaoWithDB(tx).RollbackStock(o.ProductID, o.Num); rerr != nil {
-				util.LogrusObj.Error(rerr)
-				return rerr
+		if clearingFound {
+			// 清算单是资金事实，不能在退款时仅靠可能被修改的订单字段重新算钱。
+			// 当前尚未实现手续费拆分退款，因此 fee!=0 或 gross!=net 时拒绝自动处理，交人工对账。
+			if clearingRecord.FeeCents != 0 || clearingRecord.GrossCents != clearingRecord.NetCents {
+				return errors.New("退款暂不支持含手续费的清算单")
 			}
-			return nil
+			if amount != clearingRecord.GrossCents {
+				return clearing.ErrClearingOrderMismatch
+			}
+			amount = clearingRecord.GrossCents
 		}
-
+		if amount < 0 {
+			return errors.New("退款金额非法")
+		}
 		userDao := user.NewUserDaoByDB(tx)
 
-		// 买家 credit：行锁读 -> 解密 +amount -> 加密写回 -> 追加 credit 流水。
+		// 买家 credit：即使实付为 0，也写一组 0 元幂等流水，避免重复消息反复回补库存。
 		buyer, err := userDao.GetUserByIdForUpdate(o.UserID)
 		if err != nil {
-			util.LogrusObj.Error(err)
 			return err
 		}
 		buyerBal, err := buyer.DecryptMoney()
 		if err != nil {
-			util.LogrusObj.Error(err)
 			return err
 		}
 		buyerAfter := buyerBal + amount
-		buyer.Money = strconv.FormatInt(buyerAfter, 10)
-		if buyer.Money, err = buyer.EncryptMoney(); err != nil {
-			util.LogrusObj.Error(err)
-			return err
+		if amount > 0 {
+			buyer.Money = strconv.FormatInt(buyerAfter, 10)
+			if buyer.Money, err = buyer.EncryptMoney(); err != nil {
+				return err
+			}
+			if err = userDao.UpdateUserById(o.UserID, buyer); err != nil {
+				return err
+			}
 		}
-		if err = userDao.UpdateUserById(o.UserID, buyer); err != nil {
-			util.LogrusObj.Error(err)
-			return err
-		}
-		if err = ledgerDao.AppendTransaction(o.UserID, o.ID, money.DirectionCredit, amount, buyerAfter, money.BizTypeRefund); err != nil {
-			util.LogrusObj.Error(err)
+		if err = ledgerDao.AppendTransaction(o.UserID, o.ID, money.DirectionCredit, amount, buyerAfter, refundBizType); err != nil {
 			return err
 		}
 
-		// 卖家 debit：行锁读 -> 解密 -amount -> 加密写回 -> 追加 debit 流水。
-		// 卖家可能已提现使余额不足，按"买家优先"取舍仍照扣，记账余额转负由平台清算兜底。
-		seller, err := userDao.GetUserByIdForUpdate(o.BossID)
-		if err != nil {
-			util.LogrusObj.Error(err)
-			return err
-		}
-		sellerBal, err := seller.DecryptMoney()
-		if err != nil {
-			util.LogrusObj.Error(err)
-			return err
-		}
-		sellerAfter := sellerBal - amount
-		seller.Money = strconv.FormatInt(sellerAfter, 10)
-		if seller.Money, err = seller.EncryptMoney(); err != nil {
-			util.LogrusObj.Error(err)
-			return err
-		}
-		if err = userDao.UpdateUserById(o.BossID, seller); err != nil {
-			util.LogrusObj.Error(err)
-			return err
-		}
-		if err = ledgerDao.AppendTransaction(o.BossID, o.ID, money.DirectionDebit, amount, sellerAfter, money.BizTypeRefund); err != nil {
-			util.LogrusObj.Error(err)
-			return err
+		if fromEscrow {
+			// 履约前退款：托管款尚未属于卖家，直接冲回 escrow。
+			if err = ledgerDao.AppendSystemTransaction(money.AccountCodeMerchantEscrow, o.ID, money.DirectionDebit, amount, money.BizTypeEscrowRefund); err != nil {
+				return err
+			}
+		} else {
+			// 履约后退款：卖家已经收款，才从卖家余额扣回。
+			seller, err := userDao.GetUserByIdForUpdate(o.BossID)
+			if err != nil {
+				return err
+			}
+			sellerBal, err := seller.DecryptMoney()
+			if err != nil {
+				return err
+			}
+			sellerAfter := sellerBal - amount
+			if amount > 0 {
+				seller.Money = strconv.FormatInt(sellerAfter, 10)
+				if seller.Money, err = seller.EncryptMoney(); err != nil {
+					return err
+				}
+				if err = userDao.UpdateUserById(o.BossID, seller); err != nil {
+					return err
+				}
+			}
+			if err = ledgerDao.AppendTransaction(o.BossID, o.ID, money.DirectionDebit, amount, sellerAfter, money.BizTypeRefund); err != nil {
+				return err
+			}
 		}
 
 		// 库存回补：把订单数量加回在售库存（支付时已扣减，退款是其逆操作）。
 		if _, err = product.NewProductDaoWithDB(tx).RollbackStock(o.ProductID, o.Num); err != nil {
 			util.LogrusObj.Error(err)
 			return err
+		}
+		if clearingFound {
+			now := time.Now()
+			if err = tx.Model(&clearing.PaymentClearing{}).Where("id = ?", clearingRecord.ID).
+				Updates(map[string]interface{}{"status": clearing.StatusRefunded, "refunded_at": &now}).Error; err != nil {
+				return err
+			}
 		}
 
 		// 商品归属副本回退不做，原因见方法注释。

@@ -17,9 +17,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
-	"github.com/RedInn7/gomall/internal/money"
+	"github.com/RedInn7/gomall/internal/clearing"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
-	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -42,9 +41,6 @@ var (
 	ErrStripeWebhookNotConfigured = errors.New("Stripe webhook 未配置：缺少 STRIPE_WEBHOOK_SECRET")
 	// ErrStripeSignature 签名校验失败：请求可能被伪造或篡改，应拒绝且无需 Stripe 重投。
 	ErrStripeSignature = errors.New("Stripe webhook 签名校验失败")
-	// ErrStripeAmountMismatch 会话实付金额 / 币种与订单应付口径不符：可能是被篡改的请求或
-	// 配置漂移（如 STRIPE_CURRENCY 与建会话时不一致），一律拒绝结算并告警，无需重投。
-	ErrStripeAmountMismatch = errors.New("Stripe webhook 实付金额或币种与订单应付不符")
 )
 
 // stripeEventDedupeTTL Stripe 事件去重键的存活时长。Stripe 的重投窗口最长约 3 天，
@@ -205,12 +201,10 @@ func (s *StripePaymentSrv) HandleWebhook(ctx context.Context, payload []byte, si
 		return errors.New("stripe webhook 缺少 user_id")
 	}
 
-	if err := s.settleStripeOrder(ctx, uint(orderID), uint(userID), sess.AmountTotal, string(sess.Currency)); err != nil {
-		// 金额 / 币种不符是确定性拒绝（同一会话重投结果不变），保留去重键直接挡掉后续重投。
-		// 其余多为瞬时错误（DB 抖动等），释放去重键让 Stripe 重投能再次进入结算，避免被永久挡住。
-		if !errors.Is(err, ErrStripeAmountMismatch) {
-			s.releaseStripeEvent(ctx, event.ID)
-		}
+	if err := s.settleStripeOrder(ctx, uint(orderID), uint(userID), sess.ID, sess.AmountTotal, string(sess.Currency)); err != nil {
+		// 确定性金额/币种不符已在事务内落 payment_anomaly 并返回成功；能走到这里的是 DB 等
+		// 瞬时错误，释放去重键让 Stripe 重投再次进入，避免异常记录/正常清算被永久挡住。
+		s.releaseStripeEvent(ctx, event.ID)
 		return err
 	}
 	return nil
@@ -243,15 +237,16 @@ func (s *StripePaymentSrv) releaseStripeEvent(ctx context.Context, eventID strin
 	}
 }
 
-// settleStripeOrder 结算一笔 Stripe 已支付订单：标记已付 + 扣库存 + 商品归属转移 + 卖家入账 + 写台账 + outbox。
-// 与钱包路径的区别：买家资金来自外部卡组织、不扣内部钱包，故 debit 记在平台清算账户。
+// settleStripeOrder 清算一笔 Stripe 已支付订单：外部已收资金转入商户托管，随后标记订单已付。
+// 与钱包路径的区别：买家资金来自外部卡组织、不扣内部钱包，故 debit 记在外部清算账户。
 // 幂等：订单 WaitPay 守卫为主，(order_id, direction) 唯一索引兜底并发重投。
 // paidAmount/paidCurrency 取自 Stripe 会话(sess.AmountTotal/sess.Currency)，结算前需与
 // 订单应付口径逐项核对，杜绝被篡改的 webhook 或币种漂移导致少收 / 错收。
-func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userID uint, paidAmount int64, paidCurrency string) error {
+func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userID uint, providerRef string, paidAmount int64, paidCurrency string) error {
 	var (
-		paidProductID uint
-		paidNum       int
+		paidProductID    uint
+		paidNum          int
+		paymentConfirmed bool
 	)
 	expectCurrency := stripeCurrency()
 
@@ -263,11 +258,18 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 		}
 		// 已被其它通道 / 上一次 webhook 结算过：幂等返回成功，不重复入账。
 		if order.Type != consts.OrderWaitPay {
-			log.LogrusObj.Infof("stripe settle skip: order=%d already settled (type=%d)", orderID, order.Type)
+			matched, recordErr := clearing.RecordExternalDuplicateTx(
+				tx, order, clearing.ChannelStripe, providerRef, strconv.FormatInt(paidAmount, 10), paidCurrency,
+			)
+			if recordErr != nil {
+				return recordErr
+			}
+			if !matched {
+				log.LogrusObj.Errorf("stripe duplicate payment recorded for refund review: order=%d session=%s", orderID, providerRef)
+			}
 			return nil
 		}
 
-		bossID := order.BossID
 		paidProductID = order.ProductID
 		paidNum = order.Num
 
@@ -280,52 +282,38 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 			log.LogrusObj.Errorf(
 				"stripe settle reject order=%d amount/currency mismatch: paid=%d/%s expect=%d/%s",
 				orderID, paidAmount, paidCurrency, payable, expectCurrency)
-			return ErrStripeAmountMismatch
+			// Stripe 已经确认实收，不能只返回错误再让入口去重键吞掉重投；持久化为待审核异常。
+			if err := clearing.RecordExternalAnomalyTx(
+				tx, order, clearing.ChannelStripe, providerRef, strconv.FormatInt(paidAmount, 10), paidCurrency,
+				clearing.AnomalyReasonAmountMismatch,
+			); err != nil {
+				return err
+			}
+			return nil
 		}
 
-		userDao := user.NewUserDaoByDB(tx)
-		ledgerDao := money.NewLedgerDaoByDB(tx)
-
-		// 卖家入账：解密服务端余额 + payable，再加密写回，同事务追加 credit 流水。
-		boss, err := userDao.GetUserByIdForUpdate(bossID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		bossMoney, err := boss.DecryptMoney()
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		bossBalanceAfter := bossMoney + payable
-		boss.Money = strconv.FormatInt(bossBalanceAfter, 10)
-		if boss.Money, err = boss.EncryptMoney(); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		if err = userDao.UpdateUserById(bossID, boss); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		if err = ledgerDao.AppendTransaction(bossID, order.ID, money.DirectionCredit, payable, bossBalanceAfter, money.BizTypeStripePay); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		// 复式对手方：平台 Stripe 清算账户记 debit（外部资金入口），保持借贷平衡 + (order_id,debit) 幂等。
-		if err = ledgerDao.AppendTransaction(money.StripeClearingUserID, order.ID, money.DirectionDebit, payable, 0, money.BizTypeStripePay); err != nil {
+		// 清算：外部清算账户 debit、商户托管账户 credit。卖家要等订单完成后才真正入账。
+		if err = clearing.RecordClearedTx(tx, order, clearing.ChannelStripe, providerRef, paidCurrency, nil); err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 
-		// 资金已入账，余下"扣库存 → 标记已付 → 商品归属转移 → outbox order.paid"走三条渠道共享尾段。
-		return finishOrderSettlementTx(tx, order)
+		// 资金已进入托管，余下"扣库存 → 标记已付 → 商品归属转移 → outbox order.paid"走共享尾段。
+		if err := finishPaymentConfirmationTx(tx, order); err != nil {
+			return err
+		}
+		paymentConfirmed = true
+		return nil
 	})
 	if err != nil {
 		log.LogrusObj.Errorf("stripe settle order=%d failed: %v", orderID, err)
 		return err
 	}
 
-	// TX 已把 product.Num 真正扣减；同步把 Redis reserved 桶减掉。
-	commitReservationBestEffort(ctx, paidProductID, paidNum)
+	// 只有正常清算并推进订单后才核销预留。payment_anomaly 只是接管外部异常，订单仍是 WaitPay，
+	// 绝不能把它的 reserved 提交掉，否则 DB 库存未扣而缓存预占消失，会重新暴露可售量。
+	if paymentConfirmed {
+		commitReservationBestEffort(ctx, paidProductID, paidNum)
+	}
 	return nil
 }

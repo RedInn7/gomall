@@ -8,6 +8,7 @@ import (
 	"github.com/RedInn7/gomall/internal/carousel"
 	"github.com/RedInn7/gomall/internal/cart"
 	"github.com/RedInn7/gomall/internal/category"
+	"github.com/RedInn7/gomall/internal/clearing"
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/groupbuy"
@@ -28,7 +29,7 @@ import (
 // 避免基础 db 包反向依赖各领域的 model。
 func Run() error {
 	db := dao.NewDBClient(context.Background())
-	return db.Set("gorm:table_options", "charset=utf8mb4").
+	if err := db.Set("gorm:table_options", "charset=utf8mb4").
 		AutoMigrate(
 			&user.User{}, &favorite.Favorite{},
 			&order.Order{}, &admin.Admin{}, &address.Address{},
@@ -41,6 +42,13 @@ func Run() error {
 			&promo.PromoRule{}, &promo.PromoRelease{},
 			&groupbuy.GroupbuyGroup{}, &groupbuy.GroupbuyMember{},
 			&preorder.ProductPreorder{},
-			&money.AccountTransaction{},
-		)
+			&money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{},
+		); err != nil {
+		return err
+	}
+	// account_code 是新增列：AutoMigrate 会把历史行填成默认 user_wallet。
+	// user_id=0 的历史流水实际属于旧系统账户，统一回填 legacy_system，避免与真实用户钱包混淆。
+	return db.Model(&money.AccountTransaction{}).
+		Where("user_id = ? AND account_code = ?", money.ExternalClearingUserID, money.AccountCodeUserWallet).
+		Update("account_code", money.AccountCodeLegacySystem).Error
 }
