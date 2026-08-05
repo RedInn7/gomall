@@ -14,9 +14,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
-	"github.com/RedInn7/gomall/internal/money"
+	"github.com/RedInn7/gomall/internal/clearing"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
-	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 )
@@ -157,12 +156,20 @@ func verifyBuyerBinding(ctx context.Context, orderID uint, onchainBuyer string) 
 	return nil
 }
 
-// SettleConfirmedOrder 结算一笔链上已确认的订单（ETH/USDC）。
+// SettleConfirmedOrder 清算一笔链上已确认的订单（ETH/USDC）。
 // 由 listener 监听到 escrow 合约 PaymentConfirmed 事件后触发：校验 buyer 绑定 + 金额 →
-// 标记已付 + 扣库存 + 商品归属转移 + 卖家入账 + 复式记账（卖家 credit / 平台清算账户 debit）
-// + outbox order.paid。
+// 标记已付 + 扣库存 + 商品归属转移 + 资金进入商户托管 + outbox order.paid。
 // 幂等：订单 WaitPay 守卫 + (order_id,direction) 唯一索引，链上事件重投安全。
-func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, onchainBuyer, onchainAmount string) error {
+func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, onchainBuyer, onchainAmount, txHash string) error {
+	// 首次成功后 pending 会被删除；同一 tx 的 MQ/链上事件重放必须先从持久化清算单识别，
+	// 不能再次依赖一次性的 Redis buyer 绑定，否则会把正常重放误判成 PendingMissing。
+	alreadyCleared, err := clearing.IsProviderCleared(ctx, orderID, clearing.ChannelWeb3, txHash)
+	if err != nil {
+		return err
+	}
+	if alreadyCleared {
+		return nil
+	}
 	// 先做 buyer 绑定校验：链上 buyer 必须等于签名 park 阶段写入的钱包地址，否则拒绝结算。
 	// 放在事务外、最前面，确保未通过绑定校验时不触碰任何账务 / 库存状态。
 	if err := verifyBuyerBinding(ctx, orderID, onchainBuyer); err != nil {
@@ -173,18 +180,25 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 		paidProductID uint
 		paidNum       int
 	)
-	err := orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
+	err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		order, err := orderpkg.NewOrderDaoByDB(tx).GetOrderByIdOnly(orderID)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 		if order.Type != consts.OrderWaitPay {
-			log.LogrusObj.Infof("web3 settle skip: order=%d already settled (type=%d)", orderID, order.Type)
+			matched, recordErr := clearing.RecordExternalDuplicateTx(
+				tx, order, clearing.ChannelWeb3, txHash, onchainAmount, strings.ToUpper(web3PayToken()),
+			)
+			if recordErr != nil {
+				return recordErr
+			}
+			if !matched {
+				log.LogrusObj.Errorf("web3 duplicate payment recorded for refund review: order=%d tx=%s", orderID, txHash)
+			}
 			return nil
 		}
 
-		bossID := order.BossID
 		paidProductID = order.ProductID
 		paidNum = order.Num
 
@@ -196,41 +210,14 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 			return err
 		}
 
-		userDao := user.NewUserDaoByDB(tx)
-		ledgerDao := money.NewLedgerDaoByDB(tx)
-
-		boss, err := userDao.GetUserByIdForUpdate(bossID)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		bossMoney, err := boss.DecryptMoney()
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		bossBalanceAfter := bossMoney + payable
-		boss.Money = strconv.FormatInt(bossBalanceAfter, 10)
-		if boss.Money, err = boss.EncryptMoney(); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		if err = userDao.UpdateUserById(bossID, boss); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		if err = ledgerDao.AppendTransaction(bossID, order.ID, money.DirectionCredit, payable, bossBalanceAfter, money.BizTypeWeb3Pay); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		// 对手方：平台对外清算账户记 debit（链上资金入口），保持借贷平衡 + (order_id,debit) 幂等。
-		if err = ledgerDao.AppendTransaction(money.ExternalClearingUserID, order.ID, money.DirectionDebit, payable, 0, money.BizTypeWeb3Pay); err != nil {
+		// 链上已收资金从外部清算账户转入商户托管；履约完成前不增加卖家可用余额。
+		if err = clearing.RecordClearedTx(tx, order, clearing.ChannelWeb3, txHash, strings.ToUpper(web3PayToken()), nil); err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 
-		// 资金已入账，余下"扣库存 → 标记已付 → 商品归属转移 → outbox order.paid"走三条渠道共享尾段。
-		return finishOrderSettlementTx(tx, order)
+		// 资金已进入托管，余下"扣库存 → 标记已付 → 商品归属转移 → outbox order.paid"走共享尾段。
+		return finishPaymentConfirmationTx(tx, order)
 	})
 	if err != nil {
 		log.LogrusObj.Errorf("web3 settle order=%d failed: %v", orderID, err)

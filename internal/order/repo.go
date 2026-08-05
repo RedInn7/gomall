@@ -3,11 +3,13 @@ package order
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/pkg/utils/log"
@@ -31,7 +33,7 @@ func orderListCacheKey(uID uint, typ interface{}) string {
 // 必须把该用户所有 type 桶一并失效，否则用户最长 TTL 内仍看到陈旧状态 / 重复订单。
 // 桶按已知订单状态枚举删除，避免 KEYS/SCAN 全库扫描。
 func invalidateUserOrderListCache(uID uint) {
-	if uID == 0 {
+	if uID == 0 || cache.RedisClient == nil {
 		return
 	}
 	types := []uint{
@@ -287,6 +289,20 @@ func (d *OrderDao) GetOrderByOrderNum(orderNum uint64) (*Order, error) {
 	return &o, nil
 }
 
+// GetOrderByOrderNumForUpdate 在事务内锁住订单，供退款等“读取当前状态后再迁移”的流程使用。
+func (d *OrderDao) GetOrderByOrderNumForUpdate(orderNum uint64) (*Order, error) {
+	var o Order
+	err := d.DB.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("order_num = ?", orderNum).First(&o).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &o, nil
+}
+
 func (d *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 	res := d.DB.Model(&Order{}).Where(
 		"order_num=? and type=?", orderNum, consts.OrderWaitPay).
@@ -336,13 +352,10 @@ func (d *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
 
 // RequestRefund 申请退款：from 必须落在 allowedFrom 集合内（WaitShip / WaitReceive / Completed）。
 // 通过 WHERE type IN (...) 一次拦截非法 from，避免读后写竞态。
-func (d *OrderDao) RequestRefund(orderNum uint64, allowedFrom []uint) (bool, error) {
-	if len(allowedFrom) == 0 {
-		return false, nil
-	}
+func (d *OrderDao) RequestRefund(orderNum uint64, fromType uint) (bool, error) {
 	res := d.DB.Model(&Order{}).
-		Where("order_num=? AND type IN ?", orderNum, allowedFrom).
-		Update("type", consts.OrderRefunding)
+		Where("order_num=? AND type=?", orderNum, fromType).
+		Updates(map[string]interface{}{"type": consts.OrderRefunding, "refund_from_type": fromType})
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -366,12 +379,12 @@ func (d *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
-// RejectRefund 驳回退款：Refunding -> Completed。
-// 仅在 from=Refunding 时生效，避免误把还在 WaitShip / WaitReceive 的订单推到 Completed。
-func (d *OrderDao) RejectRefund(orderNum uint64) (bool, error) {
+// RejectRefund 驳回退款：Refunding -> 申请前状态。
+// restoreType 来自进入退款时持久化的 RefundFromType，不能一律跳到 Completed 绕过履约。
+func (d *OrderDao) RejectRefund(orderNum uint64, restoreType uint) (bool, error) {
 	res := d.DB.Model(&Order{}).
 		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
-		Update("type", consts.OrderCompleted)
+		Update("type", restoreType)
 	if res.Error != nil {
 		return false, res.Error
 	}
