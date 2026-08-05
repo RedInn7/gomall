@@ -46,17 +46,11 @@
 
 ### 关键域流程图
 
-**4 条支付通道 → 统一结算** —— 内建钱包（平台内部记账）、Stripe（第三方法币 PSP，Checkout + webhook）、USDC（稳定币 ERC-20，与法币 1:1）、ETH（原生币，需喂价换算 wei）四条通道殊途同归，最终都汇到同一套结算逻辑：标记已付（WaitPay 守卫）+ 扣库存 + 商品归属转移 + 卖家入账 + 复式记账（卖家 credit / 平台清算账户 debit）+ 写 Outbox `order.paid` + CommitReservation；幂等靠 WaitPay + `(order_id, direction)` 唯一索引。
+**4 条支付通道 → 两阶段资金链** —— 内建钱包、Stripe、USDC、ETH 在支付确认时统一清算进 `merchant_escrow`，只推进订单和库存，不提前增加卖家可用余额；买家确认收货或系统自动确认后，`order.completed` 再触发托管放款。清算单、订单状态和 `(order_id, direction, biz_type)` 唯一索引共同保证幂等。
 
-![gomall 4 条支付通道与统一结算](docs/payment-channels.svg)
+**资金全景：所有动钱路径 → 复式记账台账** —— 不止支付入账，退款、预售（定金/尾款/退款）、红包（发/抢/退）、拼团（加入/成团/散团）等每一处余额变动都在同事务内追加不可变流水。系统账户虽统一使用 `user_id=0`，但通过 `account_code` 区分外部清算、商户托管与旧系统账户；`SUM(debit)=SUM(credit)` 借贷守恒，幂等靠 `(ref_order_id, direction, biz_type)` 唯一索引。
 
-**资金全景：所有动钱路径 → 复式记账台账** —— 不止支付入账，退款、预售（定金/尾款/退款）、红包（发/抢/退）、拼团（加入/成团/散团）等每一处余额变动都在同事务内追加一条不可变流水，对手方记平台清算账户（`user_id=0`），`SUM(debit)=SUM(credit)` 借贷守恒、可对账可审计；幂等靠 `(ref_order_id, direction, biz_type)` 唯一索引。
-
-![gomall 资金全景与复式记账台账](docs/funds-ledger.svg)
-
-**支付结算细节（资金台账 + 折后实付）** —— 钱包路径：锁双方 → 校验支付密码 → 买家扣款 / 卖家入账并各写一条复式记账流水 → 扣库存 → 改单 → 写 Outbox，同一事务原子；Web3 路径走 Escrow + EVM 链上对账。
-
-![支付结算流程](docs/flow-payment.svg)
+**支付清算与结算细节** —— 钱包支付锁买家并扣款，Stripe/Web3 以外部清算账户作为资金来源，三条路径都先进入商户托管；履约完成后由独立消费者给卖家入账。结算前退款从托管退，结算后退款才从卖家退；跨渠道重复实收会进入 `payment_anomaly` 待退款审核，不会被当成普通重放吞掉。完整设计见 [`docs/architecture/PAYMENT_CLEARING_SETTLEMENT.md`](docs/architecture/PAYMENT_CLEARING_SETTLEMENT.md)。
 
 **订单生命周期** —— 下单（库存预扣 + snowflake + Outbox）→ 支付 → 履约状态机 → 关单，RabbitMQ TTL 延迟关单 + Cron 双保险，失败消息按投递次数进 DLQ。
 
@@ -115,7 +109,7 @@
 
 也得把没做的说清楚，免得看的人当成完整生产系统：
 
-- **不真接第三方支付**：法币支付走 outbox 事件，下游对接由 wallet 服务消费（路线图）
+- **没有渠道级批量清算**：Stripe Checkout/webhook 已接入，但日终 payout 对账、手续费差异和银行最终入账仍是路线图
 - **不真上链**：Web3 合约源码 + Go binding 完整，但默认不连 RPC（env 控制）
 - **没有 merchant role**：商家自助 API（发货 / 看板 / 提现）路线图阶段
 - **没有物流单 / 售后工单 / 评价表**：订单状态机推到 7 态，但物流商对接 / 退货寄回 / 评价审核三件独立表是路线图
