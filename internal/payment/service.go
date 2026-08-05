@@ -9,7 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
-	"github.com/RedInn7/gomall/internal/money"
+	"github.com/RedInn7/gomall/internal/clearing"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -63,16 +63,15 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 
-		bossID := order.BossID
 		paidProductID = order.ProductID
 		paidNum = order.Num
 		// 实付口径（命中满减取折后 FinalCents）统一收口到 orderPayableCents，三条渠道一致。
 		payable := orderPayableCents(order)
 
 		userDao := user.NewUserDaoByDB(tx)
-		// 统一锁序：按 user id 升序对买卖双方一并加 FOR UPDATE，消除 A 向 B 下单与 B 向 A
-		// 下单并发时“先买家后卖家”角色锁序构成的锁环死锁。锁就位后再校验支付密码、读改写余额。
-		buyer, boss, err := userDao.LockTwoUsersForUpdate(uId, bossID)
+		// 支付确认阶段只扣买家，不再提前给卖家入账；因此这里只锁买家。
+		// 卖家余额会在订单确认收货后的 order.completed 结算事务中单独加锁并入账。
+		buyer, err := userDao.GetUserByIdForUpdate(uId)
 		if err != nil {
 			log.LogrusObj.Error(err)
 			return err
@@ -106,42 +105,15 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 
-		// 买家扣款流水：与余额变动同事务追加，(order_id, debit) 唯一索引兜底重复扣款
-		ledgerDao := money.NewLedgerDaoByDB(tx)
-		if err = ledgerDao.AppendTransaction(uId, order.ID, money.DirectionDebit, payable, buyerBalanceAfter, money.BizTypeOrderPay); err != nil {
+		// 清算：买家 debit，商户托管账户 credit，并记录一笔待结算清算单。
+		// 此时卖家余额不变；只有履约完成后才会由 order.completed 消费者放款。
+		if err = clearing.RecordClearedTx(tx, order, clearing.ChannelWallet, "", "CNY", &buyerBalanceAfter); err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
 
-		// boss 已在事务开头随 buyer 一并按 id 序加锁，无需二次读取。
-		// 商家余额同样用服务端密钥解密——绝不能用买家支付密码，否则跨账户串密钥
-		bossMoney, err := boss.DecryptMoney()
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-		bossBalanceAfter := bossMoney + payable
-		boss.Money = strconv.FormatInt(bossBalanceAfter, 10)
-		boss.Money, err = boss.EncryptMoney()
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-
-		err = userDao.UpdateUserById(bossID, boss)
-		if err != nil { // 更新boss金额失败，回滚
-			log.LogrusObj.Error(err)
-			return err
-		}
-
-		// 卖家入账流水：方向与买家相反，(order_id, credit) 唯一索引兜底重复入账
-		if err = ledgerDao.AppendTransaction(bossID, order.ID, money.DirectionCredit, payable, bossBalanceAfter, money.BizTypeOrderPay); err != nil {
-			log.LogrusObj.Error(err)
-			return err
-		}
-
-		// 资金已划转，余下"扣库存 → 标记已付 → 商品归属转移 → outbox order.paid"是三条渠道共享尾段。
-		return finishOrderSettlementTx(tx, order)
+		// 资金已进入托管，余下"扣库存 → 标记已付 → 商品归属转移 → outbox order.paid"走共享尾段。
+		return finishPaymentConfirmationTx(tx, order)
 	})
 
 	if err != nil {
