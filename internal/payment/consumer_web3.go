@@ -64,7 +64,7 @@ func HandleWeb3PaymentConfirmed(ctx context.Context, payload []byte) error {
 		return fmt.Errorf("%w: missing buyer", errWeb3PoisonMessage)
 	}
 
-	if err := GetWeb3SettleSrv().SettleConfirmedOrder(ctx, orderID, ev.Buyer, ev.Amount); err != nil {
+	if err := GetWeb3SettleSrv().SettleConfirmedOrder(ctx, orderID, ev.Buyer, ev.Amount, ev.TxHash); err != nil {
 		// 金额不足 / 喂价缺失 / buyer 不匹配：不可靠重投解决，标记毒消息进 DLQ 人工核查
 		//（防资损 / 配置问题 / 越权结算）。
 		if errors.Is(err, ErrWeb3AmountMismatch) || errors.Is(err, ErrWeb3PriceNotConfigured) || errors.Is(err, ErrWeb3BuyerMismatch) {

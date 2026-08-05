@@ -78,6 +78,7 @@ func loading() {
 	initialize.InitOrderAsyncConsumer(context.Background())
 	initialize.InitPromoReleaseConsumer(context.Background())
 	initialize.InitRefundSettleConsumer(context.Background())
+	initialize.InitClearingSettleConsumer(context.Background())
 	initialize.InitRedPacketSettleConsumer(context.Background())
 	initialize.InitGroupbuySettleConsumer(context.Background())
 	initialize.InitWeb3SettleConsumer(context.Background())
