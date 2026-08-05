@@ -16,7 +16,7 @@ import (
 )
 
 // 本文件收口三条支付渠道（余额 / Stripe / Web3）此前各自抄一遍的"确认收款"公共逻辑：
-// 应付口径、结算事务尾段、预留核销。各渠道只保留真正差异化的发起流程与资金划转，
+// 应付口径、支付确认事务尾段、预留核销。各渠道只保留真正差异化的发起流程与清算，
 // 尾段统一走这里——新增渠道时无法再漏写库存/状态/outbox 任一步，杜绝行为漂移。
 
 // orderPayableCents 订单应付金额（分）的统一口径，所有支付渠道共用。
@@ -32,15 +32,15 @@ func orderPayableCents(o *order.Order) int64 {
 	return o.Money * int64(o.Num)
 }
 
-// finishOrderSettlementTx 跑三条支付渠道共享的结算事务尾段（在调用方完成渠道特定的资金
-// 划转之后、同一事务内执行）：
+// finishPaymentConfirmationTx 跑三条支付渠道共享的“支付确认”事务尾段（在调用方完成清算后、
+// 同一事务内执行）。它不向卖家放款；真正的卖家结算由 order.completed 触发 clearing 服务完成：
 //
 //	原子扣减库存（条件 UPDATE 防超卖）→ 标记订单已付（WaitPay 守卫防重复支付）→
 //	商品归属转移给买家（名下复制一份下架同款，二手交易模型）→ 写 outbox order.paid。
 //
 // 幂等：MarkOrderPaidWithCheck 的 WaitPay 守卫为主，配合 (order_id,direction) 台账唯一索引兜底。
 // 买家 id 一律取 o.UserID（下单人），与三条渠道原有口径一致。
-func finishOrderSettlementTx(tx *gorm.DB, o *order.Order) error {
+func finishPaymentConfirmationTx(tx *gorm.DB, o *order.Order) error {
 	productID := o.ProductID
 	num := o.Num
 	buyerID := o.UserID
