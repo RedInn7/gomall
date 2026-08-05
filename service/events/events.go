@@ -81,12 +81,13 @@ type OrderRefundedEvent struct {
 	PromoDiscountCents int64  `json:"promo_discount_cents"`
 }
 
-// OrderRefundRejected 退款被运营驳回，订单退回 Completed。
+// OrderRefundRejected 退款被运营驳回，订单恢复到 RefundFromType；RestoredType 供结算消费者判断是否应放款。
 type OrderRefundRejected struct {
-	OrderID  uint   `json:"order_id"`
-	OrderNum uint64 `json:"order_num"`
-	UserID   uint   `json:"user_id"`
-	Reason   string `json:"reason"`
+	OrderID      uint   `json:"order_id"`
+	OrderNum     uint64 `json:"order_num"`
+	UserID       uint   `json:"user_id"`
+	Reason       string `json:"reason"`
+	RestoredType uint   `json:"restored_type"`
 }
 
 type ProductChanged struct {
