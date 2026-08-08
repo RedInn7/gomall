@@ -9,6 +9,8 @@
 | 01 | 用户与鉴权 | [01-user-auth.md](./01-user-auth.md) | 上下各约 40 min |
 | 02 | 支付（上）：余额支付与资金事务 | [02-payment-up.md](./02-payment-up.md) | 约 40 min |
 | 03 | 支付（下）：幂等、熔断与对账 | [03-payment-down.md](./03-payment-down.md) | 约 40 min |
+| 补充（上） | 支付清算：平台收到的钱去了哪里 | [payment-clearing.md](./payment-clearing.md) | 约 40 min |
+| 补充（下） | 支付结算：订单完成后怎么把钱给卖家 | [payment-settlement.md](./payment-settlement.md) | 约 40 min |
 | 04 | 商品展示 | [04-product-display.md](./04-product-display.md) | 约 40 min |
 | 05 | 商品搜索（上）：Elasticsearch | [05-product-search.md](./05-product-search.md) | 约 40 min |
 | 06 | 商品搜索（下）：Hybrid Search | [06-product-search-hybrid.md](./06-product-search-hybrid.md) | 约 40 min |
