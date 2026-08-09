@@ -43,5 +43,3 @@ after:  order 8 = {state: paid, channel: "balance"}
 ```bash
 go test -tags exercise ./exercises/02-payment-up/02.03-payment-finalize/problem
 ```
-
-公开测试检查正常提交、状态竞争和 Outbox 回滚；隐藏测试还会检查订单不存在、原有数据不被破坏、不同订单与事件之间的隔离。
