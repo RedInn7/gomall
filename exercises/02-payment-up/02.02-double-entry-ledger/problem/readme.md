@@ -49,5 +49,3 @@ entries:
 ```bash
 go test -tags exercise ./exercises/02-payment-up/02.02-double-entry-ledger/problem
 ```
-
-公开测试检查平账、重复请求和基本非法输入；隐藏测试会检查负数、失败后重试、多个业务键之间的隔离以及返回流水是否泄露内部切片。

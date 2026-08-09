@@ -264,23 +264,17 @@ gofmt -w exercises/*/*/problem/*.go
 go test -tags exercise ./exercises/02-payment-up/02.01-ordered-account-locks/problem
 ```
 
-完成标准：相向支付得到相同的升序锁顺序，同一账户只锁一次。
-
 ### 02.02 复式资金流水
 
 ```bash
 go test -tags exercise ./exercises/02-payment-up/02.02-double-entry-ledger/problem
 ```
 
-完成标准：一次支付原子写入 debit / credit，金额平衡，业务键不能重复。
-
 ### 02.03 原子完成支付
 
 ```bash
 go test -tags exercise ./exercises/02-payment-up/02.03-payment-finalize/problem
 ```
-
-完成标准：订单状态与 Outbox 同事务提交，状态竞争和事件写入失败不会留下半状态。
 
 ## 第四讲：支付（下）
 
@@ -290,26 +284,14 @@ go test -tags exercise ./exercises/02-payment-up/02.03-payment-finalize/problem
 go test -tags exercise ./exercises/03-payment-down/03.01-idempotency-state-machine/problem
 ```
 
-完成标准：实现 `ACQUIRED / WAIT / REPLAY`，只有成功请求可以进入 `done`。
-
 ### 03.02 先回放，再检查熔断
 
 ```bash
 go test -tags exercise ./exercises/03-payment-down/03.02-replay-before-breaker/problem
 ```
 
-完成标准：熔断 Open 时仍能回放已有成功结果，业务失败不计入系统故障。
-
 ### 03.03 支付对账扫描
 
 ```bash
 go test -tags exercise ./exercises/03-payment-down/03.03-payment-reconciliation/problem
-```
-
-完成标准：稳定找出流水缺失、不平账和渠道不一致，并按订单号排序。
-
-教师发布作业前可以验证所有参考答案：
-
-```bash
-./scripts/grade-exercises.sh solution
 ```

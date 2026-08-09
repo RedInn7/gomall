@@ -44,5 +44,3 @@ OrderedAccountIDs(7, 7) -> [7]
 ```bash
 go test -tags exercise ./exercises/02-payment-up/02.01-ordered-account-locks/problem
 ```
-
-公开测试检查正向、反向和同账户；隐藏测试会更换账户 ID 并检查返回切片的长度和顺序。
