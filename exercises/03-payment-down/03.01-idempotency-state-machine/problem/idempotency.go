@@ -24,11 +24,17 @@ type Store struct{ records map[string]record }
 func NewStore() *Store { return &Store{records: map[string]record{}} }
 
 func (s *Store) Begin(key string) (Action, string, error) {
-	// TODO: 按 init / processing / done 状态返回 ACQUIRED / WAIT / REPLAY。
+	// TODO: 开始或重放一次幂等支付请求。
+	// 1. 空 key 返回 ErrEmptyKey；
+	// 2. key 不存在时创建 processing 记录，返回 Acquired 和空响应；
+	// 3. key 已处于 processing 时返回 Wait 和空响应；
+	// 4. key 已处于 done 时返回 Replay 和之前保存的响应。
 	return "", "", nil
 }
 
 func (s *Store) CompleteSuccess(key, response string) error {
-	// TODO: 只允许 processing -> done，并保存成功响应。
+	// TODO: 只允许 processing 记录进入 done，并保存 response。
+	// key 不存在或状态不是 processing 时返回 ErrNotProcessing；已经 done 时返回 ErrAlreadyDone，
+	// 且不能覆盖第一次保存的成功响应。
 	return nil
 }
