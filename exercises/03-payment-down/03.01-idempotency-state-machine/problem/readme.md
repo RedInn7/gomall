@@ -36,5 +36,3 @@ Begin("pay-42")                 -> REPLAY, "ok"
 ```bash
 go test -tags exercise ./exercises/03-payment-down/03.01-idempotency-state-machine/problem
 ```
-
-公开测试检查主状态转换；隐藏测试还会检查空 key、重复完成和响应不可覆盖。
