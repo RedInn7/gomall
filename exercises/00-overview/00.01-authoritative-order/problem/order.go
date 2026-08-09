@@ -35,6 +35,11 @@ type Order struct {
 }
 
 func BuildOrder(req Request, authUserID uint, product Product, addressOwnerID uint) (Order, error) {
-	// TODO: 只把 req 当成购买意图；身份、价格、卖家取服务端可信数据。
+	// TODO: 校验请求并生成可信订单。
+	// 1. Quantity 必须大于 0，否则返回 ErrInvalidQuantity；
+	// 2. req.ProductID 必须等于 product.ID，否则返回 ErrProductMismatch；
+	// 3. addressOwnerID 必须等于 authUserID，否则返回 ErrAddressNotOwned；
+	// 4. 订单中的用户取 authUserID，价格和商家取 product，不能相信请求中的同名字段；
+	// 5. 商品 ID、数量和地址 ID 使用已经通过校验的请求数据。
 	return Order{}, nil
 }
