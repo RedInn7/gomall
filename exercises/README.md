@@ -21,7 +21,7 @@ solution/    参考答案
 每道题的 `problem/readme.md` 会说明业务背景和完成条件。先读题，再打开同目录下的 `.go` 文件，找到 `TODO`：
 
 ```bash
-rg -n "TODO" exercises/00-overview exercises/01-user-auth
+rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down
 ```
 
 如果编辑器支持全局搜索，直接搜索 `TODO` 也可以。
@@ -228,7 +228,7 @@ go test -tags exercise ./exercises/01-user-auth/01.03-token-version/problem
 完成单题后，可以一次运行全部学生测试：
 
 ```bash
-go test -tags exercise ./exercises/00-overview/.../problem ./exercises/01-user-auth/.../problem
+./scripts/grade-exercises.sh student
 ```
 
 所有 package 都显示 `ok` 才算完成。
@@ -236,12 +236,12 @@ go test -tags exercise ./exercises/00-overview/.../problem ./exercises/01-user-a
 如果想确认 Go 文件能否编译，但暂时不运行测试：
 
 ```bash
-go test -run '^$' -tags exercise ./exercises/00-overview/.../problem ./exercises/01-user-auth/.../problem
+./scripts/grade-exercises.sh compile
 ```
 
 ## 提交前检查
 
-- 6 个 `problem` package 全部测试通过；
+- 当前要求提交的 `problem` package 全部测试通过；
 - 没有修改任何 `*_test.go`；
 - 没有删除 `//go:build exercise`；
 - 没有从 `solution/` 直接复制整份文件；
@@ -251,7 +251,47 @@ go test -run '^$' -tags exercise ./exercises/00-overview/.../problem ./exercises
 格式化学生代码：
 
 ```bash
-gofmt -w exercises/00-overview/*/problem/*.go exercises/01-user-auth/*/problem/*.go
+gofmt -w exercises/*/*/problem/*.go
 ```
 
 公开测试只负责给出基本反馈。提交后还会运行额外测试，检查负数、到期边界、失败回滚、缓存隔离等情况。
+
+## 第三讲：支付（上）
+
+### 02.01 固定账户加锁顺序
+
+```bash
+go test -tags exercise ./exercises/02-payment-up/02.01-ordered-account-locks/problem
+```
+
+### 02.02 复式资金流水
+
+```bash
+go test -tags exercise ./exercises/02-payment-up/02.02-double-entry-ledger/problem
+```
+
+### 02.03 原子完成支付
+
+```bash
+go test -tags exercise ./exercises/02-payment-up/02.03-payment-finalize/problem
+```
+
+## 第四讲：支付（下）
+
+### 03.01 支付票根状态机
+
+```bash
+go test -tags exercise ./exercises/03-payment-down/03.01-idempotency-state-machine/problem
+```
+
+### 03.02 先回放，再检查熔断
+
+```bash
+go test -tags exercise ./exercises/03-payment-down/03.02-replay-before-breaker/problem
+```
+
+### 03.03 支付对账扫描
+
+```bash
+go test -tags exercise ./exercises/03-payment-down/03.03-payment-reconciliation/problem
+```
