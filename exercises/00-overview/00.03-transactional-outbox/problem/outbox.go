@@ -60,7 +60,11 @@ func (tx *Tx) InsertOutbox(event Event) error {
 }
 
 func CreateOrder(db *DB, order Order, eventID string) error {
-	// TODO: 在同一个 Transaction 中写订单和 Outbox 事件。
+	// TODO: 调用 db.Transaction，在同一个事务中完成下面两次写入：
+	// 1. 使用 tx.InsertOrder 写入 order；
+	// 2. 使用 tx.InsertOutbox 写入 ID 为 eventID、Topic 为 "order.created"、
+	//    Aggregate 为 order.ID 的事件，并把错误原样返回。
+	// Outbox 写入失败时，Transaction 必须让订单和事件一起回滚。
 	return nil
 }
 
