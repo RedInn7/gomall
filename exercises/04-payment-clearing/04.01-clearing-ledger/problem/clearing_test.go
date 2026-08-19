@@ -20,8 +20,9 @@ func TestRecordClearedTxWallet(t *testing.T) {
 	}
 
 	record, ok := store.Clearing(101)
-	if !ok || record.GrossCents != 1_000 || record.Status != StatusCleared {
-		t.Fatalf("clearing = %+v, ok = %v", record, ok)
+	wantRecord := ClearingRecord{OrderID: 101, BuyerID: 11, SellerID: 22, Channel: ChannelWallet, GrossCents: 1_000, NetCents: 1_000, Currency: "CNY", Status: StatusCleared}
+	if !ok || !reflect.DeepEqual(record, wantRecord) {
+		t.Fatalf("clearing = %+v, ok = %v, want %+v", record, ok, wantRecord)
 	}
 	want := []LedgerEntry{
 		{OrderID: 101, UserID: 11, AccountCode: AccountUserWallet, Direction: DirectionDebit, AmountCents: 1_000, BalanceAfterCents: 8_000, BizType: BizTypeOrderClear},
@@ -37,7 +38,7 @@ func TestRecordClearedTxStripe(t *testing.T) {
 	if err := RecordClearedTx(store, validOrder(), ChannelStripe, "pi_123", "usd", nil); err != nil {
 		t.Fatalf("RecordClearedTx() error = %v", err)
 	}
-	assertExternalPair(t, store, "pi_123", "USD")
+	assertExternalPair(t, store, ChannelStripe, "pi_123", "USD")
 }
 
 func TestRecordClearedTxWeb3(t *testing.T) {
@@ -45,7 +46,7 @@ func TestRecordClearedTxWeb3(t *testing.T) {
 	if err := RecordClearedTx(store, validOrder(), ChannelWeb3, "0xabc", "eth", nil); err != nil {
 		t.Fatalf("RecordClearedTx() error = %v", err)
 	}
-	assertExternalPair(t, store, "0xabc", "ETH")
+	assertExternalPair(t, store, ChannelWeb3, "0xabc", "ETH")
 }
 
 func TestRecordClearedTxRequiresWalletBalance(t *testing.T) {
@@ -192,10 +193,12 @@ func TestEntriesReturnsSnapshot(t *testing.T) {
 	}
 }
 
-func assertExternalPair(t *testing.T, store *Store, providerRef, currency string) {
+func assertExternalPair(t *testing.T, store *Store, channel, providerRef, currency string) {
 	t.Helper()
 	record, ok := store.Clearing(101)
-	if !ok || record.ProviderRef != providerRef || record.Currency != currency {
+	if !ok || record.OrderID != 101 || record.BuyerID != 11 || record.SellerID != 22 || record.Channel != channel ||
+		record.ProviderRef != providerRef || record.Currency != currency ||
+		record.GrossCents != 1_000 || record.FeeCents != 0 || record.NetCents != 1_000 {
 		t.Fatalf("clearing = %+v, ok = %v", record, ok)
 	}
 	entries := store.Entries()
@@ -213,7 +216,7 @@ func assertExternalPair(t *testing.T, store *Store, providerRef, currency string
 func assertAmounts(t *testing.T, store *Store, want int64) {
 	t.Helper()
 	record, ok := store.Clearing(101)
-	if !ok || record.GrossCents != want {
+	if !ok || record.GrossCents != want || record.FeeCents != 0 || record.NetCents != want {
 		t.Fatalf("clearing = %+v, ok = %v, want amount %d", record, ok, want)
 	}
 	entries := store.Entries()

@@ -223,6 +223,46 @@ go test -tags exercise ./exercises/01-user-auth/01.03-token-version/problem
 - 旧 token version 必须被拒绝；
 - 权限判断使用用户当前角色，不信 token 里的旧角色。
 
+## 第三讲：支付（上）
+
+### 02.01 固定账户加锁顺序
+
+```bash
+go test -tags exercise ./exercises/02-payment-up/02.01-ordered-account-locks/problem
+```
+
+### 02.02 复式资金流水
+
+```bash
+go test -tags exercise ./exercises/02-payment-up/02.02-double-entry-ledger/problem
+```
+
+### 02.03 原子完成支付
+
+```bash
+go test -tags exercise ./exercises/02-payment-up/02.03-payment-finalize/problem
+```
+
+## 第四讲：支付（下）
+
+### 03.01 支付票根状态机
+
+```bash
+go test -tags exercise ./exercises/03-payment-down/03.01-idempotency-state-machine/problem
+```
+
+### 03.02 先回放，再检查熔断
+
+```bash
+go test -tags exercise ./exercises/03-payment-down/03.02-replay-before-breaker/problem
+```
+
+### 03.03 支付对账扫描
+
+```bash
+go test -tags exercise ./exercises/03-payment-down/03.03-payment-reconciliation/problem
+```
+
 ## 第五讲：支付清算
 
 ### 04.01 清算复式记账
@@ -284,44 +324,4 @@ go test -tags exercise ./exercises/04-payment-clearing/04.01-clearing-ledger/pro
 gofmt -w exercises/*/*/problem/*.go
 ```
 
-公开测试只负责给出基本反馈。提交后还会运行额外测试，检查负数、到期边界、失败回滚、缓存隔离等情况。
-
-## 第三讲：支付（上）
-
-### 02.01 固定账户加锁顺序
-
-```bash
-go test -tags exercise ./exercises/02-payment-up/02.01-ordered-account-locks/problem
-```
-
-### 02.02 复式资金流水
-
-```bash
-go test -tags exercise ./exercises/02-payment-up/02.02-double-entry-ledger/problem
-```
-
-### 02.03 原子完成支付
-
-```bash
-go test -tags exercise ./exercises/02-payment-up/02.03-payment-finalize/problem
-```
-
-## 第四讲：支付（下）
-
-### 03.01 支付票根状态机
-
-```bash
-go test -tags exercise ./exercises/03-payment-down/03.01-idempotency-state-machine/problem
-```
-
-### 03.02 先回放，再检查熔断
-
-```bash
-go test -tags exercise ./exercises/03-payment-down/03.02-replay-before-breaker/problem
-```
-
-### 03.03 支付对账扫描
-
-```bash
-go test -tags exercise ./exercises/03-payment-down/03.03-payment-reconciliation/problem
-```
+公开测试只负责给出基本反馈。提交后还会运行额外测试，检查负数和到期边界、失败回滚、缓存隔离、渠道与余额约束、重复清算及借贷平衡等情况。

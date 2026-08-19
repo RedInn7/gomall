@@ -28,6 +28,7 @@ var (
 	ErrEscrowCreditFailed   = errors.New("merchant escrow credit failed")
 )
 
+// Order 只保留计算应付金额和确定交易双方所需的字段。
 type Order struct {
 	ID          uint
 	BuyerID     uint
@@ -38,6 +39,7 @@ type Order struct {
 	FinalCents  int64
 }
 
+// ClearingRecord 是“支付已实收”的业务凭证，不代表卖家已经结算到账。
 type ClearingRecord struct {
 	OrderID     uint
 	BuyerID     uint
@@ -45,10 +47,13 @@ type ClearingRecord struct {
 	Channel     string
 	ProviderRef string
 	GrossCents  int64
+	FeeCents    int64
+	NetCents    int64
 	Currency    string
 	Status      string
 }
 
+// LedgerEntry 是清算阶段的一条账本分录。
 type LedgerEntry struct {
 	OrderID           uint
 	UserID            uint
@@ -59,6 +64,7 @@ type LedgerEntry struct {
 	BizType           string
 }
 
+// Store 模拟同一数据库事务中的清算单和账本表。
 type Store struct {
 	records          map[uint]ClearingRecord
 	entries          []LedgerEntry
@@ -122,6 +128,8 @@ func RecordClearedTx(
 		Channel:     channel,
 		ProviderRef: strings.TrimSpace(providerRef),
 		GrossCents:  gross,
+		FeeCents:    0,
+		NetCents:    gross,
 		Currency:    strings.ToUpper(strings.TrimSpace(currency)),
 		Status:      StatusCleared,
 	}
