@@ -47,6 +47,8 @@ type ClearingRecord struct {
 	Channel     string
 	ProviderRef string
 	GrossCents  int64
+	FeeCents    int64
+	NetCents    int64
 	Currency    string
 	Status      string
 }
@@ -104,9 +106,10 @@ func RecordClearedTx(
 	// TODO 1：校验 store、订单主键、交易双方、数量、渠道和币种。
 	// TODO 2：Wallet 必须提供扣款后余额；Stripe/Web3 不能提供该余额。
 	// TODO 3：普通订单使用 Money * Num，促销订单使用 FinalCents；拒绝负数金额。
-	// TODO 4：同一 OrderID 只能清算一次，并标准化 providerRef 与 currency。
-	// TODO 5：Wallet 借记 user_wallet，外部渠道借记 external_clearing。
-	// TODO 6：统一贷记 merchant_escrow；任一步失败都不能留下清算单或单边账。
+	// TODO 4：同一 OrderID 只能清算一次；清算单应满足 FeeCents=0、NetCents=GrossCents。
+	// TODO 5：标准化 providerRef 与 currency，并完整保存订单、买卖双方和渠道。
+	// TODO 6：Wallet 借记 user_wallet，外部渠道借记 external_clearing。
+	// TODO 7：统一贷记 merchant_escrow；任一步失败都不能留下清算单或单边账。
 	_ = strings.TrimSpace
 	return nil
 }
