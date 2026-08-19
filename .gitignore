@@ -34,5 +34,11 @@ stressTest/config.json
 # macOS
 .DS_Store
 
+# 教学文档只维护 Markdown；导出的幻灯片和 PDF 不提交
+/docs/**/*.tex
+/docs/**/*.pdf
+/docs/slides/
+/docs/slides-pipeline/
+
 # AI 指令文件，不入公开仓库（保留在本地）
 CLAUDE.md
