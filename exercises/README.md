@@ -21,7 +21,7 @@ solution/    参考答案
 每道题的 `problem/readme.md` 会说明业务背景和完成条件。先读题，再打开同目录下的 `.go` 文件，找到 `TODO`：
 
 ```bash
-rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down
+rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down exercises/04-payment-clearing
 ```
 
 如果编辑器支持全局搜索，直接搜索 `TODO` 也可以。
@@ -222,6 +222,36 @@ go test -tags exercise ./exercises/01-user-auth/01.03-token-version/problem
 - claims 中的用户必须与当前用户一致；
 - 旧 token version 必须被拒绝；
 - 权限判断使用用户当前角色，不信 token 里的旧角色。
+
+## 第五讲：支付清算
+
+### 04.01 清算复式记账
+
+文件：
+
+```text
+exercises/04-payment-clearing/04.01-clearing-ledger/problem/clearing.go
+```
+
+需要补：
+
+```go
+func RecordClearedTx(...) error
+```
+
+测试命令：
+
+```bash
+go test -tags exercise ./exercises/04-payment-clearing/04.01-clearing-ledger/problem
+```
+
+完成标准：
+
+- Wallet 借记买家钱包，Stripe/Web3 借记外部清算账户；
+- 三种渠道统一贷记卖家托管账户，并保证借贷平衡；
+- 正确处理普通价、促销最终价、币种和外部凭证标准化；
+- 非法输入、重复订单和托管入账失败时不留下半成品；
+- 通过题目列出的 16 个公开测试场景。
 
 ## 一次运行全部题目
 
