@@ -9,18 +9,18 @@
 | 01 | 用户与鉴权 | [01-user-auth.md](./01-user-auth.md) | 上下各约 40 min |
 | 02 | 支付（上）：余额支付与资金事务 | [02-payment-up.md](./02-payment-up.md) | 约 40 min |
 | 03 | 支付（下）：幂等、熔断与对账 | [03-payment-down.md](./03-payment-down.md) | 约 40 min |
-| 补充（上） | 支付清算：平台收到的钱去了哪里 | [payment-clearing.md](./payment-clearing.md) | 约 40 min |
-| 补充（下） | 支付结算：订单完成后怎么把钱给卖家 | [payment-settlement.md](./payment-settlement.md) | 约 40 min |
-| 04 | 商品展示 | [04-product-display.md](./04-product-display.md) | 约 40 min |
-| 05 | 商品搜索（上）：Elasticsearch | [05-product-search.md](./05-product-search.md) | 约 40 min |
-| 06 | 商品搜索（下）：Hybrid Search | [06-product-search-hybrid.md](./06-product-search-hybrid.md) | 约 40 min |
-| 07 | 购物车到订单 | [07-cart-to-order.md](./07-cart-to-order.md) | 约 40 min |
-| 08 | Web3 支付（上）：签名与付款发起 | [08-payment-web3.md](./08-payment-web3.md) | 约 40 min |
-| 09 | Web3 支付（下）：链上事件结算 | [09-payment-web3-settlement.md](./09-payment-web3-settlement.md) | 约 40 min |
-| 10 | 库存与防超卖 | [10-inventory.md](./10-inventory.md) | 约 40 min |
-| 11 | 预售定金 | [11-preorder.md](./11-preorder.md) | 约 40 min |
-| 12 | 接入层护栏（上） | [12-middleware.md](./12-middleware.md) | 约 40 min |
-| 13 | 接入层护栏（下） | [13-middleware-transaction.md](./13-middleware-transaction.md) | 约 40 min |
+| 04 | 支付清算：平台收到的钱去了哪里 | [04-payment-clearing.md](./04-payment-clearing.md) | 约 40 min |
+| 05 | 支付结算：订单完成后怎么把钱给卖家 | [05-payment-settlement.md](./05-payment-settlement.md) | 约 40 min |
+| 06 | 商品展示 | [06-product-display.md](./06-product-display.md) | 约 40 min |
+| 07 | 商品搜索（上）：Elasticsearch | [07-product-search.md](./07-product-search.md) | 约 40 min |
+| 08 | 商品搜索（下）：Hybrid Search | [08-product-search-hybrid.md](./08-product-search-hybrid.md) | 约 40 min |
+| 09 | 购物车到订单 | [09-cart-to-order.md](./09-cart-to-order.md) | 约 40 min |
+| 10 | Web3 支付（上）：签名与付款发起 | [10-payment-web3.md](./10-payment-web3.md) | 约 40 min |
+| 11 | Web3 支付（下）：链上事件结算 | [11-payment-web3-settlement.md](./11-payment-web3-settlement.md) | 约 40 min |
+| 12 | 库存与防超卖 | [12-inventory.md](./12-inventory.md) | 约 40 min |
+| 13 | 预售定金 | [13-preorder.md](./13-preorder.md) | 约 40 min |
+| 14 | 接入层护栏（上） | [14-middleware.md](./14-middleware.md) | 约 40 min |
+| 15 | 接入层护栏（下） | [15-middleware-transaction.md](./15-middleware-transaction.md) | 约 40 min |
 
 ## 写作顺序
 
