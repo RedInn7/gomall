@@ -4,7 +4,7 @@
 
 | 作业 | 核心能力 | 入口 |
 | --- | --- | --- |
-| 04.01 清算复式记账 | 渠道分流、金额口径、一借一贷、幂等、原子回滚 | [problem/readme.md](./04.01-clearing-ledger/problem/readme.md) |
+| 04.01 清算复式记账 | 渠道分流、金额口径、一借一贷、防重复入账、原子回滚 | [problem/readme.md](./04.01-clearing-ledger/problem/readme.md) |
 
 运行学生版本：
 
