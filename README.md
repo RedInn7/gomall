@@ -2,7 +2,7 @@
 
 用 Go + Gin 写的电商后端，从浏览、下单、支付、履约，到优惠券、Web3 支付、向量检索都有。
 
-项目文档统一使用 Markdown：按学习顺序阅读 `docs/lecture/`，按主题深入阅读 `docs/blog/`，系统边界和设计决策放在 `docs/architecture/`。总入口见 [`docs/README.md`](docs/README.md)。
+项目文档统一使用 Markdown：按学习顺序阅读 `docs/lecture/`，跨课程共用的系统设计说明放在 `docs/architecture/`。总入口见 [`docs/README.md`](docs/README.md)。
 
 ---
 
@@ -10,7 +10,7 @@
 
 不是 toy demo。重点是把真实电商里那些"该怎么选"的地方讲清楚。
 
-一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码、Markdown 讲义和技术博客把这些连同压测数字和待办一块写了下来。
+一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码和 Markdown 讲义把这些连同压测数字和待办一块写了下来。
 
 适合工作一到三年的后端拿来练手，也适合准备答辩、面试，或者面试官拿来看候选人的系统设计深度。
 
@@ -115,8 +115,6 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - **不做前端**：纯后端 API，用 curl / Postman 自己调
 - **MVP 阶段聚焦交易闭环**：履约链路有 7 态但物流回流 / 售后 SOP 留待 wallet & merchant 落地后做
 
-未做清单完整版：`docs/architecture/feature-matrix.md`。
-
 ---
 
 ## 技术难点与亮点
@@ -132,7 +130,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 已完成：直接 replay 上一次响应体（responseRecorder 拦截过的）
 
 实测：50 VU × 15s 持续打 `/orders/create` 同 Idempotency-Key → 累计 **755,033 次请求 → DB 实际 1 笔订单**。
-`middleware/idempotency.go` + `repository/cache/idempotency.go`，详见 `docs/blog/01-idempotency.md`。
+`middleware/idempotency.go` + `repository/cache/idempotency.go`，详见 [`docs/lecture/13-middleware-transaction.md`](docs/lecture/13-middleware-transaction.md)。
 
 ### 2 · 两桶库存 + Saga 回滚：500 抢 100 零超发
 
@@ -324,8 +322,7 @@ func tryInitES(ctx context.Context) {
 教学材料以 Markdown 为唯一源稿，不再同时维护 TeX 和生成 PDF：
 
 - [课程总目录](docs/lecture/README.md)：按录制和学习顺序阅读；
-- [技术博客](docs/blog/README.md)：按幂等、库存、一致性、Web3 和搜索等主题深入；
-- [架构文档](docs/README.md#架构与设计)：查看清结算、DDD 迁移和功能边界；
+- [架构文档](docs/README.md#架构与设计)：查看普通订单的清算、结算与退款；
 - [文档总入口](docs/README.md)：不知道从哪里开始时只看这一页。
 
 ---
@@ -399,7 +396,7 @@ make env-up tools build
 
 ## 项目结构
 
-按领域垂直切片（DDD 分包）：每个业务域一个 `internal/<域>/` 包，handler / service / repo / model / dto 五件套同包内聚；基础设施与横切关注点保持独立目录。迁移细节见 `docs/architecture/DDD_MIGRATION.md`。
+按领域垂直切片（DDD 分包）：每个业务域一个 `internal/<域>/` 包，handler / service / repo / model / dto 五件套同包内聚；基础设施与横切关注点保持独立目录。
 
 ```
 gomall
