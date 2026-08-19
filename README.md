@@ -130,7 +130,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 已完成：直接 replay 上一次响应体（responseRecorder 拦截过的）
 
 实测：50 VU × 15s 持续打 `/orders/create` 同 Idempotency-Key → 累计 **755,033 次请求 → DB 实际 1 笔订单**。
-`middleware/idempotency.go` + `repository/cache/idempotency.go`，详见 [`docs/lecture/13-middleware-transaction.md`](docs/lecture/13-middleware-transaction.md)。
+`middleware/idempotency.go` + `repository/cache/idempotency.go`，详见 [`docs/lecture/15-middleware-transaction.md`](docs/lecture/15-middleware-transaction.md)。
 
 ### 2 · 两桶库存 + Saga 回滚：500 抢 100 零超发
 

@@ -14,10 +14,10 @@
 
 1. [支付（上）：余额支付与资金事务](./lecture/02-payment-up.md)
 2. [支付（下）：幂等、熔断与对账](./lecture/03-payment-down.md)
-3. [支付清算：平台收到的钱去了哪里](./lecture/payment-clearing.md)
-4. [支付结算：订单完成后怎么把钱给卖家](./lecture/payment-settlement.md)
-5. [Web3 支付（上）：签名与付款发起](./lecture/08-payment-web3.md)
-6. [Web3 支付（下）：链上事件结算](./lecture/09-payment-web3-settlement.md)
+3. [支付清算：平台收到的钱去了哪里](./lecture/04-payment-clearing.md)
+4. [支付结算：订单完成后怎么把钱给卖家](./lecture/05-payment-settlement.md)
+5. [Web3 支付（上）：签名与付款发起](./lecture/10-payment-web3.md)
+6. [Web3 支付（下）：链上事件结算](./lecture/11-payment-web3-settlement.md)
 
 ## 架构与设计
 
