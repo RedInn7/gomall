@@ -2,7 +2,7 @@
 
 用 Go + Gin 写的电商后端，从浏览、下单、支付、履约，到优惠券、Web3 支付、向量检索都有。
 
-每个模块配了压测报告（`stressTest/REPORT.md`）、一套 Beamer slides（`docs/slides/`，15 份 + 一份总览）和一篇博客（`docs/blog/`），把当初为什么这么设计也写下来了。
+项目文档统一使用 Markdown：按学习顺序阅读 `docs/lecture/`，按主题深入阅读 `docs/blog/`，系统边界和设计决策放在 `docs/architecture/`。总入口见 [`docs/README.md`](docs/README.md)。
 
 ---
 
@@ -10,7 +10,7 @@
 
 不是 toy demo。重点是把真实电商里那些"该怎么选"的地方讲清楚。
 
-一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码加上 15 份 slides、12 篇博客，把这些连同压测数字和待办一块写了下来。
+一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码、Markdown 讲义和技术博客把这些连同压测数字和待办一块写了下来。
 
 适合工作一到三年的后端拿来练手，也适合准备答辩、面试，或者面试官拿来看候选人的系统设计深度。
 
@@ -26,7 +26,7 @@
 | **客服** | 用户怒投诉时能不能给个交代 | 完整业务码表 + 客服话术（70001 限流 / 70002 熔断 / 50001 缺货 / RP-EMPTY 红包抢完）|
 | **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Jaeger 链路追踪 / Skywalking / 静默降级 / Web3 链上对账 |
 
-这些业务侧 deck 就是按这个全景拆开讲的（见下表）。
+Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.md`](docs/lecture/README.md) 进入。
 
 ---
 
@@ -64,7 +64,7 @@
 
 ![搜索与增量索引流程](docs/flow-search.svg)
 
-> 图为原生 SVG，源文件在 `docs/`；同主题的 TikZ 版架构图见概览 deck `docs/slides/00-overview`。
+> 图为原生 SVG，源文件在 `docs/`；对应讲解统一收录在 Markdown 课程和架构文档中。
 
 ---
 
@@ -73,18 +73,17 @@
 一个完整电商订单要经历的 12 个业务节点，每个节点 gomall 都有对应实现 / 路线图：
 
 ```
-注册登录(deck 01) → 浏览商品(deck 02) → 搜索发现(deck 03) → 加购选地址(deck 04)
-   → 下单锁库存(deck 04+07) → 支付(deck 05 法币 / deck 06 Web3)
-   → 商家发货(deck 09) → 用户收货 / 7天自动确认(deck 09)
-   → 评价 / 申请售后(deck 09 路线图) → 退款(deck 09)
+注册登录(讲义 01) → 浏览商品(讲义 04) → 搜索发现(讲义 05-06) → 加购选地址(讲义 07)
+   → 下单锁库存(讲义 07+10) → 支付(讲义 02-03 / 08-09)
+   → 商家发货 → 用户收货 / 自动确认 → 清算结算补充讲义 → 退款
 ```
 
 并行业务：
 
-- 营销活动（优惠券 / 秒杀 / 抢红包）—— deck 08
-- 流量治理（限流 / 熔断 / 削峰）—— deck 10
-- 最终一致性（Outbox / Saga）—— deck 11
-- 商家后台 + 可观测—— deck 12
+- 营销活动（优惠券 / 秒杀 / 抢红包）——相关博客与代码模块
+- 流量治理（限流 / 熔断 / 削峰）——讲义 12-13
+- 最终一致性（Outbox / Saga）——讲义 00（下）及相关博客
+- 商家后台与可观测性——架构文档与对应代码模块
 
 ---
 
@@ -320,45 +319,14 @@ func tryInitES(ctx context.Context) {
 
 ---
 
-## 业务侧 Deck（15 份 + 总览，按业务域拆）
+## 教学文档
 
-录制顺序以 [`docs/lecture/README.md`](docs/lecture/README.md) 为准；下面的编号是现有 deck 文件编号，不代表授课顺序。支付在正式课程的第二讲。
+教学材料以 Markdown 为唯一源稿，不再同时维护 TeX 和生成 PDF：
 
-| # | 主题 | 文件 |
-|---|------|------|
-| 01 | 用户与鉴权 | `docs/slides/01-user-auth.{tex,pdf}` |
-| 02 | 商品展示 | `docs/slides/02-product-display.{tex,pdf}` |
-| 03 | 商品搜索 | `docs/slides/03-product-search.{tex,pdf}` |
-| 04 | 购物车 → 下单 | `docs/slides/04-cart-to-order.{tex,pdf}` |
-| 05 | 支付（法币） | `docs/slides/05-payment.{tex,pdf}` |
-| 06 | Web3 支付 | `docs/slides/06-payment-web3.{tex,pdf}` |
-| 07 | 库存与防超发 | `docs/slides/07-inventory.{tex,pdf}` |
-| 08 | 营销活动 | `docs/slides/08-marketing.{tex,pdf}` |
-| 09 | 订单生命周期（7 态） | `docs/slides/09-order-lifecycle.{tex,pdf}` |
-| 10 | 流量治理 | `docs/slides/10-traffic-governance.{tex,pdf}` |
-| 11 | Outbox 与一致性 | `docs/slides/11-consistency.{tex,pdf}` |
-| 12 | 商家后台 + 可观测性 | `docs/slides/12-merchant-ops.{tex,pdf}` |
-| 13 | 满减促销引擎 | `docs/slides/13-promo-engine.{tex,pdf}` |
-| 14 | 拼团 | `docs/slides/14-groupbuy.{tex,pdf}` |
-| 15 | 预售（定金 / 尾款） | `docs/slides/15-preorder.{tex,pdf}` |
-
-另有一份总览 `docs/slides/00-overview.{tex,pdf}` 串起全局。
-
-每份 deck 约 40-50 页、≥ 6 TikZ、≥ 18 处 `file:line` 真实代码引用、≥ 5 段关键代码 + 逐行讲解、≥ 2 处来自 `stressTest/REPORT.md` 的实测数字。
-
-体例：业务 70% / 代码 30%，**业务困局 → 流程 → 关键代码 → 业务码 / 客服话术 / 各角色视角 → 路线图**。
-
-编译：
-
-```bash
-cd docs/slides
-./build.sh             # 全量
-./build.sh 03          # 只编 deck 03
-./build.sh --master    # 合订本 master.pdf
-```
-
-配套博客（12 篇）：`docs/blog/01-*.md` ~ `11-*.md`。
-特性现状路线图：`docs/architecture/feature-matrix.md`。
+- [课程总目录](docs/lecture/README.md)：按录制和学习顺序阅读；
+- [技术博客](docs/blog/README.md)：按幂等、库存、一致性、Web3 和搜索等主题深入；
+- [架构文档](docs/README.md#架构与设计)：查看清结算、DDD 迁移和功能边界；
+- [文档总入口](docs/README.md)：不知道从哪里开始时只看这一页。
 
 ---
 
@@ -442,8 +410,7 @@ gomall
 ├── docs
 │   ├── architecture    # feature matrix / DDD 迁移手册 / 路线图
 │   ├── blog            # 12 篇博客长文
-│   ├── slides          # 15 份 Beamer Deck + 00 总览
-│   └── slides-pipeline # 历史需求 / 方案 / 验收文档
+│   └── lecture         # Markdown 课程讲义与唯一学习顺序
 ├── initialize          # cron / inventory / outbox / search / web3 启动
 ├── internal            # 领域代码（每域一包：handler / service / repo / model / dto）
 │   ├── address · admin · carousel · cart · category · coupon · favorite
