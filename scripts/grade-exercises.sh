@@ -8,6 +8,15 @@ chapters=(
   "./exercises/02-payment-up/..."
   "./exercises/03-payment-down/..."
   "./exercises/04-payment-clearing/..."
+  "./exercises/05-payment-settlement/..."
+)
+race_student_packages=(
+  "./exercises/05-payment-settlement/05.03-concurrent-idempotent-settlement/problem"
+  "./exercises/05-payment-settlement/05.04-refund-settlement-race/problem"
+)
+race_solution_packages=(
+  "./exercises/05-payment-settlement/05.03-concurrent-idempotent-settlement/solution"
+  "./exercises/05-payment-settlement/05.04-refund-settlement-race/solution"
 )
 
 case "$mode" in
@@ -15,11 +24,13 @@ case "$mode" in
     packages=()
     for chapter in "${chapters[@]}"; do packages+=("${chapter}/problem"); done
     go test -tags exercise "${packages[@]}"
+	go test -race -tags exercise "${race_student_packages[@]}"
     ;;
   solution)
     packages=()
     for chapter in "${chapters[@]}"; do packages+=("${chapter}/solution"); done
     go test -tags exercise "${packages[@]}"
+	go test -race -tags exercise "${race_solution_packages[@]}"
     ;;
   compile)
     packages=()
