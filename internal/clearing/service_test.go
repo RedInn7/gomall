@@ -103,6 +103,46 @@ func TestClearingDefersSellerCreditAndSettlementIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSettlementRollsBackSellerBalanceWhenLedgerWriteFails(t *testing.T) {
+	db := openClearingTestDB(t)
+	seedUser(t, db, 61, 0)
+	seedUser(t, db, 62, 500)
+	o := seedOrder(t, db, 606, 61, 62, consts.OrderCompleted, 300)
+	if err := db.Create(&PaymentClearing{
+		OrderID: o.ID, BuyerID: o.UserID, SellerID: o.BossID,
+		Channel: ChannelWallet, GrossCents: 300, NetCents: 300,
+		Currency: "USD", Status: StatusCleared, ClearedAt: time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed clearing: %v", err)
+	}
+
+	// 预先占用结算 debit 的幂等键，使事务在余额更新后、写流水时失败。
+	if err := money.NewLedgerDaoByDB(db).AppendSystemTransaction(
+		money.AccountCodeMerchantEscrow,
+		o.ID,
+		money.DirectionDebit,
+		300,
+		money.BizTypeOrderSettle,
+	); err != nil {
+		t.Fatalf("seed conflicting ledger entry: %v", err)
+	}
+
+	if err := settleCompletedOrder(db, o.ID); err == nil {
+		t.Fatal("settlement should fail when the ledger idempotency key already exists")
+	}
+	if got := userBalance(t, db, o.BossID); got != 500 {
+		t.Fatalf("seller balance must roll back after ledger failure: got %d want 500", got)
+	}
+
+	var record PaymentClearing
+	if err := db.Where("order_id = ?", o.ID).First(&record).Error; err != nil {
+		t.Fatalf("load clearing: %v", err)
+	}
+	if record.Status != StatusCleared || record.SettledAt != nil {
+		t.Fatalf("clearing state must roll back after ledger failure: status=%s settled_at=%v", record.Status, record.SettledAt)
+	}
+}
+
 func TestExternalClearingUsesSeparateSystemAccounts(t *testing.T) {
 	db := openClearingTestDB(t)
 	seedUser(t, db, 31, 0)
