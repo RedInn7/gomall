@@ -39,6 +39,3 @@ stressTest/config.json
 /docs/**/*.pdf
 /docs/slides/
 /docs/slides-pipeline/
-
-# AI 指令文件，不入公开仓库（保留在本地）
-CLAUDE.md
