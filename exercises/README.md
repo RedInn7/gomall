@@ -21,7 +21,7 @@ solution/    参考答案
 每道题的 `problem/readme.md` 会说明业务背景和完成条件。先读题，再打开同目录下的 `.go` 文件，找到 `TODO`：
 
 ```bash
-rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down exercises/04-payment-clearing
+rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down exercises/04-payment-clearing exercises/05-payment-settlement
 ```
 
 如果编辑器支持全局搜索，直接搜索 `TODO` 也可以。
@@ -292,6 +292,50 @@ go test -tags exercise ./exercises/04-payment-clearing/04.01-clearing-ledger/pro
 - 正确处理普通价、促销最终价、币种和外部凭证标准化；
 - 非法输入、重复订单和托管入账失败时不留下半成品；
 - 通过题目列出的 16 个公开测试场景。
+
+## 第六讲：支付结算
+
+这组题从“订单完成”开始，要求把托管资金安全地转入卖家钱包。题目会连续制造重复消息、写账失败、结算与退款并发，以及历史数据不一致。
+
+### 05.01 结算状态守卫
+
+```bash
+go test -tags exercise ./exercises/05-payment-settlement/05.01-settlement-state-guard/problem
+```
+
+根据订单状态和资金状态判断执行结算、幂等跳过或返回错误。重点是不同终态同时出现时的判断优先级。
+
+### 05.02 原子卖家结算
+
+```bash
+go test -tags exercise ./exercises/05-payment-settlement/05.02-atomic-seller-settlement/problem
+```
+
+在一次事务中更新卖家余额、写托管 debit、写卖家 credit，并推进清算状态。任何一个故障点都必须完整回滚。
+
+### 05.03 并发幂等结算
+
+```bash
+go test -race -tags exercise ./exercises/05-payment-settlement/05.03-concurrent-idempotent-settlement/problem
+```
+
+处理大量重复完成事件，保证同一订单只放款一次；多个订单同时修改同一卖家余额时也不能丢失更新。
+
+### 05.04 退款与结算竞争
+
+```bash
+go test -race -tags exercise ./exercises/05-payment-settlement/05.04-refund-settlement-race/problem
+```
+
+让结算和退款争夺同一笔托管款。最终只能有一个资金终态，失败的一方不得留下余额或单边流水。
+
+### 05.05 结算对账
+
+```bash
+go test -tags exercise ./exercises/05-payment-settlement/05.05-settlement-reconciliation/problem
+```
+
+使用一次线性扫描找出清算单缺失、终态冲突、流水缺失、借贷不平和卖家余额链异常，并按订单号稳定输出。
 
 ## 一次运行全部题目
 
