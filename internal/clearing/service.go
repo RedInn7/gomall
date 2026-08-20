@@ -207,11 +207,14 @@ func settleCompletedOrder(db *gorm.DB, orderID uint) error {
 			return err
 		}
 		after := before + record.NetCents
+		// users.money 是业务查询余额时读取的余额快照。流水只负责审计，
+		// 不会反向修改该字段，因此必须先把结算后的余额重新加密并显式落库。
 		seller.Money = strconv.FormatInt(after, 10)
 		cipher, err := seller.EncryptMoney()
 		if err != nil {
 			return err
 		}
+		seller.Money = cipher
 		if err := tx.Model(&user.User{}).Where("id = ?", seller.ID).Update("money", cipher).Error; err != nil {
 			return err
 		}

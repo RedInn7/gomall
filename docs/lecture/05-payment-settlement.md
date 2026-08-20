@@ -6,7 +6,7 @@
 
 清算解决“平台已经收到钱”，结算解决“这笔钱现在属于谁”。这一讲从 `payment_clearing.status = cleared` 开始，沿着 `order.completed` 消息一直走到卖家入账或买家退款。
 
-本讲默认学生已经知道支付清算会创建 `payment_clearing`，并把资金记入 `merchant_escrow`。如果这部分还不清楚，先看《支付清算：平台收到的钱去了哪里》。
+本讲默认学生已经知道支付清算会创建 `payment_clearing`，并把资金记入 `merchant_escrow`。如果这部分还不清楚，先看前一讲《支付清算：平台收到的钱去了哪里》。
 
 ---
 
@@ -34,9 +34,9 @@ merchant_escrow   debit   10000
 
 真正困难的不是加一次余额，而是回答这些问题：
 
-- 完成事件发送了两次，会不会放款两次；
+- 完成事件发送了两次，会不会放款两次；（幂等性，如何处理）
 - 完成事件晚到，订单已经退款怎么办；
-- 结算和退款同时执行，谁有权拿走托管资金；
+- 结算和退款同时执行，谁有权拿走托管资金；（冲突如何处理）
 - 卖家余额改了，但消息确认失败怎么办；
 - 数据库临时不可用，消息应该重试还是丢弃。
 
@@ -62,7 +62,7 @@ merchant_escrow   debit   10000
 
 gomall 把链路拆成两段：
 
-1. 订单事务把状态改为 `Completed`，同时写入 Outbox；
+1. 订单事务把状态改为 `Completed`，同时写入 Outbox（算是大厂的一套标准了，基本都会这么干）；思考为什么写Outbox，不写outbox会出现什么问题，思考为什么要有事务
 2. Outbox 发布 `order.completed`，独立消费者执行结算。
 
 ```mermaid
@@ -144,12 +144,14 @@ func DispatchSettleEvent(
 func settleCompletedOrder(db *gorm.DB, orderID uint) error {
     return db.Transaction(func(tx *gorm.DB) error {
         var o order.Order
+        // SELECT ... FOR UPDATE：锁住当前订单行。
         if err := tx.Clauses(
             clause.Locking{Strength: "UPDATE"},
         ).First(&o, orderID).Error; err != nil {
             return err
         }
 
+       //PaymentClearing 对应的清算表
         var record PaymentClearing
         if err := tx.Clauses(
             clause.Locking{Strength: "UPDATE"},
@@ -161,7 +163,7 @@ func settleCompletedOrder(db *gorm.DB, orderID uint) error {
             return err
         }
 
-        switch record.Status {
+        switch record.Status {//异常检查
         case StatusSettled, StatusRefunded:
             return nil
         case StatusCleared:
@@ -210,7 +212,18 @@ if err != nil {
 }
 after := before + record.NetCents
 
-// 1. 卖家余额更新为 after
+// 1. 更新卖家真实余额。after 只是内存里的计算结果，流水也不会自动改余额。
+seller.Money = strconv.FormatInt(after, 10)
+cipher, err := seller.EncryptMoney()
+if err != nil {
+    return err
+}
+seller.Money = cipher
+if err := tx.Model(&user.User{}).
+    Where("id = ?", seller.ID).
+    Update("money", cipher).Error; err != nil {
+    return err
+}
 
 ledger := money.NewLedgerDaoByDB(tx)
 
@@ -237,6 +250,15 @@ if err := ledger.AppendTransaction(
     return err
 }
 ```
+
+这里必须区分余额和流水：
+
+- `users.money` 保存卖家此刻可以使用多少钱，付款、退款和余额查询都会直接读取它；
+- `account_transaction` 保存余额为什么发生变化，用于对账、审计和排查重复入账；
+- `after` 只是当前 Go 函数里的变量，如果没有执行 `UPDATE users SET money = ...`，事务结束后卖家余额不会发生任何变化；
+- 写入卖家钱包的 `credit` 流水也不会触发余额更新，它只是记录这次变化的证据。
+
+卖家余额经过加密后落在 `users.money`。`merchant_escrow` 是系统托管账户，没有对应的用户余额行，因此托管余额通过 `account_code = merchant_escrow` 的流水汇总得到。两种账户模型不同，不能因为托管账户只写流水，就省略卖家钱包的余额更新。
 
 最后再把状态从 `cleared` 改成 `settled`：
 
