@@ -369,37 +369,16 @@ for d := range msgs {
 
 `UpsertProduct` 和 `DeleteProduct` 都设置 `Refresh: "false"`。写请求成功以后，新文档还要等 ES refresh 才能被搜索看见。因此一件商品从 MySQL 变化到可搜索，中间至少要经过事件等待、消息消费和 ES refresh。
 
-### 想一想：当前事务 Outbox 能保证什么，不能保证什么？
+### 想一想：为什么商品写入和 Outbox 必须共用同一个事务？
 
-先沿源码观察下面三个事实，不要急着看答案：
-
-1. `createProductAndEvent`、`updateProductAndEvent`、`deleteProductAndEvent` 是否让所有 DAO 绑定同一个 `tx`？
-2. `insertProductChanged` 写 Outbox 失败后，错误是否会返回到事务回调？
-3. 管理端触发 `BackfillFromDB` 时，某个商品 Upsert 失败，本轮任务会停止、立即重试，还是继续处理后面的商品？
-
-假设运营把商品 123 从下架改成上架，但同一事务中的 Outbox 插入失败。请回答：
-
-- 商品接口会向运营返回成功还是失败？
-- MySQL 中商品 123 会保留新状态还是回滚到旧状态？
-- Outbox 表会不会留下半条事件？
-- 为什么事务已经完备，用户仍可能在短时间内搜到旧状态？
-- 现有 backfill 能否修复？如果商品 123 本次 Upsert 也失败，它什么时候才有机会再次处理？
-- 还需要哪些测试，才能防止以后有人重新拆开这个事务？
+假设运营把商品 123 从下架改成上架，但写入 `product.changed` 事件时数据库报错。当前实现最终应该保留新状态，还是回滚到旧状态？为什么？
 
 <details>
 <summary>参考答案</summary>
 
-当前实现已经是事务 Outbox。创建路径把商品、相册记录和 `product.changed` 事件放在同一事务；更新与删除路径也使用同一个 `tx` 修改商品并写事件。`insertProductChanged` 直接返回插入错误，因此 Outbox 失败会让整个事务回滚，接口返回失败。
+应该回滚到旧状态。当前实现让商品修改和 `product.changed` 事件使用同一个 `tx`：两者一起提交或一起回滚。Outbox 插入失败时，商品更新也不会生效，接口返回失败，因此不会出现“MySQL 已更新，但 ES 永远收不到同步事件”的半状态。
 
-事务回滚后，MySQL 仍保留商品 123 的旧状态，Outbox 也不会留下半条事件。代码还会检查更新和删除的 `RowsAffected`：商品不存在或卖家越权时，不写虚假的更新、删除事件。
-
-事务只能保证 MySQL 商品事实与 Outbox 事件一起成功或一起失败，不能让 ES 同步变成强一致。事务提交以后仍要等待 publisher、RabbitMQ、indexer 和 ES refresh，所以用户短时间内仍可能看到旧索引；这需要时延监控、重试和对账处理。
-
-管理端实际调用的是 `BackfillFromDB`：默认每批读取 200 条商品，单条 Upsert 失败时记录日志并继续。失败商品本轮不会立即重试；如果后面的更大 ID 成功，游标会继续向前，因此只能等下一次从头执行 backfill 才会再次处理它。
-
-项目里另有一个通用 `Backfill` 函数，它在 `loader` 失败时直接终止，并且不会推进失败 ID 的游标。分析代码时要分清“仓库里存在的辅助函数”和“管理端真实调用的实现”。
-
-回归测试应主动注入 Outbox 插入失败，分别验证创建不留商品与相册、更新恢复旧字段、删除恢复原记录；还要验证越权更新和删除不会产生事件。backfill 仍然保留，用于初始化、对账修复和处理历史缺口，但不能代替可靠的增量事件链路。
+事务只保证 MySQL 商品事实与 Outbox 事件一致，不保证 ES 立即更新。事务提交后仍要经过 publisher、RabbitMQ、indexer 和 ES refresh，所以用户短时间内仍可能看到旧索引。
 
 </details>
 
