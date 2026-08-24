@@ -24,6 +24,7 @@ import (
 var ProductSrvIns *ProductSrv
 var ProductSrvOnce sync.Once
 
+// ErrProductNotFoundOrForbidden 统一隐藏“商品不存在”和“卖家越权”的差异，避免泄露他人商品是否存在。
 var ErrProductNotFoundOrForbidden = errors.New("商品不存在或无权操作")
 
 type ProductSrv struct {
@@ -172,6 +173,8 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		log.LogrusObj.Error("创建产品失败，err:", err)
 		return nil, err
 	}
+	// 清掉可能由提前探测未来 ID 写入的空值缓存，让新商品提交后立即可读。
+	_ = cache.DelProductDetail(ctx, product.ID)
 
 	return product, nil
 }

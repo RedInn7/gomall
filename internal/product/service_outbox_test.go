@@ -55,8 +55,8 @@ func TestCreateProductAndEventRollsBackWhenImageInsertFails(t *testing.T) {
 		t.Fatal("createProductAndEvent() error = nil, want injected image error")
 	}
 	assertTableCount(t, db.Unscoped().Model(&Product{}), 0)
+	assertTableCount(t, db.Unscoped().Model(&ProductImg{}), 0)
 	assertTableCount(t, db.Model(&outbox.OutboxEvent{}), 0)
-
 }
 
 func TestUpdateProductAndEventCommitsTogether(t *testing.T) {
@@ -90,6 +90,7 @@ func TestUpdateProductAndEventRollsBackWhenOutboxInsertFails(t *testing.T) {
 	if got := loadProduct(t, db, p.ID); got.Name != p.Name {
 		t.Fatalf("product name = %q, want rollback to %q", got.Name, p.Name)
 	}
+	assertTableCount(t, db.Model(&outbox.OutboxEvent{}), 0)
 }
 
 func TestUpdateProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
@@ -97,6 +98,16 @@ func TestUpdateProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
 	p := seedProduct(t, db)
 
 	err := updateProductAndEvent(db, p.ID, p.BossID+1, testProduct())
+	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
+		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
+	}
+	assertTableCount(t, db.Model(&outbox.OutboxEvent{}), 0)
+}
+
+func TestUpdateProductAndEventRejectsMissingProductWithoutEvent(t *testing.T) {
+	db := openProductOutboxTestDB(t, true)
+
+	err := updateProductAndEvent(db, 404, 22, testProduct())
 	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
 		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
 	}
@@ -127,6 +138,7 @@ func TestDeleteProductAndEventRollsBackWhenOutboxInsertFails(t *testing.T) {
 		t.Fatal("deleteProductAndEvent() error = nil, want injected outbox error")
 	}
 	_ = loadProduct(t, db, p.ID)
+	assertTableCount(t, db.Model(&outbox.OutboxEvent{}), 0)
 }
 
 func TestDeleteProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
@@ -141,6 +153,16 @@ func TestDeleteProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
 	assertTableCount(t, db.Model(&outbox.OutboxEvent{}), 0)
 }
 
+func TestDeleteProductAndEventRejectsMissingProductWithoutEvent(t *testing.T) {
+	db := openProductOutboxTestDB(t, true)
+
+	err := deleteProductAndEvent(db, 404, 22)
+	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
+		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
+	}
+	assertTableCount(t, db.Model(&outbox.OutboxEvent{}), 0)
+}
+
 func openProductOutboxTestDB(t *testing.T, migrateOutbox bool) *gorm.DB {
 	t.Helper()
 	dsn := fmt.Sprintf("file:product-outbox-%s?mode=memory&cache=shared", t.Name())
@@ -148,6 +170,12 @@ func openProductOutboxTestDB(t *testing.T, migrateOutbox bool) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get sqlite connection: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	models := []any{&Product{}, &ProductImg{}}
 	if migrateOutbox {
 		models = append(models, &outbox.OutboxEvent{})
