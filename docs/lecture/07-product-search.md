@@ -300,14 +300,14 @@ ES 正常时，`firstNonEmpty` 会选到 `name`，搜索“咖啡壶”。ES 故
 
 因此，“后台显示已上架”和“前台可以搜索”是两个不同的业务时刻。产品需要给这段延迟设目标，例如 99% 的商品修改在 30 秒内可搜索；否则技术链路即使没有报错，也无法判断体验是否合格。
 
-商品写入 MySQL 后，`internal/product/service.go` 调用 `emitProductChanged`，向 Outbox 表插入事件。后台发布器把事件投递到 RabbitMQ，`service/search/indexer.go` 再读取 MySQL 中的最新商品并写入 ES。
+`internal/product/service.go` 在同一个数据库事务里写入商品与 Outbox 事件。事务提交后，后台发布器把事件投递到 RabbitMQ，`service/search/indexer.go` 再读取 MySQL 中的最新商品并写入 ES。
 
 ```text
 商品创建 / 修改 / 删除
         │
         ▼
       MySQL
-        │ emitProductChanged
+        │ 同一事务写 product.changed
         ▼
    Outbox（routing key: product.changed）
         │ 后台发布
@@ -369,34 +369,37 @@ for d := range msgs {
 
 `UpsertProduct` 和 `DeleteProduct` 都设置 `Refresh: "false"`。写请求成功以后，新文档还要等 ES refresh 才能被搜索看见。因此一件商品从 MySQL 变化到可搜索，中间至少要经过事件等待、消息消费和 ES refresh。
 
-### 想一想：Outbox 已经用了，为什么 ES 仍可能长期过期？
+### 想一想：当前事务 Outbox 能保证什么，不能保证什么？
 
 先沿源码观察下面三个事实，不要急着看答案：
 
-1. `ProductCreate`、`ProductUpdate`、`ProductDelete` 在什么时刻调用 `emitProductChanged`？
-2. `emitProductChanged` 写 Outbox 失败后，是把错误返回给商品接口，还是只记录日志？
+1. `createProductAndEvent`、`updateProductAndEvent`、`deleteProductAndEvent` 是否让所有 DAO 绑定同一个 `tx`？
+2. `insertProductChanged` 写 Outbox 失败后，错误是否会返回到事务回调？
 3. 管理端触发 `BackfillFromDB` 时，某个商品 Upsert 失败，本轮任务会停止、立即重试，还是继续处理后面的商品？
 
-假设运营把商品 123 从下架改成上架，MySQL 更新成功，但紧接着 Outbox 插入失败。请回答：
+假设运营把商品 123 从下架改成上架，但同一事务中的 Outbox 插入失败。请回答：
 
 - 商品接口会向运营返回成功还是失败？
-- RabbitMQ 发布器重启后，能否自动补出商品 123 的事件？
-- 用户继续搜索时，可能看到什么旧状态？
+- MySQL 中商品 123 会保留新状态还是回滚到旧状态？
+- Outbox 表会不会留下半条事件？
+- 为什么事务已经完备，用户仍可能在短时间内搜到旧状态？
 - 现有 backfill 能否修复？如果商品 123 本次 Upsert 也失败，它什么时候才有机会再次处理？
-- 怎样修改代码，才能从根源上关闭这个一致性窗口？
+- 还需要哪些测试，才能防止以后有人重新拆开这个事务？
 
 <details>
 <summary>参考答案</summary>
 
-当前实现属于“使用了 Outbox 表，但还不是严格的事务 Outbox”。三个商品写接口都先提交商品变更，再调用 `emitProductChanged`。该函数内部重新创建 Outbox DAO；插入失败时只写错误日志，不把错误返回给调用方，所以商品接口仍可能返回成功。
+当前实现已经是事务 Outbox。创建路径把商品、相册记录和 `product.changed` 事件放在同一事务；更新与删除路径也使用同一个 `tx` 修改商品并写事件。`insertProductChanged` 直接返回插入错误，因此 Outbox 失败会让整个事务回滚，接口返回失败。
 
-这时 Outbox 表里根本没有商品 123 的事件。发布器只能重试已经落表的记录，无论重启多少次都无法凭空补出这条消息。ES 会继续保留旧的上下架状态，直到后续更新产生新事件，或者运维执行全量回填。
+事务回滚后，MySQL 仍保留商品 123 的旧状态，Outbox 也不会留下半条事件。代码还会检查更新和删除的 `RowsAffected`：商品不存在或卖家越权时，不写虚假的更新、删除事件。
+
+事务只能保证 MySQL 商品事实与 Outbox 事件一起成功或一起失败，不能让 ES 同步变成强一致。事务提交以后仍要等待 publisher、RabbitMQ、indexer 和 ES refresh，所以用户短时间内仍可能看到旧索引；这需要时延监控、重试和对账处理。
 
 管理端实际调用的是 `BackfillFromDB`：默认每批读取 200 条商品，单条 Upsert 失败时记录日志并继续。失败商品本轮不会立即重试；如果后面的更大 ID 成功，游标会继续向前，因此只能等下一次从头执行 backfill 才会再次处理它。
 
 项目里另有一个通用 `Backfill` 函数，它在 `loader` 失败时直接终止，并且不会推进失败 ID 的游标。分析代码时要分清“仓库里存在的辅助函数”和“管理端真实调用的实现”。
 
-根本修复方式是让商品写入和 Outbox 插入共用同一个 `tx`：两者一起提交，任意一步失败就一起回滚。backfill 仍然应该保留，用于初始化、对账修复和处理历史缺口，但不能代替可靠的增量事件链路。
+回归测试应主动注入 Outbox 插入失败，分别验证创建不留商品与相册、更新恢复旧字段、删除恢复原记录；还要验证越权更新和删除不会产生事件。backfill 仍然保留，用于初始化、对账修复和处理历史缺口，但不能代替可靠的增量事件链路。
 
 </details>
 
@@ -416,14 +419,14 @@ for d := range msgs {
 
 ## 沿源码完整走一遍
 
-从 `service/search/routes.go` 开始，依次打开 `handler.go`、`product_query.go`、`service.go`、`repository/es/product_index.go` 和 `internal/product/repo.go`；然后换到写链，追 `emitProductChanged` 与 `service/search/indexer.go`。
+从 `service/search/routes.go` 开始，依次打开 `handler.go`、`product_query.go`、`service.go`、`repository/es/product_index.go` 和 `internal/product/repo.go`；然后换到写链，追 `createProductAndEvent`、`insertProductChanged` 与 `service/search/indexer.go`。
 
 用下面四种输入检查分支：
 
 1. ES 客户端存在，但查询返回 500。`ProductSearch` 会记录错误并查数据库；数据库也失败时，接口仍然失败。
 2. 删除消息重复投递。第二次 ES Delete 返回 404，仓储层视为成功，消费者 Ack，不会持续重试。
 3. 请求为 `title=防水跑鞋&page_num=2&page_size=10`。ES 使用“防水跑鞋”、`from=10`、`size=10`；降级路径读取空的 `req.Info`，查询条件变为 `name LIKE '%%' OR info LIKE '%%'`。
-4. 商品更新成功，Outbox 插入失败。重启发布器也补不出消息，因为表中根本没有这条 Outbox 记录；只能依靠对账或回填修复 ES。
+4. 商品更新事务中 Outbox 插入失败。事务整体回滚，MySQL 保留旧商品，Outbox 不留事件；接口返回失败，不会对外宣称这次更新已经完成。
 
 ## 课后练习
 
@@ -437,9 +440,9 @@ for d := range msgs {
 
 把普通 ES 查询改为 `bool`：`multi_match` 放进 `must`，`category_id` 和 `on_sale=true` 放进 `filter`。数据库降级也要在同一个 GORM 查询上追加对应的 `WHERE`，列表和 `COUNT` 共用相同条件。
 
-### 3. 合并商品写入与事件记录
+### 3. 验证商品写入与事件记录的原子性
 
-设计一次商品更新，让商品表修改与 Outbox 插入使用同一个事务：
+阅读当前事务 helper，解释为什么所有 DAO 都必须绑定同一个 `tx`：
 
 ```go
 err := db.Transaction(func(tx *gorm.DB) error {
@@ -452,7 +455,7 @@ err := db.Transaction(func(tx *gorm.DB) error {
 })
 ```
 
-两个 DAO 都要绑定同一个 `tx`，Outbox 插入失败应使事务回滚。RabbitMQ 发布仍交给事务外的后台发布器，不要把网络请求塞进数据库事务。
+补充故障测试，分别在创建、更新和删除时注入 Outbox 插入错误，验证商品事实和事件一起回滚。RabbitMQ 发布仍交给事务外的后台发布器，不要把网络请求塞进数据库事务。
 
 ### 4. 排查“刚上架却搜不到”
 
