@@ -63,12 +63,13 @@ func (d *ProductDao) CountProductByCondition(condition map[string]interface{}) (
 	return
 }
 
-// DeleteProduct 删除商品
-func (d *ProductDao) DeleteProduct(pId, uId uint) error {
-	return d.DB.Model(&Product{}).
+// DeleteProduct 只删除归属于当前卖家的商品，并返回受影响行数。
+// RowsAffected=0 表示商品不存在或卖家无权操作，调用方不得继续发送删除事件。
+func (d *ProductDao) DeleteProduct(pId, uId uint) (int64, error) {
+	res := d.DB.Model(&Product{}).
 		Where("id = ? AND boss_id = ?", pId, uId).
-		Delete(&Product{}).
-		Error
+		Delete(&Product{})
+	return res.RowsAffected, res.Error
 }
 
 // UpdateProduct 更新商品。
