@@ -1,10 +1,10 @@
 # 04.01：把“支付成功”记成一笔平衡的清算账
 
-## 故障现场
+## 背景
 
 Wallet 的钱来自站内余额，Stripe/Web3 的钱来自外部系统，但三种渠道最终都要形成同一种业务结果：订单已经实收，资金进入卖家待结算托管账户。若只写清算单、漏写账本，或者只写借方、漏写贷方，系统就会出现资损和对账差异。
 
-## 任务
+## 需要实现
 
 完成 `RecordClearedTx`：在一个原子操作中写入清算凭证，并生成金额相等的一借一贷两条分录。
 
@@ -17,7 +17,7 @@ func RecordClearedTx(
 ) error
 ```
 
-## 业务规则
+## 实现要求
 
 1. Wallet 借记买家的 `user_wallet`，并保存扣款后余额。
 2. Stripe/Web3 借记系统账户 `external_clearing`，不需要买家余额。
@@ -30,7 +30,7 @@ func RecordClearedTx(
 9. 任一步失败必须整体回滚，不能留下清算单或单边账。
 10. 为贴合当前生产契约，零元订单允许清算；负数金额必须拒绝。
 
-## 公开测试场景
+## 测试场景
 
 | # | 场景 | 预期 |
 | ---: | --- | --- |
@@ -51,7 +51,7 @@ func RecordClearedTx(
 | 15 | 同一订单重复清算 | 返回重复错误，不新增记录 |
 | 16 | merchant_escrow 写入失败 | 清算单和 debit 一起回滚 |
 
-## 本地评测
+## 运行测试
 
 ```bash
 go test -tags exercise ./exercises/04-payment-clearing/04.01-clearing-ledger/problem
