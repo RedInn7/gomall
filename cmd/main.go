@@ -72,7 +72,9 @@ func loading() {
 	cache.InitCache()
 	snowflake.InitSnowflake(snowflakeNodeID())
 	initialize.InitCron()
-	initialize.InitInventory(context.Background())
+	// 大数据集的库存预热可能需要数分钟。放到后台执行，让商品浏览、登录等
+	// 不依赖库存桶的接口先开始服务；下单仍由库存服务校验对应商品的桶。
+	go initialize.InitInventory(context.Background())
 	tryInitRabbitMQ()
 	initialize.InitOutboxPublisher(context.Background())
 	initialize.InitOrderAsyncConsumer(context.Background())

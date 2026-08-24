@@ -1,12 +1,20 @@
 # 05 支付结算：订单完成后怎么把钱给卖家
 
 > gomall · `order.completed` / `clearing.settle` / 卖家钱包 / 退款竞争
+>
+>
+
+如果没有清结算，买家付完款之后直接把钱转给卖家的银行卡，会有什么问题？
+
+卖家如果没有履约，没有发货，就收到了这笔钱并且提款，此时买家申请退款，此时会如果卖家余额不足退款的话，需要由平台补上这个钱。这会导致平台的资损-》事故-》背锅
+
+
 
 这一讲先记住一个结论：**订单完成后，系统才能把资金从商户托管账户转入卖家钱包；结算和退款无论谁先发生，都必须锁住同一条清算记录来决定资金去向。**
 
 清算解决“平台已经收到钱”，结算解决“这笔钱现在属于谁”。这一讲从 `payment_clearing.status = cleared` 开始，沿着 `order.completed` 消息一直走到卖家入账或买家退款。
 
-本讲默认学生已经知道支付清算会创建 `payment_clearing`，并把资金记入 `merchant_escrow`。如果这部分还不清楚，先看前一讲《支付清算：平台收到的钱去了哪里》。
+本讲默认学生已经知道：可信支付结果成立时，支付清算会创建 `payment_clearing(status=cleared)`，并把资金记入 `merchant_escrow`。用户点击确认收货，或者超过收货 SLA 后由系统自动确认，改变的是订单状态：订单进入 `Completed`，随后才触发结算，把清算状态从 `cleared` 推进到 `settled`。如果这部分还不清楚，先看前一讲《支付清算：平台收到的钱去了哪里》。
 
 ---
 
@@ -23,7 +31,8 @@
 | 待发货 / 待收货 | `cleared` | 商户托管 | 否 |
 | 已完成 | `cleared` | 商户托管 | 可以执行结算 |
 | 已完成 | `settled` | 卖家钱包 | 已完成，不再处理 |
-| 退款中 / 已退款 | `cleared/refunded` | 托管或买家钱包 | 否 |
+| 退款中 | `cleared` 或 `settled` | 托管或卖家钱包 | 否，先由退款流程决定资金去向 |
+| 已退款 | `refunded` | 已退回买家 | 否 |
 
 结算动作本身很短：
 
@@ -35,6 +44,7 @@ merchant_escrow   debit   10000
 真正困难的不是加一次余额，而是回答这些问题：
 
 - 完成事件发送了两次，会不会放款两次；（幂等性，如何处理）
+- merchant escrow 扣款成功，卖家钱包加款失败怎么处理？ACID特性-》这个事务里面能有什么，不能有什么：不能有操控外部写的接口/MQ/外部RPC，最好只操纵表
 - 完成事件晚到，订单已经退款怎么办；
 - 结算和退款同时执行，谁有权拿走托管资金；（冲突如何处理）
 - 卖家余额改了，但消息确认失败怎么办；
@@ -47,10 +57,10 @@ merchant_escrow   debit   10000
 | Order | 订单是否已经履约完成 |
 | Outbox / RabbitMQ | 完成事实是否可靠送达 |
 | Clearing | 资金当前是 `cleared`、`settled` 还是 `refunded` |
-| Money Ledger | 资金从托管转到卖家的分录 |
+| Money Ledger | 资金从托管转到卖家的流水，是流水表，为了应对监管 |
 | Refund | 退款获批后，按资金位置执行逆向操作 |
 
-订单模块不直接修改卖家钱包。它只发布“订单已经完成”这个事实，清算模块据此决定能否结算。
+订单模块不直接修改卖家钱包。它只发布“订单已经完成”这个事实（走消息队列，外部模块订阅TOPIC 然后用生产者消费者的模式进行消费TOPIC），清算模块据此决定能否结算。
 
 ---
 
@@ -60,9 +70,11 @@ merchant_escrow   debit   10000
 
 如果确认收货接口同步调用资金模块，订单请求会同时依赖订单表、清算表、资金流水和卖家钱包。任何一处暂时失败，前端都会面对“订单到底完成了没有”的尴尬状态。
 
+如果同时在一个文件里改的话，需要频繁的REBASE ，不方便敏捷开发，不方便发版，不方便上线。
+
 gomall 把链路拆成两段：
 
-1. 订单事务把状态改为 `Completed`，同时写入 Outbox（算是大厂的一套标准了，基本都会这么干）；思考为什么写Outbox，不写outbox会出现什么问题，思考为什么要有事务
+1. 订单事务把状态改为 `Completed`，同时写入 Outbox（算是大厂的一套标准了，基本都会这么干）；思考为什么写Outbox（一张表同时记录这个订单的状态改变和流水表的改变和我们需要调用外部的MQ 接口），不写outbox会出现什么问题，思考为什么要有事务
 2. Outbox 发布 `order.completed`，独立消费者执行结算。
 
 ```mermaid
@@ -110,6 +122,7 @@ func DispatchSettleEvent(
     case "order.refund_rejected":
         return HandleRefundRejectedEvent(ctx, payload)
     default:
+      //打Log
         return fmt.Errorf(
             "%w: unexpected routing key %q",
             errSettlePoisonMessage,
@@ -130,7 +143,7 @@ func DispatchSettleEvent(
 - JSON 无法解析、缺少 `order_id`：毒消息进入 DLQ；
 - 超过投递上限：进入 DLQ，等待人工排查。
 
-消息可能至少投递一次，所以结算函数必须自己保证幂等。不能把“RabbitMQ 通常只发一次”当成资金安全条件。
+消息可能至少投递一次（所有的消息队列都需要保证AT LEAST 1 ），所以结算函数必须自己保证幂等（一般来说所有的写操作都需要保证幂等，常见的方法是用redis来保证，也可以用mysql 的select for update来保证）。不能把“RabbitMQ 通常只发一次”当成资金安全条件。
 
 ---
 
@@ -152,6 +165,7 @@ func settleCompletedOrder(db *gorm.DB, orderID uint) error {
         }
 
        //PaymentClearing 对应的清算表
+      //什么是乐观锁，什么是悲观锁？悲观锁是在你访问潜在的有冲突的行之前，先加锁，再访问，乐观锁是先访问，如果有冲突，再解决。
         var record PaymentClearing
         if err := tx.Clauses(
             clause.Locking{Strength: "UPDATE"},
@@ -256,7 +270,7 @@ if err := ledger.AppendTransaction(
 - `users.money` 保存卖家此刻可以使用多少钱，付款、退款和余额查询都会直接读取它；
 - `account_transaction` 保存余额为什么发生变化，用于对账、审计和排查重复入账；
 - `after` 只是当前 Go 函数里的变量，如果没有执行 `UPDATE users SET money = ...`，事务结束后卖家余额不会发生任何变化；
-- 写入卖家钱包的 `credit` 流水也不会触发余额更新，它只是记录这次变化的证据。
+- 写入卖家钱包的 `credit` 流水也不会触发余额更新，它只是记录这次变化和将来应对监管的的证据。
 
 卖家余额经过加密后落在 `users.money`。`merchant_escrow` 是系统托管账户，没有对应的用户余额行，因此托管余额通过 `account_code = merchant_escrow` 的流水汇总得到。两种账户模型不同，不能因为托管账户只写流水，就省略卖家钱包的余额更新。
 
@@ -269,7 +283,7 @@ result := tx.Model(&PaymentClearing{}).
         "status": StatusSettled,
         "settled_at": time.Now(),
     })
-
+//会不会有并发的问题？ 实际没有并发的问题
 if result.Error != nil {
     return result.Error
 }
@@ -312,7 +326,8 @@ flowchart TD
 
 ```go
 fromEscrow := clearingFound &&
-    clearingRecord.Status == clearing.StatusCleared
+    clearingRecord.Status == clearing.StatusCleared//思考：为什么要这么判断？如果不判断clearingFound会有什么问题？-》空指针问题-》panic  一般来说，如果你去访问指针或者  .这种形式的话，都要判断是否为空
+
 
 if fromEscrow {
     err = ledgerDao.AppendSystemTransaction(
@@ -332,7 +347,7 @@ if fromEscrow {
 
 ### 4.2 结算和退款同时执行怎么办
 
-最危险的并发是：完成事件正准备给卖家放款，客服同时批准退款。
+最危险的并发是：完成事件正准备给卖家放款，客服同时批准退款。//又资损了，怎么办？
 
 ```mermaid
 sequenceDiagram
@@ -382,7 +397,7 @@ sequenceDiagram
 | 条件更新 | `WHERE status = cleared` | 防止状态被别的事务抢先推进 |
 | 消息处理 | 成功 Ack、失败重排、毒消息进 DLQ | 暂时故障可恢复，坏消息不堵队列 |
 
-幂等不是在函数开头写一个 `if processed`。资金链路需要数据库约束、事务锁、状态守卫和消息语义一起工作。
+幂等不是在函数开头写一个 `if processed`。绝对不能这么干，必出问题，PR 必被打回来。资金链路需要数据库约束、事务锁、状态守卫和消息语义一起工作。
 
 ### 5.2 三种消息顺序
 
@@ -392,7 +407,7 @@ sequenceDiagram
 | `refunded`，再迟到 `completed` | 已退款，完成事件不放款 |
 | `completed`，再 `refunded` | 先给卖家结算，退款再从卖家扣回 |
 
-系统不要求消息严格有序，而是要求每种顺序都收敛到合法资金结果。
+系统不要求消息严格有序（消息队列的消息也不是有序的），而是要求每种顺序都收敛到合法资金结果。
 
 ### 5.3 数据库提交成功，但 Ack 失败怎么办
 
@@ -400,58 +415,11 @@ RabbitMQ 会再次投递同一条消息。第二次消费锁住清算单后读�
 
 这正是“至少一次投递 + 业务幂等”的常见组合：允许消息重复，不允许资金结果重复。
 
----
 
-## 六、怎样测试一笔钱只结算一次
-
-### 6.1 核心测试
-
-`TestClearingDefersSellerCreditAndSettlementIsIdempotent` 先创建一笔 300 分的清算，再验证三个阶段：
-
-```go
-// 清算后卖家仍为 500。
-if got := userBalance(t, db, 22); got != 500 {
-    t.Fatalf("seller must not receive funds at clearing time")
-}
-
-// 履约前不能结算。
-if err := settleCompletedOrder(db, o.ID);
-    !errors.Is(err, ErrOrderNotCompleted) {
-    t.Fatalf("settlement before completion should fail")
-}
-
-// 订单完成后，连续执行两次结算。
-_ = settleCompletedOrder(db, o.ID)
-_ = settleCompletedOrder(db, o.ID)
-
-// 卖家只收到一次 300。
-if got := userBalance(t, db, 22); got != 800 {
-    t.Fatalf("seller should be credited exactly once")
-}
-```
-
-测试还会检查：
-
-- 托管账户只有一条结算 debit；
-- 卖家钱包只有一条结算 credit；
-- 清算状态最终为 `settled`；
-- `settled_at` 已经写入；
-- 两次调用后，结算流水总数仍然只有两条。
-
-### 6.2 退款竞争测试
-
-| 测试 | 证明什么 |
-|---|---|
-| `TestLateCompletedEventDoesNotSettleRefundedOrder` | 已退款订单不会被迟到事件重新放款 |
-| 退款服务的 `cleared` 场景 | 履约前退款从托管账户退，卖家余额不变 |
-| 退款服务的 `settled` 场景 | 履约后退款从卖家余额扣回 |
-| `TestDispatchSettleEventRejectsPoisonMessage` | 错误消息进入失败处理，不会误结算 |
-
-录制时可以暂时删掉 `case StatusSettled, StatusRefunded: return nil`，再连续调用两次结算。好的测试应该指出卖家余额或流水数量错了，而不只是说第二次调用返回了错误。
 
 ---
 
-## 七、代码从哪里读
+## 六、代码从哪里读
 
 | 想看的内容 | 文件 | 入口 |
 |---|---|---|

@@ -1,126 +1,32 @@
 # 06 商品展示：页面上的一件商品从哪里来
 
-目录
+## 什么是商品展示
 
-- [一、页面有商品，后端却可能没有返回商品](#一页面有商品后端却可能没有返回商品)
-- [二、列表接口不只是查一页数据](#二列表接口不只是查一页数据)
-- [三、热门商品的详情怎样读](#三热门商品的详情怎样读)
-- [四、商家改价以后，旧价格还会留在哪里](#四商家改价以后旧价格还会留在哪里)
-- [五、浏览器缓存与当前实现的边界](#五浏览器缓存与当前实现的边界)
+商品展示不是把一行数据库记录原样返回给浏览器。它要把商品事实转换成用户能理解的页面信息，包括名称、图片、标价、库存展示值、分类和详情，并在访问量上升时保持足够快的响应。
 
-仓库里已经有一套 React 店面，构建产物由 Go 服务挂在 `/app/`。商品卡片、详情弹窗、搜索浮层和购物袋都已经实现。这一讲沿着商品展示链路，判断页面数据来自 seed、HTTP 接口、Redis 还是 MySQL，并解释展示信息怎样影响用户浏览和后续交易。
+gomall 的 React 店面由 Go 服务挂在 `/app/`。用户打开首页后，商品数据可能经过浏览器缓存、Gin 中间件、Redis 和 MySQL；接口异常或返回空列表时，页面还可能继续显示前端 seed。
 
-商品展示看起来只是“把数据库中的商品画到页面上”，实际承担的是交易入口。用户要先看见商品、相信价格和库存，才会进入购物车和下单。这里一旦出错，结果不只是页面不好看：
+这意味着“页面上有商品”和“商品服务工作正常”不是同一件事。判断展示链路是否正确，必须继续追问：这件商品来自哪里、数据有多旧、下架后还能否访问，以及下单时会不会重新校验。
 
-- 上架商品没有展示，商家损失曝光和成交；
-- 下架商品仍能打开，用户可能为不可售商品下单；
-- 改价后页面长时间显示旧价，结算价与用户预期不一致；
-- 库存显示为有货、下单却失败，会持续消耗用户信任；
-- 为了提速而缓存错误响应，故障可能在后端恢复后继续影响用户。
+## 展示数据和交易事实有什么区别
 
-所以这一讲始终围绕三个业务问题展开：用户能不能看到应该看到的商品，页面信息能不能及时跟上商家的操作，以及展示数据与交易事实不一致时由谁兜底。
+| 用户看到的内容 | 展示系统的目标 | 真正交易时的要求 |
+| --- | --- | --- |
+| 商品名称与图片 | 快速、稳定地帮助用户识别商品 | 订单保存必要的商品快照 |
+| 标价与优惠价 | 尽量及时反映商家改价 | 下单时从权威数据重新计价 |
+| 库存展示值 | 告诉用户当前是否值得继续操作 | 创建订单时重新检查并扣减库存 |
+| 上架状态 | 下架商品不应继续获得曝光 | 所有公开入口和下单入口都要校验 |
+| 浏览量 | 可以异步更新并允许短暂误差 | 不参与付款和库存判断 |
 
-先在仓库根目录打开两个终端。第一个终端启动 MySQL 和 Redis：
+展示系统可以为了速度接受有上限的短暂延迟，交易系统不能直接相信浏览器、seed 或缓存里的旧值。用户即使绕过页面伪造价格，请求进入订单服务后也必须重新读取商品事实。
 
-```bash
-docker compose up -d mysql redis
-docker compose ps mysql redis
-```
+先看一个容易误判的场景：运营打开首页，看见八件商品，以为发布成功；后来才发现它们是打包在前端里的 seed，真实商家刚上架的商品没有出现。页面越像正常商城，越容易掩盖后端链路已经断开。
 
-第二个终端启动后端：
-
-```bash
-SNOWFLAKE_ALLOW_DEFAULT=true go run ./cmd
-```
-
-看到 `server listening on :5003` 后，打开：
-
-```text
-http://127.0.0.1:5003/app/
-```
-
-如果刚修改过 `web/src`，先重新构建前端，再启动 Go：
-
-```bash
-cd web
-npm ci
-npm run build
-cd ..
-SNOWFLAKE_ALLOW_DEFAULT=true go run ./cmd
-```
-
-另外保留一个终端，先定义地址，后面的命令可以逐条执行：
-
-```bash
-BASE_URL='http://127.0.0.1:5003/api/v1'
-```
-
-先访问当前前端使用的真实列表接口。再请求一个错误路径，对比 404 时页面与接口的差别：
-
-```bash
-curl -sS "$BASE_URL/product/list?page_num=1&page_size=12" | jq
-curl -i "$BASE_URL/products"
-```
-
-不要把商品 ID 写死成 42。直接从列表响应中取第一件商品：
-
-```bash
-PRODUCT_ID=$(
-  curl -sS "$BASE_URL/product/list?page_num=1&page_size=12" |
-  jq -r '.data.item[0].id'
-)
-echo "$PRODUCT_ID"
-curl -i "$BASE_URL/product/show?id=$PRODUCT_ID"
-```
-
-如果 `PRODUCT_ID` 输出 `null`，说明当前数据库没有商品数据。此时页面仍然能展示八张卡片，恰好可以证明它展示的是前端 seed，而不是数据库查询结果。
-
-查看浏览器缓存头和 304：
-
-```bash
-curl -sS -D - -o /dev/null \
-  "$BASE_URL/product/show?id=$PRODUCT_ID"
-
-ETAG=$(
-  curl -sS -D - -o /dev/null \
-  "$BASE_URL/product/show?id=$PRODUCT_ID" |
-  awk -F': ' 'tolower($1)=="etag" {gsub("\\r", "", $2); print $2}'
-)
-curl -i -H "If-None-Match: $ETAG" \
-  "$BASE_URL/product/show?id=$PRODUCT_ID"
-```
-
-查看 Redis 详情缓存。配置使用 4 号库；通过容器执行命令不要求本机安装 `redis-cli`：
-
-```bash
-docker exec redis redis-cli -n 4 GET "product:detail:$PRODUCT_ID"
-docker exec redis redis-cli -n 4 PTTL "product:detail:$PRODUCT_ID"
-docker exec redis redis-cli -n 4 TTL "product:detail:$PRODUCT_ID"
-```
-
-清掉详情缓存后连续请求两次，用来观察第一次回源和第二次缓存命中：
-
-```bash
-docker exec redis redis-cli -n 4 DEL \
-  "product:detail:$PRODUCT_ID" \
-  "product:lock:$PRODUCT_ID"
-
-curl -sS "$BASE_URL/product/show?id=$PRODUCT_ID" | jq
-docker exec redis redis-cli -n 4 PTTL "product:detail:$PRODUCT_ID"
-curl -sS "$BASE_URL/product/show?id=$PRODUCT_ID" | jq
-```
-
-不用时可以停止依赖：
-
-```bash
-docker compose stop mysql redis
-```
+这一讲从首页列表开始，继续追到热门商品详情、商家改价和浏览器缓存。学完后应该能回答四个问题：页面数据来自哪里，热点商品怎样保护数据库，改价后旧值会留在哪里，以及展示值为什么不能直接用于下单。
 
 ---
 
 ## 一、页面有商品，后端却可能没有返回商品
-
-先从一个上线事故开始：运营验收时首页有八件商品，大家认为发布成功；上线后才发现这些卡片是打包在前端里的 seed 数据，真实商家刚上架的商品一件也没有出现。页面“看起来正常”，反而掩盖了交易入口已经断开。
 
 运行仓库里的 React 店面，首页能看到商品卡片，搜索和购物袋也能用。单看页面，很容易以为商品服务已经接好了。
 
@@ -148,7 +54,7 @@ listProducts()
   .catch(() => { /* 接不到后端时保留 seed 数据 */ })
 ```
 
-因此，看到商品卡片仍然不能单独证明后端数据正常。录制时在 Network 中确认 `/api/v1/product/list` 返回 200，并把响应中的商品名与页面卡片对上；然后停止后端或制造一次失败请求，观察页面为什么仍保留 seed。
+因此，看到商品卡片仍然不能单独证明后端数据正常。在 Network 中确认 `/api/v1/product/list` 返回 200，并把响应中的商品名与页面卡片对上；然后停止后端或制造一次失败请求，观察页面为什么仍保留 seed。
 
 这也是排查商品页的起点。业务验收不能只问“页面有没有商品”，还要问“刚上架的商品多久能出现”“下架后多久消失”“接口失败时用户看到什么”。页面只能说明组件画出了东西，不能证明真实商品已经经过 Handler、Redis 和 MySQL 返回。
 
@@ -445,9 +351,92 @@ func Fail(ctx *gin.Context, err error) {
 
 这一讲最后要留下的不是某个 Redis key，而是一条业务边界：展示系统负责让用户快速看到尽可能新的信息，交易系统负责在真正扣库存、计价和付款前重新确认事实。前者可以接受有上限的延迟，后者不能相信浏览器和缓存带来的旧值。
 
-## 课后延伸
+## 沿源码完整走一遍
 
-- 为开发环境增加明确的接口失败和空列表提示，避免 seed 数据掩盖故障。
-- 给公开列表补稳定排序；定义下架语义后，为 list/show 增加一致的可见性测试。
-- 修改 `HTTPCache`，确保业务失败响应不会进入共享缓存，并分别测试成功、not found 和服务错误。
-- 为商品创建事务增加故障测试：图片记录或 Outbox 插入失败时，商品、相册记录和事件必须一起回滚。文件上传属于数据库外部副作用，还要设计孤儿文件清理或补偿任务。
+先从前端的 `web/src/App.tsx` 和 `web/src/api/products.ts` 看首页怎样请求列表，以及接口失败或返回空数组时为什么仍会保留 seed。随后从 `internal/product/routes.go` 进入 Handler、Service、缓存和 Repo，分别走一遍列表与详情。
+
+商家改价从商品更新入口开始，重点检查 `id + boss_id` 归属条件、商品与 Outbox 的数据库事务，以及事务提交后的延迟双删。最后回到 `middleware/httpcache.go`，判断浏览器缓存、Redis 缓存和数据库分别位于哪一层。
+
+下面的命令均在仓库根目录执行。先启动依赖和服务：
+
+```bash
+docker compose up -d mysql redis
+docker compose ps mysql redis
+SNOWFLAKE_ALLOW_DEFAULT=true go run ./cmd
+```
+
+Go 服务启动后，店面地址是 `http://127.0.0.1:5003/app/`。如果修改过 `web/src`，先执行 `cd web && npm ci && npm run build && cd ..`，再启动后端。
+
+定义接口地址，读取真实列表，并从响应里取得一个有效商品 ID：
+
+```bash
+BASE_URL='http://127.0.0.1:5003/api/v1'
+
+curl -sS "$BASE_URL/product/list?page_num=1&page_size=12" | jq
+
+PRODUCT_ID=$(
+  curl -sS "$BASE_URL/product/list?page_num=1&page_size=12" |
+  jq -r '.data.item[0].id'
+)
+echo "$PRODUCT_ID"
+curl -i "$BASE_URL/product/show?id=$PRODUCT_ID"
+```
+
+如果 `PRODUCT_ID` 是 `null`，说明数据库没有商品。此时再观察页面是否仍有八张卡片，就能判断 seed 是否掩盖了空数据。
+
+清除详情缓存并连续请求两次，观察第一次回源和第二次命中：
+
+```bash
+docker exec redis redis-cli -n 4 DEL \
+  "product:detail:$PRODUCT_ID" \
+  "product:lock:$PRODUCT_ID"
+
+curl -sS "$BASE_URL/product/show?id=$PRODUCT_ID" | jq
+docker exec redis redis-cli -n 4 PTTL "product:detail:$PRODUCT_ID"
+curl -sS "$BASE_URL/product/show?id=$PRODUCT_ID" | jq
+```
+
+再检查 HTTP 缓存头与条件请求：
+
+```bash
+curl -sS -D - -o /dev/null \
+  "$BASE_URL/product/show?id=$PRODUCT_ID"
+
+ETAG=$(
+  curl -sS -D - -o /dev/null \
+  "$BASE_URL/product/show?id=$PRODUCT_ID" |
+  awk -F': ' 'tolower($1)=="etag" {gsub("\\r", "", $2); print $2}'
+)
+
+curl -i -H "If-None-Match: $ETAG" \
+  "$BASE_URL/product/show?id=$PRODUCT_ID"
+```
+
+沿源码检查四种情况：
+
+1. 列表接口失败。前端保留 seed，页面仍有商品，但 Network 中请求失败。
+2. 数据库没有商品。接口返回空数组，前端仍保留 seed，`PRODUCT_ID` 为 `null`。
+3. 热门商品详情缓存失效。第一个请求回源，其他请求经过 Redis 锁、singleflight 或再次查询数据库。
+4. 商家改价。MySQL 先提交新价格与 Outbox，Redis 执行延迟双删，浏览器仍可能在 `max-age` 内显示旧价。
+
+## 课后练习
+
+### 1. 让 seed 不再掩盖接口故障
+
+为前端增加明确的 loading、empty 和 error 状态。接口失败时可以保留演示数据，但页面必须标明当前不是后端真实商品；空列表则展示空状态，不能继续伪装成八件在售商品。
+
+### 2. 统一商品可见性规则
+
+先确定下架商品是否允许通过 ID 访问详情，再为列表和详情实现一致的 `on_sale` 校验。补充测试覆盖上架、下架、越权访问和不存在商品。
+
+### 3. 固定列表分页契约
+
+给公开列表增加稳定排序，并用连续两页数据验证没有重复和遗漏。分类条件、排序字段和 `COUNT` 必须描述同一个候选集合。
+
+### 4. 验证缓存只保存成功响应
+
+修改 `HTTPCache`，让业务失败不进入共享缓存。分别测试成功、参数错误、商品不存在和数据库故障，并断言错误响应没有可复用的缓存头。
+
+### 5. 验证商品写入的原子性
+
+在商品创建或更新过程中注入图片记录、商品记录和 Outbox 写入错误，验证数据库内容与事件一起回滚。文件上传位于数据库事务之外，还要为已经上传但没有商品记录的文件设计清理或补偿流程。

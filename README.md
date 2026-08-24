@@ -1,6 +1,6 @@
 # gomall
 
-用 Go + Gin 写的电商后端，从浏览、下单、支付、履约，到优惠券、Web3 支付、向量检索都有。
+GoMall 是一套用 Go、Gin 和 React 实现的电商教学系统，覆盖商品展示、搜索、购物车、下单、支付、清算、结算、履约、库存和营销活动。React 店面由 Go 服务托管在 `/app/`，可以直接沿着用户操作追到后端代码和资金流水。
 
 项目文档统一使用 Markdown：按学习顺序阅读 `docs/lecture/`，跨课程共用的系统设计说明放在 `docs/architecture/`。总入口见 [`docs/README.md`](docs/README.md)。
 
@@ -8,9 +8,9 @@
 
 ## 项目定位
 
-不是 toy demo。重点是把真实电商里那些"该怎么选"的地方讲清楚。
+项目围绕真实电商交易链路设计，重点是把业务规则、系统实现和工程取舍讲清楚。
 
-一笔订单从下单到收货要过二十多个技术环节，每环都得回答四件事：业务要什么、系统怎么做、出错怎么兜底、客服怎么跟用户说。代码和 Markdown 讲义把这些连同压测数字和待办一块写了下来。
+一笔订单从下单到收货要经过二十多个技术环节，每一环都回答四件事：业务要什么、系统怎么做、异常如何处理、客服如何向用户解释。代码、Markdown 讲义、自动评测和压测报告共同呈现完整实现。
 
 适合工作一到三年的后端拿来练手，也适合准备答辩、面试，或者面试官拿来看候选人的系统设计深度。
 
@@ -20,11 +20,11 @@
 
 | 角色 | 关心的事 | gomall 提供 |
 |------|---------|------------|
-| **C 端用户** | 搜得到 / 买得了 / 不超卖 / 钱安全 / 出错有交代 | ES + Milvus 搜索 / 库存预扣 / 抢红包 / AES 金额加密 / 70001-70002 业务码 |
-| **商家** | 我卖了多少 / 哪个 SKU 缺货 / 钱什么时候到 | BossID 数据基础 ✓ / merchant 自助 API（路线图）/ 库存告警事件 ✓ |
+| **C 端用户** | 搜得到 / 买得了 / 不超卖 / 钱安全 / 出错有交代 | React 店面 / ES + Milvus 搜索 / 库存预扣 / 抢红包 / AES 金额加密 / 业务错误码 |
+| **商家** | 商品怎么卖 / 哪个 SKU 缺货 / 订单怎么履约 / 钱什么时候到 | 商品上架与改价 / BossID 归属校验 / 发货 / 退款审核 / 库存告警 / 托管结算 |
 | **运营 / 平台** | 大促能不能扛 / 黑产怎么挡 / GMV 受影响多少 | TokenBucket + SlidingWindow + CircuitBreaker / 双 11 异步下单削峰 |
 | **客服** | 用户怒投诉时能不能给个交代 | 完整业务码表 + 客服话术（70001 限流 / 70002 熔断 / 50001 缺货 / RP-EMPTY 红包抢完）|
-| **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Jaeger 链路追踪 / Skywalking / 静默降级 / Web3 链上对账 |
+| **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Jaeger 链路追踪 / Skywalking / 外部依赖隔离 / Web3 链上对账 |
 
 Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.md`](docs/lecture/README.md) 进入。
 
@@ -60,7 +60,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 ![库存两桶模型](docs/flow-inventory.svg)
 
-**搜索：LIKE → ES → ES + Milvus 混合 + Outbox 增量索引** —— 倒排召回 + 向量近邻召回融合排序；商品变更经 Outbox 异步同步到 ES / Milvus，保证索引与库一致。
+**搜索：LIKE → ES → 混合召回实验链路** —— 商品变更经 Outbox 增量同步到 ES；查询侧保留 ES 与 Milvus 融合排序能力，便于在商品向量索引接入后比较关键词召回与语义召回。
 
 ![搜索与增量索引流程](docs/flow-search.svg)
 
@@ -70,20 +70,23 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 ## 典型用户旅程
 
-一个完整电商订单要经历的 12 个业务节点，每个节点 gomall 都有对应实现 / 路线图：
+一个完整电商订单沿着下面的业务链路推进：
 
 ```
-注册登录(讲义 01) → 浏览商品(讲义 04) → 搜索发现(讲义 05-06) → 加购选地址(讲义 07)
-   → 下单锁库存(讲义 07+10) → 支付(讲义 02-03 / 08-09)
-   → 商家发货 → 用户收货 / 自动确认 → 清算结算补充讲义 → 退款
+注册登录(讲义 01) → 浏览商品(讲义 06) → 搜索发现(讲义 07-08) → 加购、选地址、创建订单(讲义 09)
+   → 支付确认(讲义 02-03 / 10-11) → 资金清算(讲义 04)
+   → 商家发货 → 用户收货 / 自动确认 → 卖家结算或退款(讲义 05)
 ```
+
+库存贯穿下单、支付和关单：下单预留、支付提交、取消释放，对应讲义 12。
 
 并行业务：
 
-- 营销活动（优惠券 / 秒杀 / 抢红包）——相关博客与代码模块
-- 流量治理（限流 / 熔断 / 削峰）——讲义 12-13
-- 最终一致性（Outbox / Saga）——讲义 00（下）及相关博客
-- 商家后台与可观测性——架构文档与对应代码模块
+- 营销活动（优惠券 / 秒杀 / 抢红包）——对应讲义与代码模块
+- 流量治理（限流 / 熔断 / 削峰）——讲义 14-15
+- 最终一致性（Outbox / Saga）——讲义 00（下）与架构文档
+- 预售与阶段性付款——讲义 13
+- 商家操作与可观测性——架构文档与对应代码模块
 
 ---
 
@@ -98,22 +101,9 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 实测对照：基线 `/ping` 64K RPS / p95 3.5ms，全链路 `/orders/list` 58K RPS / p95 5ms，留 5-10× 余量给 GC / 网络抖动。
 
-宁可下游慢、不能上游 429：P0 接口（下单 / 支付）**不挂限流**，靠缓存 + 异步削峰扛峰值。
+当前入口统一经过全局 IP 令牌桶（100 RPS / 200 burst）。异步下单用于削平写入峰值；实际部署时应根据核心交易与普通读取的容量分别配置限流策略。
 
 阶梯是故意压出来的：可用率每多一个 9，冗余成本近乎翻番——P3 轮播挂一会儿不影响成交，不为它堆冗余；秒杀被限流返回的是 HTTP 200 + 业务码、**不计入错误预算**，"抢光了"≠"挂了"，所以 P2 也能保 99.9%。P0 刻意停在 99.95% 而非 99.99%：单地域 + MySQL 主从下，一次主从切换或坏发布就能吃掉 52min/年 的预算，**写得出且赔得起**才是承诺。
-
----
-
-## 业务边界（不做什么）
-
-也得把没做的说清楚，免得看的人当成完整生产系统：
-
-- **没有渠道级批量清算**：Stripe Checkout/webhook 已接入，但日终 payout 对账、手续费差异和银行最终入账仍是路线图
-- **不真上链**：Web3 合约源码 + Go binding 完整，但默认不连 RPC（env 控制）
-- **没有 merchant role**：商家自助 API（发货 / 看板 / 提现）路线图阶段
-- **没有物流单 / 售后工单 / 评价表**：订单状态机推到 7 态，但物流商对接 / 退货寄回 / 评价审核三件独立表是路线图
-- **不做前端**：纯后端 API，用 curl / Postman 自己调
-- **MVP 阶段聚焦交易闭环**：履约链路有 7 态但物流回流 / 售后 SOP 留待 wallet & merchant 落地后做
 
 ---
 
@@ -188,15 +178,15 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - `last_block` 持久化到 Redis，重启时 `FilterLogs(last+1, head)` 先 catch-up，再 `SubscribeFilterLogs` 实时跟
 - 事件级幂等：`web3:event:{txhash}:{logindex}` SetNX TTL 72h，重复事件直接跳过
 - 写 outbox `web3.payment.confirmed`，下游接现有最终一致体系
-- 静默降级：`WEB3_RPC_URL` 未设 → listener 不启动，订单仍可跑
+- Web3 监听作为可选初始化模块启动，不影响未配置链上支付时的订单主链路
 
 `service/web3/listener.go::StartPaymentListener`。
 
-### 8 · ES + Milvus Hybrid 检索：召回率 vs 准确率
+### 8 · ES + Milvus Hybrid 检索实验：召回率 vs 准确率
 
 **难**：ES 关键词搜不到"苹果手机" → "iPhone 13"，纯向量搜可能召回不准。
 **解**：
-- query → embedding → Milvus 拿 top-K 语义匹配（HNSW M=16 efConstruction=200 efSearch=64，768 dim）
+- query → embedding → Milvus 拿 top-K 语义匹配（HNSW M=16 efConstruction=200 efSearch=64，768 dim）；使用前需要注入 Milvus searcher，并先建立商品向量索引
 - 同时 ES 关键词搜 top-K
 - 两边 min-max normalize 后 50/50 加权融合
 - env `EMBEDDING_API_URL` 切换模型；未设走 SHA-256 stub 让链路跑通
@@ -226,22 +216,9 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 `consts/order.go` + `internal/order/state.go` + `internal/order/shipping.go` + `internal/refund/service.go`。
 
-### 11 · 静默降级哲学：外部依赖不可用主流程不挂
+### 11 · 外部依赖隔离：交易、搜索和异步任务独立启动
 
-**难**：RMQ / ES / Web3 / Milvus 任一挂掉就 panic 起不来 = 单点之耻。
-**解**：`cmd/main.go::tryInitX` 套路
-```go
-func tryInitES(ctx context.Context) {
-    defer func() {
-        if r := recover(); r != nil {
-            util.LogrusObj.Warnf("ES 初始化失败，搜索退化到 DB 路径: %v", r)
-        }
-    }()
-    es.InitEs()
-    initialize.InitSearch(ctx)
-}
-```
-所有外部依赖独立 try* 函数 + recover，env 未设直接静默不启动，**主链路（下单 / 支付 / 列表 / 详情）永远在线**。
+RMQ、ES、Web3 和 Milvus 分别由 `cmd/main.go` 中的 `tryInitX` 入口按配置初始化。未配置可选组件时，商品、订单和支付等同步交易能力仍可沿各自的数据路径启动；当前这些组件与主服务运行在同一进程中。
 
 ---
 
@@ -283,8 +260,8 @@ func tryInitES(ctx context.Context) {
 | 能力 | 关键代码 |
 |------|---------|
 | ES 关键词检索 + outbox 增量索引 consumer | `service/search/service.go` · `service/search/indexer.go` · `repository/es/` |
-| Milvus 向量库 + HNSW 索引（768 dim） | `repository/milvus/product_vector.go` |
-| 语义搜索 hybrid（ES + Milvus 50/50 加权 + min-max normalize） | `service/search/semantic.go` · `service/search/embedding.go` |
+| Milvus 向量存储与 HNSW 索引实现（768 dim） | `repository/milvus/product_vector.go` |
+| Hybrid 融合与 embedding 查询链路 | `service/search/semantic.go` · `service/search/embedding.go` |
 
 ### Web3 支付
 
@@ -311,9 +288,9 @@ func tryInitES(ctx context.Context) {
 | Skywalking-go agent | `Makefile` · `cmd/main.go` |
 | 结构化日志（logrus） | `pkg/utils/log/` |
 
-### 静默降级
+### 外部依赖隔离
 
-启动期 RMQ / ES / Web3 / Milvus 任一不可用，主流程不阻塞（参 `cmd/main.go::tryInitX`）。
+RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和异步能力可以分别运行（参 `cmd/main.go::tryInitX`）。
 
 ---
 
@@ -350,25 +327,44 @@ func tryInitES(ctx context.Context) {
 ### 手动
 
 ```bash
-cd ./cmd && go run main.go
+# 启动数据库与缓存
+docker compose up -d mysql redis
+
+# 启动 Go 服务
+SNOWFLAKE_ALLOW_DEFAULT=true go run ./cmd
 ```
 
-或二进制：
+服务启动后访问：
+
+- 店面：`http://127.0.0.1:5003/app/`
+- 健康检查：`http://127.0.0.1:5003/api/v1/ping`
+
+前端源码位于 `web/`。修改页面后重新构建：
+
+```bash
+cd web
+npm ci
+npm run build
+```
+
+构建 Go 二进制：
 
 ```bash
 go mod tidy
-cd ./cmd && go build -o ../main && ./main
+go build -o main ./cmd
+SNOWFLAKE_ALLOW_DEFAULT=true ./main
 ```
 
-手动方式不带 Skywalking。要带 Skywalking 看 `Makefile`。
+普通构建默认不带 SkyWalking。需要探针时，先初始化子模块并单独构建 Agent。
 
 ### Makefile
 
 ```bash
-make tools          # 编 Skywalking Agent 二进制
 make                # 编二进制并自动运行
 make build          # 仅编二进制
-make env-up         # 拉起依赖（MySQL / Redis / RMQ / ES）
+make tools          # 编 SkyWalking Agent（需要先初始化子模块）
+make build-agent    # 使用 SkyWalking Agent 构建
+make env-up         # 拉起 docker-compose 中的完整依赖与观测组件
 make env-down       # 关依赖
 make docker-up      # 容器化拉起项目
 make docker-down    # 关容器
@@ -377,20 +373,26 @@ make docker-down    # 关容器
 第一次跑：
 
 ```bash
-# 1. 调 Makefile 顶部的 ARCH / OS
-make env-up tools build
-./main
+# 普通本地开发只启动必要依赖
+docker compose up -d mysql redis
+make
+
+# 需要 SkyWalking 时再执行
+git submodule update --init --recursive
+make tools build-agent
 ```
 
-### 静默降级 env vars
+### 可选集成
 
-| env | 不设的话 |
-|-----|---------|
-| 自动接 RMQ | 跳过 outbox publisher + 关单延迟队列，Cron 仍跑 |
-| 自动接 ES | 商品搜索退化到 DB 路径 |
-| `WEB3_RPC_URL` / `WEB3_ESCROW_ADDR` | Web3 listener 不启动 |
-| `MILVUS_ADDR` | Milvus 不连，语义检索关闭，ES 关键词仍可用 |
-| `EMBEDDING_API_URL` | embedding 走 SHA-256 stub（接口可跑） |
+本地启动 MySQL 和 Redis 就能体验商品、购物车、订单与钱包支付主链路；按需接入下面的组件，可以继续演示异步消息、搜索、链上支付和语义召回。
+
+| 配置 | 启用的能力 |
+|-----|-----------|
+| RabbitMQ | Outbox 事件发布与订单延迟关单 |
+| ElasticSearch | 商品关键词检索与增量索引 |
+| `WEB3_RPC_URL` / `WEB3_ESCROW_ADDR` | Web3 托管合约监听与链上支付确认 |
+| `MILVUS_ADDR` | 连接 Milvus 并创建向量集合；还需注入 searcher 和建立商品向量索引 |
+| `EMBEDDING_API_URL` | 为查询生成 embedding；商品向量需要另行建立索引 |
 
 ---
 
@@ -403,10 +405,8 @@ gomall
 ├── cmd                 # main 入口 + 启动顺序
 ├── config              # 配置加载
 ├── consts              # 全局常量（订单状态机 / 业务码 等）
-├── contracts           # Solidity 合约（Web3 Escrow）
 ├── docs
-│   ├── architecture    # feature matrix / DDD 迁移手册 / 路线图
-│   ├── blog            # 12 篇博客长文
+│   ├── architecture    # 资金、订单、搜索等跨课程架构说明
 │   └── lecture         # Markdown 课程讲义与唯一学习顺序
 ├── initialize          # cron / inventory / outbox / search / web3 启动
 ├── internal            # 领域代码（每域一包：handler / service / repo / model / dto）
@@ -419,6 +419,7 @@ gomall
 │   └── migrate         # AutoMigrate 组合包，聚合全部领域 model
 ├── middleware          # cors / jwt / rbac / track / idempotency / ratelimit / circuitbreaker / httpcache
 ├── pkg
+│   ├── web3/contracts  # Solidity 合约（Web3 Escrow）
 │   ├── e               # 业务错误码
 │   ├── utils           # ctl / email / encryption / jwt / log / snowflake / track / upload
 │   └── web3            # Web3 escrow / signature 工具
@@ -434,7 +435,8 @@ gomall
 ├── service             # 横切服务子包（events / grpc / inventory / search / web3）
 ├── static              # 静态资源
 ├── stressTest          # k6 压测脚本 + REPORT.md
-└── types               # 公共信封（BasePage / DataListResp）
+├── types               # 公共信封（BasePage / DataListResp）
+└── web                 # React + Vite 店面，构建产物由 Go 托管在 /app/
 ```
 
 ---
@@ -446,10 +448,10 @@ gomall
 ```yaml
 system:
   domain: mall
-  env: "dev"
-  HttpPort: ":5001"
-  Host: "localhost"
-  UploadModel: "local"        # 或 oss
+  appEnv: "dev"
+  httpPort: ":5003"
+  host: "localhost"
+  uploadModel: "local"        # 或 oss
 
 mysql:
   default:
@@ -463,7 +465,8 @@ mysql:
 redis:
   redisHost: 127.0.0.1
   redisPort: 6379
-  redisPassword: 123456
+  redisPassword: ""
+  redisDbName: 4
 
 es:
   EsHost: 127.0.0.1
@@ -475,6 +478,8 @@ rabbitMq:
 
 encryptSecret:
   jwtSecret: "FanOne666Secret"
+  sessionSecret: "SessionSecret"
+  moneySecret: "MoneySecret"
   emailSecret: "EmailSecret"
   phoneSecret: "PhoneSecret"
 ```

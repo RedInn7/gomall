@@ -5,6 +5,8 @@
 
 这一讲先记住一个结论：**支付成功，只能说明平台确认收到了钱；这笔钱此时应该进入托管，不能直接变成卖家余额。**
 
+回忆一下，在淘宝/amazon 买完东西，卖家能立刻收到钱吗？但是我们已经付款了，钱去哪里了？
+
 清算要回答四个问题：钱从哪里来、实际收到多少、现在放在哪里、这次支付能不能被重复处理。它不负责判断卖家是否已经完成履约，也不负责给卖家放款。
 
 ---
@@ -37,9 +39,11 @@
 |---|---|
 | 买家 | 没收到货时，钱能不能退回来 |
 | 卖家 | 平台有没有准确记录这笔待结算收入 |
-| 财务 | 外部实收、托管余额和用户余额能不能对上 |
+| 财务 | 外部实收、托管余额和用户余额能不能对上，对账能不能对上 |
 | 客服 | 重复支付是否真的多收了钱 |
-| 研发 | 回调重放时会不会重复写账 |
+| 研发 | 回调重放时会不会重复写账，有没有幂等性 |
+
+审计：关注流水是否合法，是否可以被检阅
 
 **清算的业务边界是收钱和记账，不是分账和放款。**
 
@@ -126,6 +130,10 @@ type PaymentClearing struct {
 
 `OrderID` 唯一，保证一张普通订单只有一条正常清算记录。外部渠道的 `ProviderRef` 用来识别同一笔回调是否重放。
 
+如何保证`OrderID` 的唯一性？单机实例/多实例如何保证？单实例：redis锁，clear:UUID。mysql 的乐观锁/悲观锁 select for update
+
+多实例：redis锁-》分布式redis锁:雪花ID
+
 ### 3.2 清算只创建 `cleared`
 
 ```mermaid
@@ -146,14 +154,14 @@ stateDiagram-v2
 
 ### 3.3 什么时候才会进入 `cleared`
 
-不是用户点击了“支付”，也不是系统创建了支付页面，就可以把清算单写成 `cleared`。判断标准只有一个：**系统已经拿到足以证明钱确实到账的证据，并且本地清算事务提交成功。**
+不是用户点击了“支付”，也不是系统创建了支付页面(下支付单-》甚至支付都没有完成-》一直处于等待支付状态-》QUESTION: 1. 设置一个每十五分钟的定时任务去扫描db去关单 cron)，就可以把清算单写成 `cleared`。判断标准只有一个：**系统已经拿到足以证明钱确实到账的证据，并且本地清算事务提交成功。**
 
 三种渠道拿到证据的时间不同：
 
 | 渠道 | 什么时候可以写入 `cleared` |
 |---|---|
-| Wallet | 数据库已经锁住买家钱包，确认余额足够，并在同一个事务里完成扣款、写流水和创建清算单 |
-| Stripe | 通过签名校验的 webhook 明确表示付款成功，订单、金额和币种核对一致，再由本地事务创建清算单 |
+| Wallet | **数据库已经锁住买家钱包，确认余额足够**，并在同一个事务里完成扣款、写流水和创建清算单 |
+| Stripe | 通过签名校验的 webhook **明确表示付款成功**，订单、金额和币种核对一致，再由本地事务创建清算单 |
 | Web3 | 监听器等到要求的区块确认数，核对链上事件中的订单、付款人、Token 和金额，再由本地事务创建清算单 |
 
 这里还要区分“外部已经收款”和“本地已经清算”。Stripe 可能已经扣款，链上交易也可能已经确认，但写 MySQL 时发生了临时故障。这时外部资金事实已经成立，本地记录却还不能算完成。系统应该让 webhook 或消息继续重试，直到下面几件事在一个本地事务里一起提交：
@@ -163,13 +171,15 @@ stateDiagram-v2
 3. 推进订单状态；
 4. 保存后续需要投递的事件。
 
-只要这个事务没有提交，数据库里就不应该出现半张 `cleared` 清算单。事务提交完成的时刻，才是这笔订单在 gomall 中真正完成清算的时刻。
+只要这个事务没有提交，数据库里就不应该出现半张 `cleared` 清算单(数据库保证的ACID)。事务提交完成的时刻，才是这笔订单在 gomall 中真正完成清算的时刻。
 
 ---
 
 ## 四、三种支付渠道怎样进入同一本账
 
 ### 4.1 渠道差异只留在清算入口
+
+区别的核心在于：**买家的钱是不是由你的系统记账和保管**。
 
 | 渠道 | 实收依据 | debit 账户 | 是否需要买家扣款后余额 |
 |---|---|---|---:|
@@ -197,8 +207,8 @@ func RecordClearedTx(
         return ErrInvalidClearingInput
     }
 
-    gross := orderPayableCents(o)
-    record := &PaymentClearing{
+    gross := orderPayableCents(o)//计算实际付款金额,调用营销模块
+    record := &PaymentClearing{//支付清算记录
         OrderID:     o.ID,
         BuyerID:     o.UserID,
         SellerID:    o.BossID,
@@ -215,21 +225,21 @@ func RecordClearedTx(
         return err
     }
 
-    ledger := money.NewLedgerDaoByDB(tx)
-    if walletBalanceAfter != nil {
+    ledger := money.NewLedgerDaoByDB(tx)//当前账本
+    if walletBalanceAfter != nil {//使用wallet
         if err := ledger.AppendTransaction(
             o.UserID, o.ID, money.DirectionDebit,
             gross, *walletBalanceAfter, money.BizTypeOrderClear,
         ); err != nil {
             return err
         }
-    } else if err := ledger.AppendSystemTransaction(
+    } else if err := ledger.AppendSystemTransaction(//使用外部系统,借方：记录资金来自 Stripe、Web3 等外部支付渠道
         money.AccountCodeExternalClearing, o.ID,
         money.DirectionDebit, gross, money.BizTypeOrderClear,
     ); err != nil {
         return err
     }
-
+// 贷方：记录同等金额进入商家待结算账户
     return ledger.AppendSystemTransaction(
         money.AccountCodeMerchantEscrow, o.ID,
         money.DirectionCredit, gross, money.BizTypeOrderClear,
@@ -237,17 +247,13 @@ func RecordClearedTx(
 }
 ```
 
-### 4.2 `walletBalanceAfter` 为什么是指针
+为什么在刚才的这段代码里，没有看到transcation 呢？执行失败怎么办呢？不是说好了ACID 吗？
 
-这个参数不只是传余额，它还把渠道和资金来源绑在一起：
+Answer: 写的流水表啊，更改金额还没动啊，一般来说写流水表的这段代码需要和更改实际金额在同一个函数中放到同一个transcation 里面，会和更改余额同时执行成功or 失败
 
-- `wallet` 必须传入扣款后的余额，才能写买家钱包流水；
-- `stripe` 和 `web3` 必须传 `nil`，因为它们没有扣站内余额；
-- 渠道和参数不匹配时，函数拒绝写账。
 
-它防的是一种很难查的错误：订单记录为 Stripe 支付，账本却从买家钱包扣钱。
 
-### 4.3 余额支付为什么能放进一个事务
+### 4.2 余额支付为什么能放进一个事务
 
 余额支付的资金和业务数据都在本地数据库中，因此下面的动作可以原子完成：
 
@@ -259,7 +265,7 @@ func RecordClearedTx(
 
 任何一步失败，整个事务回滚。系统不能出现“余额扣了但没有清算单”，也不能出现“清算单存在但订单仍未支付”。
 
-### 4.4 外部支付为什么只能做到最终一致
+### 4.3 外部支付为什么只能做到最终一致
 
 Stripe 和链上转账不在本地数据库事务里。可能出现这样的顺序：
 
@@ -314,7 +320,7 @@ if err := RecordExternalAnomalyTx(
 
 ### 5.2 为什么不能只靠 Redis 防重
 
-Redis 中的临时支付状态可能过期、被删除或在故障中丢失。外部已经收款后，清算单才是持久化证据。
+Redis 中的临时支付状态可能过期、被删除或在故障中丢失（到了TTL,系统断电）。外部已经收款后，清算单才是持久化证据。rds才是source of truth，rds和redis出了矛盾，一定要信rds
 
 `IsProviderCleared` 会直接查询：
 
@@ -361,30 +367,11 @@ assertLedgerEntry(
 - 托管账户收到正确金额；
 - 资金来源账户有对应 debit 流水。
 
-### 6.2 还要覆盖哪些边界
 
-| 测试 | 证明什么 |
-|---|---|
-| `TestRecordClearedTxRejectsChannelSourceMismatch` | 渠道与资金来源不匹配时拒绝写账 |
-| `TestExternalClearingUsesSeparateSystemAccounts` | 外部支付不会伪装成买家钱包扣款 |
-| `TestExternalDuplicatePaymentIsPersistedForRefundReview` | 真实重复收款不会被幂等逻辑吞掉 |
-| `TestProviderReplayIsRecognizedFromPersistentClearing` | 临时状态丢失后仍能识别渠道重放 |
-
-录制时可以现场把 `(channel == ChannelWallet) != (walletBalanceAfter != nil)` 这条检查暂时删掉，再运行渠道不匹配测试。学生会直接看到：入口处少一条约束，账本就可能记录错误的资金来源。
 
 ---
 
 ## 七、代码从哪里读
-
-| 想看的内容 | 文件 | 入口 |
-|---|---|---|
-| 清算单与异常单 | `internal/clearing/model.go` | `PaymentClearing`、`PaymentAnomaly` |
-| 支付后进入托管 | `internal/clearing/service.go` | `RecordClearedTx` |
-| 外部支付重放 | `internal/clearing/service.go` | `RecordExternalDuplicateTx` |
-| 持久化防重 | `internal/clearing/service.go` | `IsProviderCleared` |
-| 资金流水 | `internal/money/` | `AccountTransaction`、Ledger DAO |
-| 清算测试 | `internal/clearing/service_test.go` | `TestRecord...`、`TestExternal...` |
-| 完整工程设计 | `docs/architecture/PAYMENT_CLEARING_SETTLEMENT.md` | 表结构、状态与故障处理 |
 
 推荐按一笔钱的路径阅读：
 
@@ -399,7 +386,7 @@ assertLedgerEntry(
 
 ---
 
-## 八、面试时怎么回答
+## 八、recap
 
 ### Q1：清算是什么？
 

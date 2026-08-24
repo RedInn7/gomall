@@ -25,23 +25,28 @@ GO_BUILD = $(GO) build
 GO_BUILD_FLAGS = -v
 GO_BUILD_LDFLAGS = -X main.version=$(VERSION)
 
+.DEFAULT_GOAL := run
+
 .PHONY: tools
 tools:
+	mkdir -p $(TOOLS_PATH)
 	cd $(AGENT_SOURCE_PATH) && make deps
 	cd $(AGENT_SOURCE_PATH) && \
 	GOOS=$(OS) GOARCH=$(ARCH) $(GO_BUILD) $(GO_BUILD_FLAGS) -ldflags "$(GO_BUILD_LDFLAGS)" -o $(TOOLS_PATH)/$(BINARY)-$(VERSION)-$(OS)-$(ARCH) ./cmd
 
-.PHONY: run			# 构建同时运行
-test:
+.PHONY: run
+run:
 	@make build
 	@./$(OUTPUT)
 
-.PHONY: build		# 构建项目
+.PHONY: build
 build:
 	@echo "build project to ./$(OUTPUT)"
-	$(GO_BUILD) \
-	-toolexec="$(AGENT_PATH) -config $(AGENT_CONFIG)" \
-	-a -o ./$(OUTPUT) ./cmd
+	$(GO_BUILD) -o ./$(OUTPUT) ./cmd
+
+.PHONY: build-agent
+build-agent:
+	$(GO_BUILD) -toolexec="$(AGENT_PATH) -config $(AGENT_CONFIG)" -a -o ./$(OUTPUT) ./cmd
 
 .PHONY: env-up		# 启动环境
 env-up:
@@ -64,7 +69,7 @@ docker-up:
 	--name $(CONTAINER_NAME) \
 	--network host \
 	-d $(IMAGE_NAME)
-	@echo "container run success at localhost:5001"
+	@echo "container run success at localhost:5003"
 
 .PHONY: docker-down # 结束docker部署,同时删除容器和镜像
 docker-down:
@@ -72,5 +77,3 @@ docker-down:
 	docker rm $(CONTAINER_NAME)
 	docker rmi $(IMAGE_NAME)
 	@echo "container stop && rm success"
-
-default: run

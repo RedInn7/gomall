@@ -2,21 +2,34 @@ import { useEffect, useMemo, useState } from 'react'
 import type { CartLine, Product } from '../types'
 import { CAT_LABEL } from '../types'
 import { asset, cx, EDITIONS, priceOf, yuan } from '../lib/util'
+import { searchProducts } from '../api/products'
 
 /* ---------------- Search ---------------- */
 export function SearchOverlay({ open, items, onClose, onOpenProduct }: {
   open: boolean; items: Product[]; onClose: () => void; onOpenProduct: (id: number) => void
 }) {
   const [q, setQ] = useState('')
+  const [remote, setRemote] = useState<Product[] | null>(null)
+  const [searching, setSearching] = useState(false)
   useEffect(() => { if (open) setQ('') }, [open])
+  useEffect(() => {
+    const value = q.trim()
+    if (!open || !value) { setRemote(null); setSearching(false); return }
+    const timer = window.setTimeout(() => {
+      setSearching(true)
+      searchProducts(value).then(setRemote).catch(() => setRemote(null)).finally(() => setSearching(false))
+    }, 280)
+    return () => window.clearTimeout(timer)
+  }, [open, q])
   const list = useMemo(() => {
+    if (remote) return remote
     const s = q.trim().toLowerCase()
     if (!s) return items.slice(0, 6)
     return items.filter((p) => (p.name + ' ' + p.cat + ' ' + CAT_LABEL[p.cat] + ' ' + p.desc).toLowerCase().includes(s))
-  }, [q, items])
+  }, [q, items, remote])
   const hint = !q.trim()
     ? '试试 “星轨”、“édition” 或 “voyage”。'
-    : list.length ? `${list.length} 件造物与「${q}」相遇` : `未寻得「${q}」，换个词试试。`
+    : searching ? '正在检索商品库…' : list.length ? `${list.length} 件造物与「${q}」相遇` : `未寻得「${q}」，换个词试试。`
 
   return (
     <div className={cx('search', open && 'show')} aria-hidden={!open}>

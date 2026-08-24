@@ -1,6 +1,6 @@
 # 原子完成支付
 
-## 故障现场
+## 背景
 
 一笔钱已经从买家转给卖家，支付服务接下来需要把订单改成 `paid`，再通知库存、履约和客服系统。某次发布后，订单更新成功，但消息发送前进程崩溃。数据库里订单显示已支付，下游却永远没有收到通知。
 
@@ -8,7 +8,7 @@
 
 GoMall 使用 Transactional Outbox：订单状态和“等待发布的事件”一起写入数据库事务，后台发布器再发送事件。
 
-## 任务
+## 需要实现
 
 补全：
 
@@ -18,7 +18,7 @@ func FinalizePayment(db *DB, orderID uint, channel, eventID string) error
 
 这里的 `DB` 是为了练习而缩小的内存数据库。请在事务副本中完成全部操作，全部成功后再替换正式数据。
 
-## 业务规则
+## 实现要求
 
 1. 找不到订单返回 `ErrOrderNotFound`；
 2. 订单只有处于 `wait_pay` 时才能结算，否则返回 `ErrStateChanged`；
@@ -38,7 +38,7 @@ after:  order 8 = {state: paid, channel: "balance"}
 
 如果写 Outbox 失败，`after` 必须与 `before` 完全相同。
 
-## 本地评测
+## 运行测试
 
 ```bash
 go test -tags exercise ./exercises/02-payment-up/02.03-payment-finalize/problem
