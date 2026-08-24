@@ -16,4 +16,4 @@ go test -tags exercise ./exercises/01-user-auth/01.02-rbac-cache/problem
 go test -tags exercise ./exercises/01-user-auth/01.03-token-version/problem
 ```
 
-公开测试用于本地反馈；正式判分建议额外加入边界时刻、缓存穿透和版本号回退等隐藏测试。
+实现还需正确处理到期边界、缓存穿透和版本号回退。

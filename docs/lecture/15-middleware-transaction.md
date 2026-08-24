@@ -205,7 +205,7 @@ handler 内部不是简单的“减余额”：
 准备一个属于当前用户的待付款订单，并确认测试支付密钥长度与内容正确。先取得幂等 token：
 
 ```bash
-curl -i 'http://localhost:5002/api/v1/idempotency/token' \
+curl -i 'http://localhost:5003/api/v1/idempotency/token' \
   -H 'access_token: ...' \
   -H 'refresh_token: ...'
 ```
@@ -213,7 +213,7 @@ curl -i 'http://localhost:5002/api/v1/idempotency/token' \
 响应中的字段是 `data.idempotency_key`，TTL 为 300 秒。复制它发起支付：
 
 ```bash
-curl -i -X POST 'http://localhost:5002/api/v1/paydown' \
+curl -i -X POST 'http://localhost:5003/api/v1/paydown' \
   -H 'access_token: ...' \
   -H 'refresh_token: ...' \
   -H 'Idempotency-Key: 复制上一步返回值' \
