@@ -8,7 +8,7 @@
 
 ```text
 problem/     学生作答目录
-solution/    参考答案
+solution/    参考实现
 ```
 
 作答时只修改 `problem/` 里的 `.go` 文件。不要修改：
@@ -54,7 +54,7 @@ ok  github.com/RedInn7/gomall/exercises/...
 order = {...}, want {...}
 ```
 
-左边是代码实际返回的结果，右边是测试要求的结果。不要为了某一组输入写死答案，要把 readme 中描述的业务规则实现完整。
+左边是代码实际返回的结果，右边是测试要求的结果。请按 readme 中的规则实现，不要针对单个测试用例写死结果。
 
 ## 第一讲：业务总览
 
@@ -78,7 +78,7 @@ func BuildOrder(...) (Order, error)
 go test -tags exercise ./exercises/00-overview/00.01-authoritative-order/problem
 ```
 
-完成标准：
+实现要求：
 
 - 用户身份取鉴权结果，不信请求里的 `UserID`；
 - 价格和商家取服务端商品数据；
@@ -106,7 +106,7 @@ func (i *Inventory) Release(qty int) error
 go test -tags exercise ./exercises/00-overview/00.02-inventory-buckets/problem
 ```
 
-完成标准：
+实现要求：
 
 - `Reserve` 把可售库存移到预留；
 - `Commit` 把预留库存变成已售；
@@ -133,7 +133,7 @@ func CreateOrder(db *DB, order Order, eventID string) error
 go test -tags exercise ./exercises/00-overview/00.03-transactional-outbox/problem
 ```
 
-完成标准：
+实现要求：
 
 - 订单与 `order.created` 事件写在同一个事务回调里；
 - Outbox 写入失败时返回原始错误；
@@ -161,7 +161,7 @@ func NextAction(...) Action
 go test -tags exercise ./exercises/01-user-auth/01.01-dual-token/problem
 ```
 
-完成标准：
+实现要求：
 
 - access 有效时返回 `PASS`；
 - access 过期但 refresh 有效时返回 `REFRESH`；
@@ -189,7 +189,7 @@ func (c *RoleCache) Invalidate(userID uint)
 go test -tags exercise ./exercises/01-user-auth/01.02-rbac-cache/problem
 ```
 
-完成标准：
+实现要求：
 
 - TTL 内直接返回缓存角色；
 - 缓存到期后重新查询；
@@ -216,7 +216,7 @@ func Authorize(...) error
 go test -tags exercise ./exercises/01-user-auth/01.03-token-version/problem
 ```
 
-完成标准：
+实现要求：
 
 - 拒绝签名错误和已过期 token；
 - claims 中的用户必须与当前用户一致；
@@ -263,7 +263,7 @@ go test -tags exercise ./exercises/03-payment-down/03.02-replay-before-breaker/p
 go test -tags exercise ./exercises/03-payment-down/03.03-payment-reconciliation/problem
 ```
 
-## 第五讲：支付清算
+## 第四讲：支付清算
 
 ### 04.01 清算复式记账
 
@@ -285,7 +285,7 @@ func RecordClearedTx(...) error
 go test -tags exercise ./exercises/04-payment-clearing/04.01-clearing-ledger/problem
 ```
 
-完成标准：
+实现要求：
 
 - Wallet 借记买家钱包，Stripe/Web3 借记外部清算账户；
 - 三种渠道统一贷记卖家托管账户，并保证借贷平衡；
@@ -293,9 +293,9 @@ go test -tags exercise ./exercises/04-payment-clearing/04.01-clearing-ledger/pro
 - 非法输入、重复订单和托管入账失败时不留下半成品；
 - 通过题目列出的 16 个公开测试场景。
 
-## 第六讲：支付结算
+## 第五讲：支付结算
 
-这组题从“订单完成”开始，要求把托管资金安全地转入卖家钱包。题目会连续制造重复消息、写账失败、结算与退款并发，以及历史数据不一致。
+这组题从“订单完成”开始，练习把托管资金安全地转入卖家钱包，并处理重复消息、写账失败、结算与退款并发，以及历史数据不一致。
 
 ### 05.01 结算状态守卫
 
@@ -339,6 +339,8 @@ go test -tags exercise ./exercises/05-payment-settlement/05.05-settlement-reconc
 
 ## 一次运行全部题目
 
+命令说明与评分模式见 [自动评分说明](./AUTOGRADING.md)。
+
 完成单题后，可以一次运行全部学生测试：
 
 ```bash
@@ -368,4 +370,4 @@ go test -tags exercise ./exercises/05-payment-settlement/05.05-settlement-reconc
 gofmt -w exercises/*/*/problem/*.go
 ```
 
-公开测试只负责给出基本反馈。提交后还会运行额外测试，检查负数和到期边界、失败回滚、缓存隔离、渠道与余额约束、重复清算及借贷平衡等情况。
+实现还需要处理负数和到期边界、失败回滚、缓存隔离、渠道与余额约束、重复清算及借贷平衡等情况。
