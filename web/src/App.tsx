@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { Cat, Product } from './types'
+import type { Product } from './types'
 import { PRODUCTS } from './data/products'
 import { useCart } from './hooks/useCart'
 import { Cursor, Grain, Loader, Ticker } from './components/Atmosphere'
@@ -8,8 +8,11 @@ import { Hero } from './components/Hero'
 import { Collection, ValueStrip } from './components/Collection'
 import { Editorial, Footer, Promise as PromiseSec, Signup } from './components/Sections'
 import { CartDrawer, ProductDetail, SearchOverlay } from './components/Overlays'
+import { Workbench } from './components/Workbench'
+import { api, session } from './api/client'
+import { getProduct, listProducts } from './api/products'
 
-type Overlay = 'search' | 'cart' | 'detail' | null
+type Overlay = 'search' | 'cart' | 'detail' | 'workbench' | null
 
 export default function App() {
   const [items, setItems] = useState<Product[]>(PRODUCTS)
@@ -46,12 +49,16 @@ export default function App() {
   const addToCart = useCallback((id: number, qty = 1, size = 'Standard') => {
     const p = findP(id); if (!p || p.sold) return
     cart.add(id, qty, size)
+    if (session.access()) {
+      api('POST', '/api/v1/carts/create', { product_id: id }).catch((error) => toast(error?.message || '购物车同步失败'))
+    }
     toast(`${p.name} · 已入袋`)
   }, [findP, cart, toast])
 
   const openDetail = useCallback((id: number) => {
     const p = findP(id); if (!p) return
     setDetail(p); setOverlay('detail')
+    getProduct(id).then(setDetail).catch(() => { /* 详情接口暂时不可用时保留列表数据 */ })
   }, [findP])
 
   const addFromDetail = useCallback((id: number, qty: number, size: string) => {
@@ -61,36 +68,17 @@ export default function App() {
 
   const checkout = useCallback(() => {
     if (!cart.count) return
-    toast('结算已起 · 谢谢你的耐心 ✦')
-    cart.clear()
-    setTimeout(close, 700)
-  }, [cart, toast, close])
+    setOverlay('workbench')
+    toast(session.access() ? '请在订单模块选择地址并创建订单' : '请先登录，再创建订单')
+  }, [cart.count, toast])
 
-  /* 可选：融合后端 /api/v1/products，接不到则保留 mock 典藏 */
+  /* 启动后读取后端商品；本地种子保证页面在服务启动前仍可预览。 */
   useEffect(() => {
-    const ctrl = new AbortController()
-    const to = setTimeout(() => ctrl.abort(), 1500)
-    fetch('/api/v1/products', { signal: ctrl.signal })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((body) => {
-        const raw = body?.data?.item ?? body?.data?.list ?? body?.data ?? []
-        if (!Array.isArray(raw) || !raw.length) return
-        const cats: Cat[] = ['objet', 'atelier', 'edition', 'voyage']
-        const mapped: Product[] = raw.slice(0, 12).map((r: any, i: number) => ({
-          id: 1000 + (r.id || i),
-          name: r.title || r.name || `Objet ${i}`,
-          cat: cats[i % cats.length],
-          price: Math.round(Number(r.price) || 1980),
-          off: r.discount_price ? Math.round(Number(r.discount_price)) : 0,
-          img: PRODUCTS[i % PRODUCTS.length].img,
-          span: i % 4 === 0 ? 'wide' : '',
-          desc: r.info || r.title || '来自工坊的造物。',
-        }))
-        if (mapped.length) setItems(mapped)
-      })
+    let active = true
+    listProducts()
+      .then((mapped) => { if (active && mapped.length) setItems(mapped) })
       .catch(() => { /* offline / 无后端：保留 seed 典藏 */ })
-      .finally(() => clearTimeout(to))
-    return () => { clearTimeout(to); ctrl.abort() }
+    return () => { active = false }
   }, [])
 
   return (
@@ -99,7 +87,7 @@ export default function App() {
       <Cursor />
       <Loader />
       <Ticker />
-      <Nav cartCount={cart.count} onSearch={() => setOverlay('search')} onCart={() => setOverlay('cart')} onNav={nav} />
+      <Nav cartCount={cart.count} onSearch={() => setOverlay('search')} onCart={() => setOverlay('cart')} onAccount={() => setOverlay('workbench')} onNav={nav} />
 
       <main>
         <Hero count={items.length} onNav={nav} />
@@ -117,6 +105,7 @@ export default function App() {
       <ProductDetail product={detail} open={overlay === 'detail'} onClose={close} onAdd={addFromDetail} />
       <CartDrawer open={overlay === 'cart'} lines={cart.lines} findP={findP} total={cart.total} count={cart.count}
         onClose={close} setQty={cart.setQty} onCheckout={checkout} onBrowse={() => nav('#collection')} />
+      <Workbench open={overlay === 'workbench'} onClose={close} />
 
       <div className={`scrim${overlay ? ' show' : ''}`} onClick={close} aria-hidden />
       <div className={`toast${toastOn ? ' show' : ''}`} aria-live="polite">{toastMsg}</div>
