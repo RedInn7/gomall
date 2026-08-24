@@ -12,4 +12,4 @@
 go test -tags exercise ./exercises/03-payment-down/.../problem
 ```
 
-正式评测会补充空 key、重复完成、失败响应、熔断状态和多订单混合等边界测试。
+实现还需正确处理空 key、重复完成、失败响应、熔断状态和多订单混合。

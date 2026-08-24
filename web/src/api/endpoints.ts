@@ -1,0 +1,92 @@
+import type { HttpMethod } from './client'
+
+export type Endpoint = {
+  method: HttpMethod
+  path: string
+  group: string
+  label: string
+  sample?: Record<string, unknown>
+}
+
+const e = (method: HttpMethod, path: string, group: string, label: string, sample: Record<string, unknown> = {}): Endpoint => ({ method, path, group, label, sample })
+
+export const ENDPOINTS: Endpoint[] = [
+  ...([
+    ['POST', '/api/v1/user/register', '账户', '注册', { user_name: '', nick_name: '', password: '', key: '' }],
+    ['POST', '/api/v1/user/login', '账户', '登录', { user_name: '', password: '' }],
+    ['GET', '/api/v1/user/show_info', '账户', '查看资料'],
+    ['POST', '/api/v1/user/update', '账户', '修改昵称', { nick_name: '' }],
+    ['POST', '/api/v1/user/send_email', '账户', '发送验证邮件', { email: '', password: '', operation_type: 1 }],
+    ['GET', '/api/v1/user/valid_email', '账户', '验证邮箱', { token: '' }],
+    ['POST', '/api/v1/user/following', '账户', '关注用户', { id: 0 }],
+    ['POST', '/api/v1/user/unfollowing', '账户', '取消关注', { id: 0 }],
+    ['POST', '/api/v1/user/avatar', '账户', '上传头像'],
+    ['GET', '/api/v1/category/list', '商品', '分类列表'],
+    ['GET', '/api/v1/carousels', '商品', '轮播内容'],
+    ['GET', '/api/v1/product/list', '商品', '商品列表', { page_size: 12, page_num: 1 }],
+    ['GET', '/api/v1/product/show', '商品', '商品详情', { id: 0 }],
+    ['GET', '/api/v1/product/imgs/list', '商品', '商品图片', { id: 0 }],
+    ['POST', '/api/v1/product/search', '商品', '关键词搜索', { query: '', page_size: 12 }],
+    ['POST', '/api/v1/product/semantic-search', '商品', '混合搜索', { query: '', top_k: 12 }],
+    ['POST', '/api/v1/favorites/create', '收藏与购物车', '收藏商品', { product_id: 0 }],
+    ['POST', '/api/v1/favorites/delete', '收藏与购物车', '取消收藏', { id: 0 }],
+    ['GET', '/api/v1/favorites/list', '收藏与购物车', '收藏列表'],
+    ['POST', '/api/v1/carts/create', '收藏与购物车', '加入购物车', { product_id: 0, boss_id: 0 }],
+    ['GET', '/api/v1/carts/list', '收藏与购物车', '购物车列表', { page_size: 20 }],
+    ['POST', '/api/v1/carts/update', '收藏与购物车', '修改数量', { id: 0, num: 1 }],
+    ['POST', '/api/v1/carts/delete', '收藏与购物车', '移出购物车', { id: 0 }],
+    ['POST', '/api/v1/addresses/create', '地址', '新建地址', { name: '', phone: '', address: '' }],
+    ['GET', '/api/v1/addresses/show', '地址', '地址列表'],
+    ['POST', '/api/v1/addresses/update', '地址', '修改地址', { id: 0, name: '', phone: '', address: '' }],
+    ['POST', '/api/v1/addresses/delete', '地址', '删除地址', { id: 0 }],
+    ['GET', '/api/v1/idempotency/token', '订单', '取得幂等令牌'],
+    ['POST', '/api/v1/orders/create', '订单', '创建订单', { product_id: 0, num: 1, address_id: 0 }],
+    ['POST', '/api/v1/orders/enqueue', '订单', '异步创建订单', { product_id: 0, num: 1, address_id: 0 }],
+    ['GET', '/api/v1/orders/status', '订单', '查询异步下单', { ticket: '' }],
+    ['GET', '/api/v1/orders/list', '订单', '订单列表', { page_size: 20 }],
+    ['GET', '/api/v1/orders/show', '订单', '订单详情', { order_id: 0 }],
+    ['POST', '/api/v1/orders/delete', '订单', '删除订单', { order_id: 0 }],
+    ['POST', '/api/v1/orders/confirm-receive', '订单', '确认收货', { order_num: 0 }],
+    ['POST', '/api/v1/paydown', '支付与退款', '余额支付', { order_id: 0, key: '' }],
+    ['GET', '/api/v1/paydown/crypto/nonce', '支付与退款', '取得链上支付签名', { order_id: 0 }],
+    ['POST', '/api/v1/paydown/crypto', '支付与退款', '提交链上支付', { orderID: 0, walletAddr: '', signature: '', nonce: '', chainID: 1 }],
+    ['POST', '/api/v1/paydown/stripe', '支付与退款', 'Stripe 支付', { order_id: 0 }],
+    ['POST', '/api/v1/orders/refund/request', '支付与退款', '申请退款', { order_num: 0, reason: '' }],
+    ['POST', '/api/v1/money', '支付与退款', '查看余额', { key: '' }],
+    ['POST', '/api/v1/promo/calculate', '优惠活动', '计算优惠', { items: [] }],
+    ['POST', '/api/v1/coupon/batch', '优惠活动', '创建优惠券批次'],
+    ['GET', '/api/v1/coupon/batches', '优惠活动', '优惠券批次'],
+    ['POST', '/api/v1/coupon/claim', '优惠活动', '领取优惠券'],
+    ['GET', '/api/v1/coupon/my', '优惠活动', '我的优惠券'],
+    ['POST', '/api/v1/redpacket/create', '优惠活动', '发红包'],
+    ['POST', '/api/v1/redpacket/claim', '优惠活动', '抢红包'],
+    ['GET', '/api/v1/redpacket/show', '优惠活动', '红包详情'],
+    ['GET', '/api/v1/redpacket/list', '优惠活动', '我的红包'],
+    ['POST', '/api/v1/skill_product/init', '优惠活动', '创建秒杀'],
+    ['GET', '/api/v1/skill_product/list', '优惠活动', '秒杀列表'],
+    ['GET', '/api/v1/skill_product/show', '优惠活动', '秒杀详情'],
+    ['POST', '/api/v1/skill_product/skill', '优惠活动', '参加秒杀'],
+    ['GET', '/api/v1/groupbuy/:id', '团购与预售', '团购详情', { id: 0 }],
+    ['POST', '/api/v1/groupbuy/create', '团购与预售', '发起团购'],
+    ['POST', '/api/v1/groupbuy/:id/join', '团购与预售', '加入团购', { id: 0 }],
+    ['GET', '/api/v1/preorder/:id', '团购与预售', '预售详情', { id: 0 }],
+    ['POST', '/api/v1/preorder/:id/deposit', '团购与预售', '支付定金', { id: 0 }],
+    ['POST', '/api/v1/preorder/:id/final', '团购与预售', '支付尾款', { id: 0 }],
+    ['POST', '/api/v1/preorder/:id/cancel', '团购与预售', '取消预售', { id: 0 }],
+    ['POST', '/api/v1/product/create', '商家', '上架商品'],
+    ['POST', '/api/v1/product/update', '商家', '修改商品'],
+    ['POST', '/api/v1/product/delete', '商家', '删除商品', { id: 0 }],
+    ['POST', '/api/v1/orders/ship', '商家', '订单发货', { order_num: 0, tracking_no: '', carrier: '' }],
+    ['POST', '/api/v1/orders/refund/approve', '商家', '同意退款', { order_num: 0 }],
+    ['POST', '/api/v1/orders/refund/reject', '商家', '驳回退款', { order_num: 0, reason: '' }],
+    ['POST', '/api/v1/admin/bootstrap', '管理员', '初始化管理员'],
+    ['GET', '/api/v1/admin/users', '管理员', '用户列表'],
+    ['POST', '/api/v1/admin/users/promote', '管理员', '调整用户角色'],
+    ['POST', '/api/v1/admin/search/backfill', '管理员', '重建商品索引'],
+    ['GET', '/api/v1/admin/promo/rules', '管理员', '优惠规则'],
+    ['POST', '/api/v1/admin/promo/rules', '管理员', '创建优惠规则'],
+    ['PATCH', '/api/v1/admin/promo/rules/:id/stop', '管理员', '停用优惠规则', { id: 0 }],
+  ] as [HttpMethod, string, string, string, Record<string, unknown>?][]).map(([method, path, group, label, sample]) => e(method, path, group, label, sample)),
+]
+
+export const GROUPS = [...new Set(ENDPOINTS.map((item) => item.group))]
