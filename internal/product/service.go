@@ -24,6 +24,9 @@ import (
 var ProductSrvIns *ProductSrv
 var ProductSrvOnce sync.Once
 
+// ErrProductNotFoundOrForbidden 统一隐藏“商品不存在”和“卖家越权”的差异，避免泄露他人商品是否存在。
+var ErrProductNotFoundOrForbidden = errors.New("商品不存在或无权操作")
+
 type ProductSrv struct {
 }
 
@@ -129,29 +132,35 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	// 以第一张作为封面图
-	tmp, err := files[0].Open()
-	if err != nil {
-		log.LogrusObj.Error("打开封面图失败，err:", err)
-		return nil, err
-	}
-	var path string
-	if conf.Config.System.UploadModel == consts.UploadModelLocal {
-		path, err = util.ProductUploadToLocalStatic(tmp, uId, req.Name)
-	} else {
-		path, err = util.UploadToQiNiu(tmp, files[0].Size)
-	}
-	tmp.Close()
-	if err != nil {
-		log.LogrusObj.Error("上传图片失败，err:", err)
-		return nil, err
+	// 文件上传属于数据库外部 I/O，不能放进 SQL 事务长期占锁。
+	// 先上传并收集路径，随后把商品、图片记录和 Outbox 事件一次性提交。
+	imagePaths := make([]string, 0, len(files))
+	for index, file := range files {
+		tmp, openErr := file.Open()
+		if openErr != nil {
+			log.LogrusObj.Error("打开商品图片失败，err:", openErr)
+			return nil, openErr
+		}
+		fileName := req.Name + strconv.Itoa(index)
+		var imagePath string
+		if conf.Config.System.UploadModel == consts.UploadModelLocal {
+			imagePath, err = util.ProductUploadToLocalStatic(tmp, uId, fileName)
+		} else {
+			imagePath, err = util.UploadToQiNiu(tmp, file.Size)
+		}
+		_ = tmp.Close()
+		if err != nil {
+			log.LogrusObj.Error("上传商品图片失败，err:", err)
+			return nil, err
+		}
+		imagePaths = append(imagePaths, imagePath)
 	}
 	product := &Product{
 		Name:          req.Name,
 		CategoryID:    req.CategoryID,
 		Title:         req.Title,
 		Info:          req.Info,
-		ImgPath:       path,
+		ImgPath:       imagePaths[0],
 		Price:         req.Price,
 		DiscountPrice: req.DiscountPrice,
 		Num:           req.Num,
@@ -160,43 +169,14 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		BossName:      boss.UserName,
 		BossAvatar:    boss.Avatar,
 	}
-	productDao := NewProductDao(ctx)
-	err = productDao.CreateProduct(product)
-	if err != nil {
+	if err = createProductAndEvent(NewProductDao(ctx).DB, product, imagePaths...); err != nil {
 		log.LogrusObj.Error("创建产品失败，err:", err)
 		return nil, err
 	}
-	emitProductChanged(ctx, product.ID, "create")
+	// 清掉可能由提前探测未来 ID 写入的空值缓存，让新商品提交后立即可读。
+	_ = cache.DelProductDetail(ctx, product.ID)
 
-	for index, file := range files {
-		num := strconv.Itoa(index)
-		tmp, openErr := file.Open()
-		if openErr != nil {
-			log.LogrusObj.Error("打开商品图片失败，err:", openErr)
-			return nil, openErr
-		}
-		if conf.Config.System.UploadModel == consts.UploadModelLocal {
-			path, err = util.ProductUploadToLocalStatic(tmp, uId, req.Name+num)
-		} else {
-			path, err = util.UploadToQiNiu(tmp, file.Size)
-		}
-		tmp.Close()
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return nil, err
-		}
-		productImg := &ProductImg{
-			ProductID: product.ID,
-			ImgPath:   path,
-		}
-		err = NewProductImgDaoByDB(productDao.DB).CreateProductImg(productImg)
-		if err != nil {
-			log.LogrusObj.Error(err)
-			return nil, err
-		}
-	}
-
-	return nil, nil
+	return product, nil
 }
 
 func (s *ProductSrv) ProductList(ctx context.Context, req *ProductListReq) (*types.DataListResp, error) {
@@ -260,25 +240,67 @@ func (s *ProductSrv) ProductDelete(ctx context.Context, req *ProductDeleteReq) (
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	err = NewProductDao(ctx).DeleteProduct(req.ID, u.Id)
+	err = deleteProductAndEvent(NewProductDao(ctx).DB, req.ID, u.Id)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
 	_ = cache.DelProductDetail(ctx, req.ID)
 	cache.DoubleDeleteAsync(req.ID, 0)
-	emitProductChanged(ctx, req.ID, "delete")
 	return nil, nil
 }
 
-// emitProductChanged 写一条 outbox 事件，由 publisher 异步投到 RMQ 然后被 search.indexer 消费
-func emitProductChanged(ctx context.Context, productID uint, op string) {
-	if err := outbox.NewOutboxDao(ctx).Insert(
+// insertProductChanged 使用调用方的 tx 写 Outbox。
+// 事件与商品事实共用事务，任何一步失败都不会留下“商品已变、事件丢失”的半状态。
+func insertProductChanged(tx *gorm.DB, productID uint, op string) error {
+	return outbox.NewOutboxDaoByDB(tx).Insert(
 		"product", "ProductChanged", "product.changed", productID,
 		events.ProductChanged{ProductID: productID, Op: op},
-	); err != nil {
-		log.LogrusObj.Errorf("emit product.changed event failed product=%d op=%s err=%v", productID, op, err)
-	}
+	)
+}
+
+// createProductAndEvent 原子写入商品、图库记录和创建事件。
+func createProductAndEvent(db *gorm.DB, product *Product, imagePaths ...string) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := NewProductDaoByDB(tx).CreateProduct(product); err != nil {
+			return err
+		}
+		imageDao := NewProductImgDaoByDB(tx)
+		for _, imagePath := range imagePaths {
+			if err := imageDao.CreateProductImg(&ProductImg{ProductID: product.ID, ImgPath: imagePath}); err != nil {
+				return err
+			}
+		}
+		return insertProductChanged(tx, product.ID, "create")
+	})
+}
+
+// updateProductAndEvent 只有归属校验通过时才更新商品并写更新事件。
+func updateProductAndEvent(db *gorm.DB, productID, bossID uint, product *Product) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		affected, err := NewProductDaoByDB(tx).UpdateProduct(productID, bossID, product)
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return ErrProductNotFoundOrForbidden
+		}
+		return insertProductChanged(tx, productID, "update")
+	})
+}
+
+// deleteProductAndEvent 只有真实删除成功时才写删除事件，避免越权请求产生幽灵事件。
+func deleteProductAndEvent(db *gorm.DB, productID, bossID uint) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		affected, err := NewProductDaoByDB(tx).DeleteProduct(productID, bossID)
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return ErrProductNotFoundOrForbidden
+		}
+		return insertProductChanged(tx, productID, "delete")
+	})
 }
 
 // ProductUpdate 更新商品，延迟双删保证缓存一致性
@@ -302,18 +324,11 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (
 		OnSale:        req.OnSale,
 	}
 	_ = cache.DelProductDetail(ctx, req.ID)
-	affected, err := NewProductDao(ctx).UpdateProduct(req.ID, u.Id, product)
-	if err != nil {
-		log.LogrusObj.Error(err)
-		return nil, err
-	}
-	if affected == 0 {
-		err = errors.New("商品不存在或无权修改")
+	if err := updateProductAndEvent(NewProductDao(ctx).DB, req.ID, u.Id, product); err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
 	cache.DoubleDeleteAsync(req.ID, 0)
-	emitProductChanged(ctx, req.ID, "update")
 
 	return nil, nil
 }
