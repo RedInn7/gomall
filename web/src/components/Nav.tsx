@@ -4,10 +4,11 @@ interface Props {
   cartCount: number
   onSearch: () => void
   onCart: () => void
+  onAccount: () => void
   onNav: (hash: string) => void
 }
 
-export function Nav({ cartCount, onSearch, onCart, onNav }: Props) {
+export function Nav({ cartCount, onSearch, onCart, onAccount, onNav }: Props) {
   const [stuck, setStuck] = useState(false)
   useEffect(() => {
     const fn = () => setStuck(scrollY > 40)
@@ -28,6 +29,10 @@ export function Nav({ cartCount, onSearch, onCart, onNav }: Props) {
         GOMALL<sup>®</sup>
       </a>
       <div className="nav__col nav__col--right">
+        <button className="nav__icon" onClick={onAccount} aria-label="业务工作台">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5" /><path d="M5 21c.7-4.1 3-6.2 7-6.2s6.3 2.1 7 6.2" /></svg>
+          <span>账户</span>
+        </button>
         <button className="nav__icon" onClick={onSearch} aria-label="搜索">
           <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><line x1="16.5" y1="16.5" x2="21" y2="21" /></svg>
           <span>搜索</span>
