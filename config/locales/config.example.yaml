@@ -1,10 +1,10 @@
 system:
   domain: mall
   version: 1.0
-  env: "dev"
-  HttpPort: ":5002"
-  Host: "localhost"
-  UploadModel: "local"
+  appEnv: "dev"
+  httpPort: ":5003"
+  host: "localhost"
+  uploadModel: "local"
   allowedOrigins:
     - http://localhost:8080
     - http://localhost:5173
