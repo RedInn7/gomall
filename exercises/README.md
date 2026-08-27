@@ -21,7 +21,7 @@ solution/    参考实现
 每道题的 `problem/readme.md` 会说明业务背景和完成条件。先读题，再打开同目录下的 `.go` 文件，找到 `TODO`：
 
 ```bash
-rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down exercises/04-payment-clearing exercises/05-payment-settlement
+rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down exercises/04-payment-clearing exercises/05-payment-settlement exercises/07-product-search
 ```
 
 如果编辑器支持全局搜索，直接搜索 `TODO` 也可以。
@@ -336,6 +336,24 @@ go test -tags exercise ./exercises/05-payment-settlement/05.05-settlement-reconc
 ```
 
 使用一次线性扫描找出清算单缺失、终态冲突、流水缺失、借贷不平和卖家余额链异常，并按订单号稳定输出。
+
+## 第七讲：商品搜索
+
+### 07.01 搜索查询计划
+
+```bash
+go test -tags exercise ./exercises/07-product-search/07.01-search-query-plan/problem
+```
+
+先从 `info / title / name` 中选择唯一关键词，再规范分页，并把类目与在售状态转换成顺序稳定的过滤条件。公开题面包含调用样例、边界规则和 12 个测试场景。
+
+### 07.02 商品索引 Outbox
+
+```bash
+go test -tags exercise ./exercises/07-product-search/07.02-index-outbox/problem
+```
+
+在同一事务里更新商品并记录 `product.changed` 事件，同时处理事件重放、事件 ID 冲突、商品版本冲突和 Outbox 故障回滚。公开题面包含状态样例和 13 个测试场景。
 
 ## 一次运行全部题目
 
