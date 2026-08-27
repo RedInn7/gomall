@@ -9,6 +9,7 @@ chapters=(
   "./exercises/03-payment-down/..."
   "./exercises/04-payment-clearing/..."
   "./exercises/05-payment-settlement/..."
+  "./exercises/07-product-search/..."
 )
 race_student_packages=(
   "./exercises/05-payment-settlement/05.03-concurrent-idempotent-settlement/problem"
