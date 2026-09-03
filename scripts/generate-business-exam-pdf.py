@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Generate the printable Gomall business exam PDF."""
+
+from pathlib import Path
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    KeepTogether,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT = ROOT / "output" / "pdf" / "gomall-business-exam-a.pdf"
+SONG_FONT = "/System/Library/Fonts/Supplemental/Songti.ttc"
+HEI_FONT = "/System/Library/Fonts/STHeiti Medium.ttc"
+
+
+def register_fonts() -> None:
+    pdfmetrics.registerFont(TTFont("ExamSong", SONG_FONT, subfontIndex=0))
+    pdfmetrics.registerFont(TTFont("ExamHei", HEI_FONT, subfontIndex=0))
+
+
+def draw_page(canvas, doc) -> None:
+    width, height = A4
+    canvas.saveState()
+    canvas.setFont("ExamSong", 8)
+    canvas.setFillColor(colors.HexColor("#555555"))
+    canvas.drawCentredString(width / 2, 9 * mm, f"- {doc.page} -")
+    canvas.restoreState()
+
+
+def make_doc() -> BaseDocTemplate:
+    doc = BaseDocTemplate(
+        str(OUTPUT),
+        pagesize=A4,
+        leftMargin=20 * mm,
+        rightMargin=20 * mm,
+        topMargin=16 * mm,
+        bottomMargin=16 * mm,
+        title="Gomall 业务理解阶段考试（A 卷）",
+        author="Chunyu Sui",
+        subject="Gomall 业务理解阶段考试",
+    )
+    frame = Frame(
+        doc.leftMargin,
+        doc.bottomMargin,
+        doc.width,
+        doc.height,
+        leftPadding=0,
+        rightPadding=0,
+        topPadding=0,
+        bottomPadding=0,
+    )
+    doc.addPageTemplates(PageTemplate(id="exam", frames=frame, onPage=draw_page))
+    return doc
+
+
+def build_story():
+    styles = getSampleStyleSheet()
+    title = ParagraphStyle(
+        "ExamTitle",
+        parent=styles["Title"],
+        fontName="ExamHei",
+        fontSize=20,
+        leading=27,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=4 * mm,
+    )
+    subtitle = ParagraphStyle(
+        "Subtitle",
+        parent=styles["Normal"],
+        fontName="ExamSong",
+        fontSize=10,
+        leading=16,
+        alignment=TA_CENTER,
+        spaceAfter=3 * mm,
+    )
+    section = ParagraphStyle(
+        "Section",
+        parent=styles["Heading2"],
+        fontName="ExamHei",
+        fontSize=13,
+        leading=18,
+        textColor=colors.black,
+        spaceBefore=2 * mm,
+        spaceAfter=2.5 * mm,
+        borderWidth=0,
+        leftIndent=0,
+    )
+    question = ParagraphStyle(
+        "Question",
+        parent=styles["BodyText"],
+        fontName="ExamSong",
+        fontSize=10.5,
+        leading=16,
+        alignment=TA_LEFT,
+        textColor=colors.black,
+        spaceAfter=1.5 * mm,
+    )
+    option = ParagraphStyle(
+        "Option",
+        parent=question,
+        leftIndent=4 * mm,
+        firstLineIndent=-4 * mm,
+        leading=15.2,
+        spaceAfter=0.7 * mm,
+    )
+    note = ParagraphStyle(
+        "Note",
+        parent=question,
+        fontSize=9.5,
+        leading=14.5,
+        textColor=colors.HexColor("#333333"),
+    )
+
+    story = []
+    story.append(Paragraph("Gomall 业务理解阶段考试", title))
+    story.append(Paragraph("A 卷", ParagraphStyle("AVol", parent=title, fontSize=16, leading=20)))
+    story.append(
+        Paragraph(
+            "考试范围：业务总览、用户与鉴权、支付、清算与结算、商品展示、商品搜索（一）（二）<br/>"
+            "考试时间：120 分钟　　满分：100 分　　考试形式：闭卷",
+            subtitle,
+        )
+    )
+
+    story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph("考生须知", section))
+    notices = [
+        "1. 本卷重点考查业务理解，不要求默写函数名、数据库表名或 Elasticsearch DSL。",
+        "2. 除单项选择题外，只写结论但不说明业务理由，原则上不得满分。",
+        "3. 涉及故障处理时，应说明业务事实、状态变化、事务边界和失败后的结果。",
+        "4. 多项选择题少选得 1 分，错选或多选不得分。",
+        "5. 判断并改错题中，判断占 1 分，说明理由占 1 分；错误命题还须给出正确说法。",
+    ]
+    for item in notices:
+        story.append(Paragraph(item, note))
+    story.append(Spacer(1, 3 * mm))
+
+    single = [
+        ("1. 用户提交订单时，下面哪组数据应以服务端保存的业务事实为准？", ["A. 购买数量与备注", "B. 商品价格、卖家身份与当前用户身份", "C. 客户端生成的请求 ID", "D. 用户选择的页面主题"]),
+        ("2. 某用户已经通过 JWT 验证，但尝试修改另一位用户的收货地址。系统仍应拒绝该请求，主要因为还需要完成：", ["A. 身份认证", "B. 数据归属校验", "C. HTTP 缓存校验", "D. 搜索结果重排"]),
+        ("3. access token 已过期，但 refresh token 仍有效。最合理的处理是：", ["A. 继续使用原 access token 访问业务接口", "B. 直接永久封禁账户", "C. 校验 refresh token 后签发新的 token 组合", "D. 跳过鉴权，仅允许本次请求通过"]),
+        ("4. 账户间转账需要同时锁住付款账户和收款账户。所有请求都按账户 ID 从小到大加锁，主要是为了：", ["A. 避免相向支付形成死锁", "B. 提高账户余额的精度", "C. 减少资金流水数量", "D. 代替支付幂等机制"]),
+        ("5. 一笔支付已在数据库提交成功，但响应在返回途中丢失。用户使用同一个幂等 key 重试时，系统首先应当：", ["A. 再执行一次扣款，以免第一次没有成功", "B. 查找并回放已经完成的业务结果", "C. 删除原有资金流水后重新支付", "D. 因为响应丢失而把订单改回待支付"]),
+        ("6. 外部支付渠道通知平台“支付成功”后，平台不应立即把钱计入卖家可提现余额，最主要的原因是：", ["A. 卖家账户不能保存余额", "B. 支付成功与履约完成是两个不同的业务阶段", "C. 外部渠道不支持订单号", "D. 买家必须再次输入支付密码"]),
+        ("7. 关于清算与结算，下列说法正确的是：", ["A. 清算确认钱从哪里来、金额如何拆分；结算在满足条件后把托管款放给卖家", "B. 清算与结算是同一个状态的两个名称", "C. 只要订单创建，就可以直接进入 settled", "D. 结算完成后才需要记录清算单"]),
+        ("8. 商品列表读取数据库失败时，页面继续展示内置演示商品，且没有标明这些是演示数据。该做法最大的业务风险是：", ["A. 演示商品排序不够美观", "B. 系统把不存在或过期的数据伪装成了交易事实", "C. HTTP 响应体太小", "D. 用户无法触发浏览器 304"]),
+        ("9. 在商品搜索中，类目和“是否在售”更适合作为结构化过滤条件，而不是参与全文相关度打分，主要因为：", ["A. 它们表达的是必须满足的业务约束", "B. Elasticsearch 不支持字符串字段", "C. 过滤条件一定比数据库快", "D. 使用过滤后不再需要关键词"]),
+        ("10. 为保证商品修改与索引更新最终一致，较合理的做法是：", ["A. 先提交商品修改，再尽力向消息队列发送一次消息", "B. 只修改 Elasticsearch，不修改 MySQL", "C. 在同一数据库事务中写入商品事实和索引 Outbox 事件", "D. 让客户端同时调用商品接口和索引接口"]),
+    ]
+    story.append(Paragraph("一、单项选择题（10 小题，每小题 2 分，共 20 分）", section))
+    story.append(Paragraph("每小题只有一个选项最符合题意。请将答案填入括号内。", note))
+    for idx, (q, opts) in enumerate(single):
+        block = [Paragraph(q + "　（　　）", question)]
+        for opt in opts:
+            block.append(Paragraph(opt, option))
+        story.append(KeepTogether(block))
+
+    multi = [
+        ("11. 下列哪些机制共同构成了支付“只生效一次”的防线？", ["A. 幂等 key 状态机与结果回放", "B. 资金流水的业务唯一约束", "C. 订单状态条件更新", "D. 每次重试都生成新的订单", "E. 关键资金操作处于同一事务"]),
+        ("12. 下列哪些情况通常应视为业务失败，而不是支付链路本身的系统失败？", ["A. 余额不足", "B. 订单不属于当前用户", "C. 下游连接超时", "D. 订单状态已经不是待支付", "E. 数据库连接池耗尽"]),
+        ("13. 一笔托管款可以安全结算给卖家，通常需要满足哪些条件？", ["A. 订单已经达到允许结算的完成状态", "B. 清算单处于已清算但未结算状态", "C. 本次结算尚未成功执行过", "D. 买家刚刚打开过商品详情页", "E. 卖家余额、双边流水和清算状态在同一事务中提交"]),
+        ("14. 排查“商品刚上架但搜索不到”时，下面哪些检查有直接价值？", ["A. MySQL 中的商品状态与版本是否正确", "B. 商品事务是否同时写入了索引 Outbox 事件", "C. Outbox 是否已被投递和消费", "D. Elasticsearch 文档版本、可见性和过滤条件是否正确", "E. 用户浏览器的背景颜色是否正确"]),
+        ("15. 关于 Hybrid Search 的两路召回与融合，下列哪些说法正确？", ["A. 关键词召回与向量召回解决的问题并不完全相同", "B. 两路原始分数应不经处理直接相加，因为量纲天然一致", "C. 可以先扩大候选集，再归一化、按商品 ID 合并并稳定排序", "D. L2 距离越小通常越相似，方向写反会把较差结果排到前面", "E. 调整融合权重应使用代表性查询集评估，而不是只凭感觉"]),
+    ]
+    story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph("二、多项选择题（5 小题，每小题 3 分，共 15 分）", section))
+    story.append(Paragraph("全部选对得 3 分，少选得 1 分，错选或多选不得分。", note))
+    for idx, (q, opts) in enumerate(multi):
+        block = [Paragraph(q + "　（　　　　　　）", question)]
+        for opt in opts:
+            block.append(Paragraph(opt, option))
+        story.append(KeepTogether(block))
+
+    story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph("三、判断并改错题（5 小题，每小题 2 分，共 10 分）", section))
+    story.append(Paragraph("判断命题是否正确并说明理由；错误命题须给出正确说法。", note))
+    judgments = [
+        "16. JWT 验证通过后，请求体中的 user_id 就可以作为当前用户身份使用。",
+        "17. Redis 中的幂等记录丢失后，数据库中的业务唯一约束和状态守卫仍应防止重复扣款。",
+        "18. 外部支付回调重复到达，与用户真实支付了两次，是同一种业务情况，可以用同一个 Redis key 一律忽略。",
+        "19. 商品缓存只能保存成功读取的结果；数据库异常产生的错误响应不应作为正常商品数据写入缓存。",
+        "20. Elasticsearch 是商品交易事实的唯一来源，因此 MySQL 数据可以根据 Elasticsearch 结果随时覆盖。",
+    ]
+    for item in judgments:
+        story.append(Paragraph(item + "　判断：（　　）", question))
+        story.append(Spacer(1, 1.5 * mm))
+
+    short_questions = [
+        "21. 身份认证、角色授权、数据归属校验分别回答什么问题？请各举一个 Gomall 场景。",
+        "22. 请用一笔 100 元订单说明“支付、清算、结算”三个阶段分别解决什么问题，并指出卖家何时才能获得可提现余额。",
+        "23. 为什么支付系统既需要幂等机制，又需要数据库事务与资金流水唯一约束？仅使用其中一种会留下什么风险？",
+        "24. 商品搜索为什么可以在 Elasticsearch 不可用时降级到 MySQL，但不能把两者宣称为完全等价？请从可用性、搜索质量和结果契约三个方面回答。",
+    ]
+    story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph("四、业务流程简答题（4 小题，每小题 5 分，共 20 分）", section))
+    for idx, item in enumerate(short_questions):
+        story.append(Paragraph(item, question))
+        story.append(Spacer(1, 3 * mm))
+
+    scenarios = [
+        (
+            "25. “钱扣了，页面却显示失败”",
+            "某用户支付订单 O1001。数据库事务已经成功提交：买家余额减少、托管账户增加、双边流水写入、订单状态变为已支付；服务也已经把幂等状态保存为 done 并记录成功响应，但客户端在收到响应前断线。用户随后使用同一个幂等 key 重试，此时熔断器恰好处于 Open 状态。",
+            ["（1）重试请求应返回什么业务结果？（2 分）", "（2）“历史结果回放”和“熔断检查”谁应在前，为什么？（2 分）", "（3）至少写出三道能够防止再次扣款的后端防线。（3 分）"],
+            9,
+        ),
+        (
+            "26. “订单完成和退款同时发生”",
+            "订单 O2002 已支付，100 元净额位于 merchant_escrow。几乎同一时刻，系统收到订单完成事件并准备结算，客服也批准了全额退款。消息队列还重复投递了两次订单完成事件。",
+            ["（1）结算与退款竞争时，系统必须守住的核心资金不变量是什么？（2 分）", "（2）应锁定或检查哪些关键业务事实，才能决定托管款最终流向？（2 分）", "（3）若卖家 credit 流水写入失败，本次结算事务应留下什么结果？（1 分）", "（4）重复完成事件到达时，如何保证卖家不会重复入账？（2 分）"],
+            10,
+        ),
+        (
+            "27. “改价后，多处价格不一致”",
+            "商家把商品 P3003 从 100 元改为 80 元。MySQL 已更新，但详情缓存尚未失效，Elasticsearch 索引事件也暂未消费。此时用户在旧详情页看到 100 元，在搜索页看到 100 元，并提交了一个带有 price=100 的下单请求。",
+            ["（1）详情页和搜索页暂时显示旧价格，分别属于哪类一致性问题？（2 分）", "（2）创建订单时应采用哪个价格，为什么？（2 分）", "（3）系统应如何让详情缓存和搜索索引最终收敛到 80 元？（2 分）", "（4）写出一项能帮助发现该问题的监控指标。（1 分）"],
+            10,
+        ),
+    ]
+    story.append(Spacer(1, 2 * mm))
+    for idx, (heading, material, prompts, lines) in enumerate(scenarios):
+        block = []
+        if idx == 0:
+            block.append(Paragraph("五、场景分析题（3 小题，每小题 7 分，共 21 分）", section))
+        block.extend([Paragraph(heading, question), Paragraph(material, note)])
+        for prompt in prompts:
+            block.append(Paragraph(prompt, question))
+        story.append(KeepTogether(block))
+        story.append(Spacer(1, 4 * mm))
+
+    story.append(Spacer(1, 2 * mm))
+    story.append(
+        KeepTogether(
+            [
+                Paragraph("六、综合设计题（1 小题，共 14 分）", section),
+                Paragraph("28. 订单完成后的资金安全闭环", question),
+                Paragraph(
+                    "平台准备上线“确认收货后自动给卖家结算”的功能。已知：支付成功后，订单净额先进入 merchant_escrow；订单服务通过消息队列发送 order.completed；消息可能重复、延迟、乱序，也可能在数据库提交成功后因 Ack 丢失再次投递；用户可能在结算期间申请退款；财务每天需要发现漏记、重复入账和金额不平。",
+                    note,
+                ),
+            ]
+        )
+    )
+    prompts = [
+        "（1）写出从收到 order.completed 到结算成功的关键校验与状态推进顺序。（4 分）",
+        "（2）划定结算数据库事务的边界，说明哪些写操作必须一起成功或一起失败。（4 分）",
+        "（3）说明系统如何处理重复消息、乱序消息以及结算与退款并发。（3 分）",
+        "（4）给出至少三项日终对账检查，并说明每项想发现什么问题。（3 分）",
+    ]
+    for prompt in prompts:
+        story.append(Paragraph(prompt, question))
+    return story
+
+
+def main() -> None:
+    register_fonts()
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    doc = make_doc()
+    doc.build(build_story())
+    print(OUTPUT)
+
+
+if __name__ == "__main__":
+    main()
