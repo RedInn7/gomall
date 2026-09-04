@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	xcashFiatUSD          = "USD"
+	xcashFiatCNY          = "CNY"
 	maxXcashBody          = 1 << 20
 	xcashWebhookTolerance = 5 * time.Minute
 )
@@ -30,28 +30,48 @@ var (
 )
 
 type xcashConfig struct {
-	BaseURL   string
-	AppID     string
-	HMACKey   string
-	NotifyURL string
-	ReturnURL string
-	Currency  string
-	Duration  int
-	Methods   map[string][]string
+	BaseURL            string
+	AppID              string
+	HMACKey            string
+	NotifyURL          string
+	ReturnURL          string
+	Currency           string
+	Duration           int
+	Methods            map[string][]string
+	VaultSlotConfirmed bool
+	RequireAML         bool
+	AllowHTTP          bool
 }
 
 func (c xcashConfig) validate() error {
 	if strings.TrimSpace(c.BaseURL) == "" || strings.TrimSpace(c.AppID) == "" || strings.TrimSpace(c.HMACKey) == "" || strings.TrimSpace(c.NotifyURL) == "" {
 		return errors.New("Xcash 未配置：需要 XCASH_BASE_URL、XCASH_APP_ID、XCASH_HMAC_KEY 和 XCASH_NOTIFY_URL")
 	}
-	if _, err := url.ParseRequestURI(c.BaseURL); err != nil {
+	parsed, err := url.ParseRequestURI(c.BaseURL)
+	if err != nil {
 		return fmt.Errorf("XCASH_BASE_URL 非法: %w", err)
+	}
+	if parsed.Host == "" || parsed.User != nil {
+		return errors.New("XCASH_BASE_URL 必须是无内嵌凭据的绝对地址")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("XCASH_BASE_URL 不能包含 query 或 fragment")
+	}
+	if parsed.Scheme != "https" && !(c.AllowHTTP && parsed.Scheme == "http") {
+		return errors.New("XCASH_BASE_URL 必须使用 HTTPS")
 	}
 	if c.Duration < 5 || c.Duration > 30 {
 		return errors.New("XCASH_INVOICE_DURATION_MINUTES 必须在 5 到 30 之间")
 	}
-	if strings.TrimSpace(c.Currency) == "" {
-		return errors.New("XCASH_FIAT_CURRENCY 不能为空")
+	if !strings.EqualFold(strings.TrimSpace(c.Currency), xcashFiatCNY) {
+		return errors.New("Xcash 账单必须使用与 Gomall 订单一致的 CNY 计价")
+	}
+	if !c.VaultSlotConfirmed {
+		return errors.New("Xcash 未通过 VaultSlot 部署确认：请设置 XCASH_VAULTSLOT_CONFIRMED=true")
+	}
+	notifyURL, err := url.ParseRequestURI(c.NotifyURL)
+	if err != nil || notifyURL.Scheme != "https" || notifyURL.Host == "" || notifyURL.User != nil {
+		return errors.New("XCASH_NOTIFY_URL 必须是无内嵌凭据的 HTTPS 公网地址")
 	}
 	return nil
 }
@@ -120,14 +140,20 @@ type xcashWebhookHeaders struct {
 
 func newXcashClient(config xcashConfig, httpClient *http.Client) *xcashClient {
 	if strings.TrimSpace(config.Currency) == "" {
-		config.Currency = xcashFiatUSD
+		config.Currency = xcashFiatCNY
 	}
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 5 * time.Second}
 	}
+	clientCopy := *httpClient
+	// 查询账单响应没有单独签名，因此不能让 HTTP 客户端跟随跨主机或 HTTPS
+	// 降级重定向。Xcash 的规范端点不需要重定向，收到 3xx 直接报错最安全。
+	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &xcashClient{
 		config:     config,
-		httpClient: httpClient,
+		httpClient: &clientCopy,
 		now:        time.Now,
 		nonce:      xcashNonce,
 	}
