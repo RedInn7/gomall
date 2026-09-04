@@ -267,7 +267,8 @@ func TestXcashPaymentServiceReconcilesCompletedInvoiceWithoutWebhook(t *testing.
 			"pay_address":"0x4444444444444444444444444444444444444444","pay_amount":"24.91",
 			"pay_url":"https://pay.example.test/pay/%s","expires_at":"2099-09-03T20:15:00Z",
 			"status":"completed","risk_level":"Low","risk_score":"10",
-			"payment":{"chain":"arbitrum","block":99,"hash":"0xreconciled","from_address":"0xfrom","to_address":"0x4444444444444444444444444444444444444444","crypto":"USDT","amount":"24.91","status":"confirmed"}
+			"payment":{"chain":"arbitrum","block":99,"hash":"0xreconciled","from_address":"0xfrom","to_address":"0x4444444444444444444444444444444444444444","crypto":"USDT","amount":"24.910","status":"confirmed",
+			"confirm_progress":{"has_confirmed_count":12,"need_confirmed_count":12,"progress":100}}
 		}`, intent.SysNo, intent.SysNo)
 	}))
 	defer server.Close()
@@ -278,14 +279,93 @@ func TestXcashPaymentServiceReconcilesCompletedInvoiceWithoutWebhook(t *testing.
 	}, server.Client())
 	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
 	service.commitReservation = func(context.Context, uint, int) {}
-	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: buyer.ID})
-
-	status, err := service.GetCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
+	processed, err := service.ReconcilePending(context.Background(), 50)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Status != XcashIntentCompleted || status.TxHash != "0xreconciled" || status.Crypto != "USDT" {
-		t.Fatalf("unexpected reconciled status: %+v", status)
+	if processed != 1 {
+		t.Fatalf("processed intents = %d, want 1", processed)
+	}
+	var gotIntent XcashPaymentIntent
+	if err := db.First(&gotIntent, intent.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotIntent.Status != XcashIntentCompleted || gotIntent.TxHash != "0xreconciled" || gotIntent.Crypto != "USDT" ||
+		gotIntent.Confirmations != 12 || gotIntent.RequiredConfirmations != 12 || gotIntent.ConfirmProgress != 100 {
+		t.Fatalf("unexpected reconciled intent: %+v", gotIntent)
+	}
+	var gotOrder orderpkg.Order
+	if err := db.First(&gotOrder, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotOrder.Type != consts.OrderWaitShip {
+		t.Fatalf("order state = %d, want WaitShip", gotOrder.Type)
+	}
+}
+
+func TestXcashPaymentServiceSettlesCompletedIdempotentCreateResponse(t *testing.T) {
+	db := newXcashTestDB(t,
+		&user.User{}, &product.Product{}, &orderpkg.Order{},
+		&money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{},
+		&outbox.OutboxEvent{}, &XcashPaymentIntent{}, &XcashWebhookReceipt{},
+	)
+	buyer := &user.User{UserName: "retry-buyer", Email: "retry@example.com"}
+	buyer.ID = 8
+	if err := db.Create(buyer).Error; err != nil {
+		t.Fatal(err)
+	}
+	item := &product.Product{Name: "mouse", CategoryID: 1, Num: 4, BossID: 9, BossName: "seller"}
+	item.ID = 80
+	if err := db.Create(item).Error; err != nil {
+		t.Fatal(err)
+	}
+	order := &orderpkg.Order{
+		UserID: buyer.ID, BossID: 9, ProductID: item.ID, AddressID: 90, Num: 1,
+		OrderNum: 20260903005, Type: consts.OrderWaitPay, Money: 1800,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		outNo := ""
+		if r.Method == http.MethodPost {
+			var request xcashCreateInvoiceRequest
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			outNo = request.OutNo
+		} else {
+			var intent XcashPaymentIntent
+			if err := db.Where("order_id = ?", order.ID).First(&intent).Error; err != nil {
+				t.Fatal(err)
+			}
+			outNo = intent.OutNo
+		}
+		_, _ = fmt.Fprintf(w, `{
+			"sys_no":"INV260903CREATEPAID","out_no":%q,"currency":"USD","amount":"18.00",
+			"chain":"base","crypto":"DAI","pay_address":"0x8888888888888888888888888888888888888888","pay_amount":"18",
+			"pay_url":"https://pay.example.test/pay/INV260903CREATEPAID","expires_at":"2099-09-03T20:15:00Z",
+			"status":"completed","risk_level":"Low","risk_score":"5",
+			"payment":{"chain":"base","block":100,"hash":"0xcreatepaid","from_address":"0xfrom","to_address":"0x8888888888888888888888888888888888888888","crypto":"DAI","amount":"18.0","status":"confirmed"}
+		}`, outNo)
+	}))
+	defer server.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		Methods: map[string][]string{"DAI": {"base"}},
+	}, server.Client())
+	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service.commitReservation = func(context.Context, uint, int) {}
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: buyer.ID})
+
+	status, err := service.CreateCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != XcashIntentCompleted || status.Crypto != "DAI" || status.TxHash != "0xcreatepaid" {
+		t.Fatalf("completed create was not settled: %+v", status)
 	}
 	var gotOrder orderpkg.Order
 	if err := db.First(&gotOrder, order.ID).Error; err != nil {

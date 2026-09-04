@@ -32,4 +32,13 @@ func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 		StripeCheckoutHandler())
 	// Stripe webhook：公开端点（无登录），靠签名校验来源；支付完成后由它兜底结算订单
 	public.POST("webhooks/stripe", StripeWebhookHandler())
+
+	// Xcash 多链加密货币账单：链币白名单来自服务端配置，客户端只能提交订单号。
+	authed.POST("paydown/xcash",
+		middleware.Idempotency(),
+		XcashCheckoutHandler())
+	// 查询时会主动向 Xcash 对账，Webhook 丢失也能补齐已确认付款。
+	authed.GET("paydown/xcash", XcashCheckoutStatusHandler())
+	// Xcash 公开回调使用 HMAC、时间戳与持久化 nonce 校验。
+	public.POST("webhooks/xcash", XcashWebhookHandler())
 }

@@ -84,6 +84,7 @@ func loading() {
 	initialize.InitRedPacketSettleConsumer(context.Background())
 	initialize.InitGroupbuySettleConsumer(context.Background())
 	initialize.InitWeb3SettleConsumer(context.Background())
+	initialize.InitXcashReconciler(context.Background())
 	tryInitES(context.Background())
 	tryInitWeb3Listener(context.Background())
 	tryInitMilvus(context.Background())
