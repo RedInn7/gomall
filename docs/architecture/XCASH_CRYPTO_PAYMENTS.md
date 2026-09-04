@@ -20,6 +20,8 @@
 
 服务启动后还会每分钟轮转查询等待付款、等待风控以及最近 24 小时过期的账单；即使 Webhook 丢失或过期账单随后完成链上确认，也会进入同一条幂等结算路径。
 
+Gomall 的支付编排只依赖 `XcashGateway`，创建账单、查询账单和校验 Webhook 的 HTTP 细节由适配器封装。这样可以在不启动 Xcash 或 HTTP 测试服务器的情况下，用内存 fake 覆盖支付成功、异常隔离与恢复路径；替换供应商时也不需要改订单清算逻辑。
+
 ## 必须满足的业务规则
 
 - 可用币种和链取自服务端 `XCASH_METHODS_JSON` 白名单；未配置白名单时由 Xcash 项目提供所有已启用方式，客户端不能覆盖。
@@ -52,7 +54,7 @@ Xcash 管理后台必须为每条开放的链启用 VaultSlot 收款模式，并
 - Xcash 项目通知开关已开启，`XCASH_NOTIFY_URL` 是公网 HTTPS 地址，并把 Gomall 出口 IP 加入 Xcash 项目白名单。
 - 每条 VaultSlot 链的系统钱包有足够 Gas；Tron 同时准备足够 Energy/TRX，确保合约部署与归集可以执行。
 - 严格 AML 模式下，Xcash 项目已开通并启用 AML，且筛查阈值覆盖 Gomall 要求的订单范围；否则付款会停在 `risk_pending`，不会放货。
-- 当前 Xcash 的公开账单查询会缓存已完成账单约 1 小时，而 AML 写回不会主动清除此缓存。生产部署前应在 Xcash 端补上 AML 写回后的 `invoice:public` 缓存失效，或提供不缓存的已签名商户查询接口；在上游修复前，Gomall 会安全停在 `risk_pending`，但放货最多可能延迟约 1 小时。
+- 当前 Xcash 的公开账单查询会缓存已完成账单约 1 小时，而 AML 写回不会主动清除此缓存。本次 Gomall 接入不修改 Xcash 上游仓库；严格 AML 模式下，Gomall 会安全停在 `risk_pending`，正常订单在缓存过期前可能延迟最多约 1 小时。若业务不能接受该延迟，需要由 Xcash 官方提供缓存失效或不缓存的商户查询能力后再上线严格 AML。
 
 ## 验收场景
 
