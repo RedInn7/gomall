@@ -29,7 +29,7 @@ GoMall 的普通订单资金链是一个真正的两阶段模型：
 正常履约路径是：
 
 1. 订单处于待支付；
-2. Wallet、Stripe 或 Web3 确认付款；
+2. Wallet、Stripe、Web3 或 Xcash 确认付款；
 3. 清算事务写入 `PaymentClearing(status=cleared)`，资金进入 `merchant_escrow`；
 4. 同一事务扣库存、把订单推进到待发货、转移商品归属并写 `order.paid` Outbox；
 5. 商家发货，订单进入待收货；
@@ -39,19 +39,20 @@ GoMall 的普通订单资金链是一个真正的两阶段模型：
 
 支付代码里的 `finishPaymentConfirmationTx` 完成“支付确认事务尾段”（库存、待发货、商品归属、`order.paid`），**不是**卖家资金结算；真正的资金结算入口是 `clearing.SettleCompletedOrder`。
 
-## 3. 支付确认阶段：三渠道如何清算
+## 3. 支付确认阶段：四渠道如何清算
 
 所有渠道都从数据库订单读取买家、卖家、商品、数量和权威金额，不相信客户端价格。统一应付口径是：命中促销（`promo_rule_id != 0`）时取 `final_cents`，否则取 `money * num`。全额优惠导致 `final_cents=0` 也是合法结果。
 
-三条渠道的清算目标相同，区别只在资金来源：
+四条渠道的清算目标相同，区别只在资金来源：
 
 | 渠道 | 清算借方（debit） | 清算贷方（credit） | `PaymentClearing` 渠道信息 |
 | --- | --- | --- | --- |
 | Wallet | 买家 `user_wallet` | `merchant_escrow` | `channel=wallet`，币种 `CNY`，`provider_ref` 为空 |
 | Stripe | `external_clearing` | `merchant_escrow` | `channel=stripe`，记录 Checkout Session ID 和实际币种 |
 | Web3 | `external_clearing` | `merchant_escrow` | `channel=web3`，记录链上 tx hash 和代币代码 |
+| Xcash | `external_clearing` | `merchant_escrow` | `channel=xcash`，记录 `chain:tx_hash` 和实际代币代码 |
 
-三个渠道统一调用 `clearing.RecordClearedTx`。该方法创建清算单，并以 `biz_type=order_clear` 写一借一贷两条台账。此时卖家钱包不变。
+四个渠道统一调用 `clearing.RecordClearedTx`。该方法创建清算单，并以 `biz_type=order_clear` 写一借一贷两条台账。此时卖家钱包不变。
 
 ### 3.1 Wallet
 
@@ -81,6 +82,10 @@ Web3 先签名授权，再等待 escrow 合约事件达到确认深度：
 链上交易和本地清算同样不是一个原子事务。链上已确认但本地失败时，依靠事件回扫、消息重投和数据库幂等收敛。结算成功后删除 Web3 pending 只是 best-effort，不参与数据库提交。
 
 Web3 也执行相同的重复实收检查：同一 tx hash 是事件重放，不同 tx hash 或跨渠道重复付款会进入 `payment_anomaly`，不能静默当成“订单早已支付”。当前代码先保证异常资金可追踪、不会丢失；自动调用 Stripe Refund API 或链上返款仍未实现，需要运营处理 `pending_review`。
+
+### 3.4 Xcash
+
+Xcash 为订单创建限时托管账单，买家可以从服务端白名单允许的链币组合中选择付款。Gomall 校验 HMAC、时间戳、持久化 nonce、账单号、链、币、收款地址、实付数量和交易哈希；只有确认完成的付款才进入清算。Webhook 丢失时，后台每分钟主动查询等待中的账单，并复用同一条事务结算路径。错链、错币、错地址、错金额、高风险或重复实收都进入 `payment_anomaly`，不推进订单。
 
 ## 4. 清算事务的业务结果
 
@@ -154,7 +159,7 @@ Web3 也执行相同的重复实收检查：同一 tx hash 是事件重放，不
 | `account_code` | 含义 | 是否有 `users.money` |
 | --- | --- | --- |
 | `user_wallet` | 买家或卖家的站内钱包 | 有 |
-| `external_clearing` | Stripe/Web3 外部已收资金的本地会计对手方 | 无 |
+| `external_clearing` | Stripe/Web3/Xcash 外部已收资金的本地会计对手方 | 无 |
 | `merchant_escrow` | 支付成功后、履约完成前的商家托管款 | 无 |
 | `legacy_system` | 旧红包、拼团等通过兼容入口写入的系统流水 | 无 |
 
@@ -168,12 +173,12 @@ Web3 也执行相同的重复实收检查：同一 tx hash 是事件重放，不
 | --- | --- |
 | `order_id` | 关联订单；唯一索引保证一笔订单只有一个清算单 |
 | `buyer_id`、`seller_id` | 固化清算时的交易双方，结算前与订单复核 |
-| `channel` | `wallet`、`stripe` 或 `web3` |
-| `provider_ref` | Stripe Session ID、Web3 tx hash；Wallet 为空 |
+| `channel` | `wallet`、`stripe`、`web3` 或 `xcash` |
+| `provider_ref` | Stripe Session ID、Web3 tx hash、Xcash 的 `chain:tx_hash`；Wallet 为空 |
 | `gross_cents` | 订单清算总额，单位为分 |
 | `fee_cents` | 渠道/平台费用；当前为 0 |
 | `net_cents` | 最终放给卖家的金额；当前等于 `gross_cents` |
-| `currency` | Wallet 为 CNY，Stripe 为实付币种，Web3 为代币代码 |
+| `currency` | Wallet 为 CNY，Stripe 为实付币种，Web3/Xcash 为代币代码 |
 | `status` | `cleared`、`settled`、`refunded` |
 | `cleared_at`、`settled_at`、`refunded_at` | 各资金阶段时间；后两者在到达对应状态后写入 |
 
@@ -195,7 +200,7 @@ Web3 也执行相同的重复实收检查：同一 tx hash 是事件重放，不
 
 ### 8.3 `payment_anomaly`
 
-记录外部渠道确实收款但不能进入正常清算的资金：`order_id` 关联订单，`channel + provider_ref` 唯一，`provider_amount` 保留渠道原始金额，`currency` 保留币种，`reason` 为 `duplicate_external_payment` 或 `amount_currency_mismatch`，`status=pending_review`。它不是账务分录，而是退款/人工处置队列的事实记录；记录成功不等于退款完成。
+记录外部渠道确实收款但不能进入正常清算的资金：`order_id` 关联订单，`channel + provider_ref` 唯一，`provider_amount` 保留渠道原始金额，`currency` 保留币种，`reason` 包括重复付款、金额/币种不符、链上付款细节不符或高风险，`status=pending_review`。它不是账务分录，而是退款/人工处置队列的事实记录；记录成功不等于退款完成。
 
 ### 8.4 关联业务表
 
@@ -212,11 +217,13 @@ Web3 也执行相同的重复实收检查：同一 tx hash 是事件重放，不
 
 | 层级 | 机制 |
 | --- | --- |
-| 客户端入口 | Wallet、Stripe、Web3 支付接口使用请求幂等中间件 |
+| 客户端入口 | Wallet、Stripe、Web3、Xcash 支付接口使用请求幂等中间件 |
 | Stripe 建会话 | 同订单复用 Checkout 幂等键 |
 | Stripe webhook | `stripe:event:{event_id}` 去重，数据库错误时释放占位供重试 |
 | Web3 授权 | nonce 原子消费，防签名重放 |
 | Web3 listener | `tx_hash + log_index` 去重，并保存安全区块水位 |
+| Xcash Webhook | HMAC + 五分钟时间窗；`appid + nonce` 与结算同事务持久化去重 |
+| Xcash 主动对账 | 只扫描 waiting 账单，复用清算单、订单状态和 provider_ref 幂等守卫 |
 | 清算单 | `payment_clearing.order_id` 唯一 |
 | 外部重复实收 | `payment_anomaly(channel, provider_ref)` 唯一，同一事件只进入一次待退款队列 |
 | 订单支付 | `WHERE type=WaitPay` 条件推进 |
@@ -230,7 +237,7 @@ Redis 去重是减压层，不是最终资金安全边界。Redis 不可用时�
 ### 9.2 原子边界
 
 - **Wallet 清算事务**：买家扣款、清算单、两条清算分录、库存、订单、商品归属、`order.paid` 同生共死。
-- **Stripe/Web3 清算事务**：外部支付已经发生；本地清算单、分录和支付业务状态同生共死。外部与本地之间靠可信事件重试恢复。
+- **Stripe/Web3/Xcash 清算事务**：外部支付已经发生；本地清算单、分录和支付业务状态同生共死。外部与本地之间靠可信事件重试或主动对账恢复。
 - **订单完成事务**：订单进入 Completed 和 `order.completed` Outbox 同生共死；卖家放款由下游独立事务最终完成。
 - **结算事务**：卖家余额、托管 debit、卖家 credit、清算单 `settled` 同生共死。
 - **退款审批事务**：订单进入 Refunded 和 `order.refunded` Outbox 同生共死；真正退款由下游独立事务完成。
@@ -250,6 +257,7 @@ Redis 去重是减压层，不是最终资金安全边界。Redis 不可用时�
 | Web3 授权与 pending | `internal/payment/service_crypto.go` / `IssueNonce`、`VerifyAndPark` |
 | Web3 链上监听 | `service/web3/listener.go` / `StartPaymentListener` |
 | Web3 确认消息与清算 | `internal/payment/consumer_web3.go`、`internal/payment/service_web3_settle.go` |
+| Xcash 账单、Webhook 与主动对账 | `internal/payment/xcash_client.go`、`internal/payment/service_xcash.go`、`initialize/xcash.go` |
 | 支付确认事务尾段 | `internal/payment/settle.go` / `finishPaymentConfirmationTx` |
 | 确认收货与完成事件 | `internal/order/shipping.go`、`internal/order/task.go` |
 | 台账模型和系统账户写入 | `internal/money/ledger_model.go`、`internal/money/ledger_repo.go` |
@@ -275,7 +283,7 @@ Redis 去重是减压层，不是最终资金安全边界。Redis 不可用时�
 ### 11.2 清算与结算
 
 - [ ] Wallet 清算后买家只扣一次、卖家不变、托管金额正确。
-- [ ] Stripe/Web3 清算不改变买家钱包，外部清算 debit 与托管 credit 等额。
+- [ ] Stripe/Web3/Xcash 清算不改变买家钱包，外部清算 debit 与托管 credit 等额。
 - [ ] 促销订单使用 `final_cents`，全额优惠不会回退到原价。
 - [ ] 清算单、两条分录、库存、订单、商品归属或 Outbox 任一步失败时全部回滚。
 - [ ] 同订单多渠道竞争时只有一个清算事务成功。
@@ -299,6 +307,7 @@ Redis 去重是减压层，不是最终资金安全边界。Redis 不可用时�
 
 - [ ] Stripe 签名无效时拒绝；已实收但金额/币种不符时不创建清算单、只创建一笔 `pending_review` 异常；数据库瞬时失败可由 webhook 重投恢复。
 - [ ] Web3 buyer 绑定、金额、确认深度和 tx hash 传递正确；回扫不会重复清算。
+- [ ] Xcash 多链多币种白名单、签名、nonce、付款细节与风险校验正确；Webhook 丢失后主动对账可收敛。
 - [ ] Redis 不可用时数据库幂等防线仍有效。
 - [ ] 数据库提交后 reserved 核销或 pending 删除失败，不把已提交事务伪装成失败支付。
 - [ ] `payment_clearing` 与 `account_transaction` 可以按订单还原完整的清算、结算或退款资金路径。
@@ -313,6 +322,6 @@ go test ./...
 
 ## 12. 运维检查
 
-运行时至少关注：长期停在 `cleared` 且订单已经 Completed 的清算单、`payment_anomaly.status=pending_review` 的重复实收、`merchant_escrow` 按 `account_code` 聚合后的异常余额、只有单边分录的订单、`order.completed` / `order.refunded` 消费 DLQ、Stripe/Web3 外部成功但本地没有清算单的订单，以及 Outbox 长期 pending/publishing/dead 的事件。
+运行时至少关注：长期停在 `cleared` 且订单已经 Completed 的清算单、`payment_anomaly.status=pending_review` 的重复实收、`merchant_escrow` 按 `account_code` 聚合后的异常余额、只有单边分录的订单、`order.completed` / `order.refunded` 消费 DLQ、Stripe/Web3/Xcash 外部成功但本地没有清算单的订单，以及 Outbox 长期 pending/publishing/dead 的事件。
 
-出现异常时应优先重放原始可信事件，让现有幂等链路修复；不要直接改卖家余额或订单状态。人工调账必须追加可审计流水，并保留订单号、Stripe Session ID 或 Web3 tx hash。
+出现异常时应优先重放原始可信事件或触发 Xcash 主动对账，让现有幂等链路修复；不要直接改卖家余额或订单状态。人工调账必须追加可审计流水，并保留订单号、Stripe Session ID 或链上 tx hash。
