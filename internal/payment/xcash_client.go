@@ -124,9 +124,8 @@ type xcashInvoice struct {
 	Payment       *xcashPayment `json:"payment"`
 }
 
-// XcashGateway is the seam between payment orchestration and the external
-// Xcash system. The HTTP implementation below is used in production; tests can
-// provide an in-memory fake without starting an HTTP server.
+// XcashGateway 隔离订单支付编排与外部 Xcash 系统。
+// 生产环境使用下方 HTTP 实现，测试可以注入内存 fake，无需启动 HTTP 服务。
 type XcashGateway interface {
 	CreateInvoice(ctx context.Context, outNo, title, amount string) (*xcashInvoice, error)
 	GetInvoice(ctx context.Context, sysNo string) (*xcashInvoice, error)

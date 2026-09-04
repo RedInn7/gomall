@@ -52,8 +52,9 @@ const (
 	AnomalyStatusRejected               = "rejected"
 )
 
-// PaymentAnomaly 保存“订单已经由另一笔支付完成，但外部渠道又确实收了一笔钱”的异常。
-// 这类资金不能当成幂等重放直接吞掉；记录进入待审核/退款队列，provider_ref 唯一保证事件重放不重复建单。
+// PaymentAnomaly 保存外部渠道已经实收、但因为重复支付、金额或付款细节不符、
+// 风险过高等原因不能进入正常清算的异常。记录进入待审核/退款队列，
+// provider_ref 唯一保证事件重放不重复建单。
 type PaymentAnomaly struct {
 	dbmodel.Model
 	OrderID        uint      `gorm:"not null;index"`
