@@ -64,34 +64,40 @@ type xcashCreateInvoiceRequest struct {
 }
 
 type xcashPayment struct {
-	Chain       string `json:"chain"`
-	Block       uint64 `json:"block"`
-	Hash        string `json:"hash"`
-	FromAddress string `json:"from_address"`
-	ToAddress   string `json:"to_address"`
-	Crypto      string `json:"crypto"`
-	Amount      string `json:"amount"`
-	Status      string `json:"status"`
+	Chain           string               `json:"chain"`
+	Block           uint64               `json:"block"`
+	Hash            string               `json:"hash"`
+	FromAddress     string               `json:"from_address"`
+	ToAddress       string               `json:"to_address"`
+	Crypto          string               `json:"crypto"`
+	Amount          string               `json:"amount"`
+	Status          string               `json:"status"`
+	ConfirmProgress xcashConfirmProgress `json:"confirm_progress"`
+}
+
+type xcashConfirmProgress struct {
+	HasConfirmedCount  uint64 `json:"has_confirmed_count"`
+	NeedConfirmedCount uint64 `json:"need_confirmed_count"`
+	Progress           int    `json:"progress"`
 }
 
 type xcashInvoice struct {
-	SysNo           string         `json:"sys_no"`
-	OutNo           string         `json:"out_no"`
-	Currency        string         `json:"currency"`
-	Amount          string         `json:"amount"`
-	Chain           string         `json:"chain"`
-	Crypto          string         `json:"crypto"`
-	CryptoAddress   string         `json:"crypto_address"`
-	PayAddress      string         `json:"pay_address"`
-	PayAmount       string         `json:"pay_amount"`
-	PayURL          string         `json:"pay_url"`
-	PaymentURI      string         `json:"payment_uri"`
-	ExpiresAt       string         `json:"expires_at"`
-	Status          string         `json:"status"`
-	RiskLevel       string         `json:"risk_level"`
-	RiskScore       string         `json:"risk_score"`
-	Payment         *xcashPayment  `json:"payment"`
-	ConfirmProgress map[string]any `json:"confirm_progress"`
+	SysNo         string        `json:"sys_no"`
+	OutNo         string        `json:"out_no"`
+	Currency      string        `json:"currency"`
+	Amount        string        `json:"amount"`
+	Chain         string        `json:"chain"`
+	Crypto        string        `json:"crypto"`
+	CryptoAddress string        `json:"crypto_address"`
+	PayAddress    string        `json:"pay_address"`
+	PayAmount     string        `json:"pay_amount"`
+	PayURL        string        `json:"pay_url"`
+	PaymentURI    string        `json:"payment_uri"`
+	ExpiresAt     string        `json:"expires_at"`
+	Status        string        `json:"status"`
+	RiskLevel     string        `json:"risk_level"`
+	RiskScore     string        `json:"risk_score"`
+	Payment       *xcashPayment `json:"payment"`
 }
 
 type xcashClient struct {
@@ -161,6 +167,42 @@ func (c *xcashClient) CreateInvoice(ctx context.Context, outNo, title, amount st
 	}
 	if invoice.SysNo == "" || invoice.OutNo != outNo || invoice.PayURL == "" {
 		return nil, errors.New("Xcash 创建账单响应缺少必要字段")
+	}
+	return &invoice, nil
+}
+
+func (c *xcashClient) GetInvoice(ctx context.Context, sysNo string) (*xcashInvoice, error) {
+	if err := c.config.validate(); err != nil {
+		return nil, err
+	}
+	sysNo = strings.TrimSpace(sysNo)
+	if sysNo == "" {
+		return nil, errors.New("Xcash 账单号不能为空")
+	}
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, strings.TrimRight(c.config.BaseURL, "/")+"/v1/invoice/"+url.PathEscape(sysNo), nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("查询 Xcash 账单失败: %w", err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxXcashBody))
+	if err != nil {
+		return nil, fmt.Errorf("读取 Xcash 响应失败: %w", err)
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("Xcash 查询账单返回 HTTP %d: %s", response.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	var invoice xcashInvoice
+	if err := json.Unmarshal(responseBody, &invoice); err != nil {
+		return nil, fmt.Errorf("解析 Xcash 账单失败: %w", err)
+	}
+	if invoice.SysNo != sysNo {
+		return nil, errors.New("Xcash 查询响应的账单号不匹配")
 	}
 	return &invoice, nil
 }
