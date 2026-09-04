@@ -35,6 +35,7 @@ type xcashConfig struct {
 	HMACKey   string
 	NotifyURL string
 	ReturnURL string
+	Currency  string
 	Duration  int
 	Methods   map[string][]string
 }
@@ -48,6 +49,9 @@ func (c xcashConfig) validate() error {
 	}
 	if c.Duration < 5 || c.Duration > 30 {
 		return errors.New("XCASH_INVOICE_DURATION_MINUTES 必须在 5 到 30 之间")
+	}
+	if strings.TrimSpace(c.Currency) == "" {
+		return errors.New("XCASH_FIAT_CURRENCY 不能为空")
 	}
 	return nil
 }
@@ -115,6 +119,9 @@ type xcashWebhookHeaders struct {
 }
 
 func newXcashClient(config xcashConfig, httpClient *http.Client) *xcashClient {
+	if strings.TrimSpace(config.Currency) == "" {
+		config.Currency = xcashFiatUSD
+	}
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 5 * time.Second}
 	}
@@ -133,7 +140,7 @@ func (c *xcashClient) CreateInvoice(ctx context.Context, outNo, title, amount st
 	payload := xcashCreateInvoiceRequest{
 		OutNo:     outNo,
 		Title:     title,
-		Currency:  xcashFiatUSD,
+		Currency:  strings.ToUpper(c.config.Currency),
 		Amount:    amount,
 		Duration:  c.config.Duration,
 		Methods:   c.config.Methods,
