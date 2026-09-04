@@ -31,8 +31,18 @@ var ErrXcashInvalidWebhook = errors.New("Xcash Webhook 内容无效")
 
 type xcashDBProvider func(context.Context) *gorm.DB
 
+type xcashSettlementPolicy struct {
+	methods    map[string][]string
+	requireAML bool
+}
+
+func xcashSettlementPolicyFromConfig(config xcashConfig) xcashSettlementPolicy {
+	return xcashSettlementPolicy{methods: config.Methods, requireAML: config.RequireAML}
+}
+
 type XcashPaymentSrv struct {
-	client            *xcashClient
+	gateway           XcashGateway
+	policy            xcashSettlementPolicy
 	db                xcashDBProvider
 	commitReservation func(context.Context, uint, int)
 	initErr           error
@@ -46,14 +56,17 @@ var (
 func GetXcashPaymentSrv() *XcashPaymentSrv {
 	xcashPaymentSrvOnce.Do(func() {
 		config, err := loadXcashConfig()
-		xcashPaymentSrvIns = newXcashPaymentSrv(newXcashClient(config, &http.Client{Timeout: 5 * time.Second}), dao.NewDBClient)
+		gateway := newXcashClient(config, &http.Client{Timeout: 5 * time.Second})
+		xcashPaymentSrvIns = newXcashPaymentSrv(gateway, xcashSettlementPolicyFromConfig(config), dao.NewDBClient)
 		xcashPaymentSrvIns.initErr = err
 	})
 	return xcashPaymentSrvIns
 }
 
-func newXcashPaymentSrv(client *xcashClient, db xcashDBProvider) *XcashPaymentSrv {
-	return &XcashPaymentSrv{client: client, db: db, commitReservation: commitReservationBestEffort}
+func newXcashPaymentSrv(gateway XcashGateway, policy xcashSettlementPolicy, db xcashDBProvider) *XcashPaymentSrv {
+	return &XcashPaymentSrv{
+		gateway: gateway, policy: policy, db: db, commitReservation: commitReservationBestEffort,
+	}
 }
 
 type xcashWebhookEvent struct {
@@ -80,13 +93,13 @@ type xcashWebhookEvent struct {
 }
 
 func (s *XcashPaymentSrv) HandleWebhook(ctx context.Context, headers xcashWebhookHeaders, body []byte) error {
-	if s == nil || s.client == nil || s.db == nil {
+	if s == nil || s.gateway == nil || s.db == nil {
 		return errors.New("Xcash 支付服务未初始化")
 	}
 	if s.initErr != nil {
 		return s.initErr
 	}
-	if err := s.client.VerifyWebhook(headers, body); err != nil {
+	if err := s.gateway.VerifyWebhook(headers, body); err != nil {
 		return err
 	}
 	var event xcashWebhookEvent
@@ -107,7 +120,7 @@ func (s *XcashPaymentSrv) HandleWebhook(ctx context.Context, headers xcashWebhoo
 	if !event.Data.Confirmed {
 		return fmt.Errorf("%w: 尚未达到确认数", ErrXcashInvalidWebhook)
 	}
-	invoice, err := s.client.GetInvoice(ctx, event.Data.SysNo)
+	invoice, err := s.gateway.GetInvoice(ctx, event.Data.SysNo)
 	if err != nil {
 		return err
 	}
@@ -164,7 +177,7 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 			!strings.EqualFold(event.Data.FiatCurrency, intent.Currency)) {
 			anomalyReason = clearing.AnomalyReasonAmountMismatch
 		}
-		if anomalyReason == "" && !xcashMethodAllowed(s.client.config.Methods, event.Data.Crypto, event.Data.Chain) {
+		if anomalyReason == "" && !xcashMethodAllowed(s.policy.methods, event.Data.Crypto, event.Data.Chain) {
 			anomalyReason = clearing.AnomalyReasonPaymentDetailsMismatch
 		}
 		if anomalyReason == "" && isXcashHighRisk(event.Data.RiskLevel) {
@@ -194,7 +207,7 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 		if anomalyReason != "" {
 			return quarantineXcashPayment(tx, &intent, order, event, providerRef, anomalyReason)
 		}
-		if s.client.config.RequireAML && !xcashRiskReady(event.Data.RiskLevel) {
+		if s.policy.requireAML && !xcashRiskReady(event.Data.RiskLevel) {
 			return tx.Model(&intent).Updates(xcashIntentObservationUpdates(event, XcashIntentRiskPending)).Error
 		}
 
@@ -379,7 +392,7 @@ func normalizeXcashMethods(methods map[string][]string) map[string][]string {
 }
 
 func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckoutReq) (*XcashCheckoutResp, error) {
-	if s == nil || s.client == nil || s.db == nil {
+	if s == nil || s.gateway == nil || s.db == nil {
 		return nil, errors.New("Xcash 支付服务未初始化")
 	}
 	if s.initErr != nil {
@@ -435,7 +448,7 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 	outNo := fmt.Sprintf("gm-%s-%s", strconv.FormatUint(uint64(order.ID), 36), strconv.FormatUint(uint64(attempt), 36))
 	amount := formatFiatCents(payableCents)
 	title := fmt.Sprintf("Gomall #%d", order.OrderNum)
-	invoice, err := s.client.CreateInvoice(ctx, outNo, title, amount)
+	invoice, err := s.gateway.CreateInvoice(ctx, outNo, title, amount)
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +460,7 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 	}
 	invoiceCents, amountErr := parseFiatCents(invoice.Amount)
 	pricingMatches := strings.EqualFold(invoice.Currency, xcashFiatCNY) && amountErr == nil && invoiceCents == payableCents
-	methodMatches := invoice.Chain == "" || invoice.Crypto == "" || xcashMethodAllowed(s.client.config.Methods, invoice.Crypto, invoice.Chain)
+	methodMatches := invoice.Chain == "" || invoice.Crypto == "" || xcashMethodAllowed(s.policy.methods, invoice.Crypto, invoice.Chain)
 	if remoteStatus != XcashIntentCompleted && !pricingMatches {
 		return nil, errors.New("Xcash 返回的计价金额或币种与订单不一致")
 	}
@@ -492,7 +505,7 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 }
 
 func (s *XcashPaymentSrv) GetCheckout(ctx context.Context, req *XcashCheckoutReq) (*XcashCheckoutResp, error) {
-	if s == nil || s.client == nil || s.db == nil {
+	if s == nil || s.gateway == nil || s.db == nil {
 		return nil, errors.New("Xcash 支付服务未初始化")
 	}
 	if s.initErr != nil {
@@ -525,7 +538,7 @@ func (s *XcashPaymentSrv) reconcileIntent(ctx context.Context, intent *XcashPaym
 	if db == nil {
 		return nil, errors.New("数据库未初始化")
 	}
-	invoice, err := s.client.GetInvoice(ctx, intent.SysNo)
+	invoice, err := s.gateway.GetInvoice(ctx, intent.SysNo)
 	if err != nil {
 		return nil, err
 	}
@@ -545,7 +558,7 @@ func (s *XcashPaymentSrv) reconcileIntent(ctx context.Context, intent *XcashPaym
 		if snapshot.detailsMismatch {
 			return nil, errors.New("Xcash 查询结果的付款记录与账单不一致")
 		}
-		if snapshot.chain != "" && snapshot.crypto != "" && !xcashMethodAllowed(s.client.config.Methods, snapshot.crypto, snapshot.chain) {
+		if snapshot.chain != "" && snapshot.crypto != "" && !xcashMethodAllowed(s.policy.methods, snapshot.crypto, snapshot.chain) {
 			return nil, errors.New("Xcash 查询结果包含服务端白名单之外的付款方式")
 		}
 		if err := db.Model(&XcashPaymentIntent{}).
@@ -708,7 +721,7 @@ func xcashIntentObservationUpdates(event *xcashWebhookEvent, status string) map[
 // ReconcilePending 主动查询等待付款、等待风控及最近过期的账单。它不依赖用户请求，
 // 供后台定时任务弥补 Webhook 丢失；每张账单按 sys_no 精确复用金额、风险与结算校验。
 func (s *XcashPaymentSrv) ReconcilePending(ctx context.Context, limit int) (int, error) {
-	if s == nil || s.client == nil || s.db == nil {
+	if s == nil || s.gateway == nil || s.db == nil {
 		return 0, errors.New("Xcash 支付服务未初始化")
 	}
 	if s.initErr != nil {

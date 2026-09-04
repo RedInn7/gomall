@@ -81,7 +81,7 @@ Web3 先签名授权，再等待 escrow 合约事件达到确认深度：
 
 链上交易和本地清算同样不是一个原子事务。链上已确认但本地失败时，依靠事件回扫、消息重投和数据库幂等收敛。结算成功后删除 Web3 pending 只是 best-effort，不参与数据库提交。
 
-Web3 也执行相同的重复实收检查：同一 tx hash 是事件重放，不同 tx hash 或跨渠道重复付款会进入 `payment_anomaly`，不能静默当成“订单早已支付”。当前代码先保证异常资金可追踪、不会丢失；自动调用 Stripe Refund API 或链上返款仍未实现，需要运营处理 `pending_review`。
+Web3 也执行相同的重复实收检查：同一 tx hash 是事件重放，不同 tx hash 或跨渠道重复付款会进入 `payment_anomaly`，不能静默当成“订单早已支付”。当前代码先保证异常资金可追踪、不会丢失；自动调用 Stripe Refund API 或链上返款仍未实现，需要运营通过异常款管理接口复核，并在外部退款完成后登记凭证。
 
 ### 3.4 Xcash
 
@@ -200,7 +200,17 @@ Xcash 为订单创建限时托管账单，买家可以从服务端白名单允�
 
 ### 8.3 `payment_anomaly`
 
-记录外部渠道确实收款但不能进入正常清算的资金：`order_id` 关联订单，`channel + provider_ref` 唯一，`provider_amount` 保留渠道原始金额，`currency` 保留币种，`reason` 包括重复付款、金额/币种不符、链上付款细节不符或高风险，`status=pending_review`。它不是账务分录，而是退款/人工处置队列的事实记录；记录成功不等于退款完成。
+记录外部渠道确实收款但不能进入正常清算的资金：`order_id` 关联订单，`channel + provider_ref` 唯一，`provider_amount` 保留渠道原始金额，`currency` 保留币种，`reason` 包括重复付款、金额/币种不符、链上付款细节不符或高风险，初始状态为 `pending_review`。它不是账务分录，而是退款/人工处置队列的事实记录；记录成功不等于退款完成。
+
+管理员通过以下接口处理异常款：
+
+- `GET /api/v1/admin/payment-anomalies`：按状态、渠道、原因和订单分页筛选；
+- `GET /api/v1/admin/payment-anomalies/:id`：查看异常详情和完整状态历史；
+- `POST /api/v1/admin/payment-anomalies/:id/status-transitions`：追加一次人工处置记录。
+
+状态只能按 `pending_review -> reviewing -> resolved | refunded | rejected` 推进，终态不能再次修改。`resolved` 表示异常成立但已通过非退款方式完成处置，`refunded` 表示已在外部渠道完成退款，`rejected` 表示复核后确认无需处置。每次转换都必须提交当前页面看到的 `expected_status` 和说明备注，防止两个管理员基于旧页面互相覆盖；标记 `refunded` 时还必须填写外部退款凭证。状态更新和审计历史在同一个数据库事务中提交。
+
+该状态接口只登记处置事实，不调用 Stripe、Xcash 或链上合约，也不移动任何资金，响应中的 `funds_transferred=false` 会明确这一点。运营必须先在对应外部渠道完成退款，再将凭证登记为 `refunded`。
 
 ### 8.4 关联业务表
 
