@@ -39,7 +39,7 @@
 - `XCASH_VAULTSLOT_CONFIRMED=true`（必填部署门禁；确认所有开放链都使用 VaultSlot 后才能启动集成）
 - `XCASH_RETURN_URL`（可选）
 - `XCASH_INVOICE_DURATION_MINUTES`（可选，默认 15，范围 5–30）
-- `XCASH_METHODS_JSON`（可选，例如 `{"USDC":["base","ethereum"],"USDT":["base","ethereum","tron"],"ETH":["ethereum"]}`）
+- `XCASH_METHODS_JSON`（可选，例如 `{"USDC":["base","ethereum"],"USDT":["base","arbitrum-one","tron"],"ETH":["ethereum"]}`）
 - `XCASH_REQUIRE_AML_RESULT`（可选，默认 `true`；风险结果为空时保持 `risk_pending`，只接受 Low/Moderate。若 Xcash 项目没有开 AML，必须在明确接受风险后设置为 `false`）
 
 Gomall 订单金额是人民币“分”，因此 Xcash 账单固定使用 `CNY` 计价；加密货币种类仍由 `XCASH_METHODS_JSON` 或 Xcash 项目配置决定，不能把人民币金额原值改成 USD 开票。
