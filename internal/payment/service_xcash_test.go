@@ -37,31 +37,20 @@ func TestXcashPaymentServiceCreatesAndReusesInvoice(t *testing.T) {
 	}
 
 	var calls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gateway := &fakeXcashGateway{createInvoice: func(ctx context.Context, outNo, title, amount string) (*xcashInvoice, error) {
 		calls.Add(1)
-		var request xcashCreateInvoiceRequest
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatal(err)
+		if amount != "29.98" {
+			t.Fatalf("amount = %s, want 29.98", amount)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{
-			"sys_no":"INV260903ABC12345",
-			"out_no":%q,
-			"currency":"CNY",
-			"amount":"29.98",
-			"pay_url":"https://pay.example.test/pay/INV260903ABC12345",
-			"expires_at":"2099-09-03T20:15:00Z",
-			"status":"waiting"
-		}`, request.OutNo)
-	}))
-	defer server.Close()
-
-	client := newXcashClient(xcashConfig{
-		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
-		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
-		VaultSlotConfirmed: true, AllowHTTP: true,
-	}, server.Client())
-	service := newTestXcashPaymentSrv(client, db)
+		return &xcashInvoice{
+			SysNo: "INV260903ABC12345", OutNo: outNo, Currency: "CNY", Amount: "29.98",
+			PayURL:    "https://pay.example.test/pay/INV260903ABC12345",
+			ExpiresAt: "2099-09-03T20:15:00Z", Status: XcashIntentWaiting,
+		}, nil
+	}}
+	service := newXcashPaymentSrv(gateway, xcashSettlementPolicy{}, func(ctx context.Context) *gorm.DB {
+		return db.WithContext(ctx)
+	})
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 1})
 
 	first, err := service.CreateCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
