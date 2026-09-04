@@ -32,9 +32,14 @@ const interpolate = (path: string, params: Record<string, unknown>) => {
   return { resolved, rest }
 }
 
-export async function api<T = unknown>(method: HttpMethod, path: string, params: Record<string, unknown> = {}) {
+export async function api<T = unknown>(
+  method: HttpMethod,
+  path: string,
+  params: Record<string, unknown> = {},
+  extraHeaders: Record<string, string> = {},
+) {
   const { resolved, rest } = interpolate(path, params)
-  const headers: Record<string, string> = { Accept: 'application/json' }
+  const headers: Record<string, string> = { Accept: 'application/json', ...extraHeaders }
   const access = session.access()
   const refresh = session.refresh()
   if (access) headers.access_token = access

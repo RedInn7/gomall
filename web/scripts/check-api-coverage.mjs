@@ -16,7 +16,7 @@ for (const file of routeFiles) {
   const pattern = /(public|authed|merchant|admin)\.(GET|POST|PUT|PATCH|DELETE)\("?([^"\n]+)"?/g
   for (const match of source.matchAll(pattern)) {
     const [, group, method, rawPath] = match
-    if (rawPath === 'webhooks/stripe') continue
+    if (rawPath.startsWith('webhooks/')) continue
     const clean = rawPath.replace(/^\//, '')
     backend.add(`${method} /api/v1/${group === 'admin' ? `admin/${clean}` : clean}`)
   }

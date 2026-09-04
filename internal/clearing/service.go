@@ -28,7 +28,7 @@ var (
 // RecordClearedTx 在支付事务中记录“钱已经收妥并进入商户托管”。
 //
 // walletBalanceAfter 非 nil 表示余额支付：调用方已经在同一 tx 内扣完买家余额，
-// 这里补买家 debit 流水；nil 表示 Stripe/Web3 外部支付，debit 记到 external_clearing。
+// 这里补买家 debit 流水；nil 表示 Stripe/Web3/Xcash 外部支付，debit 记到 external_clearing。
 // 两种渠道都会 credit merchant_escrow，卖家钱包此时不会入账。
 func RecordClearedTx(tx *gorm.DB, o *order.Order, channel, providerRef, currency string, walletBalanceAfter *int64) error {
 	if tx == nil || o == nil || o.ID == 0 || o.UserID == 0 || o.BossID == 0 || o.Num <= 0 {
@@ -84,7 +84,7 @@ func RecordClearedTx(tx *gorm.DB, o *order.Order, channel, providerRef, currency
 // 返回 matched=true 表示 provider_ref 与原清算单一致，可按幂等重放处理；否则持久化待人工退款异常。
 func RecordExternalDuplicateTx(tx *gorm.DB, o *order.Order, channel, providerRef, providerAmount, currency string) (matched bool, err error) {
 	providerRef = strings.TrimSpace(providerRef)
-	if tx == nil || o == nil || o.ID == 0 || (channel != ChannelStripe && channel != ChannelWeb3) || providerRef == "" {
+	if tx == nil || o == nil || o.ID == 0 || !isExternalChannel(channel) || providerRef == "" {
 		return false, ErrInvalidClearingInput
 	}
 
@@ -107,10 +107,11 @@ func RecordExternalDuplicateTx(tx *gorm.DB, o *order.Order, channel, providerRef
 // 记录成功即表示异常已被系统接管；后续由运营/退款任务处理，不能再靠渠道重投修复。
 func RecordExternalAnomalyTx(tx *gorm.DB, o *order.Order, channel, providerRef, providerAmount, currency, reason string) error {
 	providerRef = strings.TrimSpace(providerRef)
-	if tx == nil || o == nil || o.ID == 0 || (channel != ChannelStripe && channel != ChannelWeb3) || providerRef == "" {
+	if tx == nil || o == nil || o.ID == 0 || !isExternalChannel(channel) || providerRef == "" {
 		return ErrInvalidClearingInput
 	}
-	if reason != AnomalyReasonDuplicatePayment && reason != AnomalyReasonAmountMismatch {
+	if reason != AnomalyReasonDuplicatePayment && reason != AnomalyReasonAmountMismatch &&
+		reason != AnomalyReasonPaymentDetailsMismatch && reason != AnomalyReasonHighRiskPayment {
 		return ErrInvalidClearingInput
 	}
 	anomaly := &PaymentAnomaly{
@@ -140,7 +141,7 @@ func IsProviderCleared(ctx context.Context, orderID uint, channel, providerRef s
 
 func isProviderCleared(db *gorm.DB, orderID uint, channel, providerRef string) (bool, error) {
 	providerRef = strings.TrimSpace(providerRef)
-	if db == nil || orderID == 0 || providerRef == "" || (channel != ChannelStripe && channel != ChannelWeb3) {
+	if db == nil || orderID == 0 || providerRef == "" || !isExternalChannel(channel) {
 		return false, ErrInvalidClearingInput
 	}
 	var count int64
@@ -254,7 +255,16 @@ func orderPayableCents(o *order.Order) int64 {
 
 func validChannel(channel string) bool {
 	switch channel {
-	case ChannelWallet, ChannelStripe, ChannelWeb3:
+	case ChannelWallet, ChannelStripe, ChannelWeb3, ChannelXcash:
+		return true
+	default:
+		return false
+	}
+}
+
+func isExternalChannel(channel string) bool {
+	switch channel {
+	case ChannelStripe, ChannelWeb3, ChannelXcash:
 		return true
 	default:
 		return false

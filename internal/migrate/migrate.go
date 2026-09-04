@@ -15,6 +15,7 @@ import (
 	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/notice"
 	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/payment"
 	"github.com/RedInn7/gomall/internal/preorder"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/promo"
@@ -43,6 +44,7 @@ func Run() error {
 			&groupbuy.GroupbuyGroup{}, &groupbuy.GroupbuyMember{},
 			&preorder.ProductPreorder{},
 			&money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{},
+			&payment.XcashPaymentIntent{}, &payment.XcashWebhookReceipt{},
 		); err != nil {
 		return err
 	}

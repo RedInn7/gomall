@@ -10,6 +10,7 @@ const (
 	ChannelWallet = "wallet"
 	ChannelStripe = "stripe"
 	ChannelWeb3   = "web3"
+	ChannelXcash  = "xcash"
 
 	StatusCleared  = "cleared"
 	StatusSettled  = "settled"
@@ -40,9 +41,11 @@ type PaymentClearing struct {
 func (PaymentClearing) TableName() string { return "payment_clearing" }
 
 const (
-	AnomalyReasonDuplicatePayment = "duplicate_external_payment"
-	AnomalyReasonAmountMismatch   = "amount_currency_mismatch"
-	AnomalyStatusPendingReview    = "pending_review"
+	AnomalyReasonDuplicatePayment       = "duplicate_external_payment"
+	AnomalyReasonAmountMismatch         = "amount_currency_mismatch"
+	AnomalyReasonPaymentDetailsMismatch = "payment_details_mismatch"
+	AnomalyReasonHighRiskPayment        = "high_risk_payment"
+	AnomalyStatusPendingReview          = "pending_review"
 )
 
 // PaymentAnomaly 保存“订单已经由另一笔支付完成，但外部渠道又确实收了一笔钱”的异常。
