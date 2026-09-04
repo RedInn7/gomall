@@ -1,4 +1,4 @@
-package admin
+package clearing
 
 import (
 	"testing"
@@ -15,10 +15,10 @@ func TestPaymentAnomalyRoutesAreAdminOnly(t *testing.T) {
 	adminGroup := authed.Group("/admin")
 	RegisterRoutes(public, authed, merchant, adminGroup)
 
-	want := map[string]string{
-		"GET /api/v1/admin/payment-anomalies":                         "",
-		"GET /api/v1/admin/payment-anomalies/:id":                     "",
-		"POST /api/v1/admin/payment-anomalies/:id/status-transitions": "",
+	want := map[string]struct{}{
+		"GET /api/v1/admin/payment-anomalies":                         {},
+		"GET /api/v1/admin/payment-anomalies/:id":                     {},
+		"POST /api/v1/admin/payment-anomalies/:id/status-transitions": {},
 	}
 	for _, route := range router.Routes() {
 		delete(want, route.Method+" "+route.Path)
