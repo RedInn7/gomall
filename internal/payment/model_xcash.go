@@ -7,10 +7,11 @@ import (
 )
 
 const (
-	XcashIntentWaiting   = "waiting"
-	XcashIntentCompleted = "completed"
-	XcashIntentExpired   = "expired"
-	XcashIntentAnomaly   = "anomaly"
+	XcashIntentWaiting     = "waiting"
+	XcashIntentCompleted   = "completed"
+	XcashIntentExpired     = "expired"
+	XcashIntentAnomaly     = "anomaly"
+	XcashIntentRiskPending = "risk_pending"
 )
 
 // XcashPaymentIntent 保存 Gomall 订单和 Xcash 账单之间的映射。
@@ -44,6 +45,7 @@ type XcashPaymentIntent struct {
 	ConfirmProgress       int
 	ExpiresAt             time.Time `gorm:"not null;index"`
 	ConfirmedAt           *time.Time
+	LastCheckedAt         *time.Time `gorm:"index"`
 }
 
 func (XcashPaymentIntent) TableName() string { return "xcash_payment_intent" }

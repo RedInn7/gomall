@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ func TestXcashPaymentServiceCreatesAndReusesInvoice(t *testing.T) {
 		_, _ = fmt.Fprintf(w, `{
 			"sys_no":"INV260903ABC12345",
 			"out_no":%q,
-			"currency":"USD",
+			"currency":"CNY",
 			"amount":"29.98",
 			"pay_url":"https://pay.example.test/pay/INV260903ABC12345",
 			"expires_at":"2099-09-03T20:15:00Z",
@@ -58,6 +59,7 @@ func TestXcashPaymentServiceCreatesAndReusesInvoice(t *testing.T) {
 	client := newXcashClient(xcashConfig{
 		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
 	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 1})
@@ -103,18 +105,29 @@ func TestXcashPaymentServiceSettlesConfirmedWebhookExactlyOnce(t *testing.T) {
 	}
 	intent := &XcashPaymentIntent{
 		OrderID: order.ID, UserID: 1, Attempt: 1, OutNo: fmt.Sprintf("gm-%d-1", order.ID),
-		SysNo: "INV260903SETTLE01", AmountCents: 1000, Currency: "USD", Status: XcashIntentWaiting,
+		SysNo: "INV260903SETTLE01", AmountCents: 1000, Currency: "CNY", Status: XcashIntentWaiting,
 		PayURL: "https://pay.example.test/pay/INV260903SETTLE01", ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
 	if err := db.Create(intent).Error; err != nil {
 		t.Fatal(err)
 	}
-
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"sys_no":"%s","currency":"CNY","amount":"10.00","chain":"base","crypto":"USDC",
+			"pay_address":"0x1111111111111111111111111111111111111111","pay_amount":"10",
+			"pay_url":"https://pay.example.test/pay/%s","expires_at":"2099-09-03T20:15:00Z",
+			"status":"completed","risk_level":"Low","risk_score":"10",
+			"payment":{"chain":"base","block":12345678,"hash":"0xabc123","from_address":"0xfrom","to_address":"0x1111111111111111111111111111111111111111","crypto":"USDC","amount":"10.00","status":"confirmed"}
+		}`, intent.SysNo, intent.SysNo)
+	}))
+	defer server.Close()
 	client := newXcashClient(xcashConfig{
-		BaseURL: "https://pay.example.test", AppID: "XC-TEST", HMACKey: "secret",
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
-		Methods: map[string][]string{"USDC": {"base"}, "USDT": {"tron"}},
-	}, nil)
+		Methods:            map[string][]string{"USDC": {"base"}, "USDT": {"tron"}},
+		VaultSlotConfirmed: true, AllowHTTP: true,
+	}, server.Client())
 	now := time.Unix(1_788_466_500, 0)
 	client.now = func() time.Time { return now }
 	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
@@ -151,7 +164,7 @@ func TestXcashPaymentServiceSettlesConfirmedWebhookExactlyOnce(t *testing.T) {
 	if err := db.Where("order_id = ?", order.ID).First(&record).Error; err != nil {
 		t.Fatal(err)
 	}
-	if record.Channel != clearing.ChannelXcash || record.ProviderRef != "base:0xabc123" || record.Currency != "USDC" {
+	if record.Channel != clearing.ChannelXcash || record.ProviderRef != intent.SysNo+":base:0xabc123" || record.Currency != "CNY" {
 		t.Fatalf("unexpected clearing record: %+v", record)
 	}
 	var receipts int64
@@ -176,18 +189,30 @@ func TestXcashPaymentServiceQuarantinesMismatchedPayment(t *testing.T) {
 	}
 	intent := &XcashPaymentIntent{
 		OrderID: order.ID, UserID: 1, Attempt: 1, OutNo: fmt.Sprintf("gm-%d-1", order.ID),
-		SysNo: "INV260903MISMATCH", AmountCents: 1000, Currency: "USD", Status: XcashIntentWaiting,
+		SysNo: "INV260903MISMATCH", AmountCents: 1000, Currency: "CNY", Status: XcashIntentWaiting,
 		Chain: "base", Crypto: "USDC", PayAddress: "0x1111111111111111111111111111111111111111", PayAmount: "10.00",
 		PayURL: "https://pay.example.test/pay/INV260903MISMATCH", ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
 	if err := db.Create(intent).Error; err != nil {
 		t.Fatal(err)
 	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"sys_no":"%s","currency":"CNY","amount":"10.00","chain":"base","crypto":"USDC",
+			"pay_address":"0x2222222222222222222222222222222222222222","pay_amount":"10.00",
+			"pay_url":"https://pay.example.test/pay/%s","expires_at":"2099-09-03T20:15:00Z",
+			"status":"completed","risk_level":"Low","risk_score":"10",
+			"payment":{"chain":"base","block":12345678,"hash":"0xmismatch","from_address":"0xfrom","to_address":"0x3333333333333333333333333333333333333333","crypto":"USDC","amount":"10","status":"confirmed"}
+		}`, intent.SysNo, intent.SysNo)
+	}))
+	defer server.Close()
 	client := newXcashClient(xcashConfig{
-		BaseURL: "https://pay.example.test", AppID: "XC-TEST", HMACKey: "secret",
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
-		Methods: map[string][]string{"USDC": {"base"}},
-	}, nil)
+		Methods:            map[string][]string{"USDC": {"base"}},
+		VaultSlotConfirmed: true, AllowHTTP: true,
+	}, server.Client())
 	now := time.Unix(1_788_466_500, 0)
 	client.now = func() time.Time { return now }
 	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
@@ -218,7 +243,7 @@ func TestXcashPaymentServiceQuarantinesMismatchedPayment(t *testing.T) {
 	if err := db.Where("order_id = ?", order.ID).First(&anomaly).Error; err != nil {
 		t.Fatal(err)
 	}
-	if anomaly.Reason != clearing.AnomalyReasonPaymentDetailsMismatch || anomaly.ProviderRef != "base:0xmismatch" {
+	if anomaly.Reason != clearing.AnomalyReasonPaymentDetailsMismatch || anomaly.ProviderRef != intent.SysNo+":base:0xmismatch" {
 		t.Fatalf("unexpected anomaly: %+v", anomaly)
 	}
 	if err := db.First(&intent, intent.ID).Error; err != nil {
@@ -254,7 +279,8 @@ func TestXcashPaymentServiceReconcilesCompletedInvoiceWithoutWebhook(t *testing.
 	}
 	intent := &XcashPaymentIntent{
 		OrderID: order.ID, UserID: buyer.ID, Attempt: 1, OutNo: fmt.Sprintf("gm-%d-1", order.ID),
-		SysNo: "INV260903RECONCILE", AmountCents: 2500, Currency: "USD", Status: XcashIntentWaiting,
+		SysNo: "INV260903RECONCILE", AmountCents: 2500, Currency: "CNY", Status: XcashIntentWaiting,
+		Chain: "base", Crypto: "USDC", PayAddress: "0x9999999999999999999999999999999999999999", PayAmount: "25",
 		PayURL: "https://pay.example.test/pay/INV260903RECONCILE", ExpiresAt: time.Now().Add(15 * time.Minute),
 	}
 	if err := db.Create(intent).Error; err != nil {
@@ -263,11 +289,11 @@ func TestXcashPaymentServiceReconcilesCompletedInvoiceWithoutWebhook(t *testing.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{
-			"sys_no":"%s","currency":"USD","amount":"25.00","chain":"arbitrum","crypto":"USDT",
+			"sys_no":"%s","currency":"CNY","amount":"25.00","chain":"arbitrum-one","crypto":"USDT",
 			"pay_address":"0x4444444444444444444444444444444444444444","pay_amount":"24.91",
 			"pay_url":"https://pay.example.test/pay/%s","expires_at":"2099-09-03T20:15:00Z",
 			"status":"completed","risk_level":"Low","risk_score":"10",
-			"payment":{"chain":"arbitrum","block":99,"hash":"0xreconciled","from_address":"0xfrom","to_address":"0x4444444444444444444444444444444444444444","crypto":"USDT","amount":"24.910","status":"confirmed",
+			"payment":{"chain":"arbitrum-one","block":99,"hash":"0xreconciled","from_address":"0xfrom","to_address":"0x4444444444444444444444444444444444444444","crypto":"USDT","amount":"24.910","status":"confirmed",
 			"confirm_progress":{"has_confirmed_count":12,"need_confirmed_count":12,"progress":100}}
 		}`, intent.SysNo, intent.SysNo)
 	}))
@@ -275,7 +301,7 @@ func TestXcashPaymentServiceReconcilesCompletedInvoiceWithoutWebhook(t *testing.
 	client := newXcashClient(xcashConfig{
 		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
-		Methods: map[string][]string{"USDT": {"arbitrum"}},
+		Methods: map[string][]string{"USDT": {"arbitrum-one"}}, VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
 	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
 	service.commitReservation = func(context.Context, uint, int) {}
@@ -343,7 +369,7 @@ func TestXcashPaymentServiceSettlesCompletedIdempotentCreateResponse(t *testing.
 			outNo = intent.OutNo
 		}
 		_, _ = fmt.Fprintf(w, `{
-			"sys_no":"INV260903CREATEPAID","out_no":%q,"currency":"USD","amount":"18.00",
+			"sys_no":"INV260903CREATEPAID","out_no":%q,"currency":"CNY","amount":"18.00",
 			"chain":"base","crypto":"DAI","pay_address":"0x8888888888888888888888888888888888888888","pay_amount":"18",
 			"pay_url":"https://pay.example.test/pay/INV260903CREATEPAID","expires_at":"2099-09-03T20:15:00Z",
 			"status":"completed","risk_level":"Low","risk_score":"5",
@@ -354,7 +380,7 @@ func TestXcashPaymentServiceSettlesCompletedIdempotentCreateResponse(t *testing.
 	client := newXcashClient(xcashConfig{
 		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
-		Methods: map[string][]string{"DAI": {"base"}},
+		Methods: map[string][]string{"DAI": {"base"}}, VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
 	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
 	service.commitReservation = func(context.Context, uint, int) {}
@@ -373,6 +399,205 @@ func TestXcashPaymentServiceSettlesCompletedIdempotentCreateResponse(t *testing.
 	}
 	if gotOrder.Type != consts.OrderWaitShip {
 		t.Fatalf("order state = %d, want WaitShip", gotOrder.Type)
+	}
+}
+
+func TestXcashPaymentServiceWaitsForAMLThenQuarantinesHighRisk(t *testing.T) {
+	db := newXcashTestDB(t, &orderpkg.Order{}, &clearing.PaymentAnomaly{}, &XcashPaymentIntent{})
+	order := &orderpkg.Order{
+		UserID: 11, BossID: 12, ProductID: 110, AddressID: 120, Num: 1,
+		OrderNum: 20260903006, Type: consts.OrderWaitPay, Money: 3000,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+	intent := &XcashPaymentIntent{
+		OrderID: order.ID, UserID: order.UserID, Attempt: 1, OutNo: "gm-aml-1",
+		SysNo: "INV260903AMLPEND1", AmountCents: 3000, Currency: "CNY", Status: XcashIntentWaiting,
+		PayURL: "https://pay.example.test/pay/INV260903AMLPEND1", ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	if err := db.Create(intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		riskFields := `"risk_level":null,"risk_score":null`
+		if calls.Add(1) > 1 {
+			riskFields = `"risk_level":"High","risk_score":"88"`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"sys_no":"%s","currency":"CNY","amount":"30.00","chain":"base","crypto":"USDC",
+			"pay_address":"0x1111111111111111111111111111111111111111","pay_amount":"30",
+			"pay_url":"https://pay.example.test/pay/%s","expires_at":"2099-09-03T20:15:00Z",
+			"status":"completed",%s,
+			"payment":{"chain":"base","block":101,"hash":"0xamlhigh","from_address":"0xfrom","to_address":"0x1111111111111111111111111111111111111111","crypto":"USDC","amount":"30.0","status":"confirmed"}
+		}`, intent.SysNo, intent.SysNo, riskFields)
+	}))
+	defer server.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		Methods: map[string][]string{"USDC": {"base"}}, VaultSlotConfirmed: true, RequireAML: true, AllowHTTP: true,
+	}, server.Client())
+	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service.commitReservation = func(context.Context, uint, int) {}
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: order.UserID})
+
+	first, err := service.GetCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Status != XcashIntentRiskPending {
+		t.Fatalf("first status = %s, want risk_pending", first.Status)
+	}
+	var before orderpkg.Order
+	if err := db.First(&before, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if before.Type != consts.OrderWaitPay {
+		t.Fatalf("risk pending payment advanced order to %d", before.Type)
+	}
+	second, err := service.GetCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Status != XcashIntentAnomaly || second.RiskLevel != "High" {
+		t.Fatalf("high risk payment was not quarantined: %+v", second)
+	}
+	var anomaly clearing.PaymentAnomaly
+	if err := db.Where("order_id = ?", order.ID).First(&anomaly).Error; err != nil {
+		t.Fatal(err)
+	}
+	if anomaly.Reason != clearing.AnomalyReasonHighRiskPayment {
+		t.Fatalf("anomaly reason = %s", anomaly.Reason)
+	}
+}
+
+func TestXcashPaymentServiceReconcilesRecentExpiredAttemptBySysNo(t *testing.T) {
+	db := newXcashTestDB(t,
+		&user.User{}, &product.Product{}, &orderpkg.Order{},
+		&money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{},
+		&outbox.OutboxEvent{}, &XcashPaymentIntent{},
+	)
+	buyer := &user.User{UserName: "late-buyer", Email: "late@example.com"}
+	buyer.ID = 21
+	if err := db.Create(buyer).Error; err != nil {
+		t.Fatal(err)
+	}
+	item := &product.Product{Name: "dock", CategoryID: 1, Num: 2, BossID: 22, BossName: "seller"}
+	item.ID = 210
+	if err := db.Create(item).Error; err != nil {
+		t.Fatal(err)
+	}
+	order := &orderpkg.Order{
+		UserID: buyer.ID, BossID: 22, ProductID: item.ID, AddressID: 220, Num: 1,
+		OrderNum: 20260903007, Type: consts.OrderWaitPay, Money: 4200,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+	oldIntent := &XcashPaymentIntent{
+		OrderID: order.ID, UserID: buyer.ID, Attempt: 1, OutNo: "gm-late-1", SysNo: "INV260903LATEOLD1",
+		AmountCents: 4200, Currency: "CNY", Status: XcashIntentExpired,
+		PayURL: "https://pay.example.test/pay/INV260903LATEOLD1", ExpiresAt: time.Now().Add(-time.Minute),
+	}
+	latestIntent := &XcashPaymentIntent{
+		OrderID: order.ID, UserID: buyer.ID, Attempt: 2, OutNo: "gm-late-2", SysNo: "INV260903LATENEW2",
+		AmountCents: 4200, Currency: "CNY", Status: XcashIntentWaiting,
+		PayURL: "https://pay.example.test/pay/INV260903LATENEW2", ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	if err := db.Create(oldIntent).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(latestIntent).Error; err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"sys_no":"%s","currency":"CNY","amount":"42.00","chain":"base","crypto":"DAI",
+			"pay_address":"0x2121212121212121212121212121212121212121","pay_amount":"42",
+			"pay_url":"https://pay.example.test/pay/%s","expires_at":"2026-09-03T20:15:00Z",
+			"status":"completed","risk_level":"Low","risk_score":"4",
+			"payment":{"chain":"base","block":102,"hash":"0xlateold","from_address":"0xfrom","to_address":"0x2121212121212121212121212121212121212121","crypto":"DAI","amount":"42","status":"confirmed"}
+		}`, oldIntent.SysNo, oldIntent.SysNo)
+	}))
+	defer server.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		Methods: map[string][]string{"DAI": {"base"}}, VaultSlotConfirmed: true, AllowHTTP: true,
+	}, server.Client())
+	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service.commitReservation = func(context.Context, uint, int) {}
+
+	processed, err := service.ReconcilePending(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed = %d, want 1", processed)
+	}
+	if err := db.First(oldIntent, oldIntent.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if oldIntent.Status != XcashIntentCompleted {
+		t.Fatalf("old intent status = %s, want completed", oldIntent.Status)
+	}
+	if err := db.First(latestIntent, latestIntent.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if latestIntent.Status != XcashIntentWaiting {
+		t.Fatalf("latest intent unexpectedly changed to %s", latestIntent.Status)
+	}
+}
+
+func TestXcashPaymentServiceRotatesReconcileBatch(t *testing.T) {
+	db := newXcashTestDB(t, &XcashPaymentIntent{})
+	for i := 1; i <= 2; i++ {
+		intent := &XcashPaymentIntent{
+			OrderID: uint(i), UserID: 1, Attempt: 1, OutNo: fmt.Sprintf("gm-rotate-%d", i),
+			SysNo: fmt.Sprintf("INV260903ROTATE%02d", i), AmountCents: 100, Currency: "CNY", Status: XcashIntentWaiting,
+			PayURL: "https://pay.example.test/pay/rotate", ExpiresAt: time.Now().Add(15 * time.Minute),
+		}
+		if err := db.Create(intent).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sysNo := strings.TrimPrefix(r.URL.Path, "/v1/invoice/")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"sys_no":%q,"currency":"CNY","amount":"1.00","pay_url":"https://pay.example.test/pay/rotate","expires_at":"2099-09-03T20:15:00Z","status":"waiting"}`, sysNo)
+	}))
+	defer server.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		VaultSlotConfirmed: true, AllowHTTP: true,
+	}, server.Client())
+	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	if _, err := service.ReconcilePending(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReconcilePending(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var intents []XcashPaymentIntent
+	if err := db.Order("id ASC").Find(&intents).Error; err != nil {
+		t.Fatal(err)
+	}
+	if intents[0].LastCheckedAt == nil || intents[1].LastCheckedAt == nil {
+		t.Fatalf("reconcile batch did not rotate: %+v", intents)
+	}
+}
+
+func TestXcashAddressComparisonRespectsChainEncoding(t *testing.T) {
+	if !xcashAddressEqual("base", "0xAbC", "0xaBc") {
+		t.Fatal("EVM address comparison should ignore hex case")
+	}
+	if xcashAddressEqual("tron", "TAbc", "TaBc") {
+		t.Fatal("Tron Base58 address comparison must be case-sensitive")
 	}
 }
 
