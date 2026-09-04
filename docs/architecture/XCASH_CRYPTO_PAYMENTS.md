@@ -10,7 +10,7 @@
 2. Gomall 只向 Xcash 发送服务端计算的订单实付金额，不接受客户端金额或自行拼装的收款方式。
 3. Xcash 返回支付页；用户从项目已启用的币种和链中选择付款方式，再按页面给出的独立地址支付正常金额。
 4. Xcash 在链上交易达到确认数后，以带 HMAC 签名的 Webhook 通知 Gomall。
-5. Gomall 校验通知、账单身份、Base/USDC、收款地址、金额和交易哈希后，在同一数据库事务内完成清算、扣库存、推进订单并记录 Webhook 幂等凭据。
+5. Gomall 校验通知、账单身份、服务端允许的链币组合、收款地址、金额和交易哈希后，在同一数据库事务内完成清算、扣库存、推进订单并记录 Webhook 幂等凭据。
 
 ## 对外接口
 
@@ -18,10 +18,12 @@
 - `GET /api/v1/paydown/xcash?order_id=...`：登录后查询自己的账单状态，并主动与 Xcash 对账。
 - `POST /api/v1/webhooks/xcash`：公开回调，只接受通过 Xcash HMAC-SHA256 校验且时间戳在允许窗口内的通知。
 
+服务启动后还会每分钟分批主动查询等待中的账单；即使 Webhook 丢失，也会进入同一条幂等结算路径。
+
 ## 必须满足的业务规则
 
 - 可用币种和链取自服务端 `XCASH_METHODS_JSON` 白名单；未配置白名单时由 Xcash 项目提供所有已启用方式，客户端不能覆盖。
-- 同一订单只创建一张本地账单；重复请求复用已有支付页。
+- 同一订单同时只使用一张未过期账单；重复请求复用已有支付页，旧账单过期后才创建下一次尝试。
 - 订单号、金额、币种、链、收款地址或实付金额与 Xcash 最终账单不一致时不得放货，已经收到的外部款进入 `payment_anomaly`。
 - `XC-Nonce` 在数据库中唯一；Webhook 事务失败时幂等凭据必须一同回滚，使 Xcash 可以安全重试。
 - 清算引用使用 `chain:tx_hash`；正常重放不重复入账，不同付款不能被当作同一次重放。
@@ -35,6 +37,7 @@
 - `XCASH_HMAC_KEY`
 - `XCASH_NOTIFY_URL`
 - `XCASH_RETURN_URL`（可选）
+- `XCASH_FIAT_CURRENCY`（可选，账单计价法币，默认 `USD`；不限制买家最终选择的加密货币）
 - `XCASH_INVOICE_DURATION_MINUTES`（可选，默认 15，范围 5–30）
 - `XCASH_METHODS_JSON`（可选，例如 `{"USDC":["base","ethereum"],"USDT":["base","ethereum","tron"],"ETH":["ethereum"]}`）
 
