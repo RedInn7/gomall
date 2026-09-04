@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -167,7 +168,7 @@ func recordPaymentAnomalyTransition(db *gorm.DB, anomalyID, operatorID uint, req
 	req.TargetStatus = strings.TrimSpace(req.TargetStatus)
 	req.Note = strings.TrimSpace(req.Note)
 	req.ExternalRefundReference = strings.TrimSpace(req.ExternalRefundReference)
-	if req.Note == "" || len(req.Note) > maxAnomalyNoteLength {
+	if req.Note == "" || utf8.RuneCountInString(req.Note) > maxAnomalyNoteLength {
 		return nil, ErrAnomalyNoteRequired
 	}
 	if !validAnomalyStatus(req.ExpectedStatus) || !validAnomalyStatus(req.TargetStatus) ||
