@@ -44,6 +44,7 @@ func Run() error {
 			&groupbuy.GroupbuyGroup{}, &groupbuy.GroupbuyMember{},
 			&preorder.ProductPreorder{},
 			&money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{},
+			&clearing.PaymentAnomalyTransition{},
 			&payment.XcashPaymentIntent{}, &payment.XcashWebhookReceipt{},
 		); err != nil {
 		return err
