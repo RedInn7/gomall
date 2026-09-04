@@ -84,7 +84,7 @@ func RecordClearedTx(tx *gorm.DB, o *order.Order, channel, providerRef, currency
 // 返回 matched=true 表示 provider_ref 与原清算单一致，可按幂等重放处理；否则持久化待人工退款异常。
 func RecordExternalDuplicateTx(tx *gorm.DB, o *order.Order, channel, providerRef, providerAmount, currency string) (matched bool, err error) {
 	providerRef = strings.TrimSpace(providerRef)
-	if tx == nil || o == nil || o.ID == 0 || (channel != ChannelStripe && channel != ChannelWeb3) || providerRef == "" {
+	if tx == nil || o == nil || o.ID == 0 || !isExternalChannel(channel) || providerRef == "" {
 		return false, ErrInvalidClearingInput
 	}
 
@@ -107,7 +107,7 @@ func RecordExternalDuplicateTx(tx *gorm.DB, o *order.Order, channel, providerRef
 // 记录成功即表示异常已被系统接管；后续由运营/退款任务处理，不能再靠渠道重投修复。
 func RecordExternalAnomalyTx(tx *gorm.DB, o *order.Order, channel, providerRef, providerAmount, currency, reason string) error {
 	providerRef = strings.TrimSpace(providerRef)
-	if tx == nil || o == nil || o.ID == 0 || (channel != ChannelStripe && channel != ChannelWeb3) || providerRef == "" {
+	if tx == nil || o == nil || o.ID == 0 || !isExternalChannel(channel) || providerRef == "" {
 		return ErrInvalidClearingInput
 	}
 	if reason != AnomalyReasonDuplicatePayment && reason != AnomalyReasonAmountMismatch {
@@ -140,7 +140,7 @@ func IsProviderCleared(ctx context.Context, orderID uint, channel, providerRef s
 
 func isProviderCleared(db *gorm.DB, orderID uint, channel, providerRef string) (bool, error) {
 	providerRef = strings.TrimSpace(providerRef)
-	if db == nil || orderID == 0 || providerRef == "" || (channel != ChannelStripe && channel != ChannelWeb3) {
+	if db == nil || orderID == 0 || providerRef == "" || !isExternalChannel(channel) {
 		return false, ErrInvalidClearingInput
 	}
 	var count int64
@@ -254,7 +254,16 @@ func orderPayableCents(o *order.Order) int64 {
 
 func validChannel(channel string) bool {
 	switch channel {
-	case ChannelWallet, ChannelStripe, ChannelWeb3:
+	case ChannelWallet, ChannelStripe, ChannelWeb3, ChannelXcash:
+		return true
+	default:
+		return false
+	}
+}
+
+func isExternalChannel(channel string) bool {
+	switch channel {
+	case ChannelStripe, ChannelWeb3, ChannelXcash:
 		return true
 	default:
 		return false

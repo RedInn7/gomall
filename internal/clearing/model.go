@@ -10,6 +10,7 @@ const (
 	ChannelWallet = "wallet"
 	ChannelStripe = "stripe"
 	ChannelWeb3   = "web3"
+	ChannelXcash  = "xcash"
 
 	StatusCleared  = "cleared"
 	StatusSettled  = "settled"
