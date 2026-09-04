@@ -277,6 +277,43 @@ func xcashRiskReady(level string) bool {
 	}
 }
 
+// stricterXcashRiskSnapshot 合并签名 Webhook 与公开查询的风险快照时只允许风险升级。
+// Xcash 的公开查询存在缓存，绝不能用缓存中的 Low 覆盖签名事件里的 High。
+func stricterXcashRiskSnapshot(currentLevel, currentScore, queriedLevel, queriedScore string) (string, string) {
+	currentLevel = strings.TrimSpace(currentLevel)
+	queriedLevel = strings.TrimSpace(queriedLevel)
+	if currentLevel == "" {
+		return queriedLevel, strings.TrimSpace(queriedScore)
+	}
+	if queriedLevel == "" {
+		return currentLevel, strings.TrimSpace(currentScore)
+	}
+	currentRank := xcashRiskRank(currentLevel)
+	queriedRank := xcashRiskRank(queriedLevel)
+	if queriedRank > currentRank || (queriedRank == currentRank && strings.EqualFold(currentLevel, queriedLevel)) {
+		return queriedLevel, strings.TrimSpace(queriedScore)
+	}
+	return currentLevel, strings.TrimSpace(currentScore)
+}
+
+func xcashRiskRank(level string) int {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "severe":
+		return 5
+	case "high":
+		return 4
+	case "moderate":
+		return 2
+	case "low":
+		return 1
+	case "":
+		return 0
+	default:
+		// 未识别等级不能被 Low/Moderate 冲掉；严格 AML 会让它保持待审核。
+		return 3
+	}
+}
+
 func loadXcashConfig() (xcashConfig, error) {
 	duration := defaultXcashInvoiceDuration
 	if raw := strings.TrimSpace(os.Getenv("XCASH_INVOICE_DURATION_MINUTES")); raw != "" {
@@ -624,12 +661,9 @@ func mergeCompletedInvoiceIntoEvent(event *xcashWebhookEvent, invoice *xcashInvo
 	event.Data.Hash = snapshot.paymentHash
 	event.Data.Block = snapshot.block
 	event.Data.Confirmed = true
-	if strings.TrimSpace(invoice.RiskLevel) != "" {
-		event.Data.RiskLevel = invoice.RiskLevel
-	}
-	if strings.TrimSpace(invoice.RiskScore) != "" {
-		event.Data.RiskScore = invoice.RiskScore
-	}
+	event.Data.RiskLevel, event.Data.RiskScore = stricterXcashRiskSnapshot(
+		event.Data.RiskLevel, event.Data.RiskScore, invoice.RiskLevel, invoice.RiskScore,
+	)
 	event.Data.Confirmations = snapshot.confirmations
 	event.Data.RequiredConfirmations = snapshot.requiredConfirmations
 	event.Data.ConfirmProgress = snapshot.confirmProgress
