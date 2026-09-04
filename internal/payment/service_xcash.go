@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/clearing"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/repository/db/dao"
@@ -26,9 +27,10 @@ const defaultXcashInvoiceDuration = 15
 type xcashDBProvider func(context.Context) *gorm.DB
 
 type XcashPaymentSrv struct {
-	client  *xcashClient
-	db      xcashDBProvider
-	initErr error
+	client            *xcashClient
+	db                xcashDBProvider
+	commitReservation func(context.Context, uint, int)
+	initErr           error
 }
 
 var (
@@ -46,7 +48,132 @@ func GetXcashPaymentSrv() *XcashPaymentSrv {
 }
 
 func newXcashPaymentSrv(client *xcashClient, db xcashDBProvider) *XcashPaymentSrv {
-	return &XcashPaymentSrv{client: client, db: db}
+	return &XcashPaymentSrv{client: client, db: db, commitReservation: commitReservationBestEffort}
+}
+
+type xcashWebhookEvent struct {
+	Type string `json:"type"`
+	Data struct {
+		SysNo      string `json:"sys_no"`
+		OutNo      string `json:"out_no"`
+		Crypto     string `json:"crypto"`
+		Chain      string `json:"chain"`
+		PayAddress string `json:"pay_address"`
+		PayAmount  string `json:"pay_amount"`
+		Hash       string `json:"hash"`
+		Block      uint64 `json:"block"`
+		Confirmed  bool   `json:"confirmed"`
+		RiskLevel  string `json:"risk_level"`
+		RiskScore  string `json:"risk_score"`
+	} `json:"data"`
+}
+
+func (s *XcashPaymentSrv) HandleWebhook(ctx context.Context, headers xcashWebhookHeaders, body []byte) error {
+	if s == nil || s.client == nil || s.db == nil {
+		return errors.New("Xcash 支付服务未初始化")
+	}
+	if s.initErr != nil {
+		return s.initErr
+	}
+	if err := s.client.VerifyWebhook(headers, body); err != nil {
+		return err
+	}
+	var event xcashWebhookEvent
+	if err := json.Unmarshal(body, &event); err != nil {
+		return fmt.Errorf("解析 Xcash Webhook 失败: %w", err)
+	}
+	event.Data.SysNo = strings.TrimSpace(event.Data.SysNo)
+	event.Data.OutNo = strings.TrimSpace(event.Data.OutNo)
+	event.Data.Chain = strings.ToLower(strings.TrimSpace(event.Data.Chain))
+	event.Data.Crypto = strings.ToUpper(strings.TrimSpace(event.Data.Crypto))
+	event.Data.Hash = strings.TrimSpace(event.Data.Hash)
+	event.Data.PayAddress = strings.TrimSpace(event.Data.PayAddress)
+	event.Data.PayAmount = strings.TrimSpace(event.Data.PayAmount)
+	if event.Type != "invoice" || event.Data.SysNo == "" || event.Data.OutNo == "" || event.Data.Chain == "" ||
+		event.Data.Crypto == "" || event.Data.Hash == "" || event.Data.PayAddress == "" || event.Data.PayAmount == "" {
+		return errors.New("Xcash Webhook 缺少账单付款字段")
+	}
+	if !event.Data.Confirmed {
+		return errors.New("Xcash Webhook 尚未达到确认数")
+	}
+	providerRef := event.Data.Chain + ":" + event.Data.Hash
+	db := s.db(ctx)
+	if db == nil {
+		return errors.New("数据库未初始化")
+	}
+	var settledProductID uint
+	var settledNum int
+	err := db.Transaction(func(tx *gorm.DB) error {
+		receipt := &XcashWebhookReceipt{
+			AppID: headers.AppID, Nonce: headers.Nonce, EventType: event.Type,
+			ProviderRef: providerRef, ProcessedAt: time.Now(),
+		}
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(receipt)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+
+		var intent XcashPaymentIntent
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("sys_no = ? AND out_no = ?", event.Data.SysNo, event.Data.OutNo).First(&intent).Error; err != nil {
+			return err
+		}
+		order, err := orderpkg.NewOrderDaoByDB(tx).GetOrderByIdOnly(intent.OrderID)
+		if err != nil {
+			return err
+		}
+		if !xcashMethodAllowed(s.client.config.Methods, event.Data.Crypto, event.Data.Chain) {
+			return errors.New("Xcash Webhook 付款方式不在服务端白名单中")
+		}
+		if (intent.Chain != "" && !strings.EqualFold(intent.Chain, event.Data.Chain)) ||
+			(intent.Crypto != "" && !strings.EqualFold(intent.Crypto, event.Data.Crypto)) ||
+			(intent.PayAddress != "" && !strings.EqualFold(intent.PayAddress, event.Data.PayAddress)) ||
+			(intent.PayAmount != "" && intent.PayAmount != event.Data.PayAmount) {
+			return errors.New("Xcash Webhook 与已保存账单不一致")
+		}
+
+		if order.Type != consts.OrderWaitPay {
+			matched, err := clearing.RecordExternalDuplicateTx(
+				tx, order, clearing.ChannelXcash, providerRef, event.Data.PayAmount, event.Data.Crypto,
+			)
+			if err != nil {
+				return err
+			}
+			status := XcashIntentAnomaly
+			if matched {
+				status = XcashIntentCompleted
+			}
+			return tx.Model(&intent).Updates(map[string]any{"status": status, "tx_hash": event.Data.Hash}).Error
+		}
+
+		if err := clearing.RecordClearedTx(tx, order, clearing.ChannelXcash, providerRef, event.Data.Crypto, nil); err != nil {
+			return err
+		}
+		if err := finishPaymentConfirmationTx(tx, order); err != nil {
+			return err
+		}
+		now := time.Now()
+		if err := tx.Model(&intent).Updates(map[string]any{
+			"status": XcashIntentCompleted, "chain": event.Data.Chain, "crypto": event.Data.Crypto,
+			"pay_address": event.Data.PayAddress, "pay_amount": event.Data.PayAmount, "tx_hash": event.Data.Hash,
+			"risk_level": event.Data.RiskLevel, "risk_score": event.Data.RiskScore, "confirmed_at": &now,
+		}).Error; err != nil {
+			return err
+		}
+		settledProductID = order.ProductID
+		settledNum = order.Num
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if settledProductID != 0 && settledNum > 0 {
+		s.commitReservation(ctx, settledProductID, settledNum)
+	}
+	return nil
 }
 
 func loadXcashConfig() (xcashConfig, error) {
