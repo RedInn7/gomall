@@ -51,6 +51,8 @@ export const ENDPOINTS: Endpoint[] = [
     ['GET', '/api/v1/paydown/crypto/nonce', '支付与退款', '取得链上支付签名', { order_id: 0 }],
     ['POST', '/api/v1/paydown/crypto', '支付与退款', '提交链上支付', { orderID: 0, walletAddr: '', signature: '', nonce: '', chainID: 1 }],
     ['POST', '/api/v1/paydown/stripe', '支付与退款', 'Stripe 支付', { order_id: 0 }],
+    ['POST', '/api/v1/paydown/xcash', '支付与退款', '加密货币支付', { order_id: 0 }],
+    ['GET', '/api/v1/paydown/xcash', '支付与退款', '查询加密货币支付', { order_id: 0 }],
     ['POST', '/api/v1/orders/refund/request', '支付与退款', '申请退款', { order_num: 0, reason: '' }],
     ['POST', '/api/v1/money', '支付与退款', '查看余额', { key: '' }],
     ['POST', '/api/v1/promo/calculate', '优惠活动', '计算优惠', { items: [] }],
