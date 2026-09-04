@@ -15,6 +15,7 @@ import (
 	"github.com/RedInn7/gomall/internal/carousel"
 	"github.com/RedInn7/gomall/internal/cart"
 	"github.com/RedInn7/gomall/internal/category"
+	"github.com/RedInn7/gomall/internal/clearing"
 	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/favorite"
 	"github.com/RedInn7/gomall/internal/groupbuy"
@@ -102,6 +103,7 @@ func NewRouter() *gin.Engine {
 		money.RegisterRoutes,
 		skill.RegisterRoutes,
 		admin.RegisterRoutes,
+		clearing.RegisterRoutes,
 		promo.RegisterRoutes,
 		groupbuy.RegisterRoutes,
 		preorder.RegisterRoutes,
