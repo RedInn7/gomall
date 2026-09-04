@@ -636,8 +636,8 @@ func xcashIntentObservationUpdates(event *xcashWebhookEvent, status string) map[
 	}
 }
 
-// ReconcilePending 主动查询仍在等待付款的账单。它不依赖用户请求，供后台定时任务
-// 弥补 Webhook 丢失；每张账单仍复用 GetCheckout 的身份、金额、风险与结算校验。
+// ReconcilePending 主动查询等待付款、等待风控及最近过期的账单。它不依赖用户请求，
+// 供后台定时任务弥补 Webhook 丢失；每张账单按 sys_no 精确复用金额、风险与结算校验。
 func (s *XcashPaymentSrv) ReconcilePending(ctx context.Context, limit int) (int, error) {
 	if s == nil || s.client == nil || s.db == nil {
 		return 0, errors.New("Xcash 支付服务未初始化")
