@@ -391,6 +391,7 @@ make tools build-agent
 | RabbitMQ | Outbox 事件发布与订单延迟关单 |
 | ElasticSearch | 商品关键词检索与增量索引 |
 | `WEB3_RPC_URL` / `WEB3_ESCROW_ADDR` | Web3 托管合约监听与链上支付确认 |
+| `XCASH_BASE_URL` / `XCASH_APP_ID` / `XCASH_HMAC_KEY` / `XCASH_NOTIFY_URL` / `XCASH_METHODS_JSON` | Xcash 多链、多币种账单、签名回调与主动对账；计价法币可用 `XCASH_FIAT_CURRENCY` 配置，部署要求见 [Xcash 接入说明](docs/architecture/XCASH_CRYPTO_PAYMENTS.md) |
 | `MILVUS_ADDR` | 连接 Milvus 并创建向量集合；还需注入 searcher 和建立商品向量索引 |
 | `EMBEDDING_API_URL` | 为查询生成 embedding；商品向量需要另行建立索引 |
 
