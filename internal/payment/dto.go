@@ -46,3 +46,26 @@ type StripeCheckoutResp struct {
 	SessionID string `json:"session_id"`
 	URL       string `json:"url"`
 }
+
+// XcashCheckoutReq 只接受订单号；金额、币种和链均由服务端订单与 Xcash 项目决定。
+type XcashCheckoutReq struct {
+	OrderID uint `form:"order_id" json:"order_id" binding:"required"`
+}
+
+// XcashCheckoutResp 是前端渲染 Xcash 支付页和付款进度所需的稳定字段。
+type XcashCheckoutResp struct {
+	SysNo      string `json:"sys_no"`
+	URL        string `json:"url"`
+	Amount     string `json:"amount"`
+	Currency   string `json:"currency"`
+	Status     string `json:"status"`
+	ExpiresAt  string `json:"expires_at"`
+	Chain      string `json:"chain,omitempty"`
+	Crypto     string `json:"crypto,omitempty"`
+	PayAddress string `json:"pay_address,omitempty"`
+	PayAmount  string `json:"pay_amount,omitempty"`
+	PaymentURI string `json:"payment_uri,omitempty"`
+	TxHash     string `json:"tx_hash,omitempty"`
+	RiskLevel  string `json:"risk_level,omitempty"`
+	RiskScore  string `json:"risk_score,omitempty"`
+}
