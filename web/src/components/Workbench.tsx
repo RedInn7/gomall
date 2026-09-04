@@ -22,7 +22,7 @@ function Action({ endpoint, onAuthChange }: { endpoint: Endpoint; onAuthChange: 
         onAuthChange()
       }
       setResult(pretty(data))
-      if (endpoint.path === '/api/v1/paydown/stripe' && (data as any)?.url) {
+      if (endpoint.method === 'POST' && (endpoint.path === '/api/v1/paydown/stripe' || endpoint.path === '/api/v1/paydown/xcash') && (data as any)?.url) {
         window.open((data as any).url, '_blank', 'noopener,noreferrer')
       }
     } catch (error: any) {
