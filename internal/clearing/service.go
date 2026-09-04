@@ -360,13 +360,11 @@ func recordPaymentAnomalyTransition(db *gorm.DB, anomalyID, operatorID uint, req
 		return nil, ErrUnexpectedExternalRefundRef
 	}
 
-	if err := persistPaymentAnomalyTransition(db, anomalyID, operatorID, req, time.Now()); err != nil {
-		return nil, err
-	}
-	detail, err := getPaymentAnomaly(db, anomalyID)
+	anomaly, history, err := persistPaymentAnomalyTransition(db, anomalyID, operatorID, req, time.Now())
 	if err != nil {
 		return nil, err
 	}
+	detail := anomalyDetail(anomaly, history)
 	return &PaymentAnomalyTransitionResponse{PaymentAnomalyDetailResponse: *detail, FundsTransferred: false}, nil
 }
 
