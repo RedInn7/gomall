@@ -25,6 +25,8 @@ import (
 
 const defaultXcashInvoiceDuration = 15
 
+var ErrXcashInvalidWebhook = errors.New("Xcash Webhook 内容无效")
+
 type xcashDBProvider func(context.Context) *gorm.DB
 
 type XcashPaymentSrv struct {
@@ -55,17 +57,20 @@ func newXcashPaymentSrv(client *xcashClient, db xcashDBProvider) *XcashPaymentSr
 type xcashWebhookEvent struct {
 	Type string `json:"type"`
 	Data struct {
-		SysNo      string `json:"sys_no"`
-		OutNo      string `json:"out_no"`
-		Crypto     string `json:"crypto"`
-		Chain      string `json:"chain"`
-		PayAddress string `json:"pay_address"`
-		PayAmount  string `json:"pay_amount"`
-		Hash       string `json:"hash"`
-		Block      uint64 `json:"block"`
-		Confirmed  bool   `json:"confirmed"`
-		RiskLevel  string `json:"risk_level"`
-		RiskScore  string `json:"risk_score"`
+		SysNo                 string `json:"sys_no"`
+		OutNo                 string `json:"out_no"`
+		Crypto                string `json:"crypto"`
+		Chain                 string `json:"chain"`
+		PayAddress            string `json:"pay_address"`
+		PayAmount             string `json:"pay_amount"`
+		Hash                  string `json:"hash"`
+		Block                 uint64 `json:"block"`
+		Confirmed             bool   `json:"confirmed"`
+		RiskLevel             string `json:"risk_level"`
+		RiskScore             string `json:"risk_score"`
+		Confirmations         uint64 `json:"-"`
+		RequiredConfirmations uint64 `json:"-"`
+		ConfirmProgress       int    `json:"-"`
 	} `json:"data"`
 }
 
@@ -81,7 +86,7 @@ func (s *XcashPaymentSrv) HandleWebhook(ctx context.Context, headers xcashWebhoo
 	}
 	var event xcashWebhookEvent
 	if err := json.Unmarshal(body, &event); err != nil {
-		return fmt.Errorf("解析 Xcash Webhook 失败: %w", err)
+		return fmt.Errorf("%w: JSON 解析失败: %v", ErrXcashInvalidWebhook, err)
 	}
 	event.Data.SysNo = strings.TrimSpace(event.Data.SysNo)
 	event.Data.OutNo = strings.TrimSpace(event.Data.OutNo)
@@ -92,10 +97,10 @@ func (s *XcashPaymentSrv) HandleWebhook(ctx context.Context, headers xcashWebhoo
 	event.Data.PayAmount = strings.TrimSpace(event.Data.PayAmount)
 	if event.Type != "invoice" || event.Data.SysNo == "" || event.Data.OutNo == "" || event.Data.Chain == "" ||
 		event.Data.Crypto == "" || event.Data.Hash == "" || event.Data.PayAddress == "" || event.Data.PayAmount == "" {
-		return errors.New("Xcash Webhook 缺少账单付款字段")
+		return fmt.Errorf("%w: 缺少账单付款字段", ErrXcashInvalidWebhook)
 	}
 	if !event.Data.Confirmed {
-		return errors.New("Xcash Webhook 尚未达到确认数")
+		return fmt.Errorf("%w: 尚未达到确认数", ErrXcashInvalidWebhook)
 	}
 	return s.processConfirmedEvent(ctx, &event, &headers)
 }
@@ -138,7 +143,7 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 			(intent.Chain != "" && !strings.EqualFold(intent.Chain, event.Data.Chain)) ||
 			(intent.Crypto != "" && !strings.EqualFold(intent.Crypto, event.Data.Crypto)) ||
 			(intent.PayAddress != "" && !strings.EqualFold(intent.PayAddress, event.Data.PayAddress)) ||
-			(intent.PayAmount != "" && intent.PayAmount != event.Data.PayAmount) {
+			(intent.PayAmount != "" && !decimalEqual(intent.PayAmount, event.Data.PayAmount)) {
 			return quarantineXcashPayment(tx, &intent, order, event, providerRef, clearing.AnomalyReasonPaymentDetailsMismatch)
 		}
 		if isXcashHighRisk(event.Data.RiskLevel) {
@@ -172,6 +177,8 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 			"risk_level": event.Data.RiskLevel, "risk_score": event.Data.RiskScore, "confirmed_at": &now,
 			"observed_chain": event.Data.Chain, "observed_crypto": event.Data.Crypto,
 			"observed_pay_address": event.Data.PayAddress, "observed_pay_amount": event.Data.PayAmount,
+			"confirmations": event.Data.Confirmations, "required_confirmations": event.Data.RequiredConfirmations,
+			"confirm_progress": event.Data.ConfirmProgress,
 		}).Error; err != nil {
 			return err
 		}
@@ -199,6 +206,8 @@ func quarantineXcashPayment(tx *gorm.DB, intent *XcashPaymentIntent, order *orde
 		"risk_level": event.Data.RiskLevel, "risk_score": event.Data.RiskScore,
 		"observed_chain": event.Data.Chain, "observed_crypto": event.Data.Crypto,
 		"observed_pay_address": event.Data.PayAddress, "observed_pay_amount": event.Data.PayAmount,
+		"confirmations": event.Data.Confirmations, "required_confirmations": event.Data.RequiredConfirmations,
+		"confirm_progress": event.Data.ConfirmProgress,
 	}).Error
 }
 
@@ -233,7 +242,11 @@ func loadXcashConfig() (xcashConfig, error) {
 	config := xcashConfig{
 		BaseURL: strings.TrimSpace(os.Getenv("XCASH_BASE_URL")), AppID: strings.TrimSpace(os.Getenv("XCASH_APP_ID")),
 		HMACKey: strings.TrimSpace(os.Getenv("XCASH_HMAC_KEY")), NotifyURL: strings.TrimSpace(os.Getenv("XCASH_NOTIFY_URL")),
-		ReturnURL: strings.TrimSpace(os.Getenv("XCASH_RETURN_URL")), Duration: duration, Methods: methods,
+		ReturnURL: strings.TrimSpace(os.Getenv("XCASH_RETURN_URL")), Currency: strings.ToUpper(strings.TrimSpace(os.Getenv("XCASH_FIAT_CURRENCY"))),
+		Duration: duration, Methods: methods,
+	}
+	if config.Currency == "" {
+		config.Currency = xcashFiatUSD
 	}
 	return config, config.validate()
 }
@@ -265,6 +278,9 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 	if s.initErr != nil {
 		return nil, s.initErr
 	}
+	if req == nil || req.OrderID == 0 {
+		return nil, errors.New("订单号不能为空")
+	}
 	userInfo, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -291,9 +307,16 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 	case err == nil && latest.Status == XcashIntentWaiting && latest.ExpiresAt.After(time.Now()):
 		return xcashIntentResponse(&latest), nil
 	case err == nil && latest.Status == XcashIntentWaiting:
-		if err := db.Model(&latest).Update("status", XcashIntentExpired).Error; err != nil {
-			return nil, err
+		current, syncErr := s.GetCheckout(ctx, req)
+		if syncErr != nil {
+			return nil, syncErr
 		}
+		if current.Status != XcashIntentExpired {
+			return current, nil
+		}
+		latest.Status = XcashIntentExpired
+	case err == nil && latest.Status != XcashIntentExpired:
+		return xcashIntentResponse(&latest), nil
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, err
 	}
@@ -302,15 +325,15 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 	if attempt == 0 {
 		attempt = 1
 	}
-	outNo := fmt.Sprintf("gm-%d-%d", order.ID, attempt)
+	outNo := fmt.Sprintf("gm-%s-%s", strconv.FormatUint(uint64(order.ID), 36), strconv.FormatUint(uint64(attempt), 36))
 	amount := formatFiatCents(payableCents)
-	title := fmt.Sprintf("Gomall order %d", order.OrderNum)
+	title := fmt.Sprintf("Gomall #%d", order.OrderNum)
 	invoice, err := s.client.CreateInvoice(ctx, outNo, title, amount)
 	if err != nil {
 		return nil, err
 	}
 	invoiceCents, amountErr := parseFiatCents(invoice.Amount)
-	if !strings.EqualFold(invoice.Currency, xcashFiatUSD) || amountErr != nil || invoiceCents != payableCents {
+	if !strings.EqualFold(invoice.Currency, s.client.config.Currency) || amountErr != nil || invoiceCents != payableCents {
 		return nil, errors.New("Xcash 返回的计价金额或币种与订单不一致")
 	}
 	if invoice.Chain != "" && invoice.Crypto != "" && !xcashMethodAllowed(s.client.config.Methods, invoice.Crypto, invoice.Chain) {
@@ -327,8 +350,18 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 		PayAddress: invoice.PayAddress, PayAmount: invoice.PayAmount, PayURL: invoice.PayURL,
 		PaymentURI: invoice.PaymentURI, RiskLevel: invoice.RiskLevel, RiskScore: invoice.RiskScore, ExpiresAt: expiresAt,
 	}
-	if intent.Status == "" {
+	remoteStatus := intent.Status
+	switch remoteStatus {
+	case "", XcashIntentWaiting:
 		intent.Status = XcashIntentWaiting
+	case XcashIntentCompleted:
+		// 创建请求可能因网络超时被客户端重试，而 Xcash 会按 out_no 返回已经完成的
+		// 原账单。先落成本地 waiting，再走统一主动对账路径，避免只改 intent 而漏掉清算。
+		intent.Status = XcashIntentWaiting
+	case XcashIntentExpired:
+		intent.Status = XcashIntentExpired
+	default:
+		return nil, fmt.Errorf("Xcash 返回未知账单状态 %q", remoteStatus)
 	}
 	if err := db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "order_id"}, {Name: "attempt"}}, DoNothing: true}).Create(intent).Error; err != nil {
 		return nil, err
@@ -337,6 +370,9 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 		if err := db.Where("order_id = ? AND attempt = ?", order.ID, attempt).First(intent).Error; err != nil {
 			return nil, err
 		}
+	}
+	if remoteStatus == XcashIntentCompleted {
+		return s.GetCheckout(ctx, req)
 	}
 	return xcashIntentResponse(intent), nil
 }
@@ -347,6 +383,9 @@ func (s *XcashPaymentSrv) GetCheckout(ctx context.Context, req *XcashCheckoutReq
 	}
 	if s.initErr != nil {
 		return nil, s.initErr
+	}
+	if req == nil || req.OrderID == 0 {
+		return nil, errors.New("订单号不能为空")
 	}
 	userInfo, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -402,7 +441,7 @@ func (s *XcashPaymentSrv) GetCheckout(ctx context.Context, req *XcashCheckoutReq
 		if (invoice.Chain != "" && invoice.Payment.Chain != "" && !strings.EqualFold(invoice.Chain, invoice.Payment.Chain)) ||
 			(invoice.Crypto != "" && invoice.Payment.Crypto != "" && !strings.EqualFold(invoice.Crypto, invoice.Payment.Crypto)) ||
 			(invoice.PayAddress != "" && invoice.Payment.ToAddress != "" && !strings.EqualFold(invoice.PayAddress, invoice.Payment.ToAddress)) ||
-			(invoice.PayAmount != "" && invoice.Payment.Amount != "" && invoice.PayAmount != invoice.Payment.Amount) {
+			(invoice.PayAmount != "" && invoice.Payment.Amount != "" && !decimalEqual(invoice.PayAmount, invoice.Payment.Amount)) {
 			return nil, errors.New("Xcash 查询结果的付款记录与账单不一致")
 		}
 	}
@@ -441,6 +480,9 @@ func (s *XcashPaymentSrv) GetCheckout(ctx context.Context, req *XcashCheckoutReq
 		event.Data.Confirmed = true
 		event.Data.RiskLevel = invoice.RiskLevel
 		event.Data.RiskScore = invoice.RiskScore
+		event.Data.Confirmations = confirmations
+		event.Data.RequiredConfirmations = requiredConfirmations
+		event.Data.ConfirmProgress = confirmProgress
 		if err := s.processConfirmedEvent(ctx, event, nil); err != nil {
 			return nil, err
 		}
@@ -451,6 +493,37 @@ func (s *XcashPaymentSrv) GetCheckout(ctx context.Context, req *XcashCheckoutReq
 		return nil, err
 	}
 	return xcashIntentResponse(&intent), nil
+}
+
+// ReconcilePending 主动查询仍在等待付款的账单。它不依赖用户请求，供后台定时任务
+// 弥补 Webhook 丢失；每张账单仍复用 GetCheckout 的身份、金额、风险与结算校验。
+func (s *XcashPaymentSrv) ReconcilePending(ctx context.Context, limit int) (int, error) {
+	if s == nil || s.client == nil || s.db == nil {
+		return 0, errors.New("Xcash 支付服务未初始化")
+	}
+	if s.initErr != nil {
+		return 0, s.initErr
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	db := s.db(ctx)
+	if db == nil {
+		return 0, errors.New("数据库未初始化")
+	}
+	var intents []XcashPaymentIntent
+	if err := db.Where("status = ?", XcashIntentWaiting).Order("id ASC").Limit(limit).Find(&intents).Error; err != nil {
+		return 0, err
+	}
+	var errs []error
+	for i := range intents {
+		intent := &intents[i]
+		userCtx := ctl.NewContext(ctx, &ctl.UserInfo{Id: intent.UserID})
+		if _, err := s.GetCheckout(userCtx, &XcashCheckoutReq{OrderID: intent.OrderID}); err != nil {
+			errs = append(errs, fmt.Errorf("Xcash 对账 order=%d sys_no=%s: %w", intent.OrderID, intent.SysNo, err))
+		}
+	}
+	return len(intents), errors.Join(errs...)
 }
 
 func xcashMethodAllowed(methods map[string][]string, crypto, chain string) bool {
@@ -479,6 +552,15 @@ func parseFiatCents(amount string) (int64, error) {
 		return 0, errors.New("金额必须精确到分")
 	}
 	return value.Num().Int64(), nil
+}
+
+func decimalEqual(left, right string) bool {
+	a, ok := new(big.Rat).SetString(strings.TrimSpace(left))
+	if !ok {
+		return false
+	}
+	b, ok := new(big.Rat).SetString(strings.TrimSpace(right))
+	return ok && a.Cmp(b) == 0
 }
 
 func xcashIntentResponse(intent *XcashPaymentIntent) *XcashCheckoutResp {
