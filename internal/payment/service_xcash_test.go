@@ -176,6 +176,73 @@ func TestXcashPaymentServiceSettlesConfirmedWebhookExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestXcashSignedHighRiskCannotBeDowngradedByCachedQuery(t *testing.T) {
+	db := newXcashTestDB(t, &orderpkg.Order{}, &clearing.PaymentAnomaly{}, &XcashPaymentIntent{}, &XcashWebhookReceipt{})
+	order := &orderpkg.Order{
+		UserID: 31, BossID: 32, ProductID: 33, AddressID: 34, Num: 1,
+		OrderNum: 20260903011, Type: consts.OrderWaitPay, Money: 1800,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+	intent := &XcashPaymentIntent{
+		OrderID: order.ID, UserID: order.UserID, Attempt: 1, OutNo: "gm-risk-merge-1",
+		SysNo: "INV260903RISKMERGE", AmountCents: 1800, Currency: "CNY", Status: XcashIntentWaiting,
+		PayURL: "https://pay.example.test/pay/INV260903RISKMERGE", ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	if err := db.Create(intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"sys_no":"%s","currency":"CNY","amount":"18.00","chain":"base","crypto":"USDC",
+			"pay_address":"0x1818181818181818181818181818181818181818","pay_amount":"18",
+			"pay_url":"https://pay.example.test/pay/%s","expires_at":"2099-09-03T20:15:00Z",
+			"status":"completed","risk_level":"Low","risk_score":"7",
+			"payment":{"chain":"base","block":1818,"hash":"0xriskmerge","from_address":"0xfrom","to_address":"0x1818181818181818181818181818181818181818","crypto":"USDC","amount":"18","status":"confirmed"}
+		}`, intent.SysNo, intent.SysNo)
+	}))
+	defer server.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		Methods: map[string][]string{"USDC": {"base"}}, VaultSlotConfirmed: true, RequireAML: true, AllowHTTP: true,
+	}, server.Client())
+	now := time.Unix(1_788_466_500, 0)
+	client.now = func() time.Time { return now }
+	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+
+	body := []byte(fmt.Sprintf(`{"type":"invoice","data":{"sys_no":"%s","out_no":"%s","crypto":"USDC","chain":"base","pay_address":"0x1818181818181818181818181818181818181818","pay_amount":"18","hash":"0xriskmerge","block":1818,"confirmed":true,"risk_level":"High","risk_score":"91"}}`, intent.SysNo, intent.OutNo))
+	headers := xcashWebhookHeaders{AppID: "XC-TEST", Nonce: "event-risk-merge", Timestamp: fmt.Sprintf("%d", now.Unix())}
+	headers.Signature = xcashSignature("secret", headers.Nonce, headers.Timestamp, body)
+	if err := service.HandleWebhook(context.Background(), headers, body); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotIntent XcashPaymentIntent
+	if err := db.First(&gotIntent, intent.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotIntent.Status != XcashIntentAnomaly || gotIntent.RiskLevel != "High" || gotIntent.RiskScore != "91" {
+		t.Fatalf("signed high risk was downgraded: %+v", gotIntent)
+	}
+	var gotOrder orderpkg.Order
+	if err := db.First(&gotOrder, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotOrder.Type != consts.OrderWaitPay {
+		t.Fatalf("high-risk payment advanced order to %d", gotOrder.Type)
+	}
+	var anomaly clearing.PaymentAnomaly
+	if err := db.Where("order_id = ?", order.ID).First(&anomaly).Error; err != nil {
+		t.Fatal(err)
+	}
+	if anomaly.Reason != clearing.AnomalyReasonHighRiskPayment {
+		t.Fatalf("anomaly reason = %s", anomaly.Reason)
+	}
+}
+
 func TestXcashPaymentServiceQuarantinesMismatchedPayment(t *testing.T) {
 	db := newXcashTestDB(t,
 		&orderpkg.Order{}, &clearing.PaymentAnomaly{}, &XcashPaymentIntent{}, &XcashWebhookReceipt{},
