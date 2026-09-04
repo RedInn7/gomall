@@ -290,7 +290,10 @@ func stricterXcashRiskSnapshot(currentLevel, currentScore, queriedLevel, queried
 	}
 	currentRank := xcashRiskRank(currentLevel)
 	queriedRank := xcashRiskRank(queriedLevel)
-	if queriedRank > currentRank || (queriedRank == currentRank && strings.EqualFold(currentLevel, queriedLevel)) {
+	if queriedRank > currentRank {
+		return queriedLevel, strings.TrimSpace(queriedScore)
+	}
+	if queriedRank == currentRank && strings.EqualFold(currentLevel, queriedLevel) && strings.TrimSpace(currentScore) == "" {
 		return queriedLevel, strings.TrimSpace(queriedScore)
 	}
 	return currentLevel, strings.TrimSpace(currentScore)
