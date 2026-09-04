@@ -38,7 +38,7 @@ func TestXcashClientCreateInvoiceSignsAndUsesConfiguredMethods(t *testing.T) {
 		if err := json.Unmarshal(body, &request); err != nil {
 			t.Fatal(err)
 		}
-		if request.OutNo != "gomall-123" || request.Amount != "29.99" || request.Currency != "USD" {
+		if request.OutNo != "gomall-123" || request.Amount != "29.99" || request.Currency != "CNY" {
 			t.Fatalf("unexpected invoice request: %+v", request)
 		}
 		if len(request.Methods) != 3 || len(request.Methods["USDT"]) != 2 || request.Methods["USDT"][1] != "tron" {
@@ -49,7 +49,7 @@ func TestXcashClientCreateInvoiceSignsAndUsesConfiguredMethods(t *testing.T) {
 		_, _ = w.Write([]byte(`{
 			"sys_no":"INV260903ABC12345",
 			"out_no":"gomall-123",
-			"currency":"USD",
+			"currency":"CNY",
 			"amount":"29.99",
 			"chain":"base",
 			"crypto":"USDC",
@@ -63,11 +63,13 @@ func TestXcashClientCreateInvoiceSignsAndUsesConfiguredMethods(t *testing.T) {
 	defer server.Close()
 
 	client := newXcashClient(xcashConfig{
-		BaseURL:   server.URL,
-		AppID:     "XC-TEST",
-		HMACKey:   secret,
-		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash",
-		Duration:  15,
+		BaseURL:            server.URL,
+		AppID:              "XC-TEST",
+		HMACKey:            secret,
+		NotifyURL:          "https://gomall.example.test/api/v1/webhooks/xcash",
+		Duration:           15,
+		VaultSlotConfirmed: true,
+		AllowHTTP:          true,
 		Methods: map[string][]string{
 			"USDC": {"base", "ethereum"},
 			"USDT": {"base", "tron"},
@@ -88,11 +90,12 @@ func TestXcashClientCreateInvoiceSignsAndUsesConfiguredMethods(t *testing.T) {
 
 func TestXcashClientVerifyWebhookRejectsTamperingAndExpiredRequests(t *testing.T) {
 	client := newXcashClient(xcashConfig{
-		BaseURL:   "https://pay.example.test",
-		AppID:     "XC-TEST",
-		HMACKey:   "test-hmac-secret",
-		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash",
-		Duration:  15,
+		BaseURL:            "https://pay.example.test",
+		AppID:              "XC-TEST",
+		HMACKey:            "test-hmac-secret",
+		NotifyURL:          "https://gomall.example.test/api/v1/webhooks/xcash",
+		Duration:           15,
+		VaultSlotConfirmed: true,
 	}, nil)
 	client.now = func() time.Time { return time.Unix(1_788_466_500, 0) }
 	body := []byte(`{"type":"invoice","data":{"sys_no":"INV1"}}`)
@@ -124,7 +127,7 @@ func TestXcashClientGetInvoiceReturnsPaymentProgress(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"sys_no":"INV260903QUERY01","currency":"USD","amount":"50.00",
+			"sys_no":"INV260903QUERY01","currency":"CNY","amount":"50.00",
 			"chain":"polygon","crypto":"USDT","pay_address":"0x3333333333333333333333333333333333333333",
 			"pay_amount":"49.85","pay_url":"https://pay.example.test/pay/INV260903QUERY01",
 			"payment_uri":"ethereum:0x3333333333333333333333333333333333333333",
@@ -136,6 +139,7 @@ func TestXcashClientGetInvoiceReturnsPaymentProgress(t *testing.T) {
 	client := newXcashClient(xcashConfig{
 		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
 
 	invoice, err := client.GetInvoice(context.Background(), "INV260903QUERY01")
@@ -144,5 +148,49 @@ func TestXcashClientGetInvoiceReturnsPaymentProgress(t *testing.T) {
 	}
 	if invoice.SysNo != "INV260903QUERY01" || invoice.Payment == nil || invoice.Payment.Hash != "0xquery" {
 		t.Fatalf("unexpected queried invoice: %+v", invoice)
+	}
+}
+
+func TestXcashClientRequiresHTTPSAndVaultSlotAttestation(t *testing.T) {
+	config := xcashConfig{
+		BaseURL: "http://pay.example.test", AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Currency: "CNY", Duration: 15,
+		VaultSlotConfirmed: true,
+	}
+	if err := config.validate(); err == nil {
+		t.Fatal("plain HTTP Xcash endpoint must be rejected")
+	}
+	config.BaseURL = "https://pay.example.test"
+	config.VaultSlotConfirmed = false
+	if err := config.validate(); err == nil {
+		t.Fatal("Xcash must fail closed without VaultSlot deployment attestation")
+	}
+	config.VaultSlotConfirmed = true
+	if err := config.validate(); err != nil {
+		t.Fatalf("valid secure Xcash config rejected: %v", err)
+	}
+}
+
+func TestXcashClientDoesNotFollowRedirects(t *testing.T) {
+	targetCalled := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: redirector.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		VaultSlotConfirmed: true, AllowHTTP: true,
+	}, redirector.Client())
+	if _, err := client.GetInvoice(context.Background(), "INV260903REDIRECT"); err == nil {
+		t.Fatal("redirected invoice query must fail")
+	}
+	if targetCalled {
+		t.Fatal("Xcash client followed a redirect")
 	}
 }

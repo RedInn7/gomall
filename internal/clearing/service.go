@@ -28,7 +28,7 @@ var (
 // RecordClearedTx 在支付事务中记录“钱已经收妥并进入商户托管”。
 //
 // walletBalanceAfter 非 nil 表示余额支付：调用方已经在同一 tx 内扣完买家余额，
-// 这里补买家 debit 流水；nil 表示 Stripe/Web3 外部支付，debit 记到 external_clearing。
+// 这里补买家 debit 流水；nil 表示 Stripe/Web3/Xcash 外部支付，debit 记到 external_clearing。
 // 两种渠道都会 credit merchant_escrow，卖家钱包此时不会入账。
 func RecordClearedTx(tx *gorm.DB, o *order.Order, channel, providerRef, currency string, walletBalanceAfter *int64) error {
 	if tx == nil || o == nil || o.ID == 0 || o.UserID == 0 || o.BossID == 0 || o.Num <= 0 {
