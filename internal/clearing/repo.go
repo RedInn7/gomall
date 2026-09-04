@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 func findPaymentAnomalies(db *gorm.DB, filter PaymentAnomalyListFilter) ([]PaymentAnomaly, int64, error) {
@@ -27,6 +26,17 @@ func findPaymentAnomalies(db *gorm.DB, filter PaymentAnomalyListFilter) ([]Payme
 }
 
 func findPaymentAnomalyDetail(db *gorm.DB, anomalyID uint) (*PaymentAnomaly, []PaymentAnomalyTransition, error) {
+	var anomaly *PaymentAnomaly
+	var history []PaymentAnomalyTransition
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		anomaly, history, err = findPaymentAnomalyDetailInSession(tx, anomalyID)
+		return err
+	})
+	return anomaly, history, err
+}
+
+func findPaymentAnomalyDetailInSession(db *gorm.DB, anomalyID uint) (*PaymentAnomaly, []PaymentAnomalyTransition, error) {
 	var anomaly PaymentAnomaly
 	if err := db.First(&anomaly, anomalyID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -47,19 +57,10 @@ func persistPaymentAnomalyTransition(
 	operatorID uint,
 	req PaymentAnomalyTransitionRequest,
 	now time.Time,
-) error {
-	return db.Transaction(func(tx *gorm.DB) error {
-		var anomaly PaymentAnomaly
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&anomaly, anomalyID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrPaymentAnomalyNotFound
-			}
-			return err
-		}
-		if anomaly.Status != req.ExpectedStatus {
-			return ErrPaymentAnomalyStatusConflict
-		}
-
+) (*PaymentAnomaly, []PaymentAnomalyTransition, error) {
+	var anomaly *PaymentAnomaly
+	var history []PaymentAnomalyTransition
+	err := db.Transaction(func(tx *gorm.DB) error {
 		updates := map[string]interface{}{
 			"status":              req.TargetStatus,
 			"last_operator_id":    operatorID,
@@ -79,10 +80,17 @@ func persistPaymentAnomalyTransition(
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
+			var count int64
+			if err := tx.Model(&PaymentAnomaly{}).Where("id = ?", anomalyID).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return ErrPaymentAnomalyNotFound
+			}
 			return ErrPaymentAnomalyStatusConflict
 		}
 
-		return tx.Create(&PaymentAnomalyTransition{
+		if err := tx.Create(&PaymentAnomalyTransition{
 			AnomalyID:         anomalyID,
 			FromStatus:        req.ExpectedStatus,
 			ToStatus:          req.TargetStatus,
@@ -90,8 +98,14 @@ func persistPaymentAnomalyTransition(
 			Note:              req.Note,
 			ExternalRefundRef: req.ExternalRefundReference,
 			ActedAt:           now,
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		var err error
+		anomaly, history, err = findPaymentAnomalyDetailInSession(tx, anomalyID)
+		return err
 	})
+	return anomaly, history, err
 }
 
 func applyPaymentAnomalyFilter(query *gorm.DB, filter PaymentAnomalyListFilter) *gorm.DB {

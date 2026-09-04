@@ -3,7 +3,9 @@ package clearing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +17,8 @@ import (
 
 func newAnomalyAdminTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "anomaly.db")), &gorm.Config{})
+	dsn := fmt.Sprintf("%s?_busy_timeout=5000&_journal_mode=WAL", filepath.Join(t.TempDir(), "anomaly.db"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -181,5 +184,53 @@ func TestRecordPaymentAnomalyTransitionUsesAuthenticatedOperator(t *testing.T) {
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 42})
 	if userInfo, err := ctl.GetUserInfo(ctx); err != nil || userInfo.Id != 42 {
 		t.Fatalf("operator context = %+v, %v", userInfo, err)
+	}
+}
+
+func TestRecordPaymentAnomalyTransitionAllowsOnlyOneConcurrentWinner(t *testing.T) {
+	db := newAnomalyAdminTestDB(t)
+	anomaly := createTestAnomaly(t, db, 701, ChannelStripe, AnomalyStatusPendingReview, time.Now())
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, operatorID := range []uint{11, 12} {
+		go func(operatorID uint) {
+			ready.Done()
+			<-start
+			_, err := recordPaymentAnomalyTransition(db, anomaly.ID, operatorID, PaymentAnomalyTransitionRequest{
+				ExpectedStatus: AnomalyStatusPendingReview,
+				TargetStatus:   AnomalyStatusReviewing,
+				Note:           "并发领取异常款",
+			})
+			errs <- err
+		}(operatorID)
+	}
+	ready.Wait()
+	close(start)
+
+	successes, conflicts := 0, 0
+	for range 2 {
+		err := <-errs
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrPaymentAnomalyStatusConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected concurrent transition error: %v", err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want 1 and 1", successes, conflicts)
+	}
+
+	detail, err := getPaymentAnomaly(db, anomaly.ID)
+	if err != nil {
+		t.Fatalf("get anomaly after race: %v", err)
+	}
+	if detail.Status != AnomalyStatusReviewing || len(detail.Transitions) != 1 {
+		t.Fatalf("unexpected state after race: %+v", detail)
 	}
 }
