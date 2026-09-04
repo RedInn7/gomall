@@ -163,6 +163,139 @@ func TestXcashPaymentServiceSettlesConfirmedWebhookExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestXcashPaymentServiceQuarantinesMismatchedPayment(t *testing.T) {
+	db := newXcashTestDB(t,
+		&orderpkg.Order{}, &clearing.PaymentAnomaly{}, &XcashPaymentIntent{}, &XcashWebhookReceipt{},
+	)
+	order := &orderpkg.Order{
+		UserID: 1, BossID: 2, ProductID: 10, AddressID: 20, Num: 1,
+		OrderNum: 20260903003, Type: consts.OrderWaitPay, Money: 1000,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+	intent := &XcashPaymentIntent{
+		OrderID: order.ID, UserID: 1, Attempt: 1, OutNo: fmt.Sprintf("gm-%d-1", order.ID),
+		SysNo: "INV260903MISMATCH", AmountCents: 1000, Currency: "USD", Status: XcashIntentWaiting,
+		Chain: "base", Crypto: "USDC", PayAddress: "0x1111111111111111111111111111111111111111", PayAmount: "10.00",
+		PayURL: "https://pay.example.test/pay/INV260903MISMATCH", ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	if err := db.Create(intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	client := newXcashClient(xcashConfig{
+		BaseURL: "https://pay.example.test", AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		Methods: map[string][]string{"USDC": {"base"}},
+	}, nil)
+	now := time.Unix(1_788_466_500, 0)
+	client.now = func() time.Time { return now }
+	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service.commitReservation = func(context.Context, uint, int) {}
+
+	body := []byte(fmt.Sprintf(`{
+		"type":"invoice",
+		"data":{
+			"sys_no":"%s","out_no":"%s","crypto":"USDC","chain":"base",
+			"pay_address":"0x2222222222222222222222222222222222222222",
+			"pay_amount":"10.00","hash":"0xmismatch","block":12345678,"confirmed":true
+		}
+	}`, intent.SysNo, intent.OutNo))
+	headers := xcashWebhookHeaders{AppID: "XC-TEST", Nonce: "event-mismatch", Timestamp: fmt.Sprintf("%d", now.Unix())}
+	headers.Signature = xcashSignature("secret", headers.Nonce, headers.Timestamp, body)
+
+	if err := service.HandleWebhook(context.Background(), headers, body); err != nil {
+		t.Fatalf("deterministic mismatch should be acknowledged after quarantine: %v", err)
+	}
+	var gotOrder orderpkg.Order
+	if err := db.First(&gotOrder, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotOrder.Type != consts.OrderWaitPay {
+		t.Fatalf("mismatched payment advanced order to %d", gotOrder.Type)
+	}
+	var anomaly clearing.PaymentAnomaly
+	if err := db.Where("order_id = ?", order.ID).First(&anomaly).Error; err != nil {
+		t.Fatal(err)
+	}
+	if anomaly.Reason != clearing.AnomalyReasonPaymentDetailsMismatch || anomaly.ProviderRef != "base:0xmismatch" {
+		t.Fatalf("unexpected anomaly: %+v", anomaly)
+	}
+	if err := db.First(&intent, intent.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if intent.Status != XcashIntentAnomaly {
+		t.Fatalf("intent status = %s, want anomaly", intent.Status)
+	}
+}
+
+func TestXcashPaymentServiceReconcilesCompletedInvoiceWithoutWebhook(t *testing.T) {
+	db := newXcashTestDB(t,
+		&user.User{}, &product.Product{}, &orderpkg.Order{},
+		&money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{},
+		&outbox.OutboxEvent{}, &XcashPaymentIntent{}, &XcashWebhookReceipt{},
+	)
+	buyer := &user.User{UserName: "reconcile-buyer", Email: "reconcile@example.com"}
+	buyer.ID = 3
+	if err := db.Create(buyer).Error; err != nil {
+		t.Fatal(err)
+	}
+	item := &product.Product{Name: "monitor", CategoryID: 1, Num: 3, BossID: 4, BossName: "seller"}
+	item.ID = 30
+	if err := db.Create(item).Error; err != nil {
+		t.Fatal(err)
+	}
+	order := &orderpkg.Order{
+		UserID: buyer.ID, BossID: 4, ProductID: item.ID, AddressID: 40, Num: 1,
+		OrderNum: 20260903004, Type: consts.OrderWaitPay, Money: 2500,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatal(err)
+	}
+	intent := &XcashPaymentIntent{
+		OrderID: order.ID, UserID: buyer.ID, Attempt: 1, OutNo: fmt.Sprintf("gm-%d-1", order.ID),
+		SysNo: "INV260903RECONCILE", AmountCents: 2500, Currency: "USD", Status: XcashIntentWaiting,
+		PayURL: "https://pay.example.test/pay/INV260903RECONCILE", ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	if err := db.Create(intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{
+			"sys_no":"%s","currency":"USD","amount":"25.00","chain":"arbitrum","crypto":"USDT",
+			"pay_address":"0x4444444444444444444444444444444444444444","pay_amount":"24.91",
+			"pay_url":"https://pay.example.test/pay/%s","expires_at":"2099-09-03T20:15:00Z",
+			"status":"completed","risk_level":"Low","risk_score":"10",
+			"payment":{"chain":"arbitrum","block":99,"hash":"0xreconciled","from_address":"0xfrom","to_address":"0x4444444444444444444444444444444444444444","crypto":"USDT","amount":"24.91","status":"confirmed"}
+		}`, intent.SysNo, intent.SysNo)
+	}))
+	defer server.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		Methods: map[string][]string{"USDT": {"arbitrum"}},
+	}, server.Client())
+	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service.commitReservation = func(context.Context, uint, int) {}
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: buyer.ID})
+
+	status, err := service.GetCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != XcashIntentCompleted || status.TxHash != "0xreconciled" || status.Crypto != "USDT" {
+		t.Fatalf("unexpected reconciled status: %+v", status)
+	}
+	var gotOrder orderpkg.Order
+	if err := db.First(&gotOrder, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if gotOrder.Type != consts.OrderWaitShip {
+		t.Fatalf("order state = %d, want WaitShip", gotOrder.Type)
+	}
+}
+
 func newXcashTestDB(t *testing.T, models ...any) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{

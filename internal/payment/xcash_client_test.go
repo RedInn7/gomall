@@ -116,3 +116,33 @@ func TestXcashClientVerifyWebhookRejectsTamperingAndExpiredRequests(t *testing.T
 		t.Fatal("webhook older than five minutes must be rejected")
 	}
 }
+
+func TestXcashClientGetInvoiceReturnsPaymentProgress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/invoice/INV260903QUERY01" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"sys_no":"INV260903QUERY01","currency":"USD","amount":"50.00",
+			"chain":"polygon","crypto":"USDT","pay_address":"0x3333333333333333333333333333333333333333",
+			"pay_amount":"49.85","pay_url":"https://pay.example.test/pay/INV260903QUERY01",
+			"payment_uri":"ethereum:0x3333333333333333333333333333333333333333",
+			"expires_at":"2099-09-03T20:15:00Z","status":"waiting",
+			"payment":{"chain":"polygon","block":88,"hash":"0xquery","from_address":"0xfrom","to_address":"0x3333333333333333333333333333333333333333","crypto":"USDT","amount":"49.85","status":"confirming"}
+		}`))
+	}))
+	defer server.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+	}, server.Client())
+
+	invoice, err := client.GetInvoice(context.Background(), "INV260903QUERY01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invoice.SysNo != "INV260903QUERY01" || invoice.Payment == nil || invoice.Payment.Hash != "0xquery" {
+		t.Fatalf("unexpected queried invoice: %+v", invoice)
+	}
+}

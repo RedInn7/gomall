@@ -17,26 +17,33 @@ const (
 // 一个订单在旧账单过期后可以创建下一 attempt，但同时只会向用户返回最新未过期账单。
 type XcashPaymentIntent struct {
 	dbmodel.Model
-	OrderID       uint      `gorm:"not null;uniqueIndex:uniq_xcash_order_attempt,priority:1;index"`
-	UserID        uint      `gorm:"not null;index"`
-	Attempt       uint      `gorm:"not null;uniqueIndex:uniq_xcash_order_attempt,priority:2"`
-	OutNo         string    `gorm:"size:32;not null;uniqueIndex"`
-	SysNo         string    `gorm:"size:32;not null;uniqueIndex"`
-	AmountCents   int64     `gorm:"not null"`
-	Currency      string    `gorm:"size:8;not null"`
-	Status        string    `gorm:"size:24;not null;index"`
-	Chain         string    `gorm:"size:32"`
-	Crypto        string    `gorm:"size:32"`
-	CryptoAddress string    `gorm:"size:128"`
-	PayAddress    string    `gorm:"size:128"`
-	PayAmount     string    `gorm:"size:128"`
-	PayURL        string    `gorm:"size:512;not null"`
-	PaymentURI    string    `gorm:"size:1024"`
-	TxHash        string    `gorm:"size:128;index"`
-	RiskLevel     string    `gorm:"size:32"`
-	RiskScore     string    `gorm:"size:32"`
-	ExpiresAt     time.Time `gorm:"not null;index"`
-	ConfirmedAt   *time.Time
+	OrderID               uint   `gorm:"not null;uniqueIndex:uniq_xcash_order_attempt,priority:1;index"`
+	UserID                uint   `gorm:"not null;index"`
+	Attempt               uint   `gorm:"not null;uniqueIndex:uniq_xcash_order_attempt,priority:2"`
+	OutNo                 string `gorm:"size:32;not null;uniqueIndex"`
+	SysNo                 string `gorm:"size:32;not null;uniqueIndex"`
+	AmountCents           int64  `gorm:"not null"`
+	Currency              string `gorm:"size:8;not null"`
+	Status                string `gorm:"size:24;not null;index"`
+	Chain                 string `gorm:"size:32"`
+	Crypto                string `gorm:"size:32"`
+	CryptoAddress         string `gorm:"size:128"`
+	PayAddress            string `gorm:"size:128"`
+	PayAmount             string `gorm:"size:128"`
+	PayURL                string `gorm:"size:512;not null"`
+	PaymentURI            string `gorm:"size:1024"`
+	TxHash                string `gorm:"size:128;index"`
+	RiskLevel             string `gorm:"size:32"`
+	RiskScore             string `gorm:"size:32"`
+	ObservedChain         string `gorm:"size:32"`
+	ObservedCrypto        string `gorm:"size:32"`
+	ObservedPayAddress    string `gorm:"size:128"`
+	ObservedPayAmount     string `gorm:"size:128"`
+	Confirmations         uint64
+	RequiredConfirmations uint64
+	ConfirmProgress       int
+	ExpiresAt             time.Time `gorm:"not null;index"`
+	ConfirmedAt           *time.Time
 }
 
 func (XcashPaymentIntent) TableName() string { return "xcash_payment_intent" }
