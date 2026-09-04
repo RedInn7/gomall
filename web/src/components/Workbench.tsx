@@ -5,6 +5,18 @@ import { cx } from '../lib/util'
 
 const pretty = (value: unknown) => JSON.stringify(value, null, 2)
 
+const IDEMPOTENT_PATHS = new Set([
+  '/api/v1/orders/create',
+  '/api/v1/orders/enqueue',
+  '/api/v1/paydown',
+  '/api/v1/paydown/crypto',
+  '/api/v1/paydown/stripe',
+  '/api/v1/paydown/xcash',
+  '/api/v1/orders/refund/request',
+  '/api/v1/redpacket/create',
+  '/api/v1/redpacket/claim',
+])
+
 function Action({ endpoint, onAuthChange }: { endpoint: Endpoint; onAuthChange: () => void }) {
   const [input, setInput] = useState(pretty(endpoint.sample ?? {}))
   const [result, setResult] = useState('')
@@ -16,7 +28,12 @@ function Action({ endpoint, onAuthChange }: { endpoint: Endpoint; onAuthChange: 
     setBusy(true)
     try {
       const params = input.trim() ? JSON.parse(input) : {}
-      const data = needsFile ? await apiForm(endpoint.path, params, file) : await api(endpoint.method, endpoint.path, params)
+      let headers: Record<string, string> = {}
+      if (endpoint.method === 'POST' && IDEMPOTENT_PATHS.has(endpoint.path)) {
+        const token = await api<{ idempotency_key: string }>('GET', '/api/v1/idempotency/token')
+        headers = { 'Idempotency-Key': token.idempotency_key }
+      }
+      const data = needsFile ? await apiForm(endpoint.path, params, file) : await api(endpoint.method, endpoint.path, params, headers)
       if (endpoint.path === '/api/v1/user/login' || endpoint.path === '/api/v1/user/register') {
         captureTokens(data)
         onAuthChange()
