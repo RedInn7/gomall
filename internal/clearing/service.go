@@ -110,7 +110,8 @@ func RecordExternalAnomalyTx(tx *gorm.DB, o *order.Order, channel, providerRef, 
 	if tx == nil || o == nil || o.ID == 0 || !isExternalChannel(channel) || providerRef == "" {
 		return ErrInvalidClearingInput
 	}
-	if reason != AnomalyReasonDuplicatePayment && reason != AnomalyReasonAmountMismatch {
+	if reason != AnomalyReasonDuplicatePayment && reason != AnomalyReasonAmountMismatch &&
+		reason != AnomalyReasonPaymentDetailsMismatch && reason != AnomalyReasonHighRiskPayment {
 		return ErrInvalidClearingInput
 	}
 	anomaly := &PaymentAnomaly{
