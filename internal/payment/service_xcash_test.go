@@ -472,6 +472,71 @@ func TestXcashPaymentServiceWaitsForAMLThenQuarantinesHighRisk(t *testing.T) {
 	if anomaly.Reason != clearing.AnomalyReasonHighRiskPayment {
 		t.Fatalf("anomaly reason = %s", anomaly.Reason)
 	}
+
+	// 模拟高风险结果已经隔离后，一个更早发出的 Low 查询才返回。旧结果不能重新
+	// 结算，更不能推进订单状态。
+	staleLow := &xcashWebhookEvent{Type: "invoice"}
+	staleLow.Data.SysNo = intent.SysNo
+	staleLow.Data.OutNo = intent.OutNo
+	staleLow.Data.Chain = "base"
+	staleLow.Data.Crypto = "USDC"
+	staleLow.Data.PayAddress = "0x1111111111111111111111111111111111111111"
+	staleLow.Data.PayAmount = "30"
+	staleLow.Data.Hash = "0xamlhigh"
+	staleLow.Data.Confirmed = true
+	staleLow.Data.RiskLevel = "Low"
+	staleLow.Data.FiatAmountCents = intent.AmountCents
+	staleLow.Data.FiatCurrency = intent.Currency
+	if err := service.processConfirmedEvent(ctx, staleLow, nil); err != nil {
+		t.Fatal(err)
+	}
+	var after orderpkg.Order
+	if err := db.First(&after, order.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.Type != consts.OrderWaitPay {
+		t.Fatalf("stale low-risk result advanced quarantined order to %d", after.Type)
+	}
+	var anomalyCount int64
+	if err := db.Model(&clearing.PaymentAnomaly{}).Where("order_id = ?", order.ID).Count(&anomalyCount).Error; err != nil {
+		t.Fatal(err)
+	}
+	if anomalyCount != 1 {
+		t.Fatalf("anomaly count = %d, want 1", anomalyCount)
+	}
+}
+
+func TestXcashStaleWaitingSnapshotDoesNotRevertCompletedIntent(t *testing.T) {
+	db := newXcashTestDB(t, &XcashPaymentIntent{})
+	intent := &XcashPaymentIntent{
+		OrderID: 301, UserID: 302, Attempt: 1, OutNo: "gm-monotonic-1",
+		SysNo: "INV260903MONOTONIC1", AmountCents: 100, Currency: "CNY", Status: XcashIntentCompleted,
+		PayURL: "https://pay.example.test/pay/INV260903MONOTONIC1", ExpiresAt: time.Now().Add(15 * time.Minute),
+	}
+	if err := db.Create(intent).Error; err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"sys_no":%q,"currency":"CNY","amount":"1.00","pay_url":"https://pay.example.test/pay/monotonic","expires_at":"2099-09-03T20:15:00Z","status":"waiting"}`, intent.SysNo)
+	}))
+	defer server.Close()
+	client := newXcashClient(xcashConfig{
+		BaseURL: server.URL, AppID: "XC-TEST", HMACKey: "secret",
+		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
+		VaultSlotConfirmed: true, AllowHTTP: true,
+	}, server.Client())
+	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	stale := *intent
+	stale.Status = XcashIntentWaiting
+
+	status, err := service.reconcileIntent(context.Background(), &stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != XcashIntentCompleted {
+		t.Fatalf("stale waiting snapshot reverted status to %s", status.Status)
+	}
 }
 
 func TestXcashPaymentServiceReconcilesRecentExpiredAttemptBySysNo(t *testing.T) {
@@ -593,11 +658,66 @@ func TestXcashPaymentServiceRotatesReconcileBatch(t *testing.T) {
 }
 
 func TestXcashAddressComparisonRespectsChainEncoding(t *testing.T) {
-	if !xcashAddressEqual("base", "0xAbC", "0xaBc") {
-		t.Fatal("EVM address comparison should ignore hex case")
+	for _, chain := range []string{"base", "avalanche", "linea", "scroll"} {
+		if !xcashAddressEqual(chain, "0xAbC", "0xaBc") {
+			t.Fatalf("%s address comparison should ignore hex case", chain)
+		}
 	}
 	if xcashAddressEqual("tron", "TAbc", "TaBc") {
 		t.Fatal("Tron Base58 address comparison must be case-sensitive")
+	}
+}
+
+func TestMergeCompletedInvoiceRequiresConfirmedPaymentFields(t *testing.T) {
+	valid := &xcashInvoice{
+		SysNo: "INV260903COMPLETE", Currency: "CNY", Amount: "1.00", Status: XcashIntentCompleted,
+		Chain: "base", Crypto: "USDC", PayAddress: "0xabc", PayAmount: "1",
+		Payment: &xcashPayment{
+			Chain: "base", Crypto: "USDC", ToAddress: "0xabc", Amount: "1", Hash: "0xhash", Status: "confirmed",
+		},
+	}
+	if err := mergeCompletedInvoiceIntoEvent(&xcashWebhookEvent{}, valid); err != nil {
+		t.Fatalf("valid completed invoice rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(*xcashInvoice){
+		"missing chain":   func(invoice *xcashInvoice) { invoice.Payment.Chain = "" },
+		"missing crypto":  func(invoice *xcashInvoice) { invoice.Payment.Crypto = "" },
+		"missing address": func(invoice *xcashInvoice) { invoice.Payment.ToAddress = "" },
+		"missing amount":  func(invoice *xcashInvoice) { invoice.Payment.Amount = "" },
+		"missing hash":    func(invoice *xcashInvoice) { invoice.Payment.Hash = "" },
+		"unconfirmed":     func(invoice *xcashInvoice) { invoice.Payment.Status = "confirming" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invoice := *valid
+			payment := *valid.Payment
+			invoice.Payment = &payment
+			mutate(&invoice)
+			if err := mergeCompletedInvoiceIntoEvent(&xcashWebhookEvent{}, &invoice); err == nil {
+				t.Fatal("incomplete payment was accepted")
+			}
+		})
+	}
+}
+
+func TestLoadXcashConfigUsesCNYStrictAMLAndNormalizesMethods(t *testing.T) {
+	t.Setenv("XCASH_BASE_URL", "https://pay.example.test")
+	t.Setenv("XCASH_APP_ID", "XC-TEST")
+	t.Setenv("XCASH_HMAC_KEY", "secret")
+	t.Setenv("XCASH_NOTIFY_URL", "https://gomall.example.test/api/v1/webhooks/xcash")
+	t.Setenv("XCASH_VAULTSLOT_CONFIRMED", "true")
+	t.Setenv("XCASH_METHODS_JSON", `{"usdc":[" Base ","base"],"USDT":["tron"]}`)
+	t.Setenv("XCASH_REQUIRE_AML_RESULT", "")
+
+	config, err := loadXcashConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Currency != "CNY" || !config.RequireAML || !config.VaultSlotConfirmed {
+		t.Fatalf("unsafe defaults: %+v", config)
+	}
+	if len(config.Methods["USDC"]) != 1 || config.Methods["USDC"][0] != "base" {
+		t.Fatalf("methods were not normalized: %#v", config.Methods)
 	}
 }
 

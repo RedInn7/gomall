@@ -154,17 +154,45 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 		if err != nil {
 			return err
 		}
-		if event.Data.ForcedAnomaly != "" {
-			return quarantineXcashPayment(tx, &intent, order, event, providerRef, event.Data.ForcedAnomaly)
+		// anomaly 是不可逆的资金隔离终态。任何更早发出的 waiting/Low 查询结果都
+		// 不能把它改回可结算状态，否则并发对账会导致已隔离付款继续放货。
+		if intent.Status == XcashIntentAnomaly {
+			return nil
 		}
-		if event.Data.FiatAmountCents != intent.AmountCents || !strings.EqualFold(event.Data.FiatCurrency, intent.Currency) {
-			return quarantineXcashPayment(tx, &intent, order, event, providerRef, clearing.AnomalyReasonAmountMismatch)
+		anomalyReason := event.Data.ForcedAnomaly
+		if anomalyReason == "" && (event.Data.FiatAmountCents != intent.AmountCents ||
+			!strings.EqualFold(event.Data.FiatCurrency, intent.Currency)) {
+			anomalyReason = clearing.AnomalyReasonAmountMismatch
 		}
-		if !xcashMethodAllowed(s.client.config.Methods, event.Data.Crypto, event.Data.Chain) {
-			return quarantineXcashPayment(tx, &intent, order, event, providerRef, clearing.AnomalyReasonPaymentDetailsMismatch)
+		if anomalyReason == "" && !xcashMethodAllowed(s.client.config.Methods, event.Data.Crypto, event.Data.Chain) {
+			anomalyReason = clearing.AnomalyReasonPaymentDetailsMismatch
 		}
-		if isXcashHighRisk(event.Data.RiskLevel) {
-			return quarantineXcashPayment(tx, &intent, order, event, providerRef, clearing.AnomalyReasonHighRiskPayment)
+		if anomalyReason == "" && isXcashHighRisk(event.Data.RiskLevel) {
+			anomalyReason = clearing.AnomalyReasonHighRiskPayment
+		}
+		// completed 同样不能被旧快照回退。若后续可信结果升级为高风险，记录异常供
+		// 运营处置，但不再重复清算；订单已经推进，不能伪装成从未发生过。后续可信
+		// 结果若暴露其他字段不一致，也按同样原则升级为异常。
+		if intent.Status == XcashIntentCompleted {
+			if anomalyReason != "" {
+				if err := clearing.RecordExternalAnomalyTx(
+					tx, order, clearing.ChannelXcash, providerRef, event.Data.PayAmount,
+					event.Data.Crypto, anomalyReason,
+				); err != nil {
+					return err
+				}
+				return tx.Model(&intent).Updates(map[string]any{
+					"status": XcashIntentAnomaly, "risk_level": event.Data.RiskLevel,
+					"risk_score": event.Data.RiskScore,
+				}).Error
+			}
+			_, err := clearing.RecordExternalDuplicateTx(
+				tx, order, clearing.ChannelXcash, providerRef, event.Data.PayAmount, event.Data.Crypto,
+			)
+			return err
+		}
+		if anomalyReason != "" {
+			return quarantineXcashPayment(tx, &intent, order, event, providerRef, anomalyReason)
 		}
 		if s.client.config.RequireAML && !xcashRiskReady(event.Data.RiskLevel) {
 			return tx.Model(&intent).Updates(xcashIntentObservationUpdates(event, XcashIntentRiskPending)).Error
@@ -480,14 +508,16 @@ func (s *XcashPaymentSrv) reconcileIntent(ctx context.Context, intent *XcashPaym
 		if snapshot.chain != "" && snapshot.crypto != "" && !xcashMethodAllowed(s.client.config.Methods, snapshot.crypto, snapshot.chain) {
 			return nil, errors.New("Xcash 查询结果包含服务端白名单之外的付款方式")
 		}
-		if err := db.Model(intent).Updates(map[string]any{
-			"status": invoice.Status, "chain": snapshot.chain, "crypto": snapshot.crypto, "crypto_address": invoice.CryptoAddress,
-			"pay_address": snapshot.payAddress, "pay_amount": snapshot.payAmount, "pay_url": invoice.PayURL,
-			"payment_uri": invoice.PaymentURI, "tx_hash": snapshot.paymentHash,
-			"risk_level": invoice.RiskLevel, "risk_score": invoice.RiskScore, "expires_at": expiresAt,
-			"confirmations": snapshot.confirmations, "required_confirmations": snapshot.requiredConfirmations,
-			"confirm_progress": snapshot.confirmProgress,
-		}).Error; err != nil {
+		if err := db.Model(&XcashPaymentIntent{}).
+			Where("id = ? AND status IN ?", intent.ID, []string{XcashIntentWaiting, XcashIntentExpired}).
+			Updates(map[string]any{
+				"status": invoice.Status, "chain": snapshot.chain, "crypto": snapshot.crypto, "crypto_address": invoice.CryptoAddress,
+				"pay_address": snapshot.payAddress, "pay_amount": snapshot.payAmount, "pay_url": invoice.PayURL,
+				"payment_uri": invoice.PaymentURI, "tx_hash": snapshot.paymentHash,
+				"risk_level": invoice.RiskLevel, "risk_score": invoice.RiskScore, "expires_at": expiresAt,
+				"confirmations": snapshot.confirmations, "required_confirmations": snapshot.requiredConfirmations,
+				"confirm_progress": snapshot.confirmProgress,
+			}).Error; err != nil {
 			return nil, err
 		}
 	case XcashIntentCompleted:
@@ -571,11 +601,13 @@ func mergeCompletedInvoiceIntoEvent(event *xcashWebhookEvent, invoice *xcashInvo
 	if event == nil || invoice == nil || strings.ToLower(strings.TrimSpace(invoice.Status)) != XcashIntentCompleted {
 		return errors.New("Xcash 最终账单尚未完成")
 	}
-	snapshot := inspectXcashInvoice(invoice)
-	if invoice.Payment == nil || snapshot.chain == "" || snapshot.crypto == "" || snapshot.payAddress == "" ||
-		snapshot.payAmount == "" || snapshot.paymentHash == "" {
-		return errors.New("Xcash 已完成账单缺少链上付款记录")
+	if invoice.Payment == nil || strings.TrimSpace(invoice.Payment.Chain) == "" ||
+		strings.TrimSpace(invoice.Payment.Crypto) == "" || strings.TrimSpace(invoice.Payment.ToAddress) == "" ||
+		strings.TrimSpace(invoice.Payment.Amount) == "" || strings.TrimSpace(invoice.Payment.Hash) == "" ||
+		!strings.EqualFold(strings.TrimSpace(invoice.Payment.Status), "confirmed") {
+		return errors.New("Xcash 已完成账单缺少已确认的链上付款记录")
 	}
+	snapshot := inspectXcashInvoice(invoice)
 	if snapshot.detailsMismatch ||
 		(event.Data.Chain != "" && !strings.EqualFold(event.Data.Chain, snapshot.chain)) ||
 		(event.Data.Crypto != "" && !strings.EqualFold(event.Data.Crypto, snapshot.crypto)) ||
@@ -616,7 +648,7 @@ func xcashAddressEqual(chain, left, right string) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)
 	switch strings.ToLower(strings.TrimSpace(chain)) {
-	case "ethereum", "bsc", "polygon", "arbitrum-one", "optimism", "base", "sepolia", "anvil":
+	case "ethereum", "bsc", "polygon", "arbitrum-one", "optimism", "base", "avalanche", "linea", "scroll", "sepolia", "anvil":
 		return strings.EqualFold(left, right)
 	default:
 		// Tron/Nile 使用大小写敏感的 Base58；未来未知链也默认精确比较，避免误放行。
