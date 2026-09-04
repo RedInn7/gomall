@@ -50,7 +50,7 @@ GoMall 的普通订单资金链是一个真正的两阶段模型：
 | Wallet | 买家 `user_wallet` | `merchant_escrow` | `channel=wallet`，币种 `CNY`，`provider_ref` 为空 |
 | Stripe | `external_clearing` | `merchant_escrow` | `channel=stripe`，记录 Checkout Session ID 和实际币种 |
 | Web3 | `external_clearing` | `merchant_escrow` | `channel=web3`，记录链上 tx hash 和代币代码 |
-| Xcash | `external_clearing` | `merchant_escrow` | `channel=xcash`，记录 `chain:tx_hash` 和实际代币代码 |
+| Xcash | `external_clearing` | `merchant_escrow` | `channel=xcash`，记录 `sys_no:chain:tx_hash`；清算币种为订单计价 CNY |
 
 四个渠道统一调用 `clearing.RecordClearedTx`。该方法创建清算单，并以 `biz_type=order_clear` 写一借一贷两条台账。此时卖家钱包不变。
 
@@ -85,7 +85,7 @@ Web3 也执行相同的重复实收检查：同一 tx hash 是事件重放，不
 
 ### 3.4 Xcash
 
-Xcash 为订单创建限时托管账单，买家可以从服务端白名单允许的链币组合中选择付款。Gomall 校验 HMAC、时间戳、持久化 nonce、账单号、链、币、收款地址、实付数量和交易哈希；只有确认完成的付款才进入清算。Webhook 丢失时，后台每分钟主动查询等待中的账单，并复用同一条事务结算路径。错链、错币、错地址、错金额、高风险或重复实收都进入 `payment_anomaly`，不推进订单。
+Xcash 为订单创建限时托管账单，买家可以从服务端白名单允许的链币组合中选择付款。Gomall 校验 HMAC、时间戳、持久化 nonce，并通过 HTTPS 最终账单复核账单号、链、币、收款地址、实付数量和交易哈希；严格 AML 模式还会等待 Low/Moderate 风险结果。Webhook 丢失时，后台轮转查询等待中、风控中和最近过期的账单，并复用同一条事务结算路径。错链、错币、错地址、错金额、高风险或重复实收都进入 `payment_anomaly`，不推进订单。
 
 ## 4. 清算事务的业务结果
 
@@ -174,11 +174,11 @@ Xcash 为订单创建限时托管账单，买家可以从服务端白名单允�
 | `order_id` | 关联订单；唯一索引保证一笔订单只有一个清算单 |
 | `buyer_id`、`seller_id` | 固化清算时的交易双方，结算前与订单复核 |
 | `channel` | `wallet`、`stripe`、`web3` 或 `xcash` |
-| `provider_ref` | Stripe Session ID、Web3 tx hash、Xcash 的 `chain:tx_hash`；Wallet 为空 |
+| `provider_ref` | Stripe Session ID、Web3 tx hash、Xcash 的 `sys_no:chain:tx_hash`；Wallet 为空 |
 | `gross_cents` | 订单清算总额，单位为分 |
 | `fee_cents` | 渠道/平台费用；当前为 0 |
 | `net_cents` | 最终放给卖家的金额；当前等于 `gross_cents` |
-| `currency` | Wallet 为 CNY，Stripe 为实付币种，Web3/Xcash 为代币代码 |
+| `currency` | Wallet/Xcash 为订单计价 CNY，Stripe 为实付法币，Web3 为代币代码；Xcash 实付代币和数量保存在 payment intent |
 | `status` | `cleared`、`settled`、`refunded` |
 | `cleared_at`、`settled_at`、`refunded_at` | 各资金阶段时间；后两者在到达对应状态后写入 |
 
@@ -223,7 +223,7 @@ Xcash 为订单创建限时托管账单，买家可以从服务端白名单允�
 | Web3 授权 | nonce 原子消费，防签名重放 |
 | Web3 listener | `tx_hash + log_index` 去重，并保存安全区块水位 |
 | Xcash Webhook | HMAC + 五分钟时间窗；`appid + nonce` 与结算同事务持久化去重 |
-| Xcash 主动对账 | 只扫描 waiting 账单，复用清算单、订单状态和 provider_ref 幂等守卫 |
+| Xcash 主动对账 | 轮转扫描 waiting、risk_pending 与最近 24 小时 expired 账单，复用清算单、订单状态和 provider_ref 幂等守卫 |
 | 清算单 | `payment_clearing.order_id` 唯一 |
 | 外部重复实收 | `payment_anomaly(channel, provider_ref)` 唯一，同一事件只进入一次待退款队列 |
 | 订单支付 | `WHERE type=WaitPay` 条件推进 |
