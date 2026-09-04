@@ -46,6 +46,10 @@ const (
 	AnomalyReasonPaymentDetailsMismatch = "payment_details_mismatch"
 	AnomalyReasonHighRiskPayment        = "high_risk_payment"
 	AnomalyStatusPendingReview          = "pending_review"
+	AnomalyStatusReviewing              = "reviewing"
+	AnomalyStatusResolved               = "resolved"
+	AnomalyStatusRefunded               = "refunded"
+	AnomalyStatusRejected               = "rejected"
 )
 
 // PaymentAnomaly 保存“订单已经由另一笔支付完成，但外部渠道又确实收了一笔钱”的异常。
@@ -60,6 +64,28 @@ type PaymentAnomaly struct {
 	Reason         string    `gorm:"size:64;not null;index"`
 	Status         string    `gorm:"size:24;not null;index"`
 	OccurredAt     time.Time `gorm:"not null"`
+	LastOperatorID uint      `gorm:"index"`
+	LastActionAt   *time.Time
+	LastNote       string `gorm:"size:1024"`
+	// ExternalRefundRef 只记录运营已在外部渠道执行退款后取得的凭证；
+	// 修改异常单状态本身不会发起任何资金划转。
+	ExternalRefundRef string `gorm:"size:128"`
+	ResolvedAt        *time.Time
 }
 
 func (PaymentAnomaly) TableName() string { return "payment_anomaly" }
+
+// PaymentAnomalyTransition 是异常款状态变化的不可变审计记录。
+// 每次状态变化与 PaymentAnomaly 的条件更新处于同一个数据库事务。
+type PaymentAnomalyTransition struct {
+	dbmodel.Model
+	AnomalyID         uint      `gorm:"not null;index"`
+	FromStatus        string    `gorm:"size:24;not null"`
+	ToStatus          string    `gorm:"size:24;not null"`
+	OperatorID        uint      `gorm:"not null;index"`
+	Note              string    `gorm:"size:1024;not null"`
+	ExternalRefundRef string    `gorm:"size:128"`
+	ActedAt           time.Time `gorm:"not null;index"`
+}
+
+func (PaymentAnomalyTransition) TableName() string { return "payment_anomaly_transition" }
