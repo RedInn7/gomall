@@ -767,6 +767,13 @@ func TestMergeCompletedInvoiceRequiresConfirmedPaymentFields(t *testing.T) {
 	}
 }
 
+func TestXcashRiskMergeKeepsSignedScoreAtSameLevel(t *testing.T) {
+	level, score := stricterXcashRiskSnapshot("High", "91", "High", "7")
+	if level != "High" || score != "91" {
+		t.Fatalf("same-level cached risk replaced signed evidence: level=%s score=%s", level, score)
+	}
+}
+
 func TestLoadXcashConfigUsesCNYStrictAMLAndNormalizesMethods(t *testing.T) {
 	t.Setenv("XCASH_BASE_URL", "https://pay.example.test")
 	t.Setenv("XCASH_APP_ID", "XC-TEST")
