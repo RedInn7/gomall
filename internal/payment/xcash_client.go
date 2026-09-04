@@ -124,12 +124,23 @@ type xcashInvoice struct {
 	Payment       *xcashPayment `json:"payment"`
 }
 
+// XcashGateway is the seam between payment orchestration and the external
+// Xcash system. The HTTP implementation below is used in production; tests can
+// provide an in-memory fake without starting an HTTP server.
+type XcashGateway interface {
+	CreateInvoice(ctx context.Context, outNo, title, amount string) (*xcashInvoice, error)
+	GetInvoice(ctx context.Context, sysNo string) (*xcashInvoice, error)
+	VerifyWebhook(headers xcashWebhookHeaders, body []byte) error
+}
+
 type xcashClient struct {
 	config     xcashConfig
 	httpClient *http.Client
 	now        func() time.Time
 	nonce      func() (string, error)
 }
+
+var _ XcashGateway = (*xcashClient)(nil)
 
 type xcashWebhookHeaders struct {
 	AppID     string

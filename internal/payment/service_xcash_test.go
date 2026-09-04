@@ -61,7 +61,7 @@ func TestXcashPaymentServiceCreatesAndReusesInvoice(t *testing.T) {
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
 		VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 1})
 
 	first, err := service.CreateCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
@@ -130,7 +130,7 @@ func TestXcashPaymentServiceSettlesConfirmedWebhookExactlyOnce(t *testing.T) {
 	}, server.Client())
 	now := time.Unix(1_788_466_500, 0)
 	client.now = func() time.Time { return now }
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	service.commitReservation = func(context.Context, uint, int) {}
 
 	body := []byte(fmt.Sprintf(`{
@@ -211,7 +211,7 @@ func TestXcashSignedHighRiskCannotBeDowngradedByCachedQuery(t *testing.T) {
 	}, server.Client())
 	now := time.Unix(1_788_466_500, 0)
 	client.now = func() time.Time { return now }
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 
 	body := []byte(fmt.Sprintf(`{"type":"invoice","data":{"sys_no":"%s","out_no":"%s","crypto":"USDC","chain":"base","pay_address":"0x1818181818181818181818181818181818181818","pay_amount":"18","hash":"0xriskmerge","block":1818,"confirmed":true,"risk_level":"High","risk_score":"91"}}`, intent.SysNo, intent.OutNo))
 	headers := xcashWebhookHeaders{AppID: "XC-TEST", Nonce: "event-risk-merge", Timestamp: fmt.Sprintf("%d", now.Unix())}
@@ -282,7 +282,7 @@ func TestXcashPaymentServiceQuarantinesMismatchedPayment(t *testing.T) {
 	}, server.Client())
 	now := time.Unix(1_788_466_500, 0)
 	client.now = func() time.Time { return now }
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	service.commitReservation = func(context.Context, uint, int) {}
 
 	body := []byte(fmt.Sprintf(`{
@@ -370,7 +370,7 @@ func TestXcashPaymentServiceReconcilesCompletedInvoiceWithoutWebhook(t *testing.
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
 		Methods: map[string][]string{"USDT": {"arbitrum-one"}}, VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	service.commitReservation = func(context.Context, uint, int) {}
 	processed, err := service.ReconcilePending(context.Background(), 50)
 	if err != nil {
@@ -449,7 +449,7 @@ func TestXcashPaymentServiceSettlesCompletedIdempotentCreateResponse(t *testing.
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
 		Methods: map[string][]string{"DAI": {"base"}}, VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	service.commitReservation = func(context.Context, uint, int) {}
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: buyer.ID})
 
@@ -507,7 +507,7 @@ func TestXcashPaymentServiceWaitsForAMLThenQuarantinesHighRisk(t *testing.T) {
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
 		Methods: map[string][]string{"USDC": {"base"}}, VaultSlotConfirmed: true, RequireAML: true, AllowHTTP: true,
 	}, server.Client())
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	service.commitReservation = func(context.Context, uint, int) {}
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: order.UserID})
 
@@ -593,7 +593,7 @@ func TestXcashStaleWaitingSnapshotDoesNotRevertCompletedIntent(t *testing.T) {
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
 		VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	stale := *intent
 	stale.Status = XcashIntentWaiting
 
@@ -661,7 +661,7 @@ func TestXcashPaymentServiceReconcilesRecentExpiredAttemptBySysNo(t *testing.T) 
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
 		Methods: map[string][]string{"DAI": {"base"}}, VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	service.commitReservation = func(context.Context, uint, int) {}
 
 	processed, err := service.ReconcilePending(context.Background(), 1)
@@ -708,7 +708,7 @@ func TestXcashPaymentServiceRotatesReconcileBatch(t *testing.T) {
 		NotifyURL: "https://gomall.example.test/api/v1/webhooks/xcash", Duration: 15,
 		VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
-	service := newXcashPaymentSrv(client, func(ctx context.Context) *gorm.DB { return db.WithContext(ctx) })
+	service := newTestXcashPaymentSrv(client, db)
 	if _, err := service.ReconcilePending(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
@@ -808,4 +808,10 @@ func newXcashTestDB(t *testing.T, models ...any) *gorm.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+func newTestXcashPaymentSrv(client *xcashClient, db *gorm.DB) *XcashPaymentSrv {
+	return newXcashPaymentSrv(client, xcashSettlementPolicyFromConfig(client.config), func(ctx context.Context) *gorm.DB {
+		return db.WithContext(ctx)
+	})
 }
