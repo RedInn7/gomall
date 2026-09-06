@@ -1,20 +1,122 @@
-# 08 商品搜索（下）：读懂 Hybrid Search 的代码与边界
+# 08 商品搜索（下）：用户搜不到商品怎么办？从关键词搜索到 Hybrid Search
 
-关键词搜索依赖“字面上能对得上”。用户搜“iPhone 15 256G”时，这种办法很合适；型号和容量都能成为 Elasticsearch 的匹配依据。但用户也可能搜“适合雨天通勤的鞋”，商品标题里未必出现“雨天”或“通勤”。这类查询需要另一种召回办法：先把查询和商品文本转换成向量，再找距离较近的商品。
+上一章我们已经把商品搜索接到了 Elasticsearch。
 
-本章讨论 Gomall 为此写下的 Hybrid Search，也就是“关键词召回 + 向量召回”。重点不是向量索引的数学推导，而是读清一条真实代码路径，并判断它现在能做什么、还缺什么。
+对于下面这种搜索，它工作得很好：
 
-读完后，你应该能回答这些问题：
+```text
+iPhone 15 256G
+```
 
-- `POST /api/v1/product/semantic-search` 收到请求后依次调用了谁；
-- 为什么 Elasticsearch 的 `_score` 不能直接与 Milvus 的 L2 distance 相加；
-- 为什么仓库里有 `SearchProductVector`，线上请求仍然可能根本没有访问 Milvus；
-- embedding、Milvus 或 Elasticsearch 故障时，当前代码分别怎样处理；
-- 改变 0.5 / 0.5 的权重后，怎样用查询样本判断结果有没有改善。
+商品标题本身就包含 `iPhone`、`15`、`256G`，Elasticsearch 可以通过倒排索引快速找到对应商品。
 
-## 阅读前准备
+但电商搜索里还有另一类很常见的 Query：
 
-建议先读完[商品搜索（上）](./07-product-search.md)，至少知道普通搜索通过 Elasticsearch 召回商品，ES 不可用时会退到 MySQL `LIKE` 查询。本章还会用到几个概念：
+```text
+适合雨天通勤的鞋
+送女朋友的生日礼物
+适合宿舍用的小冰箱
+```
+
+用户说的是自己的**需求**，而商品标题写的却可能是：
+
+```text
+GORE-TEX 防水城市徒步鞋
+DW 女士石英腕表
+Hisense 45L 单门冰箱
+```
+
+这时候问题就出现了：
+
+**商品明明符合用户需求，却可能因为没有出现相同关键词而搜不出来。**
+
+这不是排序问题。
+
+因为商品如果连候选集都没进去，后面的排序算法再好也没有用。
+
+所以这一章要解决的业务问题是：
+
+> **如何在保留关键词搜索准确性的同时，把“字面不同、语义相关”的商品也召回？**
+
+Gomall 当前给出的方案是 Hybrid Search：
+
+```text
+                    用户 Query
+                        │
+              ┌─────────┴─────────┐
+              ▼                   ▼
+       Elasticsearch           Embedding
+        关键词召回                 │
+              │                   ▼
+              │                 Milvus
+              │                向量召回
+              └─────────┬─────────┘
+                        ▼
+                     融合排序
+                        │
+                        ▼
+                      TopK
+                        │
+                        ▼
+                      商品列表
+```
+
+也就是说，我们不是用向量搜索替换 Elasticsearch，而是让两种搜索各自解决自己擅长的问题：
+
+| Query              | 更依赖哪一路  | 原因                               |
+| ------------------ | ------------- | ---------------------------------- |
+| `iPhone 15 256G`   | Elasticsearch | 型号、容量等关键词非常明确         |
+| `Nike Air Max 270` | Elasticsearch | 品牌和型号需要精确匹配             |
+| `适合雨天通勤的鞋` | 向量搜索      | 用户表达的是使用场景               |
+| `送程序员的礼物`   | 向量搜索      | 商品标题通常不会直接写“程序员礼物” |
+
+接下来不先讲向量数据库原理，而是直接沿着 Gomall 的代码往下走：
+
+```text
+POST /api/v1/product/semantic-search
+
+        ↓
+
+SemanticSearchProductsHandler
+
+        ↓
+
+SemanticSearch
+
+        ↓
+
+┌──────────────────┬────────────────────┐
+│ Elasticsearch    │ Milvus             │
+│ keyword recall   │ semantic recall    │
+└──────────────────┴────────────────────┘
+
+        ↓
+
+score normalization
+
+        ↓
+
+fusion
+
+        ↓
+
+MySQL 回查
+
+        ↓
+
+TopK
+```
+
+读代码的时候重点回答四个实际问题：
+
+1. 一次搜索请求到底经过哪些服务？
+2. Elasticsearch 和 Milvus 找出来的商品怎么合并？
+3. 某一路挂了以后，用户还能不能搜？
+4. 这套 Hybrid Search 现在真的已经在线工作了吗？
+
+![Amazon 关键词搜索与商品标题示例](./assets/hybrid-search-keyword-mismatch.png)
+
+## 专业术语
 
 先记住几个后文反复出现的词：
 
@@ -25,6 +127,351 @@
 | score | 通常越大越相关，例如 ES `_score` |
 | distance | 两个向量的距离；L2 distance 越小越接近 |
 | TopK | 最终保留相关度最高的 K 条结果 |
+
+假设你做的是一个**电商搜索系统**，用户搜索：
+
+> ```
+> "黑色男士跑步鞋"
+> ```
+
+系统里有 **1000 万件商品**。
+
+你不可能对 1000 万件商品全部做非常复杂的计算再排序，所以通常会经过：
+
+**用户 Query → 召回 → 算相关度 → 排序 → TopK → 返回结果**
+
+### 1. 召回 Recall
+
+**召回 = 从海量商品中，快速找出“可能相关”的一小批候选。**
+
+比如有：
+
+```text
+1000 万商品
+      ↓
+用户搜索："黑色男士跑步鞋"
+      ↓
+召回
+      ↓
+找出 1000 个可能相关商品
+```
+
+这 1000 个只是**候选集**，并不意味着最终都会展示。
+
+比如可以通过关键词召回：
+
+```text
+"男士跑步鞋"
+"黑色跑鞋"
+"运动鞋"
+```
+
+也可以通过向量召回，找到语义相似的商品。
+
+所以：
+
+> **召回解决的是“先从几千万商品里快速捞哪些出来”。**
+
+------
+
+### 关键词召回：倒排索引 + BM25
+
+这是搜索系统里最经典的一种。
+
+用户搜索：
+
+```
+"黑色 男士 跑步鞋"
+```
+
+系统先分词：
+
+```
+黑色
+男士
+跑步鞋
+```
+
+Elasticsearch 会有类似**倒排索引**：
+
+```
+黑色   → 商品 1, 5, 9, 17...
+男士   → 商品 1, 2, 9, 20...
+跑步鞋 → 商品 1, 7, 9, 31...
+```
+
+这样不用扫描 1000 万商品，而是直接通过索引找到候选。
+
+然后 BM25 可以计算：
+
+```
+商品1  score = 15.2
+商品9  score = 13.7
+商品7  score = 8.4
+...
+```
+
+取前几百/几千个作为候选。
+
+所以如果你项目里出现：
+
+```
+Elasticsearch
+_score
+BM25
+match
+```
+
+大概率就是在做这种召回。
+
+
+
+### 2. Embedding
+
+Embedding 可以简单理解成：
+
+> **把文字转换成一串数字，让计算机可以计算“语义有多像”。**
+
+例如：
+
+```text
+"黑色男士跑步鞋"
+
+↓ Embedding 模型
+
+[0.12, -0.83, 0.27, 0.91, ..., 0.34]
+```
+
+如果你这里使用的是 **768 维 embedding**，那就是：
+
+```text
+[
+  x1,
+  x2,
+  x3,
+  ...
+  x768
+]
+```
+
+一共 768 个浮点数。
+
+商品标题也可以转换：
+
+```text
+Query:
+"黑色男士跑步鞋"
+       ↓
+[0.12, -0.83, ..., 0.34]
+
+
+商品 A:
+"Nike 男款黑色运动跑鞋"
+       ↓
+[0.11, -0.79, ..., 0.31]
+```
+
+如果两个向量很接近，我们就认为：
+
+> 两段文本的**语义可能比较接近**。
+
+Embedding 最重要的意义就是把：
+
+```text
+文本相似度问题
+```
+
+变成：
+
+```text
+数学上的向量相似度问题
+```
+
+------
+
+### 3. Score
+
+`score` 可以理解成：
+
+> **相关度得分，通常越大越好。**
+
+比如 Elasticsearch 搜索：
+
+```text
+用户：
+"黑色男士跑步鞋"
+
+商品 A  _score = 12.7
+商品 B  _score = 9.3
+商品 C  _score = 2.1
+```
+
+一般就认为：
+
+```text
+A > B > C
+```
+
+A 和用户搜索内容最相关。
+
+所以记忆：
+
+> **Score：越大通常越好。**
+
+不过 `score` 具体怎么算，要看系统。它可能来自 BM25、余弦相似度、模型预测分数，甚至多个信号的组合。
+
+------
+
+### 4. Distance
+
+Distance 是：
+
+> **两个向量之间有多远。**
+
+例如两个 embedding：
+
+```text
+Query embedding
+        ↓
+        ●
+       / \
+      /   \
+   商品A   商品B
+    ●          ●
+```
+
+如果：
+
+```text
+distance(Query, A) = 0.2
+
+distance(Query, B) = 4.8
+```
+
+说明 A 距离 Query 更近，所以 A 通常更相关。
+
+例如常见的 **L2 Distance（欧氏距离）**：
+
+$d(x,y)=\sqrt{\sum_{i=1}^{768}(x_i-y_i)^2}$
+
+不用特别纠结公式，本质就是我们平时二维空间里的：
+
+> **两点之间的直线距离**
+
+只不过现在不是二维，而是 **768 维**。
+
+所以：
+
+```text
+score       → 通常越大越好
+
+L2 distance → 越小越好
+```
+
+这个区别非常重要。
+
+------
+
+### 5. TopK
+
+TopK 就特别简单了：
+
+> **最后只取最相关的 K 个。**
+
+比如召回了 1000 个商品，然后计算相关度：
+
+```text
+商品 A    score = 98
+商品 B    score = 95
+商品 C    score = 91
+商品 D    score = 87
+商品 E    score = 82
+...
+```
+
+如果：
+
+```text
+K = 3
+```
+
+那么 TopK 就是：
+
+```text
+A
+B
+C
+```
+
+也就是：
+
+> **TopK = 排好以后取前 K 名。**
+
+如果用的是 distance：
+
+```text
+A    distance = 0.12
+B    distance = 0.18
+C    distance = 0.25
+D    distance = 0.91
+```
+
+因为 distance 越小越相关，所以 `Top 3` 就是 A、B、C。
+
+------
+
+### 把 5 个概念串起来
+
+假设用户搜索：
+
+```text
+"适合程序员办公的机械键盘"
+```
+
+系统可能这样工作：
+
+```text
+              用户 Query
+                  │
+                  ▼
+       "适合程序员办公的机械键盘"
+                  │
+             Embedding
+                  │
+                  ▼
+       [0.21, -0.33, ...]  768维
+                  │
+                  ▼
+               召回
+        从1000万商品里快速
+          找出1000个候选
+                  │
+                  ▼
+        计算 score / distance
+                  │
+                  ▼
+               排序
+                  │
+                  ▼
+             TopK = 20
+                  │
+                  ▼
+          返回最相关20个商品
+```
+
+所以最简单的记忆方式就是：
+
+| 概念          | 你可以直接记成                      |
+| ------------- | ----------------------------------- |
+| **召回**      | 先从海量数据里**捞一批候选**        |
+| **Embedding** | 把文字**变成数字向量**              |
+| **Score**     | 相关度分数，通常**越大越好**        |
+| **Distance**  | 向量之间的距离，L2 通常**越小越好** |
+| **TopK**      | 最后只要**前 K 名**                 |
+
+其中最容易混的是 **召回和 TopK**：**召回是“先捞候选”，TopK 是“从结果里最后取前 K 个”**。
+
+
 
 阅读时可以同时打开这些文件：
 
@@ -38,191 +485,259 @@ repository/milvus/product_vector.go
 internal/product/dto.go
 ```
 
-## 1. 先看接口：请求提供了哪些搜索条件
 
-路由注册在 `service/search/routes.go`：
+
+## 1. 搜索接口入口
+
+Hybrid Search 对外提供 `POST /api/v1/product/semantic-search` 接口：
 
 ```go
 public.POST("product/semantic-search", SemanticSearchProductsHandler())
 ```
 
-因此完整接口是 `POST /api/v1/product/semantic-search`，它属于公开路由。请求体由 `ProductSemanticSearchReq` 描述：
+请求主要包含三个参数：
 
 ```go
 type ProductSemanticSearchReq struct {
-    Query      string `json:"query" form:"query" binding:"required"`
-    TopK       int    `json:"top_k" form:"top_k"`
-    CategoryID *uint  `json:"category_id,omitempty" form:"category_id"`
+    Query      string `json:"query" binding:"required"`
+    TopK       int    `json:"top_k"`
+    CategoryID *uint  `json:"category_id,omitempty"`
+}
+```
+
+- `query`：用户搜索内容
+- `top_k`：最终返回多少个商品
+- `category_id`：可选，限定商品类目
+
+例如用户在前端搜索“适合雨天通勤的鞋”，可以这样调用后端：
+
+```javascript
+const response = await fetch("/api/v1/product/semantic-search", {
+    method: "POST",
+    headers: {
+        "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+        query: "适合雨天通勤的鞋",
+        top_k: 10,
+        category_id: 12
+    })
+});
+
+const data = await response.json();
+```
+
+请求到达后端后，会先进入 `SemanticSearchProductsHandler()` 解析参数，再调用 `SemanticSearch()`：
+
+```text
+前端搜索框
+    ↓
+POST /api/v1/product/semantic-search
+    ↓
+SemanticSearchProductsHandler()
+    ↓
+SemanticSearch()
+    ↓
+关键词召回 + 向量召回
+```
+
+因此这一层主要负责**把前端的搜索请求送进后端搜索服务**，真正的召回和排序逻辑在 `SemanticSearch()` 中完成。
+
+## 2. 为什么要保留两路召回
+
+电商搜索里，用户的搜索方式并不统一。
+
+例如用户搜索：
+
+```text
+iPhone 15 256G
+```
+
+商品标题本身就包含这些关键词，这种查询交给 Elasticsearch 很合适。
+
+但如果用户搜索：
+
+```text
+适合雨天通勤的鞋
+```
+
+商品标题可能实际写的是：
+
+```text
+GORE-TEX 防水城市徒步鞋
+```
+
+![Amazon 关键词搜索与商品标题示例](./assets/hybrid-search-keyword-mismatch.png)
+
+两边没有完全相同的关键词，Elasticsearch 可能漏掉这个商品；向量搜索则可以通过 embedding 找到语义相近的商品。
+
+因此 Gomall 设计了两路召回：
+
+```text
+                    用户 Query
+                        │
+            ┌───────────┴───────────┐
+            ▼                       ▼
+     Elasticsearch                Milvus
+       关键词召回                  向量召回
+            │                       │
+            ▼                       ▼
+       一批候选商品              一批候选商品
+            └───────────┬───────────┘
+                        ▼
+                    合并候选
+                        │
+                    计算最终分数
+                        │
+                    MySQL 回查
+                        │
+                     TopK
+```
+
+两路各有分工：
+
+- **Elasticsearch**：适合品牌、型号、商品名称等精确关键词。
+- **Milvus**：适合“雨天通勤”“送女朋友的礼物”这类语义搜索。
+- **MySQL**：不负责搜索相似商品，而是在最后根据商品 ID 查询当前商品数据。
+
+
+
+### 想一想
+
+假设服务器已经配置 `MILVUS_ADDR`，并按正常启动流程完成初始化。根据上面的实际路径判断：一次语义搜索会访问真实 Milvus 吗？
+
+<details>
+<summary>参考答案</summary>
+
+会。启动时 `InitMilvusCollection` 会创建并加载与当前 embedding 契约对应的 collection，再通过 `SetProductVectorStore` 同时接通查询和写入实现。如果 Milvus 没有配置或初始化失败，系统才保留空实现，让关键词搜索继续可用。
+
+</details>
+
+## 3. SemanticSearch：Hybrid Search 的核心流程
+
+`SemanticSearch()` 负责完成整个 Hybrid Search：
+
+```text
+用户 Query
+    │
+    ├──→ Embedding → Milvus → 向量召回
+    │
+    └──→ Elasticsearch → 关键词召回
+                         │
+                  两路结果归一化
+                         │
+                  按商品 ID 合并
+                         │
+                    计算融合分数
+                         │
+                    MySQL 回查
+                         │
+                      TopK
+```
+
+### 3.1 参数校验
+
+首先检查 Query，并限制最终返回数量：
+
+```go
+if req == nil {
+    return nil, errors.New("query 不能为空")
+}
+query := strings.TrimSpace(req.Query)
+if query == "" {
+    return nil, errors.New("query 不能为空")
+}
+
+topK := req.TopK
+if topK <= 0 {
+    topK = 10
+}
+if topK > 50 {
+    topK = 50
+}
+```
+
+默认返回 10 个商品，最多返回 50 个，避免一次请求拉取过多数据。
+
+### 3.2 生成 Query Embedding
+
+向量搜索之前，需要先把用户 Query 转成 768 维向量：
+
+```go
+var vecHits []Hit
+vec, vectorErr := deps.embed(ctx, query)
+if vectorErr == nil {
+    vecHits, vectorErr = deps.vector.Search(
+        ctx, vec, topK*3, req.CategoryID,
+    )
 }
 ```
 
 例如：
 
-```json
-{
-  "query": "适合雨天通勤的鞋",
-  "top_k": 5,
-  "category_id": 12
+```text
+"适合雨天通勤的鞋"
+        ↓
+Embedding
+        ↓
+[0.12, -0.31, 0.78, ..., 0.21]
+```
+
+Milvus 会使用这个向量寻找语义上相近的商品。
+
+### 3.3 两路召回
+
+接下来分别进行向量召回和关键词召回：
+
+```go
+// Elasticsearch 关键词召回
+keywordHits, _, keywordErr := deps.keyword(
+    ctx, query, 0, topK*3, req.CategoryID,
+)
+
+if vectorErr != nil && keywordErr != nil {
+    return nil, errors.Join(vectorErr, keywordErr)
 }
 ```
 
-`query` 必填；`top_k` 没填或小于等于 0 时使用 10，大于 50 时压到 50。`category_id` 是可选的类目过滤条件。用指针而不是 `uint`，是为了区分“没有传类目”和“传入数值 0”。
-
-Handler 本身很薄：绑定 JSON，调用 `SemanticSearch`，再用 `DataListResp` 包装结果。真正的搜索逻辑从 `service/search/semantic.go` 开始。
-
-## 2. 为什么要保留两路召回
-
-考虑下面两次搜索：
-
-| 查询 | 关键词搜索的表现 | 向量搜索的表现 |
-|---|---|---|
-| `iPhone 15 256G` | 型号词明确，通常很准 | 可能混入同类手机 |
-| `适合雨天通勤的鞋` | 商品文案没有原词时容易漏掉 | 有机会找到“防水”“城市徒步”等近义商品 |
-
-向量搜索补的是语义相近但字面不同的候选，它并不适合取代关键词搜索。精确型号、品牌名和专有名词往往更依赖词项匹配；而向量结果还受到 embedding 模型、商品文本质量以及向量索引状态的影响。
-
-Gomall 的设计是让两路各找一批候选，然后按商品 ID 合并。计划中的完整数据路径是：
+假设最终需要：
 
 ```text
-query
-  ├─ EmbedText ──> GetSearcher().Search ──> 向量候选
-  └─ SearchProductsWithScore ─────────────> 关键词候选
-                         │
-                 两路分别归一化
-                         │
-                 按商品 ID 合并分数
-                         │
-                  MySQL 批量回查
-                         │
-                   排序并截断 TopK
+TopK = 10
 ```
 
-MySQL 不负责“找相似商品”，它在最后补齐当前商品数据，并过滤已经删除的 ID。搜索引擎保存的是检索副本，交易时仍然要以 MySQL 中的价格、上下架状态和库存规则为准。
+两路会各召回 30 个候选，而不是只找 10 个。
 
-要把“设计”与“当前运行状态”分开看。仓库没有注入真实 Milvus searcher，默认向量分支返回空切片，所以现阶段的实际路径更接近：
+这是因为某个商品可能在 ES 中排第 14、Milvus 中排第 12，但两路都认为它相关。融合以后，它可能进入最终 Top10。
 
-```text
-“适合雨天通勤的鞋”
-  ├─ EmbedText ──> nopMilvusSearcher ──> 0 条向量候选
-  └─ Elasticsearch ────────────────────> 关键词候选
-                                      │
-                                MySQL 批量回查
-```
+### 3.4 分数归一化
 
-也就是说，如果商品文案里没有相关词，当前可运行路径并不能依靠 Milvus 把它补回来。后文会沿源码解释原因。
+Elasticsearch 和 Milvus 使用的分数体系不同，不能直接相加。
 
-### 想一想
-
-假设服务器已经配置 `MILVUS_ADDR`，但没有其他代码改动。先根据上面的实际路径判断：一次语义搜索会访问真实 Milvus 吗？
-
-<details>
-<summary>参考答案</summary>
-
-不会。配置地址只负责初始化 Milvus 客户端；搜索服务默认持有 `nopMilvusSearcher`，仓库里没有生产 `SetSearcher` 调用把真实实现注入进去，所以向量分支仍返回空候选。
-
-</details>
-
-## 3. 逐段阅读 `SemanticSearch`
-
-### 3.1 入口函数为什么只有一行
+因此先把两路结果分别归一化到 `[0,1]`：
 
 ```go
-func SemanticSearch(
-    ctx context.Context,
-    req *product.ProductSemanticSearchReq,
-) ([]product.ProductSemanticHit, error) {
-    return semanticSearchWith(ctx, req, defaultHybridDeps())
-}
-```
-
-`defaultHybridDeps()` 提供三个真实依赖：`EmbedText`、`es.SearchProductsWithScore` 和 `ListByIDs`。核心函数把它们作为参数接收，原意是让测试能替换外部服务，不必真的启动 embedding API、Elasticsearch 和 MySQL。
-
-不过当前仓库没有覆盖 `semanticSearchWith` 的测试。这个可注入结构已经搭好，测试还需要补上。
-
-### 3.2 校验并限制 `topK`
-
-```go
-if req == nil || req.Query == "" {
-    return nil, errors.New("query 不能为空")
-}
-topK := req.TopK
-if topK <= 0 {
-    topK = defaultTopK // 10
-}
-if topK > maxTopK {
-    topK = maxTopK // 50
-}
-```
-
-限制 `topK` 不只是接口体验问题。它还会影响后面的 embedding 之外两次查询、内存中的合并数量和 MySQL 回查规模。调用方不能用一个很大的 `top_k` 把这些成本无限放大。
-
-注意，只有空字符串会被拒绝；全是空格的 `"   "` 仍能通过。如果接口要把它视为无效输入，应在校验前 `strings.TrimSpace`。
-
-### 3.3 先生成查询向量
-
-```go
-vec, err := deps.embed(ctx, req.Query)
-if err != nil {
-    return nil, err
-}
-```
-
-`EmbedText` 有两种工作方式：
-
-- 配置 `EMBEDDING_API_URL` 后，它向外部服务发送 `{model, input}`，超时为 5 秒；
-- 没有配置时，它用 SHA-256 派生出 768 维占位向量。
-
-占位向量只保证“同一段文本得到同一数组”，方便本地把接口跑通。它没有学习词义，所以不能证明“雨天通勤”和“防水城市徒步”语义接近。看到接口返回 200，不代表语义检索已经有效。
-
-embedding 失败会直接结束请求，当前代码没有退到纯关键词搜索。
-
-### 3.4 两路都取 `topK * 3`
-
-```go
-vecHits, err := GetSearcher().Search(
-    ctx, vec, topK*3, req.CategoryID,
-)
-if err != nil {
-    return nil, err
-}
-
-keywordHits, _, err := deps.keyword(
-    ctx, req.Query, 0, topK*3, req.CategoryID,
-)
-if err != nil {
-    keywordHits = nil
-}
-```
-
-用户只要前 10 条时，两路各取 30 条。这样做是给融合留余地：某个商品可能在单路中只排第 14，但它同时被两路命中，合并后反而应该进入前 10。
-
-两处分支的错误处理并不对称。向量查询失败会返回错误；关键词查询失败则丢掉 `keywordHits`，继续走纯向量结果。这是现有代码的选择，不是 Hybrid Search 必然采用的规则。
-
-还有一个容易漏看的细节：`GetSearcher()` 不在 `hybridDeps` 中。即使测试替换了 embedding、关键词查询和 DB loader，向量分支仍需额外调用全局 `SetSearcher`。全局可变状态会增加并行测试相互影响的风险。
-
-### 3.5 两路分数为什么先归一化
-
-Elasticsearch 的 `_score` 与 Milvus 返回值不在同一量纲。假设关键词分数是 18.2、9.7，向量一侧是 0.31、0.84，直接相加以后，关键词数值可能仅仅因为范围较大就控制最终排名。
-
-代码对两组数据分别执行 min-max 归一化，把当前候选组的数值压到 `[0,1]`：
-
-```go
-semNorm := minMaxNormalize(vecScores(vecHits))
+semNorm := minMaxNormalizeDistance(vecScores(vecHits))
 kwNorm := minMaxNormalize(esScores(keywordHits))
 ```
 
-若同一路所有值都相等，`minMaxNormalize` 会统一返回 1。它表达的是“这批候选都有效，但本路无法区分先后”。若输入为空，则返回 `nil`。
+可以简单理解为：
 
-这种方法简单，却有两个限制。归一化结果取决于当前候选集合，同一商品换一次查询或改变召回数量，归一化分数就可能变化；极端值也会压缩其他候选的差异。因此 0.8 并不是跨查询可比较的相关度概率。
+```text
+ES 分数       ─┐
+               ├→ 统一到 0～1
+Milvus 分数   ─┘
+```
 
-### 3.6 按商品 ID 合并
+这样两路结果才方便进行融合。Milvus 使用 L2 distance，数值越小越相近，因此向量分支会先反转方向；例如距离 `0.2` 的相关度必须高于距离 `0.8` 的相关度。
+
+### 3.5 合并两路结果
+
+系统按照商品 ID 合并候选：
 
 ```go
 for i, h := range vecHits {
     id := uint(h.ID)
-    if id == 0 {
-        continue
-    }
     hit := getOrInit(fused, id)
     hit.SemanticScore = semNorm[i]
 }
@@ -232,263 +747,132 @@ for i, h := range keywordHits {
     hit := getOrInit(fused, id)
     hit.KeywordScore = kwNorm[i]
 }
+```
 
-for id, h := range fused {
-    h.Score = 0.5*h.SemanticScore + 0.5*h.KeywordScore
-    ids = append(ids, id)
+然后计算最终融合分数：
+
+```go
+h.Score =
+    0.5*h.SemanticScore +
+    0.5*h.KeywordScore
+```
+
+例如：
+
+```json
+fused = {
+    101: {
+        SemanticScore: 0.8,
+        KeywordScore:  0.7
+    },
+
+    102: {
+        SemanticScore: 0.6,
+        KeywordScore:  0
+    },
+
+    103: {
+        SemanticScore: 0,
+        KeywordScore:  0.9
+    }
 }
 ```
 
-`fused` 以商品 ID 为 key。只被向量命中的商品，其 `KeywordScore` 保持 0；只被 ES 命中的商品则相反。两路都命中的商品能同时拿到两部分分数，所以通常更容易上升。
+因此商品 B 最终排在商品 A 前面。
 
-0.5 / 0.5 只是写在常量里的初始权重。它是否合适，取决于商品文本、用户查询和 embedding 模型，不能凭直觉宣布最优。
+这里的 `0.5 / 0.5` 就是两路召回的权重。实际业务中可以根据搜索效果调整，例如更重视语义搜索时提高 `SemanticScore` 的权重。
 
-用一组数字看合并过程会更直观。假设修正了 L2 方向后，商品 A 的归一化语义分是 0.8、关键词分是 0.2；商品 B 的两项分数分别是 0.3 和 0.9。按当前权重：
+### 3.6 MySQL 回查并返回 TopK
+
+这里最关键的是理解：**为什么搜完 ES / Milvus 之后，还要再查一次 MySQL？**
+
+前面 ES 和 Milvus 得到的主要是：
 
 ```text
-A = 0.5 × 0.8 + 0.5 × 0.2 = 0.50
-B = 0.5 × 0.3 + 0.5 × 0.9 = 0.60
+商品 101 → score 0.85
+商品 203 → score 0.72
+商品 305 → score 0.61
 ```
 
-B 排在 A 前面。若把语义权重改成 0.7、关键词权重改成 0.3，则 A 得 0.62，B 得 0.48，顺序反转。这说明调权重会直接交换某些商品的名次，必须用固定查询集比较，不能只看一条顺眼的结果。
+也就是：
 
-### 3.7 回查商品并形成稳定顺序
+> **“哪些商品相关 + 它们有多相关”**
 
-融合阶段只有 ID 和分数，代码随后执行 `ListByIDs(ids)`，把当前商品记录装入 `ProductSemanticHit`。如果某个索引 ID 在 MySQL 中已经不存在，它不会进入结果。
+但前端最终需要展示的是：
+
+```json
+{
+  "id": 101,
+  "name": "Nike 防水跑鞋",
+  "price": 129.99,
+  "description": "...",
+  "image": "...",
+  "score": 0.85
+}
+```
+
+所以需要：
+
+```go
+products := ListByIDs(ids)
+```
+
+根据刚才搜出来的商品 ID，去 MySQL **批量把完整商品信息查回来**。你原文也是把 MySQL 定位为最后补齐当前商品数据，而不是负责相似商品检索。
+
+然后：
 
 ```go
 sort.SliceStable(out, func(i, j int) bool {
-    if out[i].Score == out[j].Score {
-        return out[i].Product.ID < out[j].Product.ID
-    }
     return out[i].Score > out[j].Score
 })
+```
 
+就是按照融合后的 `Score`：
+
+```text
+商品101  0.85
+商品203  0.72
+商品305  0.61
+```
+
+**从高到低排序。**
+
+最后：
+
+```go
 if len(out) > topK {
     out = out[:topK]
 }
 ```
 
-最终按融合分数降序；同分时按商品 ID 升序，避免 Go map 的随机遍历顺序泄漏到接口结果。
-
-但 `ListByIDs` 没有显式添加 `on_sale = true`。回查 MySQL 只能说明记录还存在，不能说明它满足展示规则。若产品要求搜索只返回在售商品，需要在召回、回查或最终过滤中明确实现，而且分页与总数口径也要随之调整。
-
-## 4. 当前实现中的 L2 方向错误
-
-`repository/milvus/product_vector.go` 使用 L2：
-
-```go
-results, err := MilvusClient.Search(
-    ctx,
-    ProductVectorCollection,
-    []string{},
-    expr,
-    []string{productVectorIDField},
-    []entity.Vector{entity.FloatVector(queryVec)},
-    productVectorVectorField,
-    entity.L2,
-    topK,
-    sp,
-)
-```
-
-SDK 的 `SearchResult.Scores` 在这里保存 distance。L2 distance 越小，向量越接近。`flattenSearchResults` 却把它原样放进名为 `Score` 的字段：
-
-```go
-hits = append(hits, ProductSearchHit{
-    ProductID: uint(id),
-    Score:     score,
-})
-```
-
-接下来 `SemanticSearch` 做 min-max 归一化，并按“数值越大越相关”参与融合。结果是方向反了。举一个只为说明方向的例子：
-
-| 商品 | L2 distance | 当前归一化结果 | 当前代码的判断 |
-|---|---:|---:|---|
-| A | 0.2 | 0 | 最不相关 |
-| B | 0.8 | 1 | 最相关 |
-
-可选修法之一是先对 distance 做归一化，再计算 `1 - normalizedDistance`。也可以让 Milvus 适配器直接返回统一语义的“相关度分数”，但接口必须把字段含义写清楚。仅把字段从 `Score` 政名为 `Distance` 还不够，融合前仍需反向。
-
-在这个问题修复前，真实 Milvus searcher 即使接通，Hybrid 排序也不可信。
-
-## 5. Milvus 文件存在，生产链却没有闭合
-
-仓库已经准备了若干基础能力：
-
-- `product_vector` collection 使用商品 ID 作为主键，向量维度是 768；
-- `category_id` 可以进入过滤表达式；
-- HNSW 参数为 `M=16`、`efConstruction=200`、`efSearch=64`；
-- repository 提供 `UpsertProductVector`、`DeleteProductVector` 和 `SearchProductVector`。
-
-这些函数目前没有组成生产调用链。
-
-### 5.1 搜索侧默认使用空实现
-
-`service/search/milvus_stub.go` 中的默认对象是 `nopMilvusSearcher`：
-
-```go
-var searcher MilvusSearcher = nopMilvusSearcher{}
-
-func (nopMilvusSearcher) Search(
-    ctx context.Context,
-    vec []float32,
-    topK int,
-    categoryID *uint,
-) ([]Hit, error) {
-    return nil, nil
-}
-```
-
-它不报错，只返回空候选。仓库中也找不到生产代码调用 `SetSearcher`，更没有适配器把 `repository/milvus.SearchProductVector` 转成 `[]search.Hit`。
-
-于是默认运行时会发生一件很隐蔽的事：接口名是 semantic search，代码也生成了 embedding，但向量分支永远为空，最终只剩 ES 候选。监控如果只看 HTTP 200，会误以为 Hybrid 正常工作。
-
-### 5.2 写入侧也没有接上商品变更
-
-上一章介绍的 `product.changed` 消费者只负责更新 Elasticsearch。`UpsertProductVector` 和 `DeleteProductVector` 在当前仓库没有调用者，所以新增、修改或删除商品不会自动更新 Milvus。
-
-要把链路补齐，至少要处理以下工作：
-
-1. 决定哪些商品字段组成 embedding 文本，并记录模型与维度版本；
-2. 在商品变更事件后生成 embedding，再 Upsert 或 Delete 向量；
-3. 对 embedding 和 Milvus 写入失败进行重试，最终失败进入可检查的死信记录；
-4. 为历史商品做全量回填，模型升级时能重建 collection；
-5. 启动时注入真实 `MilvusSearcher`，并先修正 L2 distance 的方向。
-
-“读路径能查”和“写路径持续更新”缺一不可。只补搜索适配器，会查到空 collection 或过期数据；只补消费者写入，默认的 nop searcher 仍然读不到它们。
-
-## 6. 降级行为必须按代码逐项说明
-
-当前系统并没有统一的“任何依赖失败都自动降级”策略：
-
-| 故障或配置状态 | 当前行为 | 用户可能看到什么 |
-|---|---|---|
-| 普通搜索的 ES 查询失败 | 退到 MySQL `LIKE` | 仍有结果，但匹配口径与延迟改变 |
-| Hybrid 的 ES 分支失败 | 丢弃关键词候选，继续向量分支 | 精确型号结果可能变差 |
-| embedding API 失败或超时 | 直接返回错误 | 语义搜索不可用 |
-| 已注入的 Milvus searcher 返回错误 | 直接返回错误 | 语义搜索不可用 |
-| 未注入 searcher | nop 返回空切片，继续 ES | 表面成功，实际是纯关键词 |
-| 商品事件消费者积压 | ES 索引暂时落后；Milvus 本来就未接写入 | 新商品或修改内容暂时搜不到 |
-
-空结果和系统错误不能混为一谈。embedding 超时若被吞掉并返回空数组，用户会以为没有符合条件的商品；运维侧的错误率也会显得很低。更可检查的做法是记录本次请求实际启用了哪些召回源，例如 `keyword_used`、`vector_used` 和降级原因，同时观察两路候选数。
-
-是否要在 embedding 或 Milvus 故障时退到 ES，应由接口协议决定。当前实现选择“报错”，如果团队改为降级，也要给纯 ES 路径设独立超时，避免依赖依次超时导致请求拖得更久。
-
-## 7. 用小查询集评估，而不是猜权重
-
-准备约 20 条来自业务表达的查询已经足够做第一轮检查。样本应覆盖精确型号、品牌与品类、场景描述、错别字、类目过滤冲突和预期零结果。例如：
+假设：
 
 ```text
-iPhone 15 256G
-山大马克杯
-适合雨天通勤的鞋
-pingguo 15 手机
-类目=数码，query=羊毛围巾
+topK = 10
 ```
 
-为每条查询人工标注“前五名中哪些商品算相关”，然后分别保存关键词、向量和 Hybrid 三组结果。先回答两个很朴素的问题：该出现的商品有没有进入前五，明显不相关的商品是否挤到了前面。还要记录候选来源和实际降级路径，否则一次 nop searcher 下跑出的“Hybrid 结果”会污染评估。
+即使前面还有 50 个候选，最终也只返回**最相关的前 10 个商品**。
 
-权重实验必须使用同一批查询、同一份索引和同一个 embedding 模型。把 `weightSemantic` 从 0.5 改到 0.7 后，如果场景查询改善了，但精确型号大量退步，就不能只展示改善的那几条。
+所以整个过程可以记成：
 
-线上指标也有用，例如搜索后点击率、加购率和零结果率，但它们受价格、图片、排序位置等因素影响。离线查询集适合快速发现明显错误，线上实验再回答实际用户是否更愿意点击或购买。
+```text
+ES / Milvus → 找商品
+      ↓
+融合分数 → 判断谁更相关
+      ↓
+MySQL → 拿完整商品信息
+      ↓
+排序 → 取 TopK
+      ↓
+返回前端
+```
 
-## 8. 带答案的自测
 
-### 题 1
 
-请求 `top_k=20` 时，ES 与向量分支各请求多少条候选？为什么不只请求 20 条？
+### 自测题
 
-<details>
-<summary>参考答案</summary>
-
-各请求 60 条，即 `topK * 3`。多取候选是为了让两路共同命中但单路排名靠后的商品有机会在融合后进入最终前 20。
-
-</details>
-
-### 题 2
-
-没有配置 `EMBEDDING_API_URL`，接口仍能生成 768 维向量。这是否说明本地已经具备语义搜索能力？
-
-<details>
-<summary>参考答案</summary>
-
-不能。代码使用 SHA-256 派生占位向量，它只保证相同文本得到相同数组，没有学习语义关系；它用于联通代码路径。
-
-</details>
-
-### 题 3
-
-为什么默认 `nopMilvusSearcher` 比直接返回“未初始化”错误更容易掩盖问题？
-
-<details>
-<summary>参考答案</summary>
-
-nop 返回空切片且不报错，后续 ES 分支仍能产出结果，接口也会返回成功。如果没有记录各召回源候选数，调用方会把纯关键词结果误认成 Hybrid 结果。
-
-</details>
-
-### 题 4
-
-商品 A 的 L2 distance 是 0.1，商品 B 是 0.9。哪一个更接近查询？当前代码归一化后会偏向哪一个？
-
-<details>
-<summary>参考答案</summary>
-
-A 更接近查询。当前代码把 distance 当成越大越好的 score，min-max 后会给 B 更高的语义分，因此方向错误。
-
-</details>
-
-### 题 5
-
-为什么最后回查 MySQL 仍不能保证搜索结果全部在售？
-
-<details>
-<summary>参考答案</summary>
-
-`ListByIDs` 会过滤已经不存在的记录并返回当前字段，但它没有显式的 `on_sale = true` 条件。存在不等于允许展示。
-
-</details>
-
-## 9. 课后实践
-
-### 练习 A：为 L2 方向错误补测试
-
-给定两个向量候选，distance 分别为 0.2 和 0.8，再给它们相同的关键词分数。先写一个会暴露当前反向排序的测试，然后设计 distance 到相关度的转换。测试至少要覆盖 distance 全部相等的情况。
-
-<details>
-<summary>验收标准</summary>
-
-- 修正后，distance 0.2 的商品必须排在 0.8 前面。
-- distance 相同且关键词分数相同时，两件商品应得到相同融合分；最终顺序由现有商品 ID 规则决定。
-- 测试应先在当前实现上失败，修正分数方向后通过。
-
-</details>
-
-### 练习 B：补一张生产接入清单
-
-沿着“商品修改 → 事件 → embedding → Milvus Upsert → 语义查询”的方向检查仓库，写出每一步已有的函数、缺失的调用和失败后的处理办法。不要把“存在一个函数”写成“链路已完成”。
-
-<details>
-<summary>检查清单</summary>
-
-答案至少应覆盖商品变更消费者、embedding 生成、Milvus Upsert/Delete、失败重试与历史回填、生产 `SetSearcher` 注入，以及 L2 distance 转相关度。每项都要标出“已有函数”和“缺失调用”。
-
-</details>
-
-### 练习 C：定义降级协议
-
-分别为 embedding 超时、Milvus 查询失败和 ES 查询失败规定接口行为。每项需要写明：是否降级、降到哪一路、用户响应、日志字段和监控指标。最后检查这些选择会不会让一次请求连续等待多个 5 秒超时。
-
-<details>
-<summary>验收标准</summary>
-
-三类故障都要写出响应、日志、指标和后备路径；还要给整次请求设置总超时，不能把各依赖超时简单相加。方案若返回空数组，必须区分“确实没有结果”和“搜索依赖故障”。
-
-</details>
-
-## 本章结论
-
-Gomall 已经写出了 Hybrid Search 的主要骨架：生成查询向量、两路扩大召回、分别归一化、按商品 ID 合并，再回 MySQL 装配结果。代码也留下了便于替换外部依赖的接口。
-
-它目前还不是可直接上线的向量搜索。默认 searcher 是 nop，商品变更没有写入 Milvus，L2 distance 又被当成越大越好的 score。读这类代码时，判断标准不该是“文件和函数齐不齐”，而应是请求能否走到真实依赖、数据能否持续写入，以及返回值的语义是否在整条链路中保持一致。
+1. **为什么 Hybrid Search 要同时使用 Elasticsearch 和 Milvus？两者分别擅长什么？**
+2. **如果 `topK = 10`，为什么 ES 和 Milvus 要各召回 `30` 条，而不是只召回 10 条？**
+3. **为什么 ES 和 Milvus 的分数需要先归一化，再进行融合？**
+4. **如果一个商品的 `SemanticScore = 0.8`，`KeywordScore = 0.4`，两边权重都是 `0.5`，最终融合分数是多少？**
+5. **为什么 ES 和 Milvus 搜索结束后，还要根据商品 ID 回查 MySQL？MySQL 在这里负责什么？**
