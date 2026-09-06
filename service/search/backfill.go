@@ -31,6 +31,15 @@ func BackfillFromDB(ctx context.Context, batchSize int) (indexed int, err error)
 				util.LogrusObj.Errorf("backfill upsert product=%d failed: %v", p.ID, e)
 				continue
 			}
+			if store, enabled := getProductVectorStore(); enabled {
+				vec, e := EmbedText(ctx, productEmbeddingText(p))
+				if e != nil {
+					return indexed, e
+				}
+				if e := store.Upsert(ctx, p.ID, vec, p.CategoryID); e != nil {
+					return indexed, e
+				}
+			}
 			indexed++
 			lastID = p.ID
 		}

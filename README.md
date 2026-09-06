@@ -186,7 +186,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 **难**：ES 关键词搜不到"苹果手机" → "iPhone 13"，纯向量搜可能召回不准。
 **解**：
-- query → embedding → Milvus 拿 top-K 语义匹配（HNSW M=16 efConstruction=200 efSearch=64，768 dim）；使用前需要注入 Milvus searcher，并先建立商品向量索引
+- query → embedding → Milvus 拿 top-K 语义匹配（HNSW M=16 efConstruction=200 efSearch=64，768 dim）；启动时自动装配真实 searcher，商品变更事件同步维护 ES 与 Milvus
 - 同时 ES 关键词搜 top-K
 - 两边 min-max normalize 后 50/50 加权融合
 - env `EMBEDDING_API_URL` 切换模型；未设走 SHA-256 stub 让链路跑通
@@ -330,8 +330,11 @@ RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和�
 # 启动数据库与缓存
 docker compose up -d mysql redis
 
+# 需要混合搜索时，同时启动 ES 与 Milvus
+docker compose up -d --wait elasticsearch milvus-standalone
+
 # 启动 Go 服务
-SNOWFLAKE_ALLOW_DEFAULT=true go run ./cmd
+MILVUS_ADDR=localhost:19530 SNOWFLAKE_ALLOW_DEFAULT=true go run ./cmd
 ```
 
 服务启动后访问：
@@ -392,8 +395,10 @@ make tools build-agent
 | ElasticSearch | 商品关键词检索与增量索引 |
 | `WEB3_RPC_URL` / `WEB3_ESCROW_ADDR` | Web3 托管合约监听与链上支付确认 |
 | `XCASH_BASE_URL` / `XCASH_APP_ID` / `XCASH_HMAC_KEY` / `XCASH_NOTIFY_URL` / `XCASH_METHODS_JSON` / `XCASH_VAULTSLOT_CONFIRMED=true` | Xcash 多链、多币种账单、签名回调、AML 门禁与主动对账；订单固定按 CNY 计价，部署要求见 [Xcash 接入说明](docs/architecture/XCASH_CRYPTO_PAYMENTS.md) |
-| `MILVUS_ADDR` | 连接 Milvus 并创建向量集合；还需注入 searcher 和建立商品向量索引 |
-| `EMBEDDING_API_URL` | 为查询生成 embedding；商品向量需要另行建立索引 |
+| `MILVUS_ADDR` | 连接 Milvus、创建并加载商品向量集合；本机 Compose 使用 `localhost:19530` |
+| `EMBEDDING_API_URL` | 为商品与查询生成同一套 768 维 embedding；生产语义搜索应配置真实模型服务 |
+
+Milvus 第一次启用后，以管理员身份调用一次 `POST /api/v1/admin/search/backfill`，把已有商品同时灌入 ES 和 Milvus。之后 `product.changed` Outbox 消费者会维护两份索引；前端搜索框直接调用 Hybrid Search。未配置 `EMBEDDING_API_URL` 时仅使用确定性的开发占位向量，链路可验证，但不代表真实语义质量。
 
 ---
 

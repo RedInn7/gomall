@@ -2,7 +2,6 @@ package rabbitmq
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -53,6 +52,9 @@ func maxDeliveryAttempts() int64 {
 //     这是 broker 维护的、跨重启可靠的计数。
 //   - 退化情况下用 amqp.Delivery.Redelivered 区分首投与重投（只能表达 1 / >=2）。
 func deliveryCount(d amqp.Delivery) int64 {
+	if retries := retryCount(d); retries > 0 {
+		return retries + 1
+	}
 	if xdeath, ok := d.Headers["x-death"]; ok {
 		if entries, ok := xdeath.([]interface{}); ok {
 			var total int64
@@ -119,12 +121,6 @@ func RouteToDLQ(d amqp.Delivery, queue, routingKey string, poison bool) {
 // 开启 publisher confirm：只有 broker 确认 DLQ 落地才视为成功，否则返回 error，
 // 由 RouteToDLQ Nack 重排原消息，避免“源队列已 Ack 但 DLQ 没收到”导致消息双双丢失。
 func publishToDLQ(ctx context.Context, d amqp.Delivery, queue, routingKey, reason string, count int64) error {
-	ch, err := GlobalRabbitMQ.Channel()
-	if err != nil {
-		return err
-	}
-	defer ch.Close()
-
 	contentType := d.ContentType
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -141,21 +137,5 @@ func publishToDLQ(ctx context.Context, d amqp.Delivery, queue, routingKey, reaso
 		},
 	}
 
-	// 开启 confirm 失败（broker 不支持，罕见）才降级为尽力发送。
-	if err := ch.Confirm(false); err != nil {
-		return ch.PublishWithContext(ctx, DeadLetterExchange, deadLetterRouting, false, false, pub)
-	}
-
-	dc, err := ch.PublishWithDeferredConfirmWithContext(
-		ctx, DeadLetterExchange, deadLetterRouting, false, false, pub,
-	)
-	if err != nil {
-		return err
-	}
-	if ok, err := dc.WaitContext(ctx); err != nil {
-		return err
-	} else if !ok {
-		return fmt.Errorf("broker NACK for DLQ publish queue=%s", queue)
-	}
-	return nil
+	return publishConfirmed(ctx, DeadLetterExchange, deadLetterRouting, pub)
 }

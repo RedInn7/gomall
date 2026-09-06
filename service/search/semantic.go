@@ -65,26 +65,23 @@ func semanticSearchWith(ctx context.Context, req *product.ProductSemanticSearchR
 		topK = maxTopK
 	}
 
-	vec, err := deps.embed(ctx, req.Query)
-	if err != nil {
-		return nil, err
-	}
-
-	searcher := GetSearcher()
-	// 向量召回取 topK*3，给融合留余量
-	vecHits, err := searcher.Search(ctx, vec, topK*3, req.CategoryID)
-	if err != nil {
-		return nil, err
+	var vecHits []Hit
+	vec, vectorErr := deps.embed(ctx, req.Query)
+	if vectorErr == nil {
+		// 向量召回取 topK*3，给融合留余量。
+		vecHits, vectorErr = GetSearcher().Search(ctx, vec, topK*3, req.CategoryID)
 	}
 
 	// 关键词召回同样取一个余量
-	keywordHits, _, err := deps.keyword(ctx, req.Query, 0, topK*3, req.CategoryID)
-	if err != nil {
-		// ES 不可用不应该直接挂掉语义检索，记日志后降级走纯向量
+	keywordHits, _, keywordErr := deps.keyword(ctx, req.Query, 0, topK*3, req.CategoryID)
+	if keywordErr != nil {
 		keywordHits = nil
 	}
+	if vectorErr != nil && keywordErr != nil {
+		return nil, errors.Join(vectorErr, keywordErr)
+	}
 
-	semNorm := minMaxNormalize(vecScores(vecHits))
+	semNorm := minMaxNormalizeDistance(vecScores(vecHits))
 	kwNorm := minMaxNormalize(esScores(keywordHits))
 
 	fused := make(map[uint]*product.ProductSemanticHit)
@@ -138,6 +135,32 @@ func semanticSearchWith(ctx context.Context, req *product.ProductSemanticSearchR
 		out = out[:topK]
 	}
 	return out, nil
+}
+
+// minMaxNormalizeDistance 把“越小越近”的 L2 距离转换为 [0,1] 相关度。
+func minMaxNormalizeDistance(distances []float32) []float32 {
+	if len(distances) == 0 {
+		return nil
+	}
+	allEqual := true
+	for _, distance := range distances[1:] {
+		if distance != distances[0] {
+			allEqual = false
+			break
+		}
+	}
+	if allEqual {
+		out := make([]float32, len(distances))
+		for i := range out {
+			out[i] = 1
+		}
+		return out
+	}
+	normalized := minMaxNormalize(distances)
+	for i := range normalized {
+		normalized[i] = 1 - normalized[i]
+	}
+	return normalized
 }
 
 func getOrInit(m map[uint]*product.ProductSemanticHit, id uint) *product.ProductSemanticHit {
