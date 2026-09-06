@@ -58,7 +58,7 @@ func TestSetProductVectorStoreConnectsQueryPath(t *testing.T) {
 func TestProductChangedUpdatesKeywordAndVectorIndexes(t *testing.T) {
 	store := &recordingVectorStore{}
 	installVectorStoreForTest(t, store)
-	p := &product.Product{Name: "Phone", Title: "Flagship", Info: "great camera", CategoryID: 7}
+	p := &product.Product{Name: "Phone", Title: "Flagship", Info: "great camera", CategoryID: 7, OnSale: true}
 	p.ID = 12
 	var keywordID uint
 	var embeddedText string
@@ -108,5 +108,23 @@ func TestProductDeletedRemovesBothIndexes(t *testing.T) {
 	}
 	if !reflect.DeepEqual(keywordDeletes, []uint{19}) || !reflect.DeepEqual(store.deletes, []uint{19}) {
 		t.Fatalf("delete did not reach both indexes: keyword=%v vector=%v", keywordDeletes, store.deletes)
+	}
+}
+
+func TestOffSaleProductIsRemovedFromVectorIndex(t *testing.T) {
+	store := &recordingVectorStore{}
+	p := &product.Product{Name: "hidden", OnSale: false}
+	p.ID = 23
+	embedCalled := false
+	err := handleVectorProductChangedWith(context.Background(), events.ProductChanged{ProductID: 23, Op: "update"},
+		func(uint) (*product.Product, error) { return p, nil },
+		func(context.Context, string) ([]float32, error) { embedCalled = true; return nil, nil },
+		store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if embedCalled || len(store.upserts) != 0 || !reflect.DeepEqual(store.deletes, []uint{23}) {
+		t.Fatalf("off-sale product was not removed: embed=%v upserts=%v deletes=%v", embedCalled, store.upserts, store.deletes)
 	}
 }
