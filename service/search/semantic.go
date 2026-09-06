@@ -65,23 +65,20 @@ func semanticSearchWith(ctx context.Context, req *product.ProductSemanticSearchR
 		topK = maxTopK
 	}
 
-	vec, err := deps.embed(ctx, req.Query)
-	if err != nil {
-		return nil, err
-	}
-
-	searcher := GetSearcher()
-	// 向量召回取 topK*3，给融合留余量
-	vecHits, err := searcher.Search(ctx, vec, topK*3, req.CategoryID)
-	if err != nil {
-		return nil, err
+	var vecHits []Hit
+	vec, vectorErr := deps.embed(ctx, req.Query)
+	if vectorErr == nil {
+		// 向量召回取 topK*3，给融合留余量。
+		vecHits, vectorErr = GetSearcher().Search(ctx, vec, topK*3, req.CategoryID)
 	}
 
 	// 关键词召回同样取一个余量
-	keywordHits, _, err := deps.keyword(ctx, req.Query, 0, topK*3, req.CategoryID)
-	if err != nil {
-		// ES 不可用不应该直接挂掉语义检索，记日志后降级走纯向量
+	keywordHits, _, keywordErr := deps.keyword(ctx, req.Query, 0, topK*3, req.CategoryID)
+	if keywordErr != nil {
 		keywordHits = nil
+	}
+	if vectorErr != nil && keywordErr != nil {
+		return nil, errors.Join(vectorErr, keywordErr)
 	}
 
 	semNorm := minMaxNormalizeDistance(vecScores(vecHits))

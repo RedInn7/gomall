@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/RedInn7/gomall/internal/product"
@@ -12,6 +13,26 @@ type fixedVectorSearcher struct{ hits []Hit }
 
 func (s fixedVectorSearcher) Search(context.Context, []float32, int, *uint) ([]Hit, error) {
 	return s.hits, nil
+}
+
+func TestSemanticSearchFallsBackToKeywordWhenEmbeddingFails(t *testing.T) {
+	productRow := &product.Product{Name: "keyword result"}
+	productRow.ID = 8
+	hits, err := semanticSearchWith(context.Background(), &product.ProductSemanticSearchReq{Query: "phone", TopK: 2}, hybridDeps{
+		embed: func(context.Context, string) ([]float32, error) { return nil, errors.New("embedding unavailable") },
+		keyword: func(context.Context, string, int, int, *uint) ([]es.ScoredProductDoc, int64, error) {
+			return []es.ScoredProductDoc{{Doc: &es.ProductDoc{ID: 8}, Score: 3}}, 1, nil
+		},
+		loader: func(context.Context, []uint) ([]*product.Product, error) {
+			return []*product.Product{productRow}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 || hits[0].Product.ID != 8 || hits[0].KeywordScore != 1 {
+		t.Fatalf("keyword fallback missing: %#v", hits)
+	}
 }
 
 func TestSemanticSearchRanksSmallerL2DistanceFirst(t *testing.T) {
