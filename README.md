@@ -331,7 +331,7 @@ RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和�
 docker compose up -d mysql redis
 
 # 需要混合搜索时，同时启动 ES 与 Milvus
-docker compose up -d elasticsearch milvus-standalone
+docker compose up -d --wait elasticsearch milvus-standalone
 
 # 启动 Go 服务
 MILVUS_ADDR=localhost:19530 SNOWFLAKE_ALLOW_DEFAULT=true go run ./cmd
