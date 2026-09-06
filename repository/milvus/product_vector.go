@@ -72,7 +72,7 @@ func EnsureProductVectorCollection(ctx context.Context) error {
 		return fmt.Errorf("has collection: %w", err)
 	}
 	if !has {
-		if err := MilvusClient.CreateCollection(ctx, productVectorSchema(), 1); err != nil {
+		if err := MilvusClient.CreateCollection(ctx, productVectorSchema(), 1, client.WithConsistencyLevel(entity.ClStrong)); err != nil {
 			return fmt.Errorf("create collection: %w", err)
 		}
 	}
