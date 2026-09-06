@@ -50,9 +50,10 @@ func publishConfirmed(ctx context.Context, exchange, routingKey string, pub amqp
 	}
 	defer ch.Close()
 	if err := ch.Confirm(false); err != nil {
-		return ch.PublishWithContext(ctx, exchange, routingKey, false, false, pub)
+		return fmt.Errorf("enable publisher confirms: %w", err)
 	}
-	dc, err := ch.PublishWithDeferredConfirmWithContext(ctx, exchange, routingKey, false, false, pub)
+	returns := ch.NotifyReturn(make(chan amqp.Return, 1))
+	dc, err := ch.PublishWithDeferredConfirmWithContext(ctx, exchange, routingKey, true, false, pub)
 	if err != nil {
 		return err
 	}
@@ -60,6 +61,11 @@ func publishConfirmed(ctx context.Context, exchange, routingKey string, pub amqp
 		return err
 	} else if !ok {
 		return fmt.Errorf("broker NACK for retry queue %s", routingKey)
+	}
+	select {
+	case returned := <-returns:
+		return fmt.Errorf("message returned for routing key %s: %d %s", routingKey, returned.ReplyCode, returned.ReplyText)
+	default:
 	}
 	return nil
 }

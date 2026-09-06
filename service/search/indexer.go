@@ -43,7 +43,7 @@ func startProductIndexConsumer(ctx context.Context, queue string, handler produc
 	if err := rabbitmq.InitRetryQueue(queue, indexerRetryDelay); err != nil {
 		return err
 	}
-	rabbitmq.SuperviseDomainConsumer(queue, 32, func(d amqp.Delivery) {
+	rabbitmq.SuperviseDomainConsumerWithRetry(queue, 32, func(d amqp.Delivery) {
 		var ev events.ProductChanged
 		if err := json.Unmarshal(d.Body, &ev); err != nil || ev.ProductID == 0 {
 			util.LogrusObj.Errorf("product indexer parse queue=%s err=%v", queue, err)
