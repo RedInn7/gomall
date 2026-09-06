@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
@@ -32,6 +33,7 @@ type productLoaderFunc func(ctx context.Context, ids []uint) ([]*product.Product
 // hybridDeps 把可注入的依赖封装起来，生产用 defaultHybridDeps，单测可重写
 type hybridDeps struct {
 	embed   embedFunc
+	vector  MilvusSearcher
 	keyword keywordSearchFunc
 	loader  productLoaderFunc
 }
@@ -39,6 +41,7 @@ type hybridDeps struct {
 func defaultHybridDeps() hybridDeps {
 	return hybridDeps{
 		embed:   EmbedText,
+		vector:  GetSearcher(),
 		keyword: es.SearchProductsWithScore,
 		loader:  loadProductsByIDs,
 	}
@@ -54,7 +57,11 @@ func SemanticSearch(ctx context.Context, req *product.ProductSemanticSearchReq) 
 }
 
 func semanticSearchWith(ctx context.Context, req *product.ProductSemanticSearchReq, deps hybridDeps) ([]product.ProductSemanticHit, error) {
-	if req == nil || req.Query == "" {
+	if req == nil {
+		return nil, errors.New("query 不能为空")
+	}
+	query := strings.TrimSpace(req.Query)
+	if query == "" {
 		return nil, errors.New("query 不能为空")
 	}
 	topK := req.TopK
@@ -66,14 +73,14 @@ func semanticSearchWith(ctx context.Context, req *product.ProductSemanticSearchR
 	}
 
 	var vecHits []Hit
-	vec, vectorErr := deps.embed(ctx, req.Query)
+	vec, vectorErr := deps.embed(ctx, query)
 	if vectorErr == nil {
 		// 向量召回取 topK*3，给融合留余量。
-		vecHits, vectorErr = GetSearcher().Search(ctx, vec, topK*3, req.CategoryID)
+		vecHits, vectorErr = deps.vector.Search(ctx, vec, topK*3, req.CategoryID)
 	}
 
 	// 关键词召回同样取一个余量
-	keywordHits, _, keywordErr := deps.keyword(ctx, req.Query, 0, topK*3, req.CategoryID)
+	keywordHits, _, keywordErr := deps.keyword(ctx, query, 0, topK*3, req.CategoryID)
 	if keywordErr != nil {
 		keywordHits = nil
 	}
@@ -111,7 +118,9 @@ func semanticSearchWith(ctx context.Context, req *product.ProductSemanticSearchR
 	}
 	prodMap := make(map[uint]*product.Product, len(products))
 	for _, p := range products {
-		prodMap[p.ID] = p
+		if p != nil && p.OnSale {
+			prodMap[p.ID] = p
+		}
 	}
 
 	out := make([]product.ProductSemanticHit, 0, len(fused))
