@@ -85,9 +85,10 @@ func loading() {
 	initialize.InitGroupbuySettleConsumer(context.Background())
 	initialize.InitWeb3SettleConsumer(context.Background())
 	initialize.InitXcashReconciler(context.Background())
+	// 先装配 Milvus，再启动商品索引消费者，避免启动窗口内的商品事件只写 ES。
+	tryInitMilvus(context.Background())
 	tryInitES(context.Background())
 	tryInitWeb3Listener(context.Background())
-	tryInitMilvus(context.Background())
 	fmt.Println("加载配置完成...")
 }
 
