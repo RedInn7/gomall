@@ -4,15 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
 )
 
 const (
-	// ProductVectorCollection 商品向量 collection 名
-	ProductVectorCollection = "product_vector"
-
 	// ProductVectorDim 向量维度。常见嵌入模型默认维度：
 	// BGE-base / text-embedding-3-small 等多数模型为 768 dim
 	ProductVectorDim = 768
@@ -26,6 +24,22 @@ const (
 	hnswEfConstruction = 200
 	hnswEfSearch       = 64
 )
+
+var ProductVectorCollection = "product_vector_unversioned"
+
+// ConfigureProductVectorCollection 在初始化前选择 embedding 契约对应的物理集合。
+func ConfigureProductVectorCollection(name string) error {
+	if !strings.HasPrefix(name, "product_vector_") || len(name) > 255 {
+		return fmt.Errorf("invalid product vector collection name %q", name)
+	}
+	for _, r := range name {
+		if !(r == '_' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			return fmt.Errorf("invalid product vector collection name %q", name)
+		}
+	}
+	ProductVectorCollection = name
+	return nil
+}
 
 // ProductSearchHit 单条向量召回结果
 type ProductSearchHit struct {

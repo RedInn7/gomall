@@ -14,12 +14,17 @@ func InitMilvusCollection(ctx context.Context) {
 	if milvus.MilvusClient == nil {
 		return
 	}
+	contract := search.CurrentEmbeddingContract()
+	if err := milvus.ConfigureProductVectorCollection(contract.CollectionName()); err != nil {
+		util.LogrusObj.Errorf("ConfigureProductVectorCollection failed: %v", err)
+		return
+	}
 	if err := milvus.EnsureProductVectorCollection(ctx); err != nil {
 		util.LogrusObj.Errorf("EnsureProductVectorCollection failed: %v", err)
 		return
 	}
 	search.SetProductVectorStore(search.MilvusProductVectorStore{})
-	util.LogrusObj.Infoln("Milvus product_vector collection ready")
+	util.LogrusObj.Infof("Milvus collection ready name=%s embedding=%s", contract.CollectionName(), contract.Fingerprint())
 	if rabbitmq.GlobalRabbitMQ == nil {
 		util.LogrusObj.Warnln("RMQ 未初始化，Milvus 查询已启用，但不接收增量向量事件")
 		return
