@@ -76,10 +76,8 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 		return nil, err
 	}
 
-	// 单价与卖家均以服务端商品表为准，不取 req.Money / req.BossID：二者都是安全敏感字段，
-	// 客户端可任意改写——信 money 等于把定价权交给买家（1 分下单），信 boss_id 等于让买家
-	// 指定收款方（把货款打给攻击者账户）。一次反查同时拿到单价 / 类目 / 卖家；商品不存在或
-	// 定价非法直接拒单，绝不回退到客户端值（回退即重新打开漏洞）。
+	// 单价与卖家不属于创建订单的请求参数，一律根据 product_id 从商品表读取。
+	// 一次反查同时拿到单价、类目和卖家；商品不存在或定价非法时直接拒单。
 	unitCents, categoryID, bossID, err := resolveProductPricing(ctx, req.ProductID)
 	if err != nil {
 		util.LogrusObj.Errorf("resolve product pricing failed product=%d err=%v", req.ProductID, err)
@@ -111,7 +109,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 	order := &Order{
 		UserID:    u.Id,
 		ProductID: req.ProductID,
-		BossID:    bossID, // 卖家以商品表为准，忽略 req.BossID
+		BossID:    bossID,
 		Num:       int(req.Num),
 		Money:     unitCents, // 单价口径不变；满减结果记在 PromoDiscountCents / FinalCents
 		Type:      consts.OrderWaitPay,
