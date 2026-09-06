@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/RedInn7/gomall/internal/product"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -12,81 +15,83 @@ import (
 	"github.com/RedInn7/gomall/service/events"
 )
 
-const indexerQueue = "search.product.indexer"
+const (
+	indexerQueue       = "search.product.indexer"
+	vectorIndexerQueue = "search.product.vector-indexer"
+	indexerRetryDelay  = 3 * time.Second
+)
 
-// StartProductIndexer 绑定 product.changed 并启动消费者，把产品变更同步到 ES
+// StartProductIndexer 使用独立队列维护 ES 关键词索引。
 func StartProductIndexer(ctx context.Context) error {
-	if err := rabbitmq.BindDomainQueue(indexerQueue, "product.changed"); err != nil {
+	return startProductIndexConsumer(ctx, indexerQueue, handleKeywordProductChanged)
+}
+
+// StartProductVectorIndexer 使用独立队列维护 Milvus；ES 故障不会阻塞向量索引。
+func StartProductVectorIndexer(ctx context.Context) error {
+	return startProductIndexConsumer(ctx, vectorIndexerQueue, handleVectorProductChanged)
+}
+
+type productChangedHandler func(context.Context, events.ProductChanged) error
+
+func startProductIndexConsumer(ctx context.Context, queue string, handler productChangedHandler) error {
+	if err := rabbitmq.InitDeadLetterTopology(); err != nil {
 		return err
 	}
-	ch, err := rabbitmq.GlobalRabbitMQ.Channel()
-	if err != nil {
+	if err := rabbitmq.BindDomainQueue(queue, "product.changed"); err != nil {
 		return err
 	}
-	if err := ch.Qos(32, 0, false); err != nil {
+	if err := rabbitmq.InitRetryQueue(queue, indexerRetryDelay); err != nil {
 		return err
 	}
-	msgs, err := ch.Consume(indexerQueue, "", false, false, false, false, nil)
-	if err != nil {
-		return err
-	}
-	go func() {
-		for d := range msgs {
-			var ev events.ProductChanged
-			if err := json.Unmarshal(d.Body, &ev); err != nil {
-				util.LogrusObj.Errorln("indexer parse event:", err)
-				_ = d.Nack(false, false)
-				continue
-			}
-			if err := handleProductChanged(ctx, ev); err != nil {
-				util.LogrusObj.Errorf("indexer handle product=%d op=%s err=%v", ev.ProductID, ev.Op, err)
-				_ = d.Nack(false, true)
-				continue
-			}
-			_ = d.Ack(false)
+	rabbitmq.SuperviseDomainConsumer(queue, 32, func(d amqp.Delivery) {
+		var ev events.ProductChanged
+		if err := json.Unmarshal(d.Body, &ev); err != nil || ev.ProductID == 0 {
+			util.LogrusObj.Errorf("product indexer parse queue=%s err=%v", queue, err)
+			rabbitmq.RouteToDLQ(d, queue, d.RoutingKey, true)
+			return
 		}
-	}()
+		if err := handler(ctx, ev); err != nil {
+			util.LogrusObj.Errorf("product indexer handle queue=%s product=%d op=%s err=%v", queue, ev.ProductID, ev.Op, err)
+			rabbitmq.RetryToQueueOrDLQ(d, queue, d.RoutingKey)
+			return
+		}
+		_ = d.Ack(false)
+	})
 	return nil
 }
 
-func handleProductChanged(ctx context.Context, ev events.ProductChanged) error {
-	return handleProductChangedWith(ctx, ev, productIndexDeps{
-		load:          product.NewProductDao(ctx).GetProductById,
-		upsertKeyword: es.UpsertProduct,
-		deleteKeyword: es.DeleteProduct,
-		embed:         EmbedText,
-	})
+func handleKeywordProductChanged(ctx context.Context, ev events.ProductChanged) error {
+	return handleKeywordProductChangedWith(ctx, ev, product.NewProductDao(ctx).GetProductById, es.UpsertProduct, es.DeleteProduct)
 }
 
-type productIndexDeps struct {
-	load          func(uint) (*product.Product, error)
-	upsertKeyword func(context.Context, *product.Product) error
-	deleteKeyword func(context.Context, uint) error
-	embed         embedFunc
-}
-
-func handleProductChangedWith(ctx context.Context, ev events.ProductChanged, deps productIndexDeps) error {
-	store, vectorEnabled := getProductVectorStore()
+func handleKeywordProductChangedWith(ctx context.Context, ev events.ProductChanged, load func(uint) (*product.Product, error), upsert func(context.Context, *product.Product) error, deleteProduct func(context.Context, uint) error) error {
 	if ev.Op == "delete" {
-		if err := deps.deleteKeyword(ctx, ev.ProductID); err != nil {
-			return err
-		}
-		if vectorEnabled {
-			return store.Delete(ctx, ev.ProductID)
-		}
-		return nil
+		return deleteProduct(ctx, ev.ProductID)
 	}
-	p, err := deps.load(ev.ProductID)
+	p, err := load(ev.ProductID)
 	if err != nil || p == nil {
 		return err
 	}
-	if err := deps.upsertKeyword(ctx, p); err != nil {
-		return err
-	}
-	if !vectorEnabled {
+	return upsert(ctx, p)
+}
+
+func handleVectorProductChanged(ctx context.Context, ev events.ProductChanged) error {
+	store, enabled := getProductVectorStore()
+	if !enabled {
 		return nil
 	}
-	vec, err := deps.embed(ctx, productEmbeddingText(p))
+	return handleVectorProductChangedWith(ctx, ev, product.NewProductDao(ctx).GetProductById, EmbedText, store)
+}
+
+func handleVectorProductChangedWith(ctx context.Context, ev events.ProductChanged, load func(uint) (*product.Product, error), embed embedFunc, store ProductVectorStore) error {
+	if ev.Op == "delete" {
+		return store.Delete(ctx, ev.ProductID)
+	}
+	p, err := load(ev.ProductID)
+	if err != nil || p == nil {
+		return err
+	}
+	vec, err := embed(ctx, productEmbeddingText(p))
 	if err != nil {
 		return err
 	}

@@ -53,6 +53,9 @@ func maxDeliveryAttempts() int64 {
 //     这是 broker 维护的、跨重启可靠的计数。
 //   - 退化情况下用 amqp.Delivery.Redelivered 区分首投与重投（只能表达 1 / >=2）。
 func deliveryCount(d amqp.Delivery) int64 {
+	if retries := retryCount(d); retries > 0 {
+		return retries + 1
+	}
 	if xdeath, ok := d.Headers["x-death"]; ok {
 		if entries, ok := xdeath.([]interface{}); ok {
 			var total int64

@@ -144,8 +144,10 @@ services:
       - "19530:19530"
       - "9091:9091"
     depends_on:
-      - milvus-etcd
-      - milvus-minio
+      milvus-etcd:
+        condition: service_healthy
+      milvus-minio:
+        condition: service_healthy
     networks:
       - mall
 
