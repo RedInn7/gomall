@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/RedInn7/gomall/internal/product"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -49,12 +50,49 @@ func StartProductIndexer(ctx context.Context) error {
 }
 
 func handleProductChanged(ctx context.Context, ev events.ProductChanged) error {
+	return handleProductChangedWith(ctx, ev, productIndexDeps{
+		load:          product.NewProductDao(ctx).GetProductById,
+		upsertKeyword: es.UpsertProduct,
+		deleteKeyword: es.DeleteProduct,
+		embed:         EmbedText,
+	})
+}
+
+type productIndexDeps struct {
+	load          func(uint) (*product.Product, error)
+	upsertKeyword func(context.Context, *product.Product) error
+	deleteKeyword func(context.Context, uint) error
+	embed         embedFunc
+}
+
+func handleProductChangedWith(ctx context.Context, ev events.ProductChanged, deps productIndexDeps) error {
+	store, vectorEnabled := getProductVectorStore()
 	if ev.Op == "delete" {
-		return es.DeleteProduct(ctx, ev.ProductID)
+		if err := deps.deleteKeyword(ctx, ev.ProductID); err != nil {
+			return err
+		}
+		if vectorEnabled {
+			return store.Delete(ctx, ev.ProductID)
+		}
+		return nil
 	}
-	p, err := product.NewProductDao(ctx).GetProductById(ev.ProductID)
+	p, err := deps.load(ev.ProductID)
 	if err != nil || p == nil {
 		return err
 	}
-	return es.UpsertProduct(ctx, p)
+	if err := deps.upsertKeyword(ctx, p); err != nil {
+		return err
+	}
+	if !vectorEnabled {
+		return nil
+	}
+	vec, err := deps.embed(ctx, productEmbeddingText(p))
+	if err != nil {
+		return err
+	}
+	return store.Upsert(ctx, p.ID, vec, p.CategoryID)
+}
+
+func productEmbeddingText(p *product.Product) string {
+	return strings.Join([]string{strings.TrimSpace(p.Name), strings.TrimSpace(p.Title), strings.TrimSpace(p.Info)}, "\n")
 }
