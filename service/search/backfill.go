@@ -32,11 +32,7 @@ func BackfillFromDB(ctx context.Context, batchSize int) (indexed int, err error)
 				continue
 			}
 			if store, enabled := getProductVectorStore(); enabled {
-				vec, e := EmbedText(ctx, productEmbeddingText(p))
-				if e != nil {
-					return indexed, e
-				}
-				if e := store.Upsert(ctx, p.ID, vec, p.CategoryID); e != nil {
+				if e := syncProductVector(ctx, p, store, EmbedText); e != nil {
 					return indexed, e
 				}
 			}

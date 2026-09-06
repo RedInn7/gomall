@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -31,7 +32,7 @@ func CurrentEmbeddingContract() EmbeddingContract {
 		model = "sha256-stub-v1"
 	} else {
 		if provider == "" {
-			provider = "custom"
+			provider = endpointIdentity(os.Getenv(envEmbeddingURL))
 		}
 		if model == "" {
 			model = defaultModel
@@ -42,6 +43,17 @@ func CurrentEmbeddingContract() EmbeddingContract {
 		textVersion = defaultTextVersion
 	}
 	return EmbeddingContract{ProviderID: provider, Model: model, Dimensions: embeddingDim, TextVersion: textVersion, Metric: "L2"}
+}
+
+// endpointIdentity 忽略 query/fragment，避免把 API key 放进契约，同时让不同网关
+// 默认落到不同 collection。生产仍可用 EMBEDDING_PROVIDER_ID 指定不可变 revision。
+func endpointIdentity(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+		return "endpoint-" + hex.EncodeToString(sum[:8])
+	}
+	return "endpoint:" + strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host) + parsed.EscapedPath()
 }
 
 func (c EmbeddingContract) Fingerprint() string {
