@@ -397,8 +397,10 @@ make tools build-agent
 | `XCASH_BASE_URL` / `XCASH_APP_ID` / `XCASH_HMAC_KEY` / `XCASH_NOTIFY_URL` / `XCASH_METHODS_JSON` / `XCASH_VAULTSLOT_CONFIRMED=true` | Xcash 多链、多币种账单、签名回调、AML 门禁与主动对账；订单固定按 CNY 计价，部署要求见 [Xcash 接入说明](docs/architecture/XCASH_CRYPTO_PAYMENTS.md) |
 | `MILVUS_ADDR` | 连接 Milvus、创建并加载商品向量集合；本机 Compose 使用 `localhost:19530` |
 | `EMBEDDING_API_URL` | 为商品与查询生成同一套 768 维 embedding；生产语义搜索应配置真实模型服务 |
+| `EMBEDDING_PROVIDER_ID` / `EMBEDDING_MODEL` | 标识不可变的模型供应方和模型版本；变更后自动使用新的 Milvus 物理集合 |
+| `EMBEDDING_TEXT_VERSION` | 商品 embedding 文本拼接规则版本，默认 `product-v1` |
 
-Milvus 第一次启用后，以管理员身份调用一次 `POST /api/v1/admin/search/backfill`，把已有商品同时灌入 ES 和 Milvus。之后 `product.changed` Outbox 消费者会维护两份索引；前端搜索框直接调用 Hybrid Search。未配置 `EMBEDDING_API_URL` 时仅使用确定性的开发占位向量，链路可验证，但不代表真实语义质量。
+Milvus 第一次启用，或模型/供应方/文本版本变化后，以管理员身份调用一次 `POST /api/v1/admin/search/backfill`，把已有商品同时灌入 ES 和当前版本的 Milvus 集合。不同 embedding 契约使用不同物理集合，避免新旧模型向量混用；回填期间关键词搜索继续可用。之后 `product.changed` Outbox 消费者会维护两份索引；前端搜索框直接调用 Hybrid Search。未配置 `EMBEDDING_API_URL` 时仅使用确定性的开发占位向量，链路可验证，但不代表真实语义质量。
 
 ---
 
