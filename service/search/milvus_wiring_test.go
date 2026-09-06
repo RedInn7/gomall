@@ -63,15 +63,22 @@ func TestProductChangedUpdatesKeywordAndVectorIndexes(t *testing.T) {
 	var keywordID uint
 	var embeddedText string
 
-	err := handleProductChangedWith(context.Background(), events.ProductChanged{ProductID: 12, Op: "update"}, productIndexDeps{
-		load:          func(id uint) (*product.Product, error) { return p, nil },
-		upsertKeyword: func(_ context.Context, got *product.Product) error { keywordID = got.ID; return nil },
-		deleteKeyword: func(context.Context, uint) error { return nil },
-		embed: func(_ context.Context, text string) ([]float32, error) {
+	err := handleKeywordProductChangedWith(context.Background(), events.ProductChanged{ProductID: 12, Op: "update"},
+		func(uint) (*product.Product, error) { return p, nil },
+		func(_ context.Context, got *product.Product) error { keywordID = got.ID; return nil },
+		func(context.Context, uint) error { return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = handleVectorProductChangedWith(context.Background(), events.ProductChanged{ProductID: 12, Op: "update"},
+		func(uint) (*product.Product, error) { return p, nil },
+		func(_ context.Context, text string) ([]float32, error) {
 			embeddedText = text
 			return []float32{1, 2, 3}, nil
 		},
-	})
+		store,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,9 +96,13 @@ func TestProductDeletedRemovesBothIndexes(t *testing.T) {
 	installVectorStoreForTest(t, store)
 	var keywordDeletes []uint
 
-	err := handleProductChangedWith(context.Background(), events.ProductChanged{ProductID: 19, Op: "delete"}, productIndexDeps{
-		deleteKeyword: func(_ context.Context, id uint) error { keywordDeletes = append(keywordDeletes, id); return nil },
-	})
+	err := handleKeywordProductChangedWith(context.Background(), events.ProductChanged{ProductID: 19, Op: "delete"}, nil, nil,
+		func(_ context.Context, id uint) error { keywordDeletes = append(keywordDeletes, id); return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = handleVectorProductChangedWith(context.Background(), events.ProductChanged{ProductID: 19, Op: "delete"}, nil, nil, store)
 	if err != nil {
 		t.Fatal(err)
 	}
