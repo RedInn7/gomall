@@ -17,6 +17,7 @@ type consumerConfig struct {
 	prefetch int
 	// deliver 处理单条投递，自行决定 Ack/Nack。
 	deliver func(amqp.Delivery)
+	onPanic func(amqp.Delivery)
 }
 
 // superviseConsumer 启动一个自愈消费者：在后台 goroutine 中持续订阅队列，
@@ -33,7 +34,7 @@ func superviseConsumer(cfg consumerConfig) {
 				continue
 			}
 			for d := range msgs {
-				deliverWithRecover(cfg.queue, cfg.deliver, d)
+				deliverWithRecover(cfg.queue, cfg.deliver, cfg.onPanic, d)
 			}
 			// msgs 被 broker 关闭：旧 channel 已失效，先 Close 释放句柄避免堆积，
 			// 退避后回到循环顶部重新订阅（ensureConnection 会按需重连）。
@@ -46,10 +47,14 @@ func superviseConsumer(cfg consumerConfig) {
 
 // deliverWithRecover 包裹单条投递处理，捕获 handler panic 避免一条毒消息打挂整个消费者 goroutine。
 // panic 时 Nack 重排（交由投递次数 / DLQ 兜底），不静默丢消息。
-func deliverWithRecover(queue string, deliver func(amqp.Delivery), d amqp.Delivery) {
+func deliverWithRecover(queue string, deliver func(amqp.Delivery), onPanic func(amqp.Delivery), d amqp.Delivery) {
 	defer func() {
 		if r := recover(); r != nil {
 			util.LogrusObj.Errorf("RabbitMQ 消费者 %s 处理 panic: %v", queue, r)
+			if onPanic != nil {
+				onPanic(d)
+				return
+			}
 			_ = d.Nack(false, true)
 		}
 	}()
@@ -61,6 +66,15 @@ func deliverWithRecover(queue string, deliver func(amqp.Delivery), d amqp.Delive
 // 调用前应先 InitDeadLetterTopology + BindDomainQueue 声明拓扑与绑定。
 func SuperviseDomainConsumer(queue string, prefetch int, deliver func(amqp.Delivery)) {
 	superviseConsumer(consumerConfig{queue: queue, prefetch: prefetch, deliver: deliver})
+}
+
+// SuperviseDomainConsumerWithRetry 让 panic 也进入与普通错误相同的有界延迟重试。
+// 调用方必须先 InitRetryQueue。
+func SuperviseDomainConsumerWithRetry(queue string, prefetch int, deliver func(amqp.Delivery)) {
+	superviseConsumer(consumerConfig{
+		queue: queue, prefetch: prefetch, deliver: deliver,
+		onPanic: func(d amqp.Delivery) { RetryToQueueOrDLQ(d, queue, d.RoutingKey) },
+	})
 }
 
 // subscribe 在一条可用连接上开 channel、设置 Qos 并发起 Consume。
