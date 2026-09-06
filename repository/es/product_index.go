@@ -175,7 +175,7 @@ func SearchProductsWithScore(ctx context.Context, keyword string, from, size int
 			},
 		},
 	}
-	filter := []map[string]any{}
+	filter := []map[string]any{{"term": map[string]any{"on_sale": true}}}
 	if categoryID != nil {
 		filter = append(filter, map[string]any{"term": map[string]any{"category_id": *categoryID}})
 	}
