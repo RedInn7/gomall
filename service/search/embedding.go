@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -25,8 +27,9 @@ const (
 
 // embeddingRequest 与多数主流 embedding 服务 (OpenAI / 兼容网关) 字段一致
 type embeddingRequest struct {
-	Model string `json:"model"`
-	Input string `json:"input"`
+	Model      string `json:"model"`
+	Input      string `json:"input"`
+	Dimensions int    `json:"dimensions"`
 }
 
 // embeddingResponse 兼容两种返回形态:
@@ -50,15 +53,12 @@ var embedHTTPClient httpDoer = &http.Client{Timeout: embeddingTimeout}
 //   - 未配置 EMBEDDING_API_URL：返回固定 dim=768 的占位向量 (SHA-256 衍生)，让上游接口能跑通
 //   - 配置了：POST {model, input}，5s 超时
 func EmbedText(ctx context.Context, text string) ([]float32, error) {
-	url := os.Getenv(envEmbeddingURL)
+	url := strings.TrimSpace(os.Getenv(envEmbeddingURL))
 	if url == "" {
 		return stubEmbedding(text), nil
 	}
-	model := os.Getenv(envEmbeddingMdl)
-	if model == "" {
-		model = defaultModel
-	}
-	payload, err := json.Marshal(embeddingRequest{Model: model, Input: text})
+	contract := CurrentEmbeddingContract()
+	payload, err := json.Marshal(embeddingRequest{Model: contract.Model, Input: text, Dimensions: contract.Dimensions})
 	if err != nil {
 		return nil, err
 	}
@@ -86,12 +86,24 @@ func EmbedText(ctx context.Context, text string) ([]float32, error) {
 		return nil, err
 	}
 	if len(parsed.Embedding) > 0 {
-		return parsed.Embedding, nil
+		return parsed.Embedding, validateEmbedding(parsed.Embedding, contract.Dimensions)
 	}
 	if len(parsed.Data) > 0 && len(parsed.Data[0].Embedding) > 0 {
-		return parsed.Data[0].Embedding, nil
+		return parsed.Data[0].Embedding, validateEmbedding(parsed.Data[0].Embedding, contract.Dimensions)
 	}
 	return nil, errors.New("embedding api returned empty vector")
+}
+
+func validateEmbedding(vec []float32, dimensions int) error {
+	if len(vec) != dimensions {
+		return fmt.Errorf("embedding dimension mismatch: got %d, want %d", len(vec), dimensions)
+	}
+	for i, value := range vec {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return fmt.Errorf("embedding contains non-finite value at index %d", i)
+		}
+	}
+	return nil
 }
 
 // stubEmbedding 用 SHA-256 衍生 768 维占位向量，保证同 text 得到同 vec，便于本地与测试
