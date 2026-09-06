@@ -91,6 +91,13 @@ func handleVectorProductChangedWith(ctx context.Context, ev events.ProductChange
 	if err != nil || p == nil {
 		return err
 	}
+	return syncProductVector(ctx, p, store, embed)
+}
+
+func syncProductVector(ctx context.Context, p *product.Product, store ProductVectorStore, embed embedFunc) error {
+	if !p.OnSale {
+		return store.Delete(ctx, p.ID)
+	}
 	vec, err := embed(ctx, productEmbeddingText(p))
 	if err != nil {
 		return err

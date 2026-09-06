@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +50,20 @@ func TestEmbeddingContractChangesCollectionAcrossModelsAndTextVersions(t *testin
 	}
 	if base.CollectionName() != base.CollectionName() {
 		t.Fatal("embedding contract fingerprint must be deterministic")
+	}
+}
+
+func TestEmbeddingContractSeparatesDifferentEndpointsWithoutLeakingSecrets(t *testing.T) {
+	t.Setenv(envEmbeddingProviderID, "")
+	t.Setenv(envEmbeddingMdl, "same-model")
+	t.Setenv(envEmbeddingURL, "https://provider-a.example/v1/embeddings?api_key=secret-a")
+	first := CurrentEmbeddingContract()
+	t.Setenv(envEmbeddingURL, "https://provider-b.example/v1/embeddings?api_key=secret-b")
+	second := CurrentEmbeddingContract()
+	if first.CollectionName() == second.CollectionName() {
+		t.Fatal("different embedding endpoints must not share a collection")
+	}
+	if strings.Contains(first.ProviderID, "secret-a") || strings.Contains(second.ProviderID, "secret-b") {
+		t.Fatal("endpoint identity must not retain query secrets")
 	}
 }
