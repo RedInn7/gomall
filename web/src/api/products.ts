@@ -35,6 +35,6 @@ export async function getProduct(id: number) {
 }
 
 export async function searchProducts(query: string) {
-  const data = await api('POST', '/api/v1/product/search', { query, name: query, title: query, page_size: 12 })
-  return itemsOf(data).map(mapProduct)
+	const data = await api('POST', '/api/v1/product/semantic-search', { query, top_k: 12 })
+	return itemsOf(data).map(mapProduct)
 }
