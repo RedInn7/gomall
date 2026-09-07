@@ -10,14 +10,19 @@ chapters=(
   "./exercises/04-payment-clearing/..."
   "./exercises/05-payment-settlement/..."
   "./exercises/07-product-search/..."
+  "./exercises/08-product-search-hybrid/..."
+  "./exercises/09-cart-to-order/..."
+  "./exercises/12-inventory/..."
 )
 race_student_packages=(
   "./exercises/05-payment-settlement/05.03-concurrent-idempotent-settlement/problem"
   "./exercises/05-payment-settlement/05.04-refund-settlement-race/problem"
+  "./exercises/12-inventory/12.01-atomic-reservation/problem"
 )
 race_solution_packages=(
   "./exercises/05-payment-settlement/05.03-concurrent-idempotent-settlement/solution"
   "./exercises/05-payment-settlement/05.04-refund-settlement-race/solution"
+  "./exercises/12-inventory/12.01-atomic-reservation/solution"
 )
 
 case "$mode" in
