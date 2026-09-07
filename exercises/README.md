@@ -21,7 +21,7 @@ solution/    参考实现
 每道题的 `problem/readme.md` 会说明业务背景和完成条件。先读题，再打开同目录下的 `.go` 文件，找到 `TODO`：
 
 ```bash
-rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down exercises/04-payment-clearing exercises/05-payment-settlement exercises/07-product-search
+rg -n "TODO" exercises/00-overview exercises/01-user-auth exercises/02-payment-up exercises/03-payment-down exercises/04-payment-clearing exercises/05-payment-settlement exercises/07-product-search exercises/08-product-search-hybrid exercises/09-cart-to-order exercises/12-inventory
 ```
 
 如果编辑器支持全局搜索，直接搜索 `TODO` 也可以。
@@ -389,3 +389,41 @@ gofmt -w exercises/*/*/problem/*.go
 ```
 
 实现还需要处理负数和到期边界、失败回滚、缓存隔离、渠道与余额约束、重复清算及借贷平衡等情况。
+
+## 第十讲：商品搜索（三）
+
+### 08.01 Hybrid Search 融合与 Top K
+
+```bash
+go test -tags exercise ./exercises/08-product-search-hybrid/08.01-hybrid-fusion/problem
+```
+
+实现两路召回的归一化、按商品 ID 融合、稳定排序与 Top K 截断；单路失败时降级，双路失败时返回错误。
+
+## 第十一、十二讲：购物车到下单
+
+### 09.01 服务端权威结算
+
+```bash
+go test -tags exercise ./exercises/09-cart-to-order/09.01-authoritative-checkout/problem
+```
+
+只相信认证用户和服务端商品、地址数据，正确区分未找到与依赖查询失败，并防止金额溢出。
+
+### 09.02 下单 Saga
+
+```bash
+go test -tags exercise ./exercises/09-cart-to-order/09.02-create-order-saga/problem
+```
+
+串联库存预占、订单与 Outbox 原子写入、幂等重放和失败补偿。
+
+## 第十三讲：库存与防超卖
+
+### 12.01 原子库存预占
+
+```bash
+go test -race -tags exercise ./exercises/12-inventory/12.01-atomic-reservation/problem
+```
+
+实现并发安全且幂等的 Reserve、Commit 和 Release，保证三桶库存非负且总量守恒。
