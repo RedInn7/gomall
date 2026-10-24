@@ -25,7 +25,7 @@ const (
 	defaultModel     = "text-embedding-3-small"
 )
 
-// embeddingRequest 与多数主流 embedding 服务 (OpenAI / 兼容网关) 字段一致
+// embeddingRequest 与多数主流 embedding 服务和兼容网关的字段一致
 type embeddingRequest struct {
 	Model      string `json:"model"`
 	Input      string `json:"input"`
@@ -33,7 +33,7 @@ type embeddingRequest struct {
 }
 
 // embeddingResponse 兼容两种返回形态:
-//  1. {"data":[{"embedding":[...]}]} — OpenAI 风格
+//  1. {"data":[{"embedding":[...]}]} — 托管 API 风格
 //  2. {"embedding":[...]}            — 自建 BGE / Ollama 风格
 type embeddingResponse struct {
 	Data []struct {
