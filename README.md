@@ -431,7 +431,6 @@ gomall
 │   ├── e               # 业务错误码
 │   ├── utils           # ctl / email / encryption / jwt / log / snowflake / track / upload
 │   └── web3            # Web3 escrow / signature 工具
-├── proto               # gRPC proto
 ├── repository
 │   ├── cache           # Redis（coupon / idempotency / inventory / product / ratelimit / redpacket / web3 / key）
 │   ├── db
@@ -440,7 +439,7 @@ gomall
 │   ├── milvus          # Milvus 向量库
 │   └── rabbitmq        # RMQ（domain / order_async / order_delay）
 ├── routes              # 路由 + 中间件链
-├── service             # 横切服务子包（events / grpc / inventory / search / web3）
+├── service             # 横切服务子包（events / inventory / search / web3）
 ├── static              # 静态资源
 ├── stressTest          # k6 压测脚本 + REPORT.md
 ├── types               # 公共信封（BasePage / DataListResp）
