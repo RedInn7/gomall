@@ -20,6 +20,7 @@ import (
 
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/web3/escrow"
 	"github.com/RedInn7/gomall/repository/cache"
 )
 
@@ -38,18 +39,9 @@ const (
 	pollInterval = 12 * time.Second
 )
 
-// paymentConfirmedABI 与 escrow 合约里定义的 PaymentConfirmed event 形参对齐。
-// 解码用通用 ABI，避免依赖具体合约的 Go binding。
-const paymentConfirmedABI = `[{
-  "anonymous": false,
-  "inputs": [
-    {"indexed": true,  "internalType": "bytes32", "name": "orderID", "type": "bytes32"},
-    {"indexed": false, "internalType": "address", "name": "buyer",   "type": "address"},
-    {"indexed": false, "internalType": "uint256", "name": "amount",  "type": "uint256"}
-  ],
-  "name": "PaymentConfirmed",
-  "type": "event"
-}]`
+// errMalformedLog 标记日志本身解不出来的永久错误：重扫同一条日志结果不会变，
+// 告警后跳过即可；若当成临时错误卡住水位，之后所有链上付款都无法入账。
+var errMalformedLog = errors.New("malformed PaymentConfirmed log")
 
 // ethClient 抽象出 listener 用到的 ethclient.Client 子集，便于单测注入 mock。
 type ethClient interface {
@@ -119,26 +111,30 @@ func StartPaymentListener(ctx context.Context) error {
 
 func startPaymentListener(ctx context.Context, opts listenerOpts) error {
 	rpcURL := strings.TrimSpace(os.Getenv(envRPCURL))
-	escrow := strings.TrimSpace(os.Getenv(envEscrowAddr))
-	if rpcURL == "" || escrow == "" {
+	escrowAddr := strings.TrimSpace(os.Getenv(envEscrowAddr))
+	if rpcURL == "" || escrowAddr == "" {
 		util.LogrusObj.Infoln("Web3 listener: WEB3_RPC_URL / WEB3_ESCROW_ADDR 未配置，跳过启动")
 		return nil
 	}
-	if !common.IsHexAddress(escrow) {
-		return fmt.Errorf("invalid escrow address %q", escrow)
+	if !common.IsHexAddress(escrowAddr) {
+		return fmt.Errorf("invalid escrow address %q", escrowAddr)
 	}
 
-	parsedABI, err := abi.JSON(strings.NewReader(paymentConfirmedABI))
+	// 直接用合约构建产物里的 ABI，不再内嵌一份手抄版本，避免和 Escrow.sol 再次漂移
+	parsedABI, err := abi.JSON(strings.NewReader(escrow.EscrowABI))
 	if err != nil {
-		return fmt.Errorf("parse PaymentConfirmed abi: %w", err)
+		return fmt.Errorf("parse escrow abi: %w", err)
 	}
-	topic := crypto.Keccak256Hash([]byte("PaymentConfirmed(bytes32,address,uint256)"))
+	event, ok := parsedABI.Events["PaymentConfirmed"]
+	if !ok {
+		return errors.New("escrow abi has no PaymentConfirmed event")
+	}
 
 	l := &listener{
 		rpcURL:       rpcURL,
-		escrow:       common.HexToAddress(escrow),
+		escrow:       common.HexToAddress(escrowAddr),
 		abi:          parsedABI,
-		topic:        topic,
+		topic:        event.ID,
 		confirmDepth: confirmDepth(),
 		dial:         opts.dial,
 		outbox:       opts.outbox,
@@ -146,7 +142,7 @@ func startPaymentListener(ctx context.Context, opts listenerOpts) error {
 		backoff:      newBackoff(time.Second, time.Minute),
 	}
 	go l.run(ctx)
-	util.LogrusObj.Infof("Web3 listener started escrow=%s confirmDepth=%d", escrow, l.confirmDepth)
+	util.LogrusObj.Infof("Web3 listener started escrow=%s confirmDepth=%d", escrowAddr, l.confirmDepth)
 	return nil
 }
 
@@ -294,6 +290,11 @@ func (l *listener) scanConfirmed(ctx context.Context, client ethClient) error {
 			continue
 		}
 		if err := l.handleLog(ctx, lg); err != nil {
+			if errors.Is(err, errMalformedLog) {
+				// 解码类错误重扫也不会好：记 error 留给人工核对后跳过，不卡水位
+				util.LogrusObj.Errorf("Web3 listener skip malformed log tx=%s logIdx=%d block=%d err=%v", lg.TxHash.Hex(), lg.Index, lg.BlockNumber, err)
+				continue
+			}
 			util.LogrusObj.Errorf("Web3 listener handle log tx=%s logIdx=%d block=%d err=%v", lg.TxHash.Hex(), lg.Index, lg.BlockNumber, err)
 			if failedFromBlock == 0 || lg.BlockNumber < failedFromBlock {
 				failedFromBlock = lg.BlockNumber
@@ -330,31 +331,28 @@ func (l *listener) handleLog(ctx context.Context, lg types.Log) error {
 	// 校验事件确实来自配置的 escrow 合约地址。FilterQuery 已按地址过滤，
 	// 这里再做一次防御性核对，杜绝任意合约伪造同名事件冒充结算来源。
 	if lg.Address != l.escrow {
-		return fmt.Errorf("event from unexpected contract %s, want %s", lg.Address.Hex(), l.escrow.Hex())
+		return fmt.Errorf("%w: event from unexpected contract %s, want %s", errMalformedLog, lg.Address.Hex(), l.escrow.Hex())
 	}
 	// 同理校验事件签名 topic，避免地址匹配但事件类型不符的脏数据。
 	if len(lg.Topics) == 0 || lg.Topics[0] != l.topic {
-		return fmt.Errorf("unexpected event topic")
+		return fmt.Errorf("%w: unexpected event topic", errMalformedLog)
 	}
-	if len(lg.Topics) < 2 {
-		return fmt.Errorf("malformed log: topics=%d", len(lg.Topics))
+	// 合约里 orderID、buyer 都是 indexed，分别在 topics[1]、topics[2]；data 里只有 amount
+	if len(lg.Topics) != 3 {
+		return fmt.Errorf("%w: topics=%d", errMalformedLog, len(lg.Topics))
 	}
-	// indexed 参数走 topic，non-indexed 走 data
 	orderID := lg.Topics[1]
+	buyer := common.BytesToAddress(lg.Topics[2].Bytes())
 	values, err := l.abi.Unpack("PaymentConfirmed", lg.Data)
 	if err != nil {
-		return fmt.Errorf("unpack data: %w", err)
+		return fmt.Errorf("%w: unpack data: %v", errMalformedLog, err)
 	}
-	if len(values) != 2 {
-		return fmt.Errorf("unexpected non-indexed args: %d", len(values))
+	if len(values) != 1 {
+		return fmt.Errorf("%w: unexpected non-indexed args: %d", errMalformedLog, len(values))
 	}
-	buyer, ok := values[0].(common.Address)
-	if !ok {
-		return fmt.Errorf("buyer type assertion failed")
-	}
-	amount, ok := values[1].(*big.Int)
+	amount, ok := values[0].(*big.Int)
 	if !ok || amount == nil {
-		return fmt.Errorf("amount type assertion failed")
+		return fmt.Errorf("%w: amount type assertion failed", errMalformedLog)
 	}
 
 	ev := PaymentConfirmed{
