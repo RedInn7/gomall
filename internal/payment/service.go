@@ -57,8 +57,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 
-		if order.Type != consts.OrderWaitPay {
-			err = errors.New("订单状态非未支付，无法重复支付")
+		if err = ensureOrderPayable(order); err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}

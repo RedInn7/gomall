@@ -108,8 +108,8 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	if order.Type != consts.OrderWaitPay {
-		return nil, errors.New("订单状态非未支付，无法发起支付")
+	if err := ensureOrderPayable(order); err != nil {
+		return nil, err
 	}
 
 	// 实付口径统一走 orderPayableCents（命中促销取折后 FinalCents），与钱包 / Web3 路径一致。
