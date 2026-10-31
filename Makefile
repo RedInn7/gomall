@@ -50,12 +50,12 @@ build-agent:
 
 .PHONY: env-up		# 启动环境
 env-up:
-	docker-compose up -d
+	docker compose up -d
 	@echo "env start success"
 
 .PHONY: env-down	# 关闭环境
 env-down:
-	docker-compose down
+	docker compose down
 	@echo "env stop success"
 
 .PHONY: docker-up	# 以容器形式部署项目
