@@ -99,7 +99,7 @@ func loading(ctx context.Context) *cron.Cron {
 		panic(err)
 	}
 	cache.InitCache()
-	c := initialize.InitCron(ctx)
+	c := initialize.InitCron()
 	// 大数据集的库存预热可能需要数分钟，InitInventory 在后台执行，让商品浏览、登录等
 	// 不依赖库存桶的接口先开始服务；还没建桶的商品下单时按 DB 补建。
 	initialize.InitInventory(ctx)
