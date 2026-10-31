@@ -13,14 +13,11 @@ import (
 	"github.com/RedInn7/gomall/internal/redpacket"
 	"github.com/RedInn7/gomall/internal/refund"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
-	"github.com/RedInn7/gomall/service/inventory"
 )
 
 // InitCron 注册并启动定时任务，返回 cron 实例：退出时 <-c.Stop().Done() 等在跑的任务结束。
-// ctx 取消后，接收 ctx 的任务（available 对账）会尽快结束本轮。
-func InitCron(ctx context.Context) *cron.Cron {
+func InitCron() *cron.Cron {
 	c := cron.New(cron.WithSeconds())
 	orderService := new(order.OrderTaskService)
 	// @every 5m 而非 "* */5 * * * *"：后者在 WithSeconds 下是「分钟能被 5 整除时每秒触发」，
@@ -50,27 +47,6 @@ func InitCron(ctx context.Context) *cron.Cron {
 	})
 	if err != nil {
 		panic(fmt.Sprintf("StockReconcile Cron 初始化失败: %v", err))
-	}
-
-	// available 桶对账兜底：按 DB num - reserved 纠正 available 的漂移（退款回补了 DB 库存、
-	// 改库存后写 Redis 失败、Redis 丢键等）。每个漂移商品要隔 5s 二次采样，一轮可能跑很久；
-	// 两轮重叠会把同一笔漂移纠两次，所以上一轮没跑完就跳过本轮。
-	if _, e := c.AddJob("@every 10m", cron.NewChain(cron.SkipIfStillRunning(cron.DefaultLogger)).Then(cron.FuncJob(func() {
-		defer func() {
-			if r := recover(); r != nil {
-				util.LogrusObj.Errorf("AvailableReconcile Cron Panic: %v", r)
-			}
-		}()
-		// 多实例部署时每个实例都会触发：抢一把 9 分钟后自动过期的锁，每 10 分钟只有一个实例跑。
-		// ponytail: 单轮超过 9 分钟仍可能和别的实例重叠，漂移商品很多时再换成带续期的锁
-		if ok, err := cache.RedisClient.SetNX(ctx, "stock:reconcile:available:lock", 1, 9*time.Minute).Result(); err != nil || !ok {
-			return
-		}
-		if err := inventory.ReconcileAvailable(ctx, 500); err != nil {
-			util.LogrusObj.Errorf("AvailableReconcile 执行失败: %v", err)
-		}
-	}))); e != nil {
-		util.LogrusObj.Errorf("AvailableReconcile Cron 注册失败: %v", e)
 	}
 
 	redPacketService := new(redpacket.RedPacketTaskService)
