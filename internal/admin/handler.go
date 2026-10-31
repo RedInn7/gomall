@@ -45,10 +45,17 @@ func AdminPromoteUserHandler() gin.HandlerFunc {
 	}
 }
 
-// BootstrapAdminHandler 仅当系统无 admin 时可用
+// BootstrapAdminHandler 仅当系统无 admin、且请求带上服务端配置的 ADMIN_BOOTSTRAP_TOKEN 时可用
 func BootstrapAdminHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if err := GetAdminSrv().BootstrapPromoteSelf(c.Request.Context()); err != nil {
+		type bootstrapReq struct {
+			Token string `json:"token" form:"token"`
+		}
+		req, ok := response.Bind[bootstrapReq](c)
+		if !ok {
+			return
+		}
+		if err := GetAdminSrv().BootstrapPromoteSelf(c.Request.Context(), req.Token); err != nil {
 			response.Fail(c, err)
 			return
 		}
