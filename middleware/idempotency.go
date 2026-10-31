@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
@@ -20,6 +21,13 @@ const (
 	// 提交/释放属于请求返回后的清理动作，使用独立的后台超时，避免请求 ctx 已取消导致清理失败
 	idempotencyCleanupTimeout = 3 * time.Second
 	idempotencyCommitRetries  = 3
+)
+
+// 幂等状态机的 Redis 操作，单测替换成内存实现
+var (
+	acquireIdempotency = cache.AcquireIdempotencyLock
+	commitIdempotency  = cache.CommitIdempotencyResult
+	releaseIdempotency = cache.ReleaseIdempotencyLock
 )
 
 // responseRecorder 拷贝写入的响应体，便于幂等命中时回放
@@ -65,7 +73,7 @@ func Idempotency() gin.HandlerFunc {
 		}
 
 		key := cache.IdempotencyTokenKey(user.Id, token)
-		state, cached, err := cache.AcquireIdempotencyLock(c.Request.Context(), key)
+		state, cached, err := acquireIdempotency(c.Request.Context(), key)
 		if err != nil {
 			log.LogrusObj.Errorln("idempotency lua error:", err)
 			c.JSON(http.StatusOK, gin.H{
@@ -104,9 +112,19 @@ func Idempotency() gin.HandlerFunc {
 		recorder := &responseRecorder{ResponseWriter: c.Writer, body: bytes.NewBuffer(nil)}
 		c.Writer = recorder
 
+		// handler panic 时 c.Next 不会正常返回，key 会停在 processing 直到 TTL 过期；
+		// 先回退到 init 让客户端能重试，再把 panic 原样抛给外层 Recovery。
+		defer func() {
+			if r := recover(); r != nil {
+				releaseIdempotencyLock(key)
+				panic(r)
+			}
+		}()
 		c.Next()
 
-		if len(c.Errors) > 0 || recorder.Status() >= http.StatusBadRequest {
+		// response.Fail 的业务失败（余额不足、密码错误等）也是 HTTP 200，靠它在 ctx 上的标记识别；
+		// 失败不缓存成 done，同一个 key 改正后还能重试
+		if len(c.Errors) > 0 || recorder.Status() >= http.StatusBadRequest || response.Failed(c) {
 			releaseIdempotencyLock(key)
 			return
 		}
@@ -117,20 +135,19 @@ func Idempotency() gin.HandlerFunc {
 
 // commitIdempotencyResult 将幂等记录从 processing 推进到 done 并缓存响应体。
 // 业务副作用此时已落库、2xx 也已返回给客户端，因此提交失败不能静默吞掉：
-// 在后台 context 内带超时重试若干次；若仍失败则把记录回退到 init，
-// 让客户端可以用同一 token 安全重试，而不是把记录滞留在 processing 直到 TTL 过期。
+// 在后台 context 内带超时重试若干次；仍失败就让记录停在 processing 等 TTL 过期。
+// 不能回退到 init：那会让同一 token 再放行一次，把已经成功的副作用重复执行。
 func commitIdempotencyResult(key, result string) {
 	for i := 0; i < idempotencyCommitRetries; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), idempotencyCleanupTimeout)
-		err := cache.CommitIdempotencyResult(ctx, key, result)
+		err := commitIdempotency(ctx, key, result)
 		cancel()
 		if err == nil {
 			return
 		}
 		log.LogrusObj.Errorln("idempotency commit error:", err)
 	}
-	// 多次提交仍失败，回退到 init 解除 processing 卡死，优先保证客户端可重试
-	releaseIdempotencyLock(key)
+	log.LogrusObj.Errorln("idempotency commit gave up, token stays processing until TTL expires")
 }
 
 // releaseIdempotencyLock 在后台 context 内把幂等记录回退到 init，
@@ -138,7 +155,7 @@ func commitIdempotencyResult(key, result string) {
 func releaseIdempotencyLock(key string) {
 	ctx, cancel := context.WithTimeout(context.Background(), idempotencyCleanupTimeout)
 	defer cancel()
-	if err := cache.ReleaseIdempotencyLock(ctx, key); err != nil {
+	if err := releaseIdempotency(ctx, key); err != nil {
 		log.LogrusObj.Errorln("idempotency release error:", err)
 	}
 }
