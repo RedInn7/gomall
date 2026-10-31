@@ -48,3 +48,15 @@ func TestSaveImageUsesRandomName(t *testing.T) {
 		t.Fatal("非图片内容应被拒绝")
 	}
 }
+
+// OSS 上传在连七牛之前就要拦下非图片与超大文件（不配置 OSS 也能跑）。
+func TestUploadToQiNiuValidatesBeforeUpload(t *testing.T) {
+	for name, content := range map[string][]byte{
+		"非图片":    []byte("<script>alert(1)</script>"),
+		"超过 5MB": append(append([]byte{}, pngBytes...), make([]byte, maxImageSize)...),
+	} {
+		if _, err := UploadToQiNiu(newMemFile(content), int64(len(content))); err == nil {
+			t.Fatalf("%s 应被拒绝", name)
+		}
+	}
+}
