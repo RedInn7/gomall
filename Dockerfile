@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM golang:1.26 AS builder
 
 ENV GO111MODULE=on \
@@ -6,9 +7,13 @@ ENV GO111MODULE=on \
 WORKDIR /app
 # 先只拷依赖清单，源码改动时可以复用依赖下载这一层缓存
 COPY go.mod go.sum ./
-RUN go mod download
+# 模块和编译缓存挂到 BuildKit 缓存卷，跨次构建复用，不进镜像层
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o main ./cmd
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o main ./cmd
 # 路由从 ./web/dist 托管店面，产物要落在 publish/web/dist
 RUN mkdir -p publish/web \
     && cp main publish \

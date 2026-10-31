@@ -25,6 +25,8 @@ func StockReservedKey(productID uint) string {
 var (
 	ErrStockInsufficient = errors.New("库存不足")
 	ErrStockNotInit      = errors.New("库存未初始化")
+	// ErrReservationShort reserved 桶不够核销：这份预占已经不在 reserved 里，重试也核销不掉。
+	ErrReservationShort = errors.New("预占不足，无法核销")
 )
 
 // reserveScript: 检查 available >= n，然后 available -= n, reserved += n
@@ -102,6 +104,14 @@ redis.call('SET', KEYS[1], target)
 return target
 `)
 
+// restockScript: 退款回补，available += n；available 不存在（未初始化）时不建桶
+var restockScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    redis.call('INCRBY', KEYS[1], ARGV[1])
+end
+return 1
+`)
+
 // InitStock 把商品库存水位写入 available 桶（覆盖写），reserved 初始 0
 func InitStock(ctx context.Context, productID uint, available int64) error {
 	pipe := RedisClient.TxPipeline()
@@ -152,7 +162,7 @@ func CommitReservation(ctx context.Context, productID uint, n int64) error {
 	}
 	code, _ := res.(int64)
 	if code != 1 {
-		return fmt.Errorf("commit reservation failed (product=%d, n=%d): code=%d", productID, n, code)
+		return fmt.Errorf("%w (product=%d, n=%d): code=%d", ErrReservationShort, productID, n, code)
 	}
 	return nil
 }
@@ -170,6 +180,12 @@ func ReleaseReservation(ctx context.Context, productID uint, n int64) error {
 		return fmt.Errorf("release reservation failed (product=%d, n=%d): code=%d", productID, n, code)
 	}
 	return nil
+}
+
+// RestockAvailable 退款回补：available += n。available 桶不存在时什么也不做——
+// 之后按 DB 水位（已含这次回补）初始化，不能凭空建一个只有 n 的桶。
+func RestockAvailable(ctx context.Context, productID uint, n int64) error {
+	return restockScript.Run(ctx, RedisClient, []string{StockAvailableKey(productID)}, n).Err()
 }
 
 // ScanReservedProductIDs 扫出当前所有存在 reserved 桶的商品 ID，供对账兜底枚举。

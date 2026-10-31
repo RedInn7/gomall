@@ -52,21 +52,55 @@ const stockReconcileGrace = 5 * time.Second
 // 支付路径先在 DB 事务把订单推进到 WaitShip，再在事务外扣 reserved；这两步之间订单已离开
 // WaitPay 但 reserved 仍占着。对账时把「最近 stockCommitGrace 内刚推进到 WaitShip」的订单量
 // 并入基准，避免把这笔在途预占误判成泄漏而回收，否则随后支付侧 CommitReservation 会净超卖。
-// 取值远大于事务提交到 commit 之间的耗时（通常亚秒级），30s 留足重试 / 抖动余量。
+// 取值远大于事务提交到 commit 之间的耗时（通常亚秒级），30s 留足重试 / 抖动余量；
+// 重试后仍没核销掉的订单另打 StockCommitPending 标记，不受这个窗口限制。
 const stockCommitGrace = 30 * time.Second
+
+// stockCommitRetries 支付成功后核销 Redis 预占的尝试次数，间隔 100ms、200ms。
+const stockCommitRetries = 3
+
+// CommitStockReservation 支付 / 成团 / 付尾款落库后核销 Redis 预占（reserved 减 num）。
+// DB 已真正扣减库存，这里只同步缓存，失败不回滚支付：先短暂重试，仍失败就给订单打
+// StockCommitPending 标记，库存对账把它当合法占用并补核销，不会当泄漏退回 available 造成超卖。
+// reserved 已不够核销（ErrReservationShort）说明这份预占早已不在 reserved 里，重试和标记都没有意义。
+func CommitStockReservation(ctx context.Context, orderID, productID uint, num int) {
+	if productID == 0 || num <= 0 {
+		return
+	}
+	// 请求方断开不能让核销跟着失败：支付已经落库了。
+	ctx = context.WithoutCancel(ctx)
+	var err error
+	for i := 0; i < stockCommitRetries; i++ {
+		if i > 0 {
+			time.Sleep(time.Duration(50<<i) * time.Millisecond)
+		}
+		if err = cache.CommitReservation(ctx, productID, int64(num)); err == nil {
+			return
+		}
+		if errors.Is(err, cache.ErrReservationShort) {
+			util.LogrusObj.Errorf("commit reservation failed order=%d product=%d num=%d err=%v", orderID, productID, num, err)
+			return
+		}
+	}
+	util.LogrusObj.Errorf("commit reservation failed, mark pending order=%d product=%d num=%d err=%v", orderID, productID, num, err)
+	if _, e := NewOrderDao(ctx).SetStockCommitPending(orderID, true); e != nil {
+		util.LogrusObj.Errorf("mark stock commit pending failed order=%d err=%v", orderID, e)
+	}
+}
 
 // RunStockReservationReconcile 对账 Redis reserved 桶与 DB 未支付订单，回收泄漏的预占。
 //
 // 为什么需要它：下单是「先写 Redis reserved，再提交 DB 订单」的双写，二者没有跨系统
 // 原子性。进程在两步之间崩溃会留下「Redis 占了、DB 无订单」的孤儿预占；这种单子既没有
 // 订单行（GetTimeoutOrders 扫不到）、也没有延迟消息，任何关单路径都救不回来，库存被永久
-// 占死。本任务按商品重算 reserved 应有水位（Σ WaitPay 订单 Num），把多出来的退回 available。
+// 占死。本任务按商品重算 reserved 应有水位（Σ WaitPay / WaitGroup 订单 Num），把多出来的退回 available。
 //
 // 只回收「多占」（reserved > Σ订单），绝不反向给 reserved 补量 —— 少占可能是 Redis 丢数据，
 // 盲目从 available 搬运会超卖。为躲开「建单在途」假阳性，采两次样取交集（min）：真泄漏两次
 // 都在，在途预占第二次已落 DB 而消失。
 func (s *OrderTaskService) RunStockReservationReconcile() {
 	ctx := context.Background()
+	s.retryPendingCommits(ctx)
 	leak1, err := s.sampleReservationLeak(ctx)
 	if err != nil {
 		util.LogrusObj.Errorf("StockReconcile 首次采样失败: %v", err)
@@ -94,17 +128,44 @@ func (s *OrderTaskService) RunStockReservationReconcile() {
 			util.LogrusObj.Errorf("StockReconcile 释放泄漏预占失败 product=%d n=%d err=%v", pid, leaked, err)
 			continue
 		}
-		util.LogrusObj.Warnf("StockReconcile 回收泄漏预占 product=%d n=%d（reserved 超出 WaitPay 订单口径）", pid, leaked)
+		util.LogrusObj.Warnf("StockReconcile 回收泄漏预占 product=%d n=%d（reserved 超出 WaitPay / WaitGroup 订单口径）", pid, leaked)
+	}
+}
+
+// retryPendingCommits 补核销支付时没核销掉的预占（StockCommitPending）。
+// 先把标记翻掉再核销，多实例不会重复核销；Redis 不可用就把标记还回去，下一轮再试；
+// reserved 已不够核销说明预占早已不在 reserved 里（Redis 丢过数据并按 DB 重新初始化等），直接丢弃标记。
+func (s *OrderTaskService) retryPendingCommits(ctx context.Context) {
+	dao := NewOrderDao(ctx)
+	orders, err := dao.ListStockCommitPending(100)
+	if err != nil {
+		util.LogrusObj.Errorf("StockReconcile 拉取待核销订单失败: %v", err)
+		return
+	}
+	for _, o := range orders {
+		if claimed, err := dao.SetStockCommitPending(o.ID, false); err != nil || !claimed {
+			continue
+		}
+		err := cache.CommitReservation(ctx, o.ProductID, int64(o.Num))
+		if err == nil || errors.Is(err, cache.ErrReservationShort) {
+			util.LogrusObj.Warnf("StockReconcile 补核销预占 order=%d product=%d n=%d err=%v", o.ID, o.ProductID, o.Num, err)
+			continue
+		}
+		util.LogrusObj.Errorf("StockReconcile 补核销失败 order=%d product=%d err=%v", o.ID, o.ProductID, err)
+		if _, e := dao.SetStockCommitPending(o.ID, true); e != nil {
+			util.LogrusObj.Errorf("StockReconcile 恢复待核销标记失败 order=%d err=%v", o.ID, e)
+		}
 	}
 }
 
 // sampleReservationLeak 采一次样：对每个存在 reserved 桶的商品，算
-// reserved - Σ(WaitPay Num) - Σ(刚支付待 commit 的 Num)，正值即疑似泄漏。返回 map[productID]leak(>0)。
+// reserved - Σ(WaitPay / WaitGroup Num) - Σ(已支付待核销的 Num)，正值即疑似泄漏。返回 map[productID]leak(>0)。
 //
 // 基准里减去两类合法占用：
-//   - WaitPay 订单：reserved 的正常归属；
-//   - 刚推进到 WaitShip 且在 stockCommitGrace 内的订单：支付已成功但 Redis 尚未 CommitReservation
-//     的在途预占。这一项是关键防线，避免把「支付成功但 commit 在途」的预占误回收成泄漏。
+//   - WaitPay / WaitGroup 订单：reserved 的正常归属（拼团单成团时才核销）；
+//   - 已支付但 Redis 尚未 CommitReservation 的订单：刚推进到 WaitShip、仍在 stockCommitGrace 内的在途单，
+//     以及重试后仍没核销、打了 StockCommitPending 标记的订单。这一项是关键防线，
+//     避免把「支付成功但 commit 没完成」的预占误回收成泄漏。
 func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]int64, error) {
 	pids, err := cache.ScanReservedProductIDs(ctx)
 	if err != nil {
@@ -114,11 +175,11 @@ func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]
 		return nil, nil
 	}
 	dao := NewOrderDao(ctx)
-	waitPaySum, err := dao.SumWaitPayNumByProduct()
+	waitPaySum, err := dao.SumReservedNumByProduct()
 	if err != nil {
 		return nil, err
 	}
-	inflightSum, err := dao.SumRecentlyPaidNumByProduct(time.Now().Add(-stockCommitGrace))
+	inflightSum, err := dao.SumCommitPendingNumByProduct(time.Now().Add(-stockCommitGrace))
 	if err != nil {
 		return nil, err
 	}

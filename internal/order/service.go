@@ -27,6 +27,14 @@ import (
 
 const OrderTimeKey = "OrderTime"
 
+// maxUnpaidOrdersPerUser 单个用户同时挂着的未支付订单上限：每张未支付单都占着库存预占，
+// 不设上限就能靠下单不付款把库存占光。
+// ponytail: 查数和建单不在一个事务里，并发下单可能略微超出；防刷够用，要精确再加用户级锁。
+const maxUnpaidOrdersPerUser = 20
+
+// ErrTooManyUnpaidOrders 未支付订单数到了上限。
+var ErrTooManyUnpaidOrders = errors.New("未支付订单过多，请先支付或取消已有订单")
+
 var OrderSrvIns *OrderSrv
 var OrderSrvOnce sync.Once
 
@@ -66,6 +74,9 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	if err = ensureUnpaidQuota(ctx, u.Id); err != nil {
 		return nil, err
 	}
 
@@ -246,7 +257,7 @@ func buildPromoCartItems(productID uint, categoryID, unitCents, qty int64) []pro
 }
 
 // resolveProductPricing 从商品表反查权威单价（分）、类目与卖家，作为下单计费 / 打款的唯一来源。
-// 单价换算与取价优先级（DiscountPrice→Price）集中在 product.Product.UnitCents；商品不存在或
+// 单价换算与取价优先级（DiscountPrice→Price）集中在 product.Product.UnitCents；商品不存在、已下架或
 // 定价非法直接返回 error 由调用方拒单，绝不回退到客户端传入的金额 / 卖家。
 func resolveProductPricing(ctx context.Context, productID uint) (unitCents int64, categoryID int64, bossID uint, err error) {
 	pdao := product.NewProductDao(ctx)
@@ -257,11 +268,27 @@ func resolveProductPricing(ctx context.Context, productID uint) (unitCents int64
 	if perr != nil || p == nil {
 		return 0, 0, 0, fmt.Errorf("商品不存在或查询失败 product=%d: %w", productID, perr)
 	}
+	if !p.OnSale {
+		return 0, 0, 0, product.ErrProductNotOnSale
+	}
 	cents, ok := p.UnitCents()
 	if !ok {
 		return 0, 0, 0, fmt.Errorf("商品定价非法 product=%d discount=%q price=%q", productID, p.DiscountPrice, p.Price)
 	}
 	return cents, int64(p.CategoryID), p.BossID, nil
+}
+
+// ensureUnpaidQuota 未支付订单数到上限就拒绝再下单（同步 / 异步下单共用）。
+func ensureUnpaidQuota(ctx context.Context, userID uint) error {
+	n, err := NewOrderDao(ctx).CountUnpaidByUser(userID)
+	if err != nil {
+		util.LogrusObj.Errorf("count unpaid orders failed user=%d err=%v", userID, err)
+		return err
+	}
+	if n >= maxUnpaidOrdersPerUser {
+		return ErrTooManyUnpaidOrders
+	}
+	return nil
 }
 
 // resolveProductSettlement 仅取权威单价（分）与卖家，异步消费侧不需要类目时用它。
@@ -270,8 +297,8 @@ func resolveProductSettlement(ctx context.Context, productID uint) (unitCents in
 	return cents, boss, err
 }
 
-// OrderDelete 软删订单。成功时不回传订单体（保持既有 API 契约：data 为 null），
-// 仅用 ShowOrderById 做存在性校验。
+// OrderDelete 删除订单（物理删除）。成功时不回传订单体（保持既有 API 契约：data 为 null）。
+// 只能删资金已闭环的终态订单，判定见 DeleteOrderById。
 func (s *OrderSrv) OrderDelete(ctx context.Context, req *OrderDeleteReq) (*OrderListRespItem, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -279,18 +306,21 @@ func (s *OrderSrv) OrderDelete(ctx context.Context, req *OrderDeleteReq) (*Order
 		return nil, err
 	}
 	db := NewOrderDao(ctx)
-	ret, err := db.ShowOrderById(req.OrderId, u.Id)
-	if err != nil {
-		util.LogrusObj.Error("ShowOrderById失败，err:", err)
-		return nil, err
-	}
-	if ret == nil || ret.ID == 0 {
-		return nil, errors.New("没有查找到数据")
-	}
-
-	if err = db.DeleteOrderById(req.OrderId, u.Id); err != nil {
+	if _, err = db.GetOrderById(req.OrderId, u.Id); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("没有查找到数据")
+		}
 		util.LogrusObj.Error(err)
 		return nil, err
+	}
+
+	deleted, err := db.DeleteOrderById(req.OrderId, u.Id)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	if !deleted {
+		return nil, errors.New("订单尚未结束或资金未结清，暂不能删除")
 	}
 
 	return nil, nil

@@ -111,7 +111,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 			return e
 		}
 
-		if e := debitUser(tx, u.Id, bossID, req.Key, pp.DepositCents, ord.ID, money.BizTypePreorderDeposit); e != nil {
+		if e := debitUser(ctx, tx, u.Id, bossID, req.Key, pp.DepositCents, ord.ID, money.BizTypePreorderDeposit); e != nil {
 			return e
 		}
 
@@ -192,7 +192,7 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*Pre
 
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		// 1) 扣尾款
-		if e := debitUser(tx, u.Id, ord.BossID, req.Key, pp.FinalCents, ord.ID, money.BizTypePreorderFinal); e != nil {
+		if e := debitUser(ctx, tx, u.Id, ord.BossID, req.Key, pp.FinalCents, ord.ID, money.BizTypePreorderFinal); e != nil {
 			return e
 		}
 
@@ -232,9 +232,7 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*Pre
 	}
 
 	// 事务成功后再清 Redis reserved，cache 失败不回滚 DB（业务真相在 DB）
-	if cErr := cache.CommitReservation(ctx, ord.ProductID, int64(ord.Num)); cErr != nil {
-		util.LogrusObj.Errorf("commit reservation on final paid failed orderID=%d err=%v", ord.ID, cErr)
-	}
+	order.CommitStockReservation(ctx, ord.ID, ord.ProductID, ord.Num)
 
 	return &PreorderActionResp{
 		OrderID:       ord.ID,
@@ -285,7 +283,7 @@ func (s *PreorderSrv) CancelPreorderInDepositWindow(ctx context.Context, req *Pr
 
 	err = baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		// 1) 全额退还定金到用户
-		if e := refundUser(tx, u.Id, ord.BossID, req.Key, pp.DepositCents, ord.ID, money.BizTypePreorderRefund); e != nil {
+		if e := refundUser(ctx, tx, u.Id, ord.BossID, req.Key, pp.DepositCents, ord.ID, money.BizTypePreorderRefund); e != nil {
 			return e
 		}
 		// 2) 状态机重置：preorder_stage 1->0, type WaitPay->Closed
@@ -454,7 +452,7 @@ func (s *PreorderSrv) ShowPreorder(ctx context.Context, productID uint) (*Preord
 // 余额密文落库不可对账，故在同一事务内为这笔买家→卖家的资金转移追加成对台账流水：
 // 买家 debit + 卖家 credit，bizType 区分定金 / 尾款两阶段。balance_after 记各方变更后余额，
 // (ref_order_id, direction, biz_type) 唯一索引兜底，事务失败一起回滚。
-func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, refOrderID uint, bizType string) error {
+func debitUser(ctx context.Context, tx *gorm.DB, userID, bossID uint, key string, amountCents int64, refOrderID uint, bizType string) error {
 	if amountCents <= 0 {
 		return nil
 	}
@@ -465,15 +463,15 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, 
 	if err != nil {
 		return err
 	}
-	if !u.CheckMoneyPassword(key) {
-		return user.ErrMoneyKeyIncorrect
+	if err := user.VerifyMoneyPassword(ctx, u, key); err != nil {
+		return err
 	}
 	userMoney, err := u.DecryptMoney()
 	if err != nil {
 		return err
 	}
 	if userMoney-amountCents < 0 {
-		return errors.New("金额不足")
+		return user.ErrInsufficientBalance
 	}
 	buyerBalanceAfter := userMoney - amountCents
 	u.Money = strconv.FormatInt(buyerBalanceAfter, 10)
@@ -481,7 +479,7 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, 
 	if err != nil {
 		return err
 	}
-	if err := userDao.UpdateUserById(userID, u); err != nil {
+	if err := userDao.UpdateUserMoney(userID, u.Money); err != nil {
 		return err
 	}
 	// 买家扣款流水：与余额变动同事务追加
@@ -504,7 +502,7 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, 
 	if err != nil {
 		return err
 	}
-	if err := userDao.UpdateUserById(bossID, boss); err != nil {
+	if err := userDao.UpdateUserMoney(bossID, boss.Money); err != nil {
 		return err
 	}
 	// 卖家入账流水：方向与买家相反，与买家流水配对保持 SUM(debit)=SUM(credit)
@@ -516,7 +514,7 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, 
 // 退款是定金的反向转移（卖家→买家），同一事务内追加成对台账流水：卖家 debit + 买家 credit，
 // bizType=preorder_refund。该 biz_type 与定金 / 尾款不同，故同一订单上退款流水与定金 debit
 // 不冲突；(ref_order_id, direction, biz_type) 唯一索引兜底，事务失败一起回滚。
-func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, refOrderID uint, bizType string) error {
+func refundUser(ctx context.Context, tx *gorm.DB, userID, bossID uint, key string, amountCents int64, refOrderID uint, bizType string) error {
 	if amountCents <= 0 {
 		return nil
 	}
@@ -527,8 +525,8 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64,
 	if err != nil {
 		return err
 	}
-	if !u.CheckMoneyPassword(key) {
-		return user.ErrMoneyKeyIncorrect
+	if err := user.VerifyMoneyPassword(ctx, u, key); err != nil {
+		return err
 	}
 
 	boss, err := userDao.GetUserByIdForUpdate(bossID)
@@ -549,7 +547,7 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64,
 	if err != nil {
 		return err
 	}
-	if err := userDao.UpdateUserById(bossID, boss); err != nil {
+	if err := userDao.UpdateUserMoney(bossID, boss.Money); err != nil {
 		return err
 	}
 	// 卖家退款出账流水
@@ -557,6 +555,12 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64,
 		return err
 	}
 
+	// 自买自卖时买家和卖家是同一行：u 是扣款前读的旧快照，要沿用刚写回的 boss，
+	// 否则会用旧余额覆盖掉上面这笔卖家扣款，每取消一次凭空多出一笔定金。
+	// 买卖不同人时 u 的行锁从事务开头一直持有，快照仍是最新的，不用重读。
+	if userID == bossID {
+		u = boss
+	}
 	userMoney, err := u.DecryptMoney()
 	if err != nil {
 		return err
@@ -567,7 +571,7 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64,
 	if err != nil {
 		return err
 	}
-	if err := userDao.UpdateUserById(userID, u); err != nil {
+	if err := userDao.UpdateUserMoney(userID, u.Money); err != nil {
 		return err
 	}
 	// 买家退款入账流水：与卖家出账配对保持 SUM(debit)=SUM(credit)

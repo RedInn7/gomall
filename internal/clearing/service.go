@@ -126,8 +126,7 @@ func RecordExternalAnomalyTx(tx *gorm.DB, o *order.Order, channel, providerRef, 
 	if tx == nil || o == nil || o.ID == 0 || !isExternalChannel(channel) || providerRef == "" {
 		return ErrInvalidClearingInput
 	}
-	if reason != AnomalyReasonDuplicatePayment && reason != AnomalyReasonAmountMismatch &&
-		reason != AnomalyReasonPaymentDetailsMismatch && reason != AnomalyReasonHighRiskPayment {
+	if !validAnomalyReason(reason) {
 		return ErrInvalidClearingInput
 	}
 	anomaly := &PaymentAnomaly{
@@ -163,6 +162,22 @@ func isProviderCleared(db *gorm.DB, orderID uint, channel, providerRef string) (
 	var count int64
 	if err := db.Model(&PaymentClearing{}).
 		Where("order_id=? AND channel=? AND provider_ref=?", orderID, channel, providerRef).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// HasProviderAnomaly 同一笔外部支付（channel + provider_ref）是否已记过异常单。
+// 异常单落库即表示这笔钱已转人工审核 / 退款，同一事件重投不能再进正常清算。
+func HasProviderAnomaly(ctx context.Context, channel, providerRef string) (bool, error) {
+	providerRef = strings.TrimSpace(providerRef)
+	if providerRef == "" || !isExternalChannel(channel) {
+		return false, ErrInvalidClearingInput
+	}
+	var count int64
+	if err := dao.NewDBClient(ctx).Model(&PaymentAnomaly{}).
+		Where("channel=? AND provider_ref=?", channel, providerRef).
 		Count(&count).Error; err != nil {
 		return false, err
 	}
@@ -399,11 +414,13 @@ func validOptionalAnomalyChannel(channel string) bool {
 }
 
 func validOptionalAnomalyReason(reason string) bool {
-	if reason == "" {
-		return true
-	}
+	return reason == "" || validAnomalyReason(reason)
+}
+
+func validAnomalyReason(reason string) bool {
 	switch reason {
-	case AnomalyReasonDuplicatePayment, AnomalyReasonAmountMismatch, AnomalyReasonPaymentDetailsMismatch, AnomalyReasonHighRiskPayment:
+	case AnomalyReasonDuplicatePayment, AnomalyReasonAmountMismatch, AnomalyReasonPaymentDetailsMismatch,
+		AnomalyReasonHighRiskPayment, AnomalyReasonFulfillmentFailed:
 		return true
 	default:
 		return false

@@ -57,7 +57,7 @@ func TestResolveGroupbuyPricingOnlyTrustsMerchantPrice(t *testing.T) {
 	productDao := NewProductDaoByDB(db)
 
 	closed := &Product{Name: "closed", Price: "100.00", BossID: 22}
-	open := &Product{Name: "open", Price: "100.00", BossID: 22, GroupbuyPriceCents: 8000}
+	open := &Product{Name: "open", Price: "100.00", BossID: 22, GroupbuyPriceCents: 8000, OnSale: true}
 	if err := db.Create([]*Product{closed, open}).Error; err != nil {
 		t.Fatalf("seed products: %v", err)
 	}
