@@ -130,7 +130,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 支付时 Lua `reserved -= n`；取消时 Lua `reserved → available`
 - DB 事务失败 → defer 调 release Lua 把扣的退回
 
-实测：1000 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms（k6 压测时同样被全局令牌桶限流，max 延迟只作参考）。
+实测（单测 `TestCoupon_AtomicClaimNoOversell`，已在 3461689 删除）：1000 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms（k6 压测时同样被全局令牌桶限流，max 延迟只作参考）。
 `repository/cache/inventory.go` 4 个 Lua 脚本 + `internal/order/cancel.go` Saga 回滚。
 
 ### 3 · Outbox + 协同 Saga：解双写问题
@@ -212,7 +212,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 旧名 `UnPaid/Paid/Cancelled` 标 Deprecated 别名保留
 - 状态机校验 `CanTransition(from, to)` + DAO 条件 UPDATE 双兜底幂等
 - 7 天 Cron 自动确认收货
-- 单测 17 例覆盖所有合法 / 非法转换
+- 单测覆盖全部 11 条合法转换和 10 条典型非法转换（`internal/order/order_state_test.go`）
 
 `consts/order.go` + `internal/order/state.go` + `internal/order/shipping.go` + `internal/refund/service.go`。
 
