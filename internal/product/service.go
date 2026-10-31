@@ -132,6 +132,25 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
+	product := &Product{
+		Name:               req.Name,
+		CategoryID:         req.CategoryID,
+		Title:              req.Title,
+		Info:               req.Info,
+		Price:              req.Price,
+		DiscountPrice:      req.DiscountPrice,
+		Num:                req.Num,
+		OnSale:             true,
+		BossID:             uId,
+		BossName:           boss.UserName,
+		BossAvatar:         boss.Avatar,
+		GroupbuyPriceCents: req.GroupbuyPriceCents,
+	}
+	// 拼团价在上传图片之前校验，非法请求不落盘
+	if err = product.checkGroupbuyPrice(); err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
 	// 文件上传属于数据库外部 I/O，不能放进 SQL 事务长期占锁。
 	// 先上传并收集路径，随后把商品、图片记录和 Outbox 事件一次性提交。
 	imagePaths := make([]string, 0, len(files))
@@ -155,20 +174,7 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 		}
 		imagePaths = append(imagePaths, imagePath)
 	}
-	product := &Product{
-		Name:          req.Name,
-		CategoryID:    req.CategoryID,
-		Title:         req.Title,
-		Info:          req.Info,
-		ImgPath:       imagePaths[0],
-		Price:         req.Price,
-		DiscountPrice: req.DiscountPrice,
-		Num:           req.Num,
-		OnSale:        true,
-		BossID:        uId,
-		BossName:      boss.UserName,
-		BossAvatar:    boss.Avatar,
-	}
+	product.ImgPath = imagePaths[0]
 	if err = createProductAndEvent(NewProductDao(ctx).DB, product, imagePaths...); err != nil {
 		log.LogrusObj.Error("创建产品失败，err:", err)
 		return nil, err
@@ -314,14 +320,20 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (
 		return nil, err
 	}
 	product := &Product{
-		Name:          req.Name,
-		CategoryID:    req.CategoryID,
-		Title:         req.Title,
-		Info:          req.Info,
-		Price:         req.Price,
-		DiscountPrice: req.DiscountPrice,
-		Num:           req.Num,
-		OnSale:        req.OnSale,
+		Name:               req.Name,
+		CategoryID:         req.CategoryID,
+		Title:              req.Title,
+		Info:               req.Info,
+		Price:              req.Price,
+		DiscountPrice:      req.DiscountPrice,
+		Num:                req.Num,
+		OnSale:             req.OnSale,
+		GroupbuyPriceCents: req.GroupbuyPriceCents,
+	}
+	// 拼团价按本次提交的新零售价校验，改价不会留下越界的拼团价
+	if err = product.checkGroupbuyPrice(); err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
 	}
 	_ = cache.DelProductDetail(ctx, req.ID)
 	if err := updateProductAndEvent(NewProductDao(ctx).DB, req.ID, u.Id, product); err != nil {
