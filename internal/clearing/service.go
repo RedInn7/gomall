@@ -168,6 +168,22 @@ func isProviderCleared(db *gorm.DB, orderID uint, channel, providerRef string) (
 	return count > 0, nil
 }
 
+// HasProviderAnomaly 同一笔外部支付（channel + provider_ref）是否已记过异常单。
+// 异常单落库即表示这笔钱已转人工审核 / 退款，同一事件重投不能再进正常清算。
+func HasProviderAnomaly(ctx context.Context, channel, providerRef string) (bool, error) {
+	providerRef = strings.TrimSpace(providerRef)
+	if providerRef == "" || !isExternalChannel(channel) {
+		return false, ErrInvalidClearingInput
+	}
+	var count int64
+	if err := dao.NewDBClient(ctx).Model(&PaymentAnomaly{}).
+		Where("channel=? AND provider_ref=?", channel, providerRef).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // SettleCompletedOrder 消费 order.completed 后执行真实结算。
 // 对清算记录加行锁并检查状态；已经 settled/refunded 的重复事件直接成功返回。
 func SettleCompletedOrder(ctx context.Context, orderID uint) error {
