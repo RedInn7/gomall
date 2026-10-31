@@ -368,7 +368,7 @@ make tools          # 编 SkyWalking Agent（需要先初始化子模块）
 make build-agent    # 使用 SkyWalking Agent 构建
 make env-up         # 拉起 docker-compose 中的完整依赖与观测组件
 make env-down       # 关依赖
-make docker-up      # 容器化拉起项目
+make docker-up      # 容器化拉起项目，挂载本地 config/locales/config.yaml
 make docker-down    # 关容器
 ```
 
