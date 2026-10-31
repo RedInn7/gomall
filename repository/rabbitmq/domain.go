@@ -2,6 +2,7 @@ package rabbitmq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -12,6 +13,9 @@ import (
 //	routing key 形如 "order.created" / "stock.reserved" / "product.updated"
 //	消费端 bind 通配符即可订阅自己感兴趣的事件
 const DomainEventsExchange = "domain.events"
+
+// ErrUnroutable 事件发到了没有任何队列绑定的 routing key，被 broker 退回（mandatory）。
+var ErrUnroutable = errors.New("domain event unroutable")
 
 // InitDomainEventsExchange 声明拓扑。Init 在 publisher / consumer 启动前都要调一次
 func InitDomainEventsExchange() error {
@@ -78,10 +82,10 @@ func PublishDomainEvent(ctx context.Context, routingKey string, payload []byte) 
 	}
 
 	// confirm 到达后 return（若有）必已先于 confirm 投入 channel，此处非阻塞探测即可。
-	// 收到 return 说明无队列接收该 routing key，按发布失败处理，不让 outbox MarkSent。
+	// 收到 return 说明无队列接收该 routing key，返回 ErrUnroutable，由 outbox 按事件类型决定重试还是视为已发送。
 	select {
 	case ret := <-returns:
-		return fmt.Errorf("domain event returned routing key %q: %d %s", routingKey, ret.ReplyCode, ret.ReplyText)
+		return fmt.Errorf("%w: routing key %q: %d %s", ErrUnroutable, routingKey, ret.ReplyCode, ret.ReplyText)
 	default:
 		return nil
 	}

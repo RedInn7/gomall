@@ -381,6 +381,44 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 	return nil
 }
 
+// settleCompensationDelay 补偿任务只碰这么久之前就该结算完的订单，给正常的事件链路留出时间。
+const settleCompensationDelay = 10 * time.Minute
+
+// RunSettleCompensation cron 资金兜底：order.completed / order.refunded 事件丢了（outbox 死信、消费者进 DLQ），
+// 卖家就永远拿不到钱、买家永远退不到款。这里直接按订单与清算单状态补：已完成但清算单还是 cleared 的补结算，
+// 已退款但清算单还不是 refunded 的补退款。两边都按清算单状态幂等，与正常消费者并发也只生效一次。
+// ponytail: 每轮各补 100 单，永久失败的单会一直占名额；量大时改成按 id 游标翻页。
+func (s *RefundSrv) RunSettleCompensation() {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Errorf("SettleCompensation Cron Panic: %v", r)
+		}
+	}()
+	ctx := context.Background()
+	db := dao.NewDBClient(ctx)
+	before := time.Now().Add(-settleCompensationDelay)
+	missed := func(orderType uint, clearingCond, clearingStatus string) []uint {
+		var ids []uint
+		if err := db.Model(&orderpkg.Order{}).
+			Where("type = ? AND updated_at <= ? AND id IN (?)", orderType, before,
+				db.Model(&clearing.PaymentClearing{}).Select("order_id").Where(clearingCond, clearingStatus)).
+			Limit(100).Pluck("id", &ids).Error; err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 扫表失败 type=%d err=%v", orderType, err)
+		}
+		return ids
+	}
+	for _, id := range missed(consts.OrderCompleted, "status = ?", clearing.StatusCleared) {
+		if err := clearing.SettleCompletedOrder(ctx, id); err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 补结算失败 order=%d err=%v", id, err)
+		}
+	}
+	for _, id := range missed(consts.OrderRefunded, "status <> ?", clearing.StatusRefunded) {
+		if err := s.SettleRefund(ctx, id); err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 补退款失败 order=%d err=%v", id, err)
+		}
+	}
+}
+
 func inUintSlice(v uint, s []uint) bool {
 	for _, x := range s {
 		if x == v {

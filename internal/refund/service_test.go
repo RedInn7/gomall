@@ -164,6 +164,55 @@ func TestZeroAmountLegacyRefundIsIdempotent(t *testing.T) {
 	}
 }
 
+// order.completed / order.refunded 事件丢了（outbox 死信、消费者进 DLQ）：补偿任务按订单与清算单状态补结算、补退款，
+// 刚完成的订单留给正常事件链路。
+func TestSettleCompensationSettlesMissedOrders(t *testing.T) {
+	db := openRefundTestDB(t)
+	stubRestockRedis(t)
+	seedRefundUser(t, db, 11, 0)
+	seedRefundUser(t, db, 22, 0)
+	p := &product.Product{Name: "book", CategoryID: 1, Num: 0, BossID: 22}
+	p.ID = 33
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("seed product: %v", err)
+	}
+	old := time.Now().Add(-time.Hour)
+	seed := func(id, orderType uint, updatedAt time.Time) {
+		o := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: p.ID, AddressID: 1, Num: 1, Money: 300, Type: orderType}
+		o.ID, o.UpdatedAt = id, updatedAt
+		if err := db.Create(o).Error; err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+		if err := db.Create(&clearing.PaymentClearing{
+			OrderID: id, BuyerID: 11, SellerID: 22, Channel: clearing.ChannelWallet,
+			GrossCents: 300, NetCents: 300, Currency: "CNY", Status: clearing.StatusCleared, ClearedAt: old,
+		}).Error; err != nil {
+			t.Fatalf("seed clearing: %v", err)
+		}
+	}
+	seed(44, consts.OrderCompleted, old)
+	seed(45, consts.OrderRefunded, old)
+	seed(46, consts.OrderCompleted, time.Now())
+
+	GetRefundSrv().RunSettleCompensation()
+
+	for orderID, want := range map[uint]string{44: clearing.StatusSettled, 45: clearing.StatusRefunded, 46: clearing.StatusCleared} {
+		var c clearing.PaymentClearing
+		if err := db.Where("order_id = ?", orderID).First(&c).Error; err != nil {
+			t.Fatal(err)
+		}
+		if c.Status != want {
+			t.Fatalf("order %d clearing status = %s, want %s", orderID, c.Status, want)
+		}
+	}
+	if got := refundUserBalance(t, db, 22); got != 300 {
+		t.Fatalf("seller balance = %d, want 300 from the settled order", got)
+	}
+	if got := refundUserBalance(t, db, 11); got != 300 {
+		t.Fatalf("buyer balance = %d, want 300 from the refunded order", got)
+	}
+}
+
 func TestRejectRefundRestoresOriginalState(t *testing.T) {
 	tests := []uint{consts.OrderWaitShip, consts.OrderWaitReceive, consts.OrderCompleted}
 	for _, fromType := range tests {
