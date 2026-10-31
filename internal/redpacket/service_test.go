@@ -1,6 +1,7 @@
 package redpacket
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
@@ -39,6 +40,63 @@ func TestSendRejectsInsufficientBalance(t *testing.T) {
 	}
 	assertRowCount(t, db, &money.AccountTransaction{}, 0)
 	assertRowCount(t, db, &RedPacket{}, 0)
+}
+
+func TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty(t *testing.T) {
+	db := openRedPacketTestDB(t)
+	seedRedPacketUser(t, db, 7, 0)
+	var released []uint
+	prevRelease := releaseRedPacketCache
+	releaseRedPacketCache = func(_ context.Context, id uint) (int64, error) {
+		released = append(released, id)
+		return 0, nil // Redis 里的份额已被清空，回收不能再按它算钱
+	}
+	t.Cleanup(func() { releaseRedPacketCache = prevRelease })
+
+	past, future := time.Now().Add(-time.Minute), time.Now().Add(time.Hour)
+	seed := func(id uint, total int64, status uint, expireAt time.Time, claims ...int64) {
+		rp := &RedPacket{UserID: 7, Total: total, Count: len(claims) + 1, Remaining: 1, ExpireAt: expireAt, Status: status}
+		rp.ID = id
+		if err := db.Create(rp).Error; err != nil {
+			t.Fatalf("seed red packet: %v", err)
+		}
+		for i, amount := range claims {
+			if err := db.Create(&RedPacketClaim{RedPacketID: id, UserID: uint(100 + i), Amount: amount}).Error; err != nil {
+				t.Fatalf("seed claim: %v", err)
+			}
+		}
+	}
+	seed(1, 1000, RedPacketStatusActive, past, 300, 200) // 正常过期：退 500
+	seed(2, 800, RedPacketStatusFinished, past, 100)     // 旧逻辑误标已抢完：仍要退 700
+	seed(3, 500, RedPacketStatusFinished, past, 500)     // 真抢完：不退
+	seed(4, 600, RedPacketStatusActive, future)          // 未过期：不动
+
+	task := &RedPacketTaskService{}
+	task.RunRedPacketExpireCheck()
+	task.RunRedPacketExpireCheck() // 重跑幂等
+
+	if got := redPacketUserBalance(t, db, 7); got != 1200 {
+		t.Fatalf("sender refund got %d want 1200 (500 + 700)", got)
+	}
+	for id, want := range map[uint]uint{1: RedPacketStatusRefunded, 2: RedPacketStatusRefunded, 3: RedPacketStatusFinished, 4: RedPacketStatusActive} {
+		var rp RedPacket
+		if err := db.First(&rp, id).Error; err != nil {
+			t.Fatalf("load red packet %d: %v", id, err)
+		}
+		if rp.Status != want {
+			t.Fatalf("red packet %d status got %d want %d", id, rp.Status, want)
+		}
+	}
+	var refunds int64
+	if err := db.Model(&money.AccountTransaction{}).Where("biz_type = ?", money.BizTypeRedPacketRefund).Count(&refunds).Error; err != nil {
+		t.Fatalf("count refund ledger: %v", err)
+	}
+	if refunds != 4 {
+		t.Fatalf("refund ledger entries got %d want 4 (sender credit + escrow debit per packet)", refunds)
+	}
+	if len(released) != 2 {
+		t.Fatalf("redis cleanup calls got %v want one per refunded packet", released)
+	}
 }
 
 func openRedPacketTestDB(t *testing.T) *gorm.DB {
