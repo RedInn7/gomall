@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm"
 
 	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
@@ -102,6 +103,85 @@ func TestGroupbuyRequiresPayPassword(t *testing.T) {
 	}
 	if got := groupbuyUserBalance(t, db, 1); got != 100000 {
 		t.Fatalf("密码错误不能扣款, balance=%d", got)
+	}
+}
+
+// 成团才真正卖出：每个成员扣 1 件 DB 库存，否则 DB 水位虚高，后续按 DB 校验的支付会超卖。
+func TestMarkGroupSuccessDeductsProductStock(t *testing.T) {
+	db := openGroupbuyTestDB(t)
+	stubInventoryLua(t)
+	seedGroupbuyUser(t, db, 1, 100000)
+	seedGroupbuyUser(t, db, 2, 0) // 卖家
+	seedGroupbuyUser(t, db, 3, 100000)
+	p := seedGroupbuyProduct(t, db, 8000)
+
+	ctx := context.Background()
+	created, err := GetGroupbuySrv().CreateGroup(ctx, 1, p.ID, 2, 0, 0, 0, testPayKey)
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	joined, err := GetGroupbuySrv().JoinGroup(ctx, 3, created.GroupID, 0, 0, testPayKey)
+	if err != nil || !joined.IsSuccess {
+		t.Fatalf("join should complete the group: resp=%+v err=%v", joined, err)
+	}
+
+	var got product.Product
+	if err := db.First(&got, p.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Num != 3 {
+		t.Fatalf("product stock after group success = %d, want 3", got.Num)
+	}
+}
+
+// 加入时成团失败、满员但还是 open 的团：散团扫描不能把它散掉，补成团扫描要把它推进到成团，过了截止时间也一样。
+func TestFullOpenGroupIsCompletedNotExpired(t *testing.T) {
+	db := openGroupbuyTestDB(t)
+	stubInventoryLua(t)
+	seedGroupbuyUser(t, db, 2, 0) // 卖家
+	p := seedGroupbuyProduct(t, db, 8000)
+	g := &GroupbuyGroup{
+		ProductID: p.ID, LeaderID: 1, TargetCount: 2, CurrentCount: 2,
+		PriceCents: 8000, Status: GroupbuyStatusOpen, ExpireAt: time.Now().Add(-time.Hour),
+	}
+	if err := db.Create(g).Error; err != nil {
+		t.Fatalf("seed group: %v", err)
+	}
+	orderIDs := make([]uint, 0, 2)
+	for _, uid := range []uint{1, 3} {
+		o := &orderpkg.Order{UserID: uid, BossID: 2, ProductID: p.ID, Num: 1, Money: 8000,
+			Type: consts.OrderWaitGroup, OrderNum: uint64(70000 + uid)}
+		if err := db.Create(o).Error; err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+		if err := db.Create(&GroupbuyMember{GroupID: g.ID, UserID: uid, OrderID: int64(o.ID)}).Error; err != nil {
+			t.Fatalf("seed member: %v", err)
+		}
+		orderIDs = append(orderIDs, o.ID)
+	}
+
+	ids, err := NewGroupbuyDao(context.Background()).ExpireOpenGroupsBefore(time.Now(), 10)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("full group must not be expired: ids=%v err=%v", ids, err)
+	}
+
+	GetGroupbuySrv().RunCompleteFullGroups()
+
+	var got GroupbuyGroup
+	if err := db.First(&got, g.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != GroupbuyStatusSuccess {
+		t.Fatalf("group status = %d, want success", got.Status)
+	}
+	for _, id := range orderIDs {
+		var o orderpkg.Order
+		if err := db.First(&o, id).Error; err != nil {
+			t.Fatal(err)
+		}
+		if o.Type != consts.OrderWaitShip {
+			t.Fatalf("member order %d type = %d, want WaitShip", id, o.Type)
+		}
 	}
 }
 

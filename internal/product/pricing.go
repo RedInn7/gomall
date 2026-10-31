@@ -32,6 +32,9 @@ const GroupbuyMinPriceBps = 5000
 // ErrGroupbuyNotOpen 商品未开放拼团（GroupbuyPriceCents=0）。
 var ErrGroupbuyNotOpen = errors.New("该商品未开放拼团")
 
+// ErrProductNotOnSale 商品已下架：下单、预售、拼团一律拒绝。
+var ErrProductNotOnSale = errors.New("商品已下架")
+
 // checkGroupbuyPrice 校验商家配置的拼团价：0 表示不开放拼团；
 // 否则须落在 [零售价 * GroupbuyMinPriceBps / 10000, 零售价]。
 func (p *Product) checkGroupbuyPrice() error {
@@ -60,18 +63,24 @@ func (d *ProductDao) ResolveGroupbuyPricing(id uint) (priceCents int64, bossID u
 	if p.GroupbuyPriceCents == 0 {
 		return 0, 0, ErrGroupbuyNotOpen
 	}
+	if !p.OnSale {
+		return 0, 0, ErrProductNotOnSale
+	}
 	if err = p.checkGroupbuyPrice(); err != nil {
 		return 0, 0, err
 	}
 	return p.GroupbuyPriceCents, p.BossID, nil
 }
 
-// ResolveBossID 反查商品卖家：仅需商品存在，不校验定价。
-// 供 cart/favorite/preorder 这类只需「谁是卖家」、金额另有权威来源的场景使用。
+// ResolveBossID 反查商品卖家：商品须存在且在售，不校验定价。
+// 供预售付定金、参团这类只需「谁是卖家」、金额另有权威来源的下单场景使用。
 func (d *ProductDao) ResolveBossID(id uint) (uint, error) {
 	p, err := d.GetProductById(id)
 	if err != nil || p == nil {
 		return 0, fmt.Errorf("商品不存在或查询失败 product=%d: %w", id, err)
+	}
+	if !p.OnSale {
+		return 0, ErrProductNotOnSale
 	}
 	return p.BossID, nil
 }
