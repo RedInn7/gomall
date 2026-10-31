@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/RedInn7/gomall/internal/address"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/pkg/utils/snowflake"
@@ -132,7 +133,7 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (Order
 		return OrderEnqueueResp{}, err
 	}
 
-	if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
+	if err = product.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
 		util.LogrusObj.Errorf("async enqueue reserve stock failed product=%d num=%d err=%v", req.ProductID, req.Num, err)
 		return OrderEnqueueResp{}, err
 	}

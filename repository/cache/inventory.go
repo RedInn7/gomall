@@ -11,7 +11,8 @@ import (
 // 库存在 Redis 里分两个桶维护:
 //   stock:available:{pid}   还能下单的数量
 //   stock:reserved:{pid}    已下单但未支付的数量 (占着但未真正扣)
-// product.Num 在 DB 是初始水位；启动时由 syncer 把它复制到 Redis available
+// product.Num 在 DB 是剩余库存（付款才扣）；建商品时写入 available，启动预热和下单时
+// 按 DB 补建缺失的桶，商家改库存时按差值调整 available
 
 func StockAvailableKey(productID uint) string {
 	return fmt.Sprintf("stock:available:%d", productID)
@@ -67,6 +68,19 @@ redis.call('INCRBY', KEYS[2], ARGV[1])
 return 1
 `)
 
+// initIfAbsentScript: available 不存在时按 DB 库存建桶，已存在则不动（返回 0）。
+// DB 的 num 里还算着已预占、没付款的件数，所以 available = num - reserved，reserved 不存在按 0 算；
+// 预占比 num 还多时为负（含义见 AdjustAvailable）。判断和写入在同一段 Lua 里，
+// 并发的懒初始化 / 启动预热不会互相覆盖。
+// KEYS[1]=available, KEYS[2]=reserved, ARGV[1]=DB product.num
+var initIfAbsentScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 1 then
+    return 0
+end
+redis.call('SET', KEYS[1], tonumber(ARGV[1]) - tonumber(redis.call('GET', KEYS[2]) or '0'))
+return 1
+`)
+
 // restockScript: 退款回补，available += n；available 不存在（未初始化）时不建桶
 var restockScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[1]) == 1 then
@@ -82,6 +96,22 @@ func InitStock(ctx context.Context, productID uint, available int64) error {
 	pipe.Set(ctx, StockReservedKey(productID), 0, 0)
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+// InitStockIfAbsent 按 DB 库存建 available 桶；桶已存在时不覆盖，不会抹掉运行期的预占。
+func InitStockIfAbsent(ctx context.Context, productID uint, num int64) error {
+	return initIfAbsentScript.Run(ctx, RedisClient,
+		[]string{StockAvailableKey(productID), StockReservedKey(productID)}, num).Err()
+}
+
+// AdjustAvailable 商家把 DB 库存从 old 改成 new 后，available 跟着加 delta = new - old（可为负）。
+// 静止时 available + reserved == DB num，改库存不动已预占的 reserved，所以 available 变 delta。
+// 不直接写 new - reserved：付款事务已扣 DB、还没扣 reserved 时改库存，这笔会被重复扣掉，差值不会。
+// 不夹到 0：new 比已预占的件数还少时 available 为负，就是欠下的件数，预占释放回来先还欠账，
+// reserve 脚本把负数当无货；夹到 0 会丢掉欠账，之后释放回来的预占会凭空多出可卖库存。
+// 和退款回补用同一段脚本：桶不存在时不动，下单时按 DB 的新库存懒建桶。
+func AdjustAvailable(ctx context.Context, productID uint, delta int64) error {
+	return restockScript.Run(ctx, RedisClient, []string{StockAvailableKey(productID)}, delta).Err()
 }
 
 // ReserveStock 预扣 n 件 (available -> reserved)

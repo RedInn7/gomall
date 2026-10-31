@@ -62,11 +62,8 @@ func TestCreateProductAndEventRollsBackWhenImageInsertFails(t *testing.T) {
 func TestUpdateProductAndEventCommitsTogether(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
-	updated := testProduct()
-	updated.Name = "升级款咖啡壶"
-	updated.OnSale = false
 
-	if err := updateProductAndEvent(db, p.ID, p.BossID, updated); err != nil {
+	if _, err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{Name: new("升级款咖啡壶"), OnSale: new(false)}); err != nil {
 		t.Fatalf("updateProductAndEvent() error = %v", err)
 	}
 	got := loadProduct(t, db, p.ID)
@@ -76,14 +73,28 @@ func TestUpdateProductAndEventCommitsTogether(t *testing.T) {
 	assertProductChangedEvent(t, db, p.ID, "update")
 }
 
+// 只传 on_sale=false：只下架，名称、价格、类目、库存等没传的字段保持原值。
+func TestUpdateProductAndEventOnlyWritesProvidedFields(t *testing.T) {
+	db := openProductOutboxTestDB(t, true)
+	p := seedProduct(t, db)
+
+	if _, err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{OnSale: new(false)}); err != nil {
+		t.Fatalf("updateProductAndEvent() error = %v", err)
+	}
+	got := loadProduct(t, db, p.ID)
+	if got.OnSale || got.Name != p.Name || got.CategoryID != p.CategoryID || got.Title != p.Title ||
+		got.Info != p.Info || got.Price != p.Price || got.Num != p.Num {
+		t.Fatalf("updated product = %+v, want only on_sale changed from %+v", got, p)
+	}
+	assertProductChangedEvent(t, db, p.ID, "update")
+}
+
 func TestUpdateProductAndEventRollsBackWhenOutboxInsertFails(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
 	injectProductOutboxFailure(t, db)
-	updated := testProduct()
-	updated.Name = "不应提交的新名称"
 
-	err := updateProductAndEvent(db, p.ID, p.BossID, updated)
+	_, err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{Name: new("不应提交的新名称")})
 	if err == nil {
 		t.Fatal("updateProductAndEvent() error = nil, want injected outbox error")
 	}
@@ -97,7 +108,7 @@ func TestUpdateProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
 
-	err := updateProductAndEvent(db, p.ID, p.BossID+1, testProduct())
+	_, err := updateProductAndEvent(db, p.ID, p.BossID+1, &ProductUpdateReq{Name: new("越权改名")})
 	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
 		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
 	}
@@ -107,7 +118,7 @@ func TestUpdateProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
 func TestUpdateProductAndEventRejectsMissingProductWithoutEvent(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 
-	err := updateProductAndEvent(db, 404, 22, testProduct())
+	_, err := updateProductAndEvent(db, 404, 22, &ProductUpdateReq{Name: new("不存在")})
 	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
 		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
 	}
@@ -125,6 +136,26 @@ func TestDeleteProductAndEventCommitsTogether(t *testing.T) {
 	if err := db.First(&got, p.ID).Error; !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("load deleted product error = %v, want record not found", err)
 	}
+	assertProductChangedEvent(t, db, p.ID, "delete")
+}
+
+// 被收藏过的商品也能删：收藏随商品一起删掉；别人来删时整个事务回滚，收藏还在。
+func TestDeleteProductAndEventRemovesFavorites(t *testing.T) {
+	db := openProductOutboxTestDB(t, true)
+	p := seedProduct(t, db)
+	if err := db.Exec(`INSERT INTO favorite (product_id) VALUES (?)`, p.ID).Error; err != nil {
+		t.Fatalf("seed favorite: %v", err)
+	}
+
+	if err := deleteProductAndEvent(db, p.ID, p.BossID+1); !errors.Is(err, ErrProductNotFoundOrForbidden) {
+		t.Fatalf("wrong seller error = %v, want %v", err, ErrProductNotFoundOrForbidden)
+	}
+	assertTableCount(t, db.Table("favorite"), 1)
+
+	if err := deleteProductAndEvent(db, p.ID, p.BossID); err != nil {
+		t.Fatalf("deleteProductAndEvent() error = %v", err)
+	}
+	assertTableCount(t, db.Table("favorite"), 0)
 	assertProductChangedEvent(t, db, p.ID, "delete")
 }
 
@@ -182,6 +213,16 @@ func openProductOutboxTestDB(t *testing.T, migrateOutbox bool) *gorm.DB {
 	}
 	if err := db.AutoMigrate(models...); err != nil {
 		t.Fatalf("migrate product outbox schema: %v", err)
+	}
+	// favorite 包依赖 product，测试里 import 不了：建一张带外键的最小 favorite 表，
+	// 并打开 SQLite 的外键检查，复现 MySQL 删除被收藏商品时的 1451。
+	for _, statement := range []string{
+		`PRAGMA foreign_keys = ON`,
+		`CREATE TABLE favorite (id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES product(id))`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatalf("prepare favorite table: %v", err)
+		}
 	}
 	return db
 }

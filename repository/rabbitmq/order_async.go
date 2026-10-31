@@ -49,7 +49,7 @@ func PublishOrderAsync(ctx context.Context, payload []byte) error {
 // 重试逻辑交给上层（失败要释放预扣库存 + 写 ticket 失败态，不能让 RMQ 无限 requeue）。
 // 消费在自愈 supervisor 中运行：连接抖动 / channel 关闭后会自动重连并重新订阅。
 func ConsumeOrderAsync(handler func(body []byte) error) error {
-	superviseConsumer(consumerConfig{
+	superviseConsumer(consumerCtx, consumerConfig{
 		queue:    OrderAsyncQueue,
 		prefetch: 32,
 		deliver: func(d amqp.Delivery) {

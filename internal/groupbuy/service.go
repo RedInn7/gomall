@@ -109,7 +109,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 	}
 
 	// 1. 预扣 1 份库存
-	if err := cache.ReserveStock(ctx, productID, 1); err != nil {
+	if err := product.ReserveStock(ctx, productID, 1); err != nil {
 		util.LogrusObj.Errorf("groupbuy reserve stock leader=%d product=%d err=%v", leaderID, productID, err)
 		return nil, err
 	}
@@ -236,7 +236,7 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 	}
 
 	// 1. 预扣 1 份库存
-	if err = cache.ReserveStock(ctx, g.ProductID, 1); err != nil {
+	if err = product.ReserveStock(ctx, g.ProductID, 1); err != nil {
 		util.LogrusObj.Errorf("groupbuy join reserve stock user=%d product=%d err=%v", userID, g.ProductID, err)
 		return nil, err
 	}

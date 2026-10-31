@@ -34,13 +34,14 @@ func (c PublisherConfig) withDefaults() PublisherConfig {
 type Publisher struct {
 	cfg     PublisherConfig
 	running atomic.Bool
+	done    chan struct{}
 }
 
 func New(cfg PublisherConfig) *Publisher {
-	return &Publisher{cfg: cfg.withDefaults()}
+	return &Publisher{cfg: cfg.withDefaults(), done: make(chan struct{})}
 }
 
-// Start 启动后台轮询循环。重复调用是 no-op
+// Start 启动后台轮询循环，ctx 取消后发完当前这批再退出。重复调用是 no-op
 func (p *Publisher) Start(ctx context.Context) {
 	if !p.running.CompareAndSwap(false, true) {
 		return
@@ -48,7 +49,13 @@ func (p *Publisher) Start(ctx context.Context) {
 	go p.loop(ctx)
 }
 
+// Done 在轮询循环退出后关闭，进程退出前用它等在途的那批事件发完。
+func (p *Publisher) Done() <-chan struct{} {
+	return p.done
+}
+
 func (p *Publisher) loop(ctx context.Context) {
+	defer close(p.done)
 	ticker := time.NewTicker(p.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -56,7 +63,9 @@ func (p *Publisher) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			p.drainBatch(ctx)
+			// 已认领（publishing）的这批不随退出信号中断：发完并标记 sent / failed 再退出，
+			// 否则要等回收窗口过后才重发，发出去但没标记的还会重复投递。
+			p.drainBatch(context.WithoutCancel(ctx))
 		}
 	}
 }

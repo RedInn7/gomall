@@ -178,7 +178,7 @@ if closed {
 - Redis 确实丢失了对应 key，可以从数据库建立账本；
 - 滚动发布时，旧实例仍在处理订单，Redis 已有实时 `available / reserved`，新实例不能用初始水位覆盖它。
 
-因此讲解 `SeedFromDB` 时要盯住两个设计点：游标分页避免一次把商品全读进内存；初始化前检查 key 是否存在，已有库存跳过。`InitStock` 本身是覆盖写，所以“先判断再初始化”的调用纪律很重要，而且检查与写入之间仍有竞态窗口。
+因此讲解 `SeedFromDB` 时要盯住两个设计点：游标分页避免一次把商品全读进内存；初始化前检查 key 是否存在，已有库存跳过。`InitStock` 本身是覆盖写，所以“先判断再初始化”的调用纪律很重要；预热用的 `InitStockIfAbsent` 把判断和写入放进同一段 Lua，和下单时的按需建桶并发也不会互相覆盖。
 
 这也暴露了模型边界：`product.num` 是数据库剩余库存，reserve 时不会立即变化，支付成功后才由结算事务扣减；静止时应满足 `available + reserved == product.num`。若 Redis 在有待付款订单时丢失，需要结合这些订单重算两只桶，不能只把 `product.num` 全写进 available。
 
