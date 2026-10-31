@@ -15,6 +15,9 @@ import (
 // ErrMoneyKeyIncorrect 支付密码错误：密文无法用该密钥还原出合法金额
 var ErrMoneyKeyIncorrect = errors.New("支付密码错误")
 
+// ErrInsufficientBalance 钱包余额不够本次出账。所有扣款路径共用，余额不允许扣成负数。
+var ErrInsufficientBalance = errors.New("金额不足")
+
 // User 用户模型
 type User struct {
 	dbmodel.Model
@@ -123,11 +126,11 @@ func (u *User) SetMoneyPassword(pin string) error {
 	return nil
 }
 
-// CheckMoneyPassword 校验支付密码。摘要为空（历史 / 种子用户未设密码）时放行，
-// 否则做 bcrypt 比对。
+// CheckMoneyPassword 校验支付密码（bcrypt 比对）。摘要为空（迁移前的种子用户）一律不通过。
+// 扣款路径应走带失败限次的 VerifyMoneyPassword。
 func (u *User) CheckMoneyPassword(pin string) bool {
 	if u.MoneyPasswordDigest == "" {
-		return true
+		return false
 	}
 	return bcrypt.CompareHashAndPassword([]byte(u.MoneyPasswordDigest), []byte(pin)) == nil
 }

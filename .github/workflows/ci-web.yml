@@ -1,0 +1,45 @@
+name: CI Web
+
+# 前端或后端路由（check:api 会扫描 routes.go）变化时才跑。
+on:
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'internal/*/routes.go'
+      - 'service/search/routes.go'
+      - '.github/workflows/ci-web.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'internal/*/routes.go'
+      - 'service/search/routes.go'
+      - '.github/workflows/ci-web.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run build
+      # web/dist 由 Go 直接托管，提交的产物必须和源码一致
+      - name: 提交的 dist 与源码一致
+        run: git diff --exit-code -- dist || { echo "web/dist 落后于 web/src：本地 npm run build 后提交 dist"; exit 1; }
+      - run: npm run check:api

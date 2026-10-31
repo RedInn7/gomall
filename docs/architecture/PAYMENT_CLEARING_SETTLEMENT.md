@@ -49,7 +49,7 @@ GoMall 的普通订单资金链是一个真正的两阶段模型：
 | --- | --- | --- | --- |
 | Wallet | 买家 `user_wallet` | `merchant_escrow` | `channel=wallet`，币种 `CNY`，`provider_ref` 为空 |
 | Stripe | `external_clearing` | `merchant_escrow` | `channel=stripe`，记录 Checkout Session ID 和实际币种 |
-| Web3 | `external_clearing` | `merchant_escrow` | `channel=web3`，记录链上 tx hash 和代币代码 |
+| Web3 | `external_clearing` | `merchant_escrow` | `channel=web3`，记录链上 tx hash；清算币种为订单计价 CNY，链上金额已按人民币汇率核对 |
 | Xcash | `external_clearing` | `merchant_escrow` | `channel=xcash`，记录 `sys_no:chain:tx_hash`；清算币种为订单计价 CNY |
 
 四个渠道统一调用 `clearing.RecordClearedTx`。该方法创建清算单，并以 `biz_type=order_clear` 写一借一贷两条台账。此时卖家钱包不变。
@@ -178,7 +178,7 @@ Xcash 为订单创建限时托管账单，买家可以从服务端白名单允�
 | `gross_cents` | 订单清算总额，单位为分 |
 | `fee_cents` | 渠道/平台费用；当前为 0 |
 | `net_cents` | 最终放给卖家的金额；当前等于 `gross_cents` |
-| `currency` | Wallet/Xcash 为订单计价 CNY，Stripe 为实付法币，Web3 为代币代码；Xcash 实付代币和数量保存在 payment intent |
+| `currency` | 各渠道都记订单计价币种 CNY，与 `gross_cents` 同口径（Stripe 固定按 cny 收款）；Web3 实付代币以 `provider_ref` 对应的交易为准，Xcash 实付代币和数量保存在 payment intent |
 | `status` | `cleared`、`settled`、`refunded` |
 | `cleared_at`、`settled_at`、`refunded_at` | 各资金阶段时间；后两者在到达对应状态后写入 |
 
@@ -322,10 +322,10 @@ Redis 去重是减压层，不是最终资金安全边界。Redis 不可用时�
 - [ ] 数据库提交后 reserved 核销或 pending 删除失败，不把已提交事务伪装成失败支付。
 - [ ] `payment_clearing` 与 `account_transaction` 可以按订单还原完整的清算、结算或退款资金路径。
 
-建议执行：
+建议执行（`internal/money`、`service/web3` 目前没有单测，相关条目要人工核对）：
 
 ```bash
-go test ./internal/clearing ./internal/payment ./internal/refund ./internal/money ./internal/order ./service/web3
+go test ./internal/clearing ./internal/payment ./internal/refund
 go test -race ./internal/clearing ./internal/payment ./internal/refund
 go test ./...
 ```

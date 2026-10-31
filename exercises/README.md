@@ -56,7 +56,7 @@ order = {...}, want {...}
 
 左边是代码实际返回的结果，右边是测试要求的结果。请按 readme 中的规则实现，不要针对单个测试用例写死结果。
 
-## 第一讲：业务总览
+## 讲义 00：业务总览
 
 ### 00.01 服务端权威数据
 
@@ -139,7 +139,7 @@ go test -tags exercise ./exercises/00-overview/00.03-transactional-outbox/proble
 - Outbox 写入失败时返回原始错误；
 - 事务失败后不能留下只有订单、没有事件的半状态。
 
-## 第二讲：用户鉴权
+## 讲义 01：用户鉴权
 
 ### 01.01 双 Token 续期
 
@@ -223,7 +223,7 @@ go test -tags exercise ./exercises/01-user-auth/01.03-token-version/problem
 - 旧 token version 必须被拒绝；
 - 权限判断使用用户当前角色，不信 token 里的旧角色。
 
-## 第三讲：支付（上）
+## 讲义 02：支付（上）
 
 ### 02.01 固定账户加锁顺序
 
@@ -243,7 +243,7 @@ go test -tags exercise ./exercises/02-payment-up/02.02-double-entry-ledger/probl
 go test -tags exercise ./exercises/02-payment-up/02.03-payment-finalize/problem
 ```
 
-## 第四讲：支付（下）
+## 讲义 03：支付（下）
 
 ### 03.01 支付票根状态机
 
@@ -263,7 +263,7 @@ go test -tags exercise ./exercises/03-payment-down/03.02-replay-before-breaker/p
 go test -tags exercise ./exercises/03-payment-down/03.03-payment-reconciliation/problem
 ```
 
-## 第四讲：支付清算
+## 讲义 04：支付清算
 
 ### 04.01 清算复式记账
 
@@ -293,7 +293,7 @@ go test -tags exercise ./exercises/04-payment-clearing/04.01-clearing-ledger/pro
 - 非法输入、重复订单和托管入账失败时不留下半成品；
 - 通过题目列出的 16 个公开测试场景。
 
-## 第五讲：支付结算
+## 讲义 05：支付结算
 
 这组题从“订单完成”开始，练习把托管资金安全地转入卖家钱包，并处理重复消息、写账失败、结算与退款并发，以及历史数据不一致。
 
@@ -337,7 +337,7 @@ go test -tags exercise ./exercises/05-payment-settlement/05.05-settlement-reconc
 
 使用一次线性扫描找出清算单缺失、终态冲突、流水缺失、借贷不平和卖家余额链异常，并按订单号稳定输出。
 
-## 第七讲：商品搜索
+## 讲义 07：商品搜索（上）
 
 ### 07.01 搜索查询计划
 
@@ -354,6 +354,44 @@ go test -tags exercise ./exercises/07-product-search/07.02-index-outbox/problem
 ```
 
 在同一事务里更新商品并记录 `product.changed` 事件，同时处理事件重放、事件 ID 冲突、商品版本冲突和 Outbox 故障回滚。公开题面包含状态样例和 13 个测试场景。
+
+## 讲义 08：商品搜索（下）
+
+### 08.01 Hybrid Search 融合与 Top K
+
+```bash
+go test -tags exercise ./exercises/08-product-search-hybrid/08.01-hybrid-fusion/problem
+```
+
+实现两路召回的归一化、按商品 ID 融合、稳定排序与 Top K 截断；单路失败时降级，双路失败时返回错误。
+
+## 讲义 09：购物车到订单
+
+### 09.01 服务端权威结算
+
+```bash
+go test -tags exercise ./exercises/09-cart-to-order/09.01-authoritative-checkout/problem
+```
+
+只相信认证用户和服务端商品、地址数据，正确区分未找到与依赖查询失败，并防止金额溢出。
+
+### 09.02 下单 Saga
+
+```bash
+go test -tags exercise ./exercises/09-cart-to-order/09.02-create-order-saga/problem
+```
+
+串联库存预占、订单与 Outbox 原子写入、幂等重放和失败补偿。
+
+## 讲义 12：库存与防超卖
+
+### 12.01 原子库存预占
+
+```bash
+go test -race -tags exercise ./exercises/12-inventory/12.01-atomic-reservation/problem
+```
+
+实现并发安全且幂等的 Reserve、Commit 和 Release，保证三桶库存非负且总量守恒。
 
 ## 一次运行全部题目
 
@@ -389,41 +427,3 @@ gofmt -w exercises/*/*/problem/*.go
 ```
 
 实现还需要处理负数和到期边界、失败回滚、缓存隔离、渠道与余额约束、重复清算及借贷平衡等情况。
-
-## 第十讲：商品搜索（三）
-
-### 08.01 Hybrid Search 融合与 Top K
-
-```bash
-go test -tags exercise ./exercises/08-product-search-hybrid/08.01-hybrid-fusion/problem
-```
-
-实现两路召回的归一化、按商品 ID 融合、稳定排序与 Top K 截断；单路失败时降级，双路失败时返回错误。
-
-## 第十一、十二讲：购物车到下单
-
-### 09.01 服务端权威结算
-
-```bash
-go test -tags exercise ./exercises/09-cart-to-order/09.01-authoritative-checkout/problem
-```
-
-只相信认证用户和服务端商品、地址数据，正确区分未找到与依赖查询失败，并防止金额溢出。
-
-### 09.02 下单 Saga
-
-```bash
-go test -tags exercise ./exercises/09-cart-to-order/09.02-create-order-saga/problem
-```
-
-串联库存预占、订单与 Outbox 原子写入、幂等重放和失败补偿。
-
-## 第十三讲：库存与防超卖
-
-### 12.01 原子库存预占
-
-```bash
-go test -race -tags exercise ./exercises/12-inventory/12.01-atomic-reservation/problem
-```
-
-实现并发安全且幂等的 Reserve、Commit 和 Release，保证三桶库存非负且总量守恒。
