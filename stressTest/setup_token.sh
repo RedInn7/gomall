@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 注册一个测试用户、登录、把 token 写回 config.json
-# 服务必须在 :5002 监听
+# 服务地址默认 http://localhost:5003/api/v1，可用 BASE_URL 覆盖
 set -euo pipefail
 
-BASE=http://localhost:5002/api/v1
+BASE=${BASE_URL:-http://localhost:5003/api/v1}
 USER="k6_$(date +%s)"
 PASS="K6test123!"
 KEY="123456"

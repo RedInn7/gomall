@@ -7,7 +7,7 @@ import { check } from 'k6';
 import { Counter } from 'k6/metrics';
 
 const config = JSON.parse(open('./config.json'));
-const BASE = 'http://localhost:5002/api/v1';
+const BASE = __ENV.BASE_URL || 'http://localhost:5003/api/v1';
 
 export const options = {
     vus: 80,
@@ -64,5 +64,8 @@ export default function (data) {
     } else {
         failed.add(1);
     }
-    check(res, { 'http 200': r => r.status === 200 });
+    check(res, {
+        'http 200': r => r.status === 200,
+        'not rate-limited': r => !r.body || r.body.indexOf('"status":70001') < 0,
+    });
 }
