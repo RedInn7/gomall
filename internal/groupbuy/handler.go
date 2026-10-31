@@ -13,21 +13,23 @@ import (
 
 // GroupbuyCreateReq 团长发起拼团请求。
 //   - target_count >= 2，建议 3 / 5
-//   - price_cents 拼团价（分），需低于商品 sku 单价
+//   - 拼团价不由客户端传：取商家在商品上配置的拼团价
 //   - ttl_seconds 留 0 时默认 24h
+//   - key 支付密码，字段名与 paydown 一致
 type GroupbuyCreateReq struct {
-	ProductID   uint  `json:"product_id" binding:"required"`
-	TargetCount int   `json:"target_count" binding:"required"`
-	PriceCents  int64 `json:"price_cents" binding:"required"`
-	TTLSeconds  int64 `json:"ttl_seconds"`
-	BossID      uint  `json:"boss_id"`
-	AddressID   uint  `json:"address_id"`
+	ProductID   uint   `json:"product_id" binding:"required"`
+	TargetCount int    `json:"target_count" binding:"required"`
+	TTLSeconds  int64  `json:"ttl_seconds"`
+	BossID      uint   `json:"boss_id"`
+	AddressID   uint   `json:"address_id"`
+	Key         string `json:"key"`
 }
 
-// GroupbuyJoinReq 加入团请求。
+// GroupbuyJoinReq 加入团请求。key 为支付密码，参团即扣款。
 type GroupbuyJoinReq struct {
-	BossID    uint `json:"boss_id"`
-	AddressID uint `json:"address_id"`
+	BossID    uint   `json:"boss_id"`
+	AddressID uint   `json:"address_id"`
+	Key       string `json:"key"`
 }
 
 // GroupbuyShowResp 团状态分享落地页响应。
@@ -52,8 +54,8 @@ func GroupbuyCreateHandler() gin.HandlerFunc {
 		ttl := time.Duration(req.TTLSeconds) * time.Second
 		resp, err := GetGroupbuySrv().CreateGroup(
 			c.Request.Context(),
-			u.Id, req.ProductID, req.TargetCount, req.PriceCents, ttl,
-			req.BossID, req.AddressID,
+			u.Id, req.ProductID, req.TargetCount, ttl,
+			req.BossID, req.AddressID, req.Key,
 		)
 		if err != nil {
 			response.Fail(c, err)
@@ -71,9 +73,11 @@ func GroupbuyJoinHandler() gin.HandlerFunc {
 			response.Fail(c, err)
 			return
 		}
-		var req GroupbuyJoinReq
-		// JSON body 可选：用户加入分享链接时无 body，跳过解析错误
-		_ = c.ShouldBindJSON(&req)
+		// 参团要扣款，body 里必须带支付密码
+		req, ok := response.BindJSON[GroupbuyJoinReq](c)
+		if !ok {
+			return
+		}
 
 		u, err := ctl.GetUserInfo(c.Request.Context())
 		if err != nil {
@@ -82,7 +86,7 @@ func GroupbuyJoinHandler() gin.HandlerFunc {
 		}
 
 		resp, err := GetGroupbuySrv().JoinGroup(
-			c.Request.Context(), u.Id, groupID, req.BossID, req.AddressID,
+			c.Request.Context(), u.Id, groupID, req.BossID, req.AddressID, req.Key,
 		)
 		if err != nil {
 			response.Fail(c, err)

@@ -22,7 +22,7 @@ export function setup() {
     const now = new Date();
     const end = new Date(now.getTime() + 3600 * 1000);
     const r = http.post(
-        `${BASE}/coupon/batch`,
+        `${BASE}/admin/coupon/batch`,
         JSON.stringify({
             name: 'k6-redis-' + now.getTime(),
             type: 1,
