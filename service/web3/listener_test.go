@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 
@@ -36,10 +37,17 @@ func (fakeSub) Unsubscribe()      {}
 func (fakeSub) Err() <-chan error { return nil }
 
 type fakeClient struct {
-	mu      sync.Mutex
-	head    uint64
-	logs    []types.Log
-	queries [][2]uint64 // 每次 FilterLogs 的 [from, to]
+	mu       sync.Mutex
+	chainID  int64
+	head     uint64
+	logs     []types.Log
+	subErr   error       // SubscribeFilterLogs 返回的错误，HTTP RPC 下是 rpc.ErrNotificationsUnsupported
+	failFrom uint64      // 非 0 时，from >= failFrom 的 FilterLogs 返回错误
+	queries  [][2]uint64 // 每次 FilterLogs 的 [from, to]
+}
+
+func (c *fakeClient) ChainID(context.Context) (*big.Int, error) {
+	return big.NewInt(c.chainID), nil
 }
 
 func (c *fakeClient) BlockNumber(context.Context) (uint64, error) {
@@ -52,6 +60,9 @@ func (c *fakeClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]ty
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.queries = append(c.queries, [2]uint64{q.FromBlock.Uint64(), q.ToBlock.Uint64()})
+	if c.failFrom != 0 && q.FromBlock.Uint64() >= c.failFrom {
+		return nil, errors.New("query returned more than 10000 results")
+	}
 	var out []types.Log
 	for _, lg := range c.logs {
 		if lg.BlockNumber >= q.FromBlock.Uint64() && lg.BlockNumber <= q.ToBlock.Uint64() {
@@ -62,6 +73,9 @@ func (c *fakeClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]ty
 }
 
 func (c *fakeClient) SubscribeFilterLogs(context.Context, ethereum.FilterQuery, chan<- types.Log) (ethereum.Subscription, error) {
+	if c.subErr != nil {
+		return nil, c.subErr
+	}
 	return fakeSub{}, nil
 }
 
@@ -298,5 +312,76 @@ func TestCursorReadErrorSkipsRoundInsteadOfColdStart(t *testing.T) {
 	// 冷启动会从 safeHead=8 起扫并写下水位 8，block 6 的付款就永远被跳过
 	if len(client.queries) != 0 || rdb.value(lastBlockKey) != "" || len(ob.snapshot()) != 0 {
 		t.Fatalf("round must not scan or move the cursor: queries=%v cursor=%q", client.queries, rdb.value(lastBlockKey))
+	}
+}
+
+func TestListenerPollsWhenRPCCannotSubscribe(t *testing.T) {
+	lg := escrowLog(t, common.HexToHash("0x0e"), common.HexToAddress("0x4444444444444444444444444444444444444444"), big.NewInt(3), 6, common.HexToHash("0xee"))
+	client := &fakeClient{head: 10, logs: []types.Log{lg}, subErr: rpc.ErrNotificationsUnsupported}
+	rdb := newFakeRedis()
+	rdb.kv[lastBlockKey] = "4"
+	ob := &fakeOutbox{}
+	startTestListener(t, client, rdb, ob)
+
+	waitFor(t, func() bool { return len(ob.snapshot()) == 1 && rdb.value(lastBlockKey) == "8" }, "scan over HTTP RPC without subscription")
+}
+
+func TestScanCatchesUpInChunksAndKeepsFinishedChunks(t *testing.T) {
+	ctx := context.Background()
+	client := &fakeClient{head: 5002, failFrom: 2002} // safeHead=5000，第二片查询失败
+	rdb := newFakeRedis()
+	rdb.kv[lastBlockKey] = "1"
+	l := newTestListener(t, rdb, &fakeOutbox{})
+
+	if err := l.scanConfirmed(ctx, client); err == nil {
+		t.Fatal("want the failed chunk to surface an error")
+	}
+	if got := rdb.value(lastBlockKey); got != "2001" {
+		t.Fatalf("watermark must keep the finished chunk, got %q", got)
+	}
+
+	client.failFrom = 0
+	if err := l.scanConfirmed(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	want := [][2]uint64{{2, 2001}, {2002, 4001}, {2002, 4001}, {4002, 5000}}
+	if fmt.Sprint(client.queries) != fmt.Sprint(want) {
+		t.Fatalf("chunked queries mismatch: got %v want %v", client.queries, want)
+	}
+	if got := rdb.value(lastBlockKey); got != "5000" {
+		t.Fatalf("watermark want 5000, got %q", got)
+	}
+}
+
+func TestListenerStopsOnChainIDMismatch(t *testing.T) {
+	client := &fakeClient{chainID: 11155111, head: 10}
+	l := newTestListener(t, newFakeRedis(), &fakeOutbox{})
+	l.chainID = 1
+	l.dial = func(context.Context, string) (ethClient, error) { return client, nil }
+
+	done := make(chan struct{})
+	go func() { l.run(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener must exit instead of reconnecting to the wrong chain")
+	}
+	if len(client.queries) != 0 {
+		t.Fatalf("must not scan the wrong chain, queries=%v", client.queries)
+	}
+}
+
+func TestBackoffKeepsGrowingWhenInitialScanFails(t *testing.T) {
+	rdb := newFakeRedis()
+	rdb.getErr = errors.New("redis: connection refused")
+	l := newTestListener(t, rdb, &fakeOutbox{})
+	l.dial = func(context.Context, string) (ethClient, error) { return &fakeClient{head: 10}, nil }
+	l.backoff.cur = 8 * time.Second
+
+	if err := l.connectAndServe(context.Background()); err == nil {
+		t.Fatal("initial scan must fail while redis is down")
+	}
+	if l.backoff.cur != 8*time.Second {
+		t.Fatalf("backoff reset before the first successful scan: %s", l.backoff.cur)
 	}
 }
