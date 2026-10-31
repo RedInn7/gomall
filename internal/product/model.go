@@ -23,6 +23,8 @@ type Product struct {
 	BossID        uint
 	BossName      string
 	BossAvatar    string
+	// GroupbuyPriceCents 商家设置的拼团价（分），0 表示不开放拼团。开团价格只认这一列。
+	GroupbuyPriceCents int64 `gorm:"not null;default:0"`
 }
 
 func (Product) TableName() string {

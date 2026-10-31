@@ -3,6 +3,8 @@ package coupon
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,14 +60,15 @@ func (s *CouponSrv) ListActiveBatches(ctx context.Context) (interface{}, error) 
 	return NewCouponDao(ctx).ListActiveBatches(time.Now())
 }
 
-// Claim 领券。mode="db" 走悲观锁；其余走 Lua 原子扣减
+// Claim 领券。默认走 Lua 原子扣减；mode="db" 走悲观锁，仅在服务端设置
+// COUPON_ALLOW_DB_MODE=true 时生效（压测对比用），否则忽略客户端传值。
 func (s *CouponSrv) Claim(ctx context.Context, mode string, batchId uint) (interface{}, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	if mode == "db" {
+	if mode == "db" && strings.EqualFold(strings.TrimSpace(os.Getenv("COUPON_ALLOW_DB_MODE")), "true") {
 		return NewCouponDao(ctx).ClaimWithDBLock(u.Id, batchId)
 	}
 

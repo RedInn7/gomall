@@ -92,11 +92,8 @@ func (s *UserSrv) UserLogin(ctx context.Context, req *UserServiceReq) (*UserToke
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	if !exist { // 如果查询不到，返回相应的错误
-		return nil, errors.New("用户不存在")
-	}
-
-	if !user.CheckPassword(req.Password) {
+	// 用户不存在与密码错误统一提示，避免借登录接口枚举用户名
+	if !exist || !user.CheckPassword(req.Password) {
 		return nil, errors.New("账号/密码不正确")
 	}
 
