@@ -24,6 +24,8 @@ func StockReservedKey(productID uint) string {
 var (
 	ErrStockInsufficient = errors.New("库存不足")
 	ErrStockNotInit      = errors.New("库存未初始化")
+	// ErrReservationShort reserved 桶不够核销：这份预占已经不在 reserved 里，重试也核销不掉。
+	ErrReservationShort = errors.New("预占不足，无法核销")
 )
 
 // reserveScript: 检查 available >= n，然后 available -= n, reserved += n
@@ -104,7 +106,7 @@ func CommitReservation(ctx context.Context, productID uint, n int64) error {
 	}
 	code, _ := res.(int64)
 	if code != 1 {
-		return fmt.Errorf("commit reservation failed (product=%d, n=%d): code=%d", productID, n, code)
+		return fmt.Errorf("%w (product=%d, n=%d): code=%d", ErrReservationShort, productID, n, code)
 	}
 	return nil
 }

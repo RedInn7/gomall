@@ -121,7 +121,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 	}
 
 	// TX 已经把 product.Num 真正扣减了；同步把 Redis reserved 桶减掉
-	commitReservationBestEffort(ctx, paidProductID, paidNum)
+	orderpkg.CommitStockReservation(ctx, req.OrderId, paidProductID, paidNum)
 
 	return nil, nil
 }
