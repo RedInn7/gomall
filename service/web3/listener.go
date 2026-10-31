@@ -77,6 +77,7 @@ type redisCmd interface {
 	Get(ctx context.Context, key string) *redis.StringCmd
 	Set(ctx context.Context, key string, value any, expiration time.Duration) *redis.StatusCmd
 	SetNX(ctx context.Context, key string, value any, expiration time.Duration) *redis.BoolCmd
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
 var defaultRedis = func() redisCmd { return cache.RedisClient }
@@ -257,7 +258,10 @@ func (l *listener) scanConfirmed(ctx context.Context, client ethClient) error {
 	}
 	safeHead := head - l.confirmDepth
 
-	last := l.loadLastBlock(ctx)
+	last, err := l.loadLastBlock(ctx)
+	if err != nil {
+		return fmt.Errorf("load last block: %w", err)
+	}
 	if last > safeHead {
 		// 游标已领先安全高度（如曾配置更小确认深度或链回退），不回退游标，等链头追上。
 		return nil
@@ -365,9 +369,10 @@ func (l *listener) handleLog(ctx context.Context, lg types.Log) error {
 	}
 
 	dedupeKey := fmt.Sprintf("web3:event:%s:%d", lg.TxHash.Hex(), lg.Index)
-	if first, err := l.tryClaim(ctx, dedupeKey); err != nil {
+	claimed, err := l.tryClaim(ctx, dedupeKey)
+	if err != nil {
 		util.LogrusObj.Warnf("Web3 listener dedupe redis err=%v key=%s, fallback to write", err, dedupeKey)
-	} else if !first {
+	} else if !claimed {
 		return nil
 	}
 
@@ -378,9 +383,27 @@ func (l *listener) handleLog(ctx context.Context, lg types.Log) error {
 		0,
 		ev,
 	); err != nil {
+		// 去重 key 已占位但事件没落库：不撤销的话，下一轮重扫会把它当成已处理跳过，事件就永久丢了
+		if claimed {
+			l.releaseClaim(ctx, dedupeKey)
+		}
 		return fmt.Errorf("outbox insert: %w", err)
 	}
 	return nil
+}
+
+// releaseClaim 撤销 tryClaim 的占位。用不随调用方取消的 ctx：outbox 失败常常正是 ctx 被取消，
+// DEL 不能跟着一起失败。
+func (l *listener) releaseClaim(ctx context.Context, key string) {
+	rdb := l.rdb()
+	if rdb == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if err := rdb.Del(ctx, key).Err(); err != nil {
+		util.LogrusObj.Errorf("Web3 listener release dedupe key=%s err=%v", key, err)
+	}
 }
 
 // tryClaim 用 SETNX 占位，true 表示这是首次处理；redis 不可用时返回 err，由调用方决定降级策略
@@ -396,20 +419,26 @@ func (l *listener) tryClaim(ctx context.Context, key string) (bool, error) {
 	return ok, nil
 }
 
-func (l *listener) loadLastBlock(ctx context.Context) uint64 {
+// loadLastBlock 读取游标，返回 0 表示没有游标（冷启动）。
+// 只有 key 不存在（redis.Nil）才算没有游标；其他错误必须上抛，
+// 否则 Redis 一抖就会被当成冷启动，从 safeHead 起扫而跳过中间的块。
+func (l *listener) loadLastBlock(ctx context.Context) (uint64, error) {
 	rdb := l.rdb()
 	if rdb == nil {
-		return 0
+		return 0, nil
 	}
 	v, err := rdb.Get(ctx, lastBlockKey).Result()
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
+	}
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	var n uint64
-	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-		return 0
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s=%q: %w", lastBlockKey, v, err)
 	}
-	return n
+	return n, nil
 }
 
 func (l *listener) saveLastBlock(ctx context.Context, block uint64) {

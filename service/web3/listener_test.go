@@ -2,6 +2,7 @@ package web3
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -35,9 +36,10 @@ func (fakeSub) Unsubscribe()      {}
 func (fakeSub) Err() <-chan error { return nil }
 
 type fakeClient struct {
-	mu   sync.Mutex
-	head uint64
-	logs []types.Log
+	mu      sync.Mutex
+	head    uint64
+	logs    []types.Log
+	queries [][2]uint64 // 每次 FilterLogs 的 [from, to]
 }
 
 func (c *fakeClient) BlockNumber(context.Context) (uint64, error) {
@@ -49,6 +51,7 @@ func (c *fakeClient) BlockNumber(context.Context) (uint64, error) {
 func (c *fakeClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.queries = append(c.queries, [2]uint64{q.FromBlock.Uint64(), q.ToBlock.Uint64()})
 	var out []types.Log
 	for _, lg := range c.logs {
 		if lg.BlockNumber >= q.FromBlock.Uint64() && lg.BlockNumber <= q.ToBlock.Uint64() {
@@ -65,8 +68,9 @@ func (c *fakeClient) SubscribeFilterLogs(context.Context, ethereum.FilterQuery, 
 func (c *fakeClient) Close() {}
 
 type fakeRedis struct {
-	mu sync.Mutex
-	kv map[string]string
+	mu     sync.Mutex
+	kv     map[string]string
+	getErr error // 非 nil 时 Get 一律返回它，模拟 Redis 故障
 }
 
 func newFakeRedis() *fakeRedis { return &fakeRedis{kv: map[string]string{}} }
@@ -75,7 +79,9 @@ func (r *fakeRedis) Get(ctx context.Context, key string) *redis.StringCmd {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cmd := redis.NewStringCmd(ctx)
-	if v, ok := r.kv[key]; ok {
+	if r.getErr != nil {
+		cmd.SetErr(r.getErr)
+	} else if v, ok := r.kv[key]; ok {
 		cmd.SetVal(v)
 	} else {
 		cmd.SetErr(redis.Nil)
@@ -104,6 +110,21 @@ func (r *fakeRedis) SetNX(ctx context.Context, key string, value any, _ time.Dur
 	return cmd
 }
 
+func (r *fakeRedis) Del(ctx context.Context, keys ...string) *redis.IntCmd {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var n int64
+	for _, k := range keys {
+		if _, ok := r.kv[k]; ok {
+			delete(r.kv, k)
+			n++
+		}
+	}
+	cmd := redis.NewIntCmd(ctx)
+	cmd.SetVal(n)
+	return cmd
+}
+
 func (r *fakeRedis) value(key string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -111,13 +132,18 @@ func (r *fakeRedis) value(key string) string {
 }
 
 type fakeOutbox struct {
-	mu     sync.Mutex
-	events []PaymentConfirmed
+	mu       sync.Mutex
+	events   []PaymentConfirmed
+	failNext int // 接下来这么多次 Insert 返回错误，模拟 DB 故障
 }
 
 func (o *fakeOutbox) Insert(_, _, _ string, _ uint, payload any) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.failNext > 0 {
+		o.failNext--
+		return errors.New("db down")
+	}
 	ev, ok := payload.(PaymentConfirmed)
 	if !ok {
 		return fmt.Errorf("unexpected payload %T", payload)
@@ -155,6 +181,24 @@ func escrowLog(t *testing.T, orderID common.Hash, buyer common.Address, amount *
 		Data:        data,
 		BlockNumber: block,
 		TxHash:      tx,
+	}
+}
+
+// newTestListener 直接构造 listener，便于逐轮调用 scanConfirmed 断言水位
+func newTestListener(t *testing.T, rdb *fakeRedis, ob *fakeOutbox) *listener {
+	t.Helper()
+	parsed, err := abi.JSON(strings.NewReader(escrow.EscrowABI))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &listener{
+		escrow:       testEscrow,
+		abi:          parsed,
+		topic:        parsed.Events["PaymentConfirmed"].ID,
+		confirmDepth: 2,
+		outbox:       func(context.Context) outboxWriter { return ob },
+		rdb:          func() redisCmd { return rdb },
+		backoff:      newBackoff(time.Second, time.Minute),
 	}
 }
 
@@ -211,5 +255,48 @@ func TestListenerDecodesEscrowLogAndSkipsMalformedOne(t *testing.T) {
 	want := PaymentConfirmed{OrderID: orderID.Hex(), Buyer: buyer.Hex(), Amount: amount.String(), TxHash: good.TxHash.Hex(), BlockNumber: 6}
 	if events[0] != want {
 		t.Fatalf("decoded event mismatch:\n got %+v\nwant %+v", events[0], want)
+	}
+}
+
+func TestOutboxFailureReleasesDedupeKeyForRescan(t *testing.T) {
+	ctx := context.Background()
+	lg := escrowLog(t, common.HexToHash("0x0c"), common.HexToAddress("0x2222222222222222222222222222222222222222"), big.NewInt(7), 6, common.HexToHash("0xcc"))
+	client := &fakeClient{head: 10, logs: []types.Log{lg}}
+	rdb := newFakeRedis()
+	rdb.kv[lastBlockKey] = "4"
+	ob := &fakeOutbox{failNext: 1}
+	l := newTestListener(t, rdb, ob)
+
+	if err := l.scanConfirmed(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	if got := rdb.value(lastBlockKey); got != "5" {
+		t.Fatalf("watermark must stop before the failed block, got %q", got)
+	}
+	if err := l.scanConfirmed(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	if events := ob.snapshot(); len(events) != 1 || events[0].TxHash != lg.TxHash.Hex() {
+		t.Fatalf("rescan must write the event once the dedupe key is released, got %+v", events)
+	}
+	if got := rdb.value(lastBlockKey); got != "8" {
+		t.Fatalf("watermark want 8 after the retry succeeds, got %q", got)
+	}
+}
+
+func TestCursorReadErrorSkipsRoundInsteadOfColdStart(t *testing.T) {
+	lg := escrowLog(t, common.HexToHash("0x0d"), common.HexToAddress("0x3333333333333333333333333333333333333333"), big.NewInt(9), 6, common.HexToHash("0xdd"))
+	client := &fakeClient{head: 10, logs: []types.Log{lg}}
+	rdb := newFakeRedis()
+	rdb.getErr = errors.New("redis: connection refused")
+	ob := &fakeOutbox{}
+	l := newTestListener(t, rdb, ob)
+
+	if err := l.scanConfirmed(context.Background(), client); err == nil {
+		t.Fatal("cursor read error must abort the round")
+	}
+	// 冷启动会从 safeHead=8 起扫并写下水位 8，block 6 的付款就永远被跳过
+	if len(client.queries) != 0 || rdb.value(lastBlockKey) != "" || len(ob.snapshot()) != 0 {
+		t.Fatalf("round must not scan or move the cursor: queries=%v cursor=%q", client.queries, rdb.value(lastBlockKey))
 	}
 }
