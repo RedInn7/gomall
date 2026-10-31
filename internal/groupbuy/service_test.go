@@ -82,6 +82,7 @@ func TestCreateGroupRejectsProductNotOpen(t *testing.T) {
 
 func TestGroupbuyRequiresPayPassword(t *testing.T) {
 	db := openGroupbuyTestDB(t)
+	stubInventoryLua(t)
 	seedGroupbuyUser(t, db, 1, 100000)
 	p := seedGroupbuyProduct(t, db, 8000)
 	g := &GroupbuyGroup{
@@ -104,13 +105,19 @@ func TestGroupbuyRequiresPayPassword(t *testing.T) {
 	}
 }
 
-// okLuaHook 让所有 Redis 命令（库存 Lua）直接返回 1，不连真实 Redis。
+// okLuaHook 让所有 Redis 命令直接放行、不连真实 Redis：库存 Lua 返回 1，
+// 支付密码限次的滑动窗口脚本返回 {1, 1}。
 type okLuaHook struct{}
 
 func (okLuaHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 func (okLuaHook) ProcessHook(redis.ProcessHook) redis.ProcessHook {
 	return func(_ context.Context, cmd redis.Cmder) error {
 		if c, ok := cmd.(*redis.Cmd); ok {
+			// 滑动窗口脚本是 1 个 key + 4 个参数：evalsha sha 1 key a b c d 共 8 个 args
+			if len(c.Args()) == 8 {
+				c.SetVal([]interface{}{int64(1), int64(1)})
+				return nil
+			}
 			c.SetVal(int64(1))
 		}
 		return nil
