@@ -7,7 +7,7 @@ import http from 'k6/http';
 import { check } from 'k6';
 
 const config = JSON.parse(open('./config.json'));
-const BASE = 'http://localhost:5002/api/v1';
+const BASE = __ENV.BASE_URL || 'http://localhost:5003/api/v1';
 
 export const options = {
     vus: 50,
@@ -40,6 +40,7 @@ export default function (data) {
     );
     check(res, {
         'status 200': r => r.status === 200,
+        'not rate-limited': r => !r.body || r.body.indexOf('"status":70001') < 0,
         'no duplicate side-effect': r => r.body.indexOf('60002') < 0 || r.body.indexOf('"order_num"') >= 0,
     });
 }

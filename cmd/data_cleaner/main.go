@@ -2,11 +2,15 @@ package main
 
 import (
 	"fmt"
-	"github.com/RedInn7/gomall/pkg/utils/log"
+	"time"
+
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-	"time"
+	"gorm.io/gorm/schema"
+
+	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 const (
@@ -15,27 +19,17 @@ const (
 	BatchSize     = 5000    // 每次删 5000 条 (安全水位，不会锁死 DB)
 )
 
-type Order struct {
-	gorm.Model
-}
-
-func (Order) TableName() string {
-	return "order"
-}
-
 func main() {
+	log.InitLog()
 	db, err := gorm.Open(mysql.Open(DSN), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
+		Logger:         logger.Default.LogMode(logger.Silent),
+		NamingStrategy: schema.NamingStrategy{SingularTable: true}, // 与服务一致，表名是 order
 	})
 	if err != nil {
 		panic("链接数据库失败，err: " + err.Error())
 	}
-	err = db.AutoMigrate(&Order{})
-	if err != nil {
-		panic("链接数据库失败，err: " + err.Error())
-	}
 	var maxId uint
-	err = db.Unscoped().Model(&Order{}).Select("max(id)").Scan(&maxId).Error
+	err = db.Unscoped().Model(&order.Order{}).Select("max(id)").Scan(&maxId).Error
 	if err != nil {
 		panic("获取max id失败，err: " + err.Error())
 	}
@@ -45,15 +39,15 @@ func main() {
 		startId = maxId - DeleteRecords
 	}
 	startTime := time.Now()
-	totalDeleted := uint(0)
+	var totalDeleted int64
 	fmt.Println("🚀 开始删除 1000000 条数据...")
 	for i := startId; i < maxId; i += BatchSize {
 		end := min(maxId+1, i+BatchSize)
-		result := db.Unscoped().Where("id>=? and id<?", i, end).Delete(&Order{})
+		result := db.Unscoped().Where("id>=? and id<?", i, end).Delete(&order.Order{})
 		if result.Error != nil {
 			log.LogrusObj.Errorf("删除数据失败，err:%v\n，删除id范围：[%v,%v)\n", result.Error, i, end)
 		}
-		totalDeleted += end - i + 1
+		totalDeleted += result.RowsAffected
 		fmt.Printf("删除进度 %v/%v\n", totalDeleted, DeleteRecords)
 	}
 	duration := time.Since(startTime)
