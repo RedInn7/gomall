@@ -222,18 +222,28 @@ func (d *OrderDao) ShowOrderById(id, uId uint) (r *OrderListRespItem, err error)
 	return
 }
 
-// DeleteOrderById 删除订单
-func (d *OrderDao) DeleteOrderById(id, uId uint) error {
+// DeleteOrderById 删除买家自己的订单，返回是否真的删掉了一行。
+// DeletedAt 是普通可空列不是 gorm.DeletedAt，这里是物理 DELETE：订单一删，托管款、清算单和
+// 结算消费者都找不到它，所以只删资金已闭环的终态单——
+//   - Closed：没收过款，或收的款已原路退回；
+//   - Completed / Refunded：清算单已 settled / refunded，或根本没有清算单（迁移前旧单、预售 / 拼团单）。
+//
+// 条件写进 DELETE 的 WHERE，与并发的状态推进 / 结算竞争时也不会误删。
+func (d *OrderDao) DeleteOrderById(id, uId uint) (bool, error) {
 	res := d.DB.Model(&Order{}).
 		Where("id=? AND user_id = ?", id, uId).
+		Where("(type=? OR (type IN ? AND NOT EXISTS (SELECT 1 FROM payment_clearing WHERE order_id=? AND status NOT IN ?)))",
+			consts.OrderClosed, []uint{consts.OrderCompleted, consts.OrderRefunded}, id,
+			// 即 clearing.StatusSettled / StatusRefunded；clearing 依赖 order，这里不能反向 import。
+			[]string{"settled", "refunded"}).
 		Delete(&Order{})
 	if res.Error != nil {
-		return res.Error
+		return false, res.Error
 	}
 	if res.RowsAffected > 0 {
 		invalidateUserOrderListCache(uId)
 	}
-	return nil
+	return res.RowsAffected > 0, nil
 }
 
 // UpdateOrderById 更新订单详情
