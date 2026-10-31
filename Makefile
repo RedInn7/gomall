@@ -68,6 +68,8 @@ docker-up:
 	-it \
 	--name $(CONTAINER_NAME) \
 	--network host \
+	-e SNOWFLAKE_ALLOW_DEFAULT=true \
+	-v $(DIR)/config/locales/config.yaml:/app/config/locales/config.yaml:ro \
 	-d $(IMAGE_NAME)
 	@echo "container run success at localhost:5003"
 
