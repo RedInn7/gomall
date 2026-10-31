@@ -131,21 +131,14 @@ func (s *UserSrv) UserInfoUpdate(ctx context.Context, req *UserInfoUpdateReq) (*
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	userDao := NewUserDao(ctx)
-	user, err := userDao.GetUserById(u.Id)
-	if err != nil {
-		log.LogrusObj.Error(err)
-		return nil, err
-	}
 
 	if req.NickName != "" {
-		user.NickName = req.NickName
-	}
-
-	err = userDao.UpdateUserById(u.Id, user)
-	if err != nil {
-		log.LogrusObj.Error(err)
-		return nil, err
+		// 只写改动的列：整行回写会把并发改掉的余额 / 密码 / 邮箱覆盖回本次读到的旧值。
+		err = NewUserDao(ctx).UpdateUserColumns(u.Id, map[string]interface{}{"nick_name": req.NickName})
+		if err != nil {
+			log.LogrusObj.Error(err)
+			return nil, err
+		}
 	}
 
 	return nil, nil
@@ -177,8 +170,7 @@ func (s *UserSrv) UserAvatarUpload(ctx context.Context, file multipart.File, fil
 		return nil, err
 	}
 
-	user.Avatar = path
-	err = userDao.UpdateUserById(uId, user)
+	err = userDao.UpdateUserColumns(uId, map[string]interface{}{"avatar": path})
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
@@ -258,18 +250,15 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserIn
 		return nil, err
 	}
 
+	var columns map[string]interface{}
 	switch operationType {
 	case consts.EmailOperationBinding:
 		user.Email = email
+		columns = map[string]interface{}{"email": email}
 	case consts.EmailOperationNoBinding:
-		// 解绑：把 email 置空。GORM 的 struct Updates 会跳过零值，导致解绑变成静默 no-op，
-		// 这里用 Select("email") 显式持久化空字符串。
+		// 解绑：把 email 置空。GORM 的 struct Updates 会跳过零值，必须按列写空字符串。
 		user.Email = ""
-		if err = userDao.UpdateUserColumns(userId, map[string]interface{}{"email": ""}); err != nil {
-			log.LogrusObj.Error(err)
-			return nil, err
-		}
-		goto buildResp
+		columns = map[string]interface{}{"email": ""}
 	case consts.EmailOperationUpdatePassword:
 		if passwordDigest == "" {
 			err = errors.New("token 缺少密码摘要")
@@ -277,12 +266,13 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserIn
 			return nil, err
 		}
 		user.PasswordDigest = passwordDigest
+		columns = map[string]interface{}{"password_digest": passwordDigest}
 	default:
 		return nil, errors.New("操作不符合")
 	}
 
-	err = userDao.UpdateUserById(userId, user)
-	if err != nil {
+	// 只写本次操作改动的列：整行回写会把并发改掉的余额 / 密码 / 邮箱覆盖回本次读到的旧值。
+	if err = userDao.UpdateUserColumns(userId, columns); err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
@@ -296,8 +286,6 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserIn
 		}
 		middleware.InvalidateTokenVersionCache(userId)
 	}
-
-buildResp:
 
 	return &UserInfoResp{
 		ID:       user.ID,

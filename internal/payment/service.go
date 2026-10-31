@@ -99,7 +99,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 
-		err = userDao.UpdateUserById(uId, buyer)
+		err = userDao.UpdateUserMoney(uId, buyer.Money)
 		if err != nil { // 更新用户金额失败，回滚
 			log.LogrusObj.Error(err)
 			return err
