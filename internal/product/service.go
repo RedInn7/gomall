@@ -182,8 +182,9 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 	// 清掉可能由提前探测未来 ID 写入的空值缓存，让新商品提交后立即可读。
 	_ = cache.DelProductDetail(ctx, product.ID)
 	// 建库存桶，新商品提交后立即可下单。商品已落库，写 Redis 不跟着请求取消；
-	// 失败只记日志，下单时 ReserveStock 会按 DB 库存补建。
-	if err = cache.InitStock(context.WithoutCancel(ctx), product.ID, int64(product.Num)); err != nil {
+	// 失败只记日志，下单时 ReserveStock 会按 DB 库存补建。用“没有才建”而不是覆盖写的 InitStock：
+	// 提交后已有人下单懒建了桶并预占时，覆盖写会把这笔预占清掉。
+	if err = cache.InitStockIfAbsent(context.WithoutCancel(ctx), product.ID, int64(product.Num)); err != nil {
 		log.LogrusObj.Errorf("init stock product=%d failed: %v", product.ID, err)
 	}
 
@@ -359,7 +360,7 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (
 	}
 	cache.DoubleDeleteAsync(req.ID, 0)
 	// 改了库存：Redis available 按差值同步（算法见 cache.AdjustAvailable）。DB 已提交，写 Redis
-	// 不跟着请求取消；失败只记日志，留下的偏差由定时任务 ReconcileAvailable 纠正。
+	// 不跟着请求取消；失败只记日志，日志里的 delta 就是 available 要补的量。
 	if req.Num != nil && *req.Num != oldNum {
 		delta := int64(*req.Num - oldNum)
 		if err = cache.AdjustAvailable(context.WithoutCancel(ctx), req.ID, delta); err != nil {
