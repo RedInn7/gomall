@@ -15,29 +15,6 @@ func SearchProducts(ctx context.Context, req *product.ProductSearchReq) ([]*es.P
 	return es.SearchProducts(ctx, kw, from, req.PageSize)
 }
 
-// Backfill 把 DB 中现存商品全量灌进 ES (按 id 批量扫)
-func Backfill(ctx context.Context, batchSize int, fetcher func(lastID uint, limit int) ([]uint, error), loader func(id uint) error) error {
-	if batchSize <= 0 {
-		batchSize = 200
-	}
-	var last uint
-	for {
-		ids, err := fetcher(last, batchSize)
-		if err != nil {
-			return err
-		}
-		if len(ids) == 0 {
-			return nil
-		}
-		for _, id := range ids {
-			if err := loader(id); err != nil {
-				return err
-			}
-			last = id
-		}
-	}
-}
-
 // searchKeyword ES 与 DB 回退共用的关键词，优先级 info > title > name
 func searchKeyword(req *product.ProductSearchReq) string {
 	return firstNonEmpty(req.Info, req.Title, req.Name)

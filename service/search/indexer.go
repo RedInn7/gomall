@@ -3,10 +3,12 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/internal/product"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -18,7 +20,9 @@ import (
 const (
 	indexerQueue       = "search.product.indexer"
 	vectorIndexerQueue = "search.product.vector-indexer"
-	indexerRetryDelay  = 3 * time.Second
+	// indexerRetryDelay 索引失败多是 ES / Milvus / DB 暂时不可用，按 1 分钟间隔重试；
+	// 进 DLQ 前的总窗口约为 (rabbitMq.maxDeliveryAttempts-1) 分钟，默认 3 次即约 2 分钟
+	indexerRetryDelay = time.Minute
 )
 
 // StartProductIndexer 使用独立队列维护 ES 关键词索引。
@@ -69,6 +73,10 @@ func handleKeywordProductChangedWith(ctx context.Context, ev events.ProductChang
 		return deleteProduct(ctx, ev.ProductID)
 	}
 	p, err := load(ev.ProductID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		// 商品已被删掉（删除事件可能还在路上）：按删除处理，重试也等不回来
+		return deleteProduct(ctx, ev.ProductID)
+	}
 	if err != nil || p == nil {
 		return err
 	}
@@ -88,6 +96,9 @@ func handleVectorProductChangedWith(ctx context.Context, ev events.ProductChange
 		return store.Delete(ctx, ev.ProductID)
 	}
 	p, err := load(ev.ProductID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return store.Delete(ctx, ev.ProductID)
+	}
 	if err != nil || p == nil {
 		return err
 	}
