@@ -13,6 +13,7 @@ import (
 	"github.com/RedInn7/gomall/internal/redpacket"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
+	"github.com/RedInn7/gomall/service/inventory"
 )
 
 func InitCron() {
@@ -45,6 +46,22 @@ func InitCron() {
 	})
 	if err != nil {
 		panic(fmt.Sprintf("StockReconcile Cron 初始化失败: %v", err))
+	}
+
+	// available 桶对账兜底：按 DB num - reserved 纠正 available 的漂移（退款回补了 DB 库存、
+	// 改库存后写 Redis 失败、Redis 丢键等）。每个漂移商品要隔 5s 二次采样，一轮可能跑很久；
+	// 两轮重叠会把同一笔漂移纠两次，所以上一轮没跑完就跳过本轮。
+	if _, e := c.AddJob("@every 10m", cron.NewChain(cron.SkipIfStillRunning(cron.DefaultLogger)).Then(cron.FuncJob(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				util.LogrusObj.Errorf("AvailableReconcile Cron Panic: %v", r)
+			}
+		}()
+		if err := inventory.ReconcileAvailable(context.Background(), 500); err != nil {
+			util.LogrusObj.Errorf("AvailableReconcile 执行失败: %v", err)
+		}
+	}))); e != nil {
+		util.LogrusObj.Errorf("AvailableReconcile Cron 注册失败: %v", e)
 	}
 
 	redPacketService := new(redpacket.RedPacketTaskService)

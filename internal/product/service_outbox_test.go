@@ -63,7 +63,7 @@ func TestUpdateProductAndEventCommitsTogether(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
 
-	if err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{Name: new("升级款咖啡壶"), OnSale: new(false)}); err != nil {
+	if _, err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{Name: new("升级款咖啡壶"), OnSale: new(false)}); err != nil {
 		t.Fatalf("updateProductAndEvent() error = %v", err)
 	}
 	got := loadProduct(t, db, p.ID)
@@ -78,7 +78,7 @@ func TestUpdateProductAndEventOnlyWritesProvidedFields(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
 
-	if err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{OnSale: new(false)}); err != nil {
+	if _, err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{OnSale: new(false)}); err != nil {
 		t.Fatalf("updateProductAndEvent() error = %v", err)
 	}
 	got := loadProduct(t, db, p.ID)
@@ -94,7 +94,7 @@ func TestUpdateProductAndEventRollsBackWhenOutboxInsertFails(t *testing.T) {
 	p := seedProduct(t, db)
 	injectProductOutboxFailure(t, db)
 
-	err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{Name: new("不应提交的新名称")})
+	_, err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{Name: new("不应提交的新名称")})
 	if err == nil {
 		t.Fatal("updateProductAndEvent() error = nil, want injected outbox error")
 	}
@@ -108,7 +108,7 @@ func TestUpdateProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
 
-	err := updateProductAndEvent(db, p.ID, p.BossID+1, &ProductUpdateReq{Name: new("越权改名")})
+	_, err := updateProductAndEvent(db, p.ID, p.BossID+1, &ProductUpdateReq{Name: new("越权改名")})
 	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
 		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
 	}
@@ -118,7 +118,7 @@ func TestUpdateProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
 func TestUpdateProductAndEventRejectsMissingProductWithoutEvent(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 
-	err := updateProductAndEvent(db, 404, 22, &ProductUpdateReq{Name: new("不存在")})
+	_, err := updateProductAndEvent(db, 404, 22, &ProductUpdateReq{Name: new("不存在")})
 	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
 		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
 	}

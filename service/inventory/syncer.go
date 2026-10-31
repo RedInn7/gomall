@@ -34,15 +34,8 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
 		}
 		for _, p := range rows {
 			lastID = p.ID
-			exists, err := cache.RedisClient.Exists(ctx, cache.StockAvailableKey(p.ID)).Result()
-			if err != nil {
-				util.LogrusObj.Errorln("inventory exists check:", err)
-				continue
-			}
-			if exists == 1 {
-				continue
-			}
-			if err := cache.InitStock(ctx, p.ID, int64(p.Num)); err != nil {
+			// 判断和建桶在一段 Lua 里原子完成：预热和下单时的懒初始化并发，也不会覆盖已有预占
+			if err := cache.InitStockIfAbsent(ctx, p.ID, int64(p.Num)); err != nil {
 				util.LogrusObj.Errorf("InitStock product=%d failed: %v", p.ID, err)
 			}
 		}
