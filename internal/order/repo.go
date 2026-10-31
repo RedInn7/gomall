@@ -318,12 +318,21 @@ func (d *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 
 }
 
+// whereBoss 商家写操作的归属条件：bossID=0 表示 admin，不限归属；否则只命中该商家自己的订单。
+func whereBoss(q *gorm.DB, bossID uint) *gorm.DB {
+	if bossID == 0 {
+		return q
+	}
+	return q.Where("boss_id=?", bossID)
+}
+
 // ShipOrder 商家发货：WaitShip -> WaitReceive。
 // 条件 UPDATE 保证幂等：仅当订单仍处于 WaitShip 时才会写入；
 // 已发货 / 已退款的订单 RowsAffected=0，上层据此判定非法转换。
+// bossID 见 whereBoss：商家只能发自己的货。
 // 物流单号本期不持久化（model 未引入字段），仅在事件层带出。
-func (d *OrderDao) ShipOrder(orderNum uint64) (bool, error) {
-	res := d.DB.Model(&Order{}).
+func (d *OrderDao) ShipOrder(orderNum uint64, bossID uint) (bool, error) {
+	res := whereBoss(d.DB.Model(&Order{}), bossID).
 		Where("order_num=? AND type=?", orderNum, consts.OrderWaitShip).
 		Update("type", consts.OrderWaitReceive)
 	if res.Error != nil {
@@ -365,9 +374,9 @@ func (d *OrderDao) RequestRefund(orderNum uint64, fromType uint) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
-// ApproveRefund 同意退款：Refunding -> Refunded。
-func (d *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
-	res := d.DB.Model(&Order{}).
+// ApproveRefund 同意退款：Refunding -> Refunded。bossID 见 whereBoss。
+func (d *OrderDao) ApproveRefund(orderNum uint64, bossID uint) (bool, error) {
+	res := whereBoss(d.DB.Model(&Order{}), bossID).
 		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
 		Update("type", consts.OrderRefunded)
 	if res.Error != nil {
@@ -381,8 +390,9 @@ func (d *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
 
 // RejectRefund 驳回退款：Refunding -> 申请前状态。
 // restoreType 来自进入退款时持久化的 RefundFromType，不能一律跳到 Completed 绕过履约。
-func (d *OrderDao) RejectRefund(orderNum uint64, restoreType uint) (bool, error) {
-	res := d.DB.Model(&Order{}).
+// bossID 见 whereBoss。
+func (d *OrderDao) RejectRefund(orderNum uint64, restoreType uint, bossID uint) (bool, error) {
+	res := whereBoss(d.DB.Model(&Order{}), bossID).
 		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
 		Update("type", restoreType)
 	if res.Error != nil {
