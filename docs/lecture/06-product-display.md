@@ -213,8 +213,8 @@ if !locked {
     defer cache.UnlockProduct(ctx, req.ID)
 }
 
-loaded, err := cache.LoadProductOnce(req.ID, func() (interface{}, error) {
-    return s.loadProductFromDB(ctx, req.ID)
+loaded, err := cache.LoadProductOnce(ctx, req.ID, func(ctx context.Context) (interface{}, error) {
+    return s.loadProductFromDB(ctx, req.ID) // 这个 ctx 与发起请求脱钩，领头请求断开也能查完
 })
 ```
 
