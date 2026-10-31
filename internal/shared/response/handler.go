@@ -40,10 +40,20 @@ func BindJSON[T any](ctx *gin.Context) (*T, bool) {
 	return &req, true
 }
 
+// failedKey Fail 在 gin ctx 上留下的业务失败标记
+const failedKey = "response.failed"
+
 // Fail 统一错误出口：记日志 + 写错误响应。HTTP 始终 200，错误码在响应体里。
+// 同时在 ctx 上标记失败，幂等这类中间件据此识别业务失败，不用去解析响应体里的业务码。
 func Fail(ctx *gin.Context, err error) {
 	log.LogrusObj.Infoln(err)
+	ctx.Set(failedKey, true)
 	ctx.JSON(http.StatusOK, ErrorResponse(ctx, err))
+}
+
+// Failed 本次请求是否经 Fail 返回了业务失败
+func Failed(ctx *gin.Context) bool {
+	return ctx.GetBool(failedKey)
 }
 
 // OK 统一成功出口。

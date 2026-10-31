@@ -8,6 +8,8 @@ import (
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	util "github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 const (
@@ -28,21 +30,14 @@ var retryLevels sync.Map
 // InitRetryQueue 声明延迟重试队列。TTL 到期后，消息经默认交换机回到原队列。
 // 只给一个 delay 时是固定间隔；给多个时逐级退避：第 n 次重试进第 min(n, len(delays)) 级，
 // 每级至少走一次，投递上限取 len(delays)+1 与配置 MaxDeliveryAttempts 的较大者。
+// 同名队列已按别的延迟声明过时 broker 返回 406：沿用已有队列并告警，不让消费者因此起不来；
+// 删掉该延迟队列后重启才会换成新延迟。
 func InitRetryQueue(queue string, delays ...time.Duration) error {
 	if len(delays) == 0 {
 		return errors.New("retry queue needs at least one delay")
 	}
-	ch, err := GlobalRabbitMQ.Channel()
-	if err != nil {
-		return err
-	}
-	defer ch.Close()
 	for i, delay := range delays {
-		if _, err := ch.QueueDeclare(retryQueueName(queue, i+1), true, false, false, false, amqp.Table{
-			"x-message-ttl":             int32(delay / time.Millisecond),
-			"x-dead-letter-exchange":    "",
-			"x-dead-letter-routing-key": queue,
-		}); err != nil {
+		if err := declareRetryQueue(queue, i+1, delay); err != nil {
 			return err
 		}
 	}
@@ -50,7 +45,28 @@ func InitRetryQueue(queue string, delays ...time.Duration) error {
 	return nil
 }
 
-// retryQueueName 第一级沿用旧名 queue.retry，已声明的队列参数不变，不会触发 406。
+// declareRetryQueue 每级单独开 channel：406 会让 broker 关掉当前 channel。
+func declareRetryQueue(queue string, level int, delay time.Duration) error {
+	ch, err := GlobalRabbitMQ.Channel()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
+	name := retryQueueName(queue, level)
+	_, err = ch.QueueDeclare(name, true, false, false, false, amqp.Table{
+		"x-message-ttl":             int32(delay / time.Millisecond),
+		"x-dead-letter-exchange":    "",
+		"x-dead-letter-routing-key": queue,
+	})
+	var amqpErr *amqp.Error
+	if errors.As(err, &amqpErr) && amqpErr.Code == amqp.PreconditionFailed {
+		util.LogrusObj.Warnf("retry queue %s 已存在且参数不同，沿用旧队列: %v", name, err)
+		return nil
+	}
+	return err
+}
+
+// retryQueueName 第一级沿用旧名 queue.retry，与只有一级延迟的老用法（搜索索引）共用同一个队列。
 func retryQueueName(queue string, level int) string {
 	if level <= 1 {
 		return queue + ".retry"

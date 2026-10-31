@@ -37,6 +37,30 @@ func UserRegisterHandler() gin.HandlerFunc {
 	}
 }
 
+// SetMoneyPasswordHandler 没有支付密码的存量用户补设支付密码
+func SetMoneyPasswordHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		req, ok := response.Bind[SetMoneyPasswordReq](ctx)
+		if !ok {
+			return
+		}
+
+		// 与注册同一校验
+		if len(req.Key) != consts.EncryptMoneyKeyLength {
+			err := errors.New("key长度错误,必须是6位数")
+			ctx.JSON(http.StatusOK, response.ErrorResponse(ctx, err))
+			return
+		}
+
+		resp, err := GetUserSrv().SetMoneyPassword(ctx.Request.Context(), req)
+		if err != nil {
+			response.Fail(ctx, err)
+			return
+		}
+		response.OK(ctx, resp)
+	}
+}
+
 // UserLoginHandler 用户登陆接口
 func UserLoginHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {

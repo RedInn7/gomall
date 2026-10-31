@@ -63,15 +63,15 @@ func BootstrapAdminHandler() gin.HandlerFunc {
 	}
 }
 
-// AdminBackfillProductIndexHandler 把 DB 中所有 product 灌一遍到 ES (一次性运维操作)
+// AdminBackfillProductIndexHandler 在后台把 DB 中所有 product 灌一遍到 ES / Milvus（一次性运维操作），
+// 立即返回；进度和失败的商品 ID 看服务日志
 func AdminBackfillProductIndexHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		batch, _ := strconv.Atoi(c.DefaultQuery("batch", "200"))
-		n, err := search.BackfillFromDB(c.Request.Context(), batch)
-		if err != nil {
+		if err := search.StartBackfill(c.Request.Context(), batch); err != nil {
 			response.Fail(c, err)
 			return
 		}
-		response.OK(c, gin.H{"indexed": n})
+		response.OK(c, gin.H{"message": "回填已在后台开始，进度见服务日志"})
 	}
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/clearing"
+	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/dbmodel"
@@ -88,6 +89,7 @@ func TestOrderDeleteOnlyRemovesOrdersWithSettledFunds(t *testing.T) {
 		name          string
 		orderType     uint
 		clearing      string // 空串表示没有清算单
+		refundCredit  string // 买家退款入账流水的 biz_type，空串表示退款还没落账
 		owner         uint
 		wantDeletable bool
 	}{
@@ -96,9 +98,13 @@ func TestOrderDeleteOnlyRemovesOrdersWithSettledFunds(t *testing.T) {
 		{name: "refunding", orderType: consts.OrderRefunding, clearing: clearing.StatusCleared, owner: 11},
 		{name: "completed before settlement", orderType: consts.OrderCompleted, clearing: clearing.StatusCleared, owner: 11},
 		{name: "other buyer's closed order", orderType: consts.OrderClosed, owner: 12},
+		// 已批准退款、但 order.refunded 消费者还没把钱退到账：删了单退款就永远到不了。
+		{name: "refunded before credit with settled clearing", orderType: consts.OrderRefunded, clearing: clearing.StatusSettled, owner: 11},
+		{name: "refunded legacy order before credit", orderType: consts.OrderRefunded, owner: 11},
 		{name: "closed", orderType: consts.OrderClosed, owner: 11, wantDeletable: true},
 		{name: "completed and settled", orderType: consts.OrderCompleted, clearing: clearing.StatusSettled, owner: 11, wantDeletable: true},
-		{name: "refunded", orderType: consts.OrderRefunded, clearing: clearing.StatusRefunded, owner: 11, wantDeletable: true},
+		{name: "refund credited from escrow", orderType: consts.OrderRefunded, clearing: clearing.StatusRefunded, refundCredit: money.BizTypeEscrowRefund, owner: 11, wantDeletable: true},
+		{name: "refund credited for legacy order", orderType: consts.OrderRefunded, refundCredit: money.BizTypeRefund, owner: 11, wantDeletable: true},
 		{name: "completed legacy order without clearing", orderType: consts.OrderCompleted, owner: 11, wantDeletable: true},
 	}
 	srv := order.NewOrderSrv(nil)
@@ -116,6 +122,15 @@ func TestOrderDeleteOnlyRemovesOrdersWithSettledFunds(t *testing.T) {
 				}
 				if err := db.Create(record).Error; err != nil {
 					t.Fatalf("seed clearing: %v", err)
+				}
+			}
+			if tt.refundCredit != "" {
+				credit := &money.AccountTransaction{
+					UserID: o.UserID, Direction: money.DirectionCredit, AmountCents: 100,
+					RefOrderID: o.ID, BalanceAfterCents: 100, BizType: tt.refundCredit,
+				}
+				if err := db.Create(credit).Error; err != nil {
+					t.Fatalf("seed refund credit: %v", err)
 				}
 			}
 
@@ -228,7 +243,7 @@ func openOrderTestDB(t *testing.T) *gorm.DB {
 		util.LogrusObj = previousLogger
 		_ = sqlDB.Close()
 	})
-	if err := db.AutoMigrate(&user.User{}, &order.Order{}, &clearing.PaymentClearing{}, &outbox.OutboxEvent{}); err != nil {
+	if err := db.AutoMigrate(&user.User{}, &order.Order{}, &clearing.PaymentClearing{}, &money.AccountTransaction{}, &outbox.OutboxEvent{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
