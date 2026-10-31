@@ -134,6 +134,30 @@ func TestOrderDeleteOnlyRemovesOrdersWithSettledFunds(t *testing.T) {
 	}
 }
 
+// 下架商品不能下单；未支付订单挂满上限后也不能再下单（每张未支付单都占着库存）。
+func TestOrderCreateRejectsOffSaleProductAndTooManyUnpaidOrders(t *testing.T) {
+	db := openOrderTestDB(t)
+	if err := db.AutoMigrate(&product.Product{}); err != nil {
+		t.Fatal(err)
+	}
+	offSale := &product.Product{Name: "old mug", CategoryID: 1, Price: "10.00", Num: 5, BossID: 22}
+	if err := db.Create(offSale).Error; err != nil {
+		t.Fatal(err)
+	}
+	srv := order.NewOrderSrv(nil)
+
+	if _, err := srv.OrderCreate(asUser(11), &order.OrderCreateReq{ProductID: offSale.ID, Num: 1}); !errors.Is(err, product.ErrProductNotOnSale) {
+		t.Fatalf("off-sale product must be rejected, got %v", err)
+	}
+
+	for i := 0; i < 20; i++ {
+		seedOrder(t, db, &order.Order{UserID: 12, BossID: 22, Type: consts.OrderWaitPay, OrderNum: uint64(9100 + i)})
+	}
+	if _, err := srv.OrderCreate(asUser(12), &order.OrderCreateReq{ProductID: offSale.ID, Num: 1}); !errors.Is(err, order.ErrTooManyUnpaidOrders) {
+		t.Fatalf("unpaid order quota must be enforced, got %v", err)
+	}
+}
+
 // MQ 重投同一个 ticket（上次建完单没来得及 Ack）只能有一张订单，第二次直接回写成功。
 func TestAsyncOrderTaskCreatesOneOrderPerTicket(t *testing.T) {
 	db := openOrderTestDB(t)

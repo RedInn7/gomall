@@ -290,6 +290,15 @@ func (d *OrderDao) MarkOrderPaidWithCheck(orderID, userID uint) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
+// CountUnpaidByUser 用户名下未支付的普通订单数（已付定金的预售单不算，见 notPreorderSQL）。
+func (d *OrderDao) CountUnpaidByUser(userID uint) (n int64, err error) {
+	err = d.DB.Model(&Order{}).
+		Where("user_id = ? AND type = ?", userID, consts.OrderWaitPay).
+		Where(notPreorderSQL).
+		Count(&n).Error
+	return
+}
+
 // GetTimeoutOrders 拉取超时未支付的普通订单，供 cron 兜底关单。预售单不在其列（见 notPreorderSQL）。
 func (d *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*Order, err error) {
 	expireTime := time.Now().Add(-time.Duration(minutes) * time.Minute)
