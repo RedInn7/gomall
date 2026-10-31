@@ -70,7 +70,7 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 			return errors.New("订单不存在")
 		}
 		if order.UserID != u.Id {
-			return errors.New("无权操作该订单")
+			return orderpkg.ErrOrderForbidden
 		}
 		fromType := order.Type
 		if !inUintSlice(fromType, refundAllowedFrom) {
@@ -97,11 +97,16 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 }
 
 // ApproveRefund 运营同意退款。
+//   - 商家只能审批自己的订单（MerchantScope），admin 不限
 //   - 仅允许 Refunding -> Refunded
 //   - 写 outbox(order.refunded)，amount 取实付口径 FinalCents（回退到 Money*Num）；tx_id 留空待下游回填
 //
 // 真正的资金回退在下游 wallet 服务消费事件时执行；本服务仅做状态推进。
 func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
+	bossID, err := orderpkg.MerchantScope(ctx)
+	if err != nil {
+		return err
+	}
 	baseDao := orderpkg.NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
@@ -109,6 +114,9 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 	}
 	if order == nil || order.ID == 0 {
 		return errors.New("订单不存在")
+	}
+	if bossID != 0 && order.BossID != bossID {
+		return orderpkg.ErrOrderForbidden
 	}
 	if order.Type != consts.OrderRefunding {
 		return orderpkg.ErrInvalidOrderStateTransition
@@ -121,7 +129,7 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 		amount = order.Money * int64(order.Num)
 	}
 	txErr := baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := orderpkg.NewOrderDaoByDB(tx).ApproveRefund(orderNum)
+		ok, err := orderpkg.NewOrderDaoByDB(tx).ApproveRefund(orderNum, bossID)
 		if err != nil {
 			return err
 		}
@@ -151,9 +159,14 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 }
 
 // RejectRefund 运营驳回退款，订单回到申请退款前的状态。
+//   - 商家只能驳回自己的订单（MerchantScope），admin 不限
 //   - 仅允许 Refunding -> RefundFromType（WaitShip / WaitReceive / Completed）
 //   - 写 outbox(order.refund_rejected) 让客服 / 用户系统得知
 func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason string) error {
+	bossID, err := orderpkg.MerchantScope(ctx)
+	if err != nil {
+		return err
+	}
 	baseDao := orderpkg.NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
@@ -161,6 +174,9 @@ func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason st
 	}
 	if order == nil || order.ID == 0 {
 		return errors.New("订单不存在")
+	}
+	if bossID != 0 && order.BossID != bossID {
+		return orderpkg.ErrOrderForbidden
 	}
 	if order.Type != consts.OrderRefunding {
 		return orderpkg.ErrInvalidOrderStateTransition
@@ -171,7 +187,7 @@ func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason st
 		restoreType = consts.OrderCompleted
 	}
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := orderpkg.NewOrderDaoByDB(tx).RejectRefund(orderNum, restoreType)
+		ok, err := orderpkg.NewOrderDaoByDB(tx).RejectRefund(orderNum, restoreType, bossID)
 		if err != nil {
 			return err
 		}
@@ -296,7 +312,7 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 			if buyer.Money, err = buyer.EncryptMoney(); err != nil {
 				return err
 			}
-			if err = userDao.UpdateUserById(o.UserID, buyer); err != nil {
+			if err = userDao.UpdateUserMoney(o.UserID, buyer.Money); err != nil {
 				return err
 			}
 		}
@@ -325,7 +341,7 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 				if seller.Money, err = seller.EncryptMoney(); err != nil {
 					return err
 				}
-				if err = userDao.UpdateUserById(o.BossID, seller); err != nil {
+				if err = userDao.UpdateUserMoney(o.BossID, seller.Money); err != nil {
 					return err
 				}
 			}

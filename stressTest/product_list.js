@@ -5,6 +5,8 @@
 import http from 'k6/http';
 import { check } from 'k6';
 
+const BASE = __ENV.BASE_URL || 'http://localhost:5003/api/v1';
+
 export const options = {
     vus: 50,
     duration: '30s',
@@ -14,9 +16,9 @@ export const options = {
 };
 
 export default function () {
-    const res = http.get('http://localhost:5002/api/v1/product/list?page_num=1&page_size=20');
+    const res = http.get(`${BASE}/product/list?page_num=1&page_size=20`);
     check(res, {
         'status 200': r => r.status === 200,
-        'not rate-limited': r => !r.body || r.body.indexOf('70001') < 0,
+        'not rate-limited': r => !r.body || r.body.indexOf('"status":70001') < 0,
     });
 }

@@ -42,7 +42,7 @@ const escrowUserID = money.ExternalClearingUserID
 //   - 托管 credit：仅追加 credit 流水(groupbuy_pay)，系统账户不维护钱包行
 //
 // 幂等：(refOrderID, debit, groupbuy_pay) 唯一索引兜底，重复点击 / 重复投递不重复扣款。
-// 拼团下单不收支付密码（加入即代扣，与普通下单后单独 PayDown 的形态不同），
+// 拼团开团 / 参团在 service 层先过支付密码（checkPayKey，与 paydown 共用失败锁定），加入即代扣，
 // 故这里不校验 money key，仅做服务端余额读改写。
 func collectToEscrow(tx *gorm.DB, memberID uint, amountCents int64, refOrderID uint) error {
 	if amountCents <= 0 {
@@ -67,7 +67,7 @@ func collectToEscrow(tx *gorm.DB, memberID uint, amountCents int64, refOrderID u
 	if u.Money, err = u.EncryptMoney(); err != nil {
 		return err
 	}
-	if err = userDao.UpdateUserById(memberID, u); err != nil {
+	if err = userDao.UpdateUserMoney(memberID, u.Money); err != nil {
 		return err
 	}
 	if err = ledgerDao.AppendTransaction(memberID, refOrderID, money.DirectionDebit, amountCents, after, BizTypeGroupBuyPay); err != nil {
@@ -118,7 +118,7 @@ func settleToSeller(tx *gorm.DB, sellerID uint, amountCents int64, refOrderID ui
 	if seller.Money, err = seller.EncryptMoney(); err != nil {
 		return err
 	}
-	if err = userDao.UpdateUserById(sellerID, seller); err != nil {
+	if err = userDao.UpdateUserMoney(sellerID, seller.Money); err != nil {
 		return err
 	}
 	return ledgerDao.AppendTransaction(sellerID, refOrderID, money.DirectionCredit, amountCents, after, BizTypeGroupBuySettle)
@@ -163,7 +163,7 @@ func refundFromEscrow(tx *gorm.DB, memberID uint, amountCents int64, refOrderID 
 	if u.Money, err = u.EncryptMoney(); err != nil {
 		return err
 	}
-	if err = userDao.UpdateUserById(memberID, u); err != nil {
+	if err = userDao.UpdateUserMoney(memberID, u.Money); err != nil {
 		return err
 	}
 	return ledgerDao.AppendTransaction(memberID, refOrderID, money.DirectionCredit, amountCents, after, BizTypeGroupBuyRefund)

@@ -16,7 +16,6 @@ conf/config.ini
 # vendor/
 node_modules
 config/locales/config.yaml
-go.sum
 ci
 main
 logs

@@ -10,8 +10,6 @@ import (
 	"strconv"
 
 	"github.com/elastic/go-elasticsearch/esapi"
-
-	"github.com/RedInn7/gomall/internal/product"
 )
 
 const ProductIndex = "product"
@@ -44,7 +42,8 @@ var productIndexMapping = `{
   }
 }`
 
-// ProductDoc ES 中的商品文档结构，与 product.Product 同构但去掉了 gorm 字段
+// ProductDoc ES 中的商品文档结构。由 service/search 从商品模型映射而来，
+// repository 层不依赖 internal/product（见 CONTEXT.md 的分层规则）
 type ProductDoc struct {
 	ID            uint   `json:"id"`
 	Name          string `json:"name"`
@@ -58,23 +57,8 @@ type ProductDoc struct {
 	BossID        uint   `json:"boss_id"`
 	ImgPath       string `json:"img_path"`
 	CreatedAt     int64  `json:"created_at"`
-}
-
-func docFromModel(p *product.Product) *ProductDoc {
-	return &ProductDoc{
-		ID:            p.ID,
-		Name:          p.Name,
-		Title:         p.Title,
-		Info:          p.Info,
-		CategoryID:    p.CategoryID,
-		Price:         p.Price,
-		DiscountPrice: p.DiscountPrice,
-		OnSale:        p.OnSale,
-		Num:           p.Num,
-		BossID:        p.BossID,
-		ImgPath:       p.ImgPath,
-		CreatedAt:     p.CreatedAt.Unix(),
-	}
+	// Version 外部版本号（商品 updated_at 的 UnixNano），只用于写入时的版本控制，不进文档
+	Version int64 `json:"-"`
 }
 
 // EnsureProductIndex 幂等地创建索引。已存在则跳过
@@ -107,21 +91,20 @@ func EnsureProductIndex(ctx context.Context) error {
 }
 
 // UpsertProduct 写入或更新一条
-func UpsertProduct(ctx context.Context, p *product.Product) error {
+func UpsertProduct(ctx context.Context, doc *ProductDoc) error {
 	if EsClient == nil {
 		return errors.New("es client not initialized")
 	}
-	doc := docFromModel(p)
 	body, err := json.Marshal(doc)
 	if err != nil {
 		return err
 	}
 	// 以商品 updated_at 作外部版本：回填拿旧快照晚到时 ES 返回 409，不会盖掉更新的增量写入；
 	// external_gte 允许同版本重写，重复投递照样幂等
-	version := int(p.UpdatedAt.UnixNano())
+	version := int(doc.Version)
 	req := esapi.IndexRequest{
 		Index:       ProductIndex,
-		DocumentID:  strconv.FormatUint(uint64(p.ID), 10),
+		DocumentID:  strconv.FormatUint(uint64(doc.ID), 10),
 		Body:        bytes.NewReader(body),
 		Refresh:     "false",
 		Version:     &version,

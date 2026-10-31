@@ -10,8 +10,6 @@ import (
 	"time"
 
 	elastic "github.com/elastic/go-elasticsearch"
-
-	"github.com/RedInn7/gomall/internal/product"
 )
 
 func TestUpsertProductWritesExternalVersionAndIgnoresStaleConflict(t *testing.T) {
@@ -32,13 +30,12 @@ func TestUpsertProductWritesExternalVersionAndIgnoresStaleConflict(t *testing.T)
 	EsClient = client
 	t.Cleanup(func() { EsClient = previous })
 
-	p := &product.Product{Name: "phone"}
-	p.ID = 12
-	p.UpdatedAt = time.Date(2026, 10, 31, 8, 0, 0, 123_000_000, time.UTC)
+	updatedAt := time.Date(2026, 10, 31, 8, 0, 0, 123_000_000, time.UTC)
+	p := &ProductDoc{ID: 12, Name: "phone", Version: updatedAt.UnixNano()}
 	if err := UpsertProduct(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
-	if query.Get("version_type") != "external_gte" || query.Get("version") != strconv.FormatInt(p.UpdatedAt.UnixNano(), 10) {
+	if query.Get("version_type") != "external_gte" || query.Get("version") != strconv.FormatInt(p.Version, 10) {
 		t.Fatalf("upsert must carry updated_at as external version, got %v", query)
 	}
 

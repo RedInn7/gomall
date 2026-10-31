@@ -248,7 +248,24 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 		return nil
 	})
 	if err != nil {
-		return err
+		if !isUnfulfillable(err) {
+			return err
+		}
+		// 已确认收款却确定性无法履约（库存不足 / 商品已删 / 订单不存在）：原事务整体回滚后，
+		// 在独立事务里把账单隔离成异常单，向 Xcash 返回成功停止重投，由运营走异常退款。
+		return db.Transaction(func(tx *gorm.DB) error {
+			var intent XcashPaymentIntent
+			if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("sys_no = ?", event.Data.SysNo).First(&intent).Error; e != nil {
+				return errors.Join(err, e)
+			}
+			if intent.Status == XcashIntentAnomaly || intent.Status == XcashIntentCompleted {
+				return nil
+			}
+			o := &orderpkg.Order{}
+			o.ID = intent.OrderID
+			return quarantineXcashPayment(tx, &intent, o, event, providerRef, clearing.AnomalyReasonFulfillmentFailed)
+		})
 	}
 	if settledProductID != 0 && settledNum > 0 {
 		s.commitReservation(ctx, settledProductID, settledNum)
@@ -413,8 +430,8 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 	if err != nil {
 		return nil, err
 	}
-	if order.Type != consts.OrderWaitPay {
-		return nil, errors.New("订单状态非未支付")
+	if err := ensureOrderPayable(order); err != nil {
+		return nil, err
 	}
 	payableCents := orderPayableCents(order)
 	if payableCents <= 0 {
