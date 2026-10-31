@@ -144,6 +144,7 @@ SNOWFLAKE_ALLOW_DEFAULT=true /tmp/gomall-bin &
 # 3. 准备测试 token
 cd stressTest
 ./setup_token.sh   # 注册新用户 + 写 config.json
+# 建券批次、初始化秒杀需要管理员：服务端和上面的脚本设置同一个 ADMIN_BOOTSTRAP_TOKEN（系统里还没有管理员时生效）
 
 # 4. 初始化秒杀数据
 ACCESS=$(jq -r .access_token config.json)
