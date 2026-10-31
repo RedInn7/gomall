@@ -320,7 +320,9 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 	})
 	if err != nil {
 		log.LogrusObj.Errorf("stripe settle order=%d failed: %v", orderID, err)
-		return err
+		// 库存不足 / 商品已删等确定性失败：钱已在 Stripe，改记异常单并返回成功，停止 webhook 重投。
+		return recordUnfulfillable(orderpkg.NewOrderDao(ctx).DB, err, orderID, clearing.ChannelStripe,
+			providerRef, strconv.FormatInt(paidAmount, 10), paidCurrency)
 	}
 
 	// 只有正常清算并推进订单后才核销预留。payment_anomaly 只是接管外部异常，订单仍是 WaitPay，
