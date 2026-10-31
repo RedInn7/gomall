@@ -130,8 +130,8 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 支付时 Lua `reserved -= n`；取消时 Lua `reserved → available`
 - DB 事务失败 → defer 调 release Lua 把扣的退回
 
-实测（单测 `TestCoupon_AtomicClaimNoOversell`，已在 3461689 删除）：1000 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms（k6 压测时同样被全局令牌桶限流，max 延迟只作参考）。
-`repository/cache/inventory.go` 4 个 Lua 脚本 + `internal/order/cancel.go` Saga 回滚。
+实测（单测 `TestCoupon_AtomicClaimNoOversell`，已在 3461689 删除）：500 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms（k6 压测时同样被全局令牌桶限流，max 延迟只作参考）。
+`repository/cache/inventory.go` 3 个 Lua 脚本（reserve / commit / release）+ `internal/order/cancel.go` Saga 回滚。
 
 ### 3 · Outbox + 协同 Saga：解双写问题
 
@@ -199,17 +199,16 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 **解**：保留同步 `/orders/create` 兼容老客户端；新增异步路径
 - `POST /orders/enqueue`：reserve 库存 + 写 RMQ + 立即返回 ticket（<10ms）
 - `internal/order/consumer.go`：消费 MQ 慢慢落 DB（沿用同事务 + outbox）
-- `GET /orders/status?ticket=`：前端轮询，0.5s × 6 次后切换"长等待"文案
+- `GET /orders/status?ticket=`：按 ticket 查询落库结果；店面目前只能在 Workbench 里手动调用，还没有自动轮询
 - 失败 → consumer 调 release 释放 reserved（Saga）
 
 `internal/order/async.go` + `internal/order/consumer.go` + `repository/rabbitmq/order_async.go`。
 
-### 10 · 订单 7 态机：兼容存量 + 业务对齐
+### 10 · 订单 8 态机：兼容存量 + 业务对齐
 
 **难**：原系统只有 3 态（WaitPay/Paid/Cancelled），且 consts 里两套常量数值重叠（`Cancelled=3` = `OrderTypeShipping=3` 撞值不同义，是 bug）。
-**解**：升到业界标配 7 态：`WaitPay → WaitShip → WaitReceive → Completed | Closed | Refunding | Refunded`
-- 数值兼容：1/2/3 保留原义（存量数据零迁移），4-7 新增
-- 旧名 `UnPaid/Paid/Cancelled` 标 Deprecated 别名保留
+**解**：升到 8 态：业界标配的 `WaitPay → WaitShip → WaitReceive → Completed | Closed | Refunding | Refunded`，加上拼团成员订单的 `WaitGroup`（成团进 WaitShip，超时散团进 Closed）
+- 数值兼容：1/2/3 保留原义（存量数据零迁移），4-7 新增，8 是拼团中
 - 状态机校验 `CanTransition(from, to)` + DAO 条件 UPDATE 双兜底幂等
 - 7 天 Cron 自动确认收货
 - 单测覆盖全部 11 条合法转换和 10 条典型非法转换（`internal/order/order_state_test.go`）
@@ -236,7 +235,7 @@ RMQ、ES、Web3 和 Milvus 分别由 `cmd/main.go` 中的 `tryInitX` 入口按�
 | 异步下单（削峰填谷 enqueue → consumer → ticket polling） | `internal/order/async.go` · `internal/order/consumer.go` |
 | HTTP cache（ETag + Cache-Control + 304） | `middleware/httpcache.go` |
 | 雪花算法订单号 | `pkg/utils/snowflake/` |
-| 订单状态机 7 态（WaitPay → WaitShip → WaitReceive → Completed / Closed / Refunding / Refunded） | `consts/order.go` · `internal/order/state.go` · `internal/order/shipping.go` · `internal/refund/service.go` |
+| 订单状态机 8 态（WaitPay → WaitShip → WaitReceive → Completed / Closed / Refunding / Refunded，拼团 WaitGroup） | `consts/order.go` · `internal/order/state.go` · `internal/order/shipping.go` · `internal/refund/service.go` |
 
 ### 流量治理
 
