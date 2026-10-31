@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	crand "crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -146,13 +147,18 @@ func ProductCountCached(ctx context.Context, categoryID uint, load func() (int64
 	return v.(int64), nil
 }
 
-// TryProductLock 用 SETNX 抢回源锁，避免缓存击穿时多个请求同时回源
-func TryProductLock(ctx context.Context, id uint) (bool, error) {
-	return RedisClient.SetNX(ctx, ProductLockKey(id), "1", ProductLockTTL).Result()
+// TryProductLock 用 SETNX 抢回源锁，避免缓存击穿时多个请求同时回源。
+// 锁的值是随机 token，解锁时带回来，见 UnlockProduct。
+func TryProductLock(ctx context.Context, id uint) (token string, locked bool, err error) {
+	token = crand.Text()
+	locked, err = RedisClient.SetNX(ctx, ProductLockKey(id), token, ProductLockTTL).Result()
+	return token, locked, err
 }
 
-func UnlockProduct(ctx context.Context, id uint) {
-	RedisClient.Del(ctx, ProductLockKey(id))
+// UnlockProduct 只删自己持有的锁：回源超过 ProductLockTTL 时锁已过期并可能被别的请求
+// 抢到，直接 DEL 会把别人的锁删掉。比较 token 和删除在同一段 Lua 里完成。
+func UnlockProduct(ctx context.Context, id uint, token string) {
+	compareAndDeleteScript.Run(ctx, RedisClient, []string{ProductLockKey(id)}, token)
 }
 
 const (

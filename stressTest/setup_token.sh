@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 注册一个测试用户、登录、把 token 写回 config.json
-# 服务必须在 :5002 监听
+# 服务地址默认 http://localhost:5003/api/v1，可用 BASE_URL 覆盖
 set -euo pipefail
 
-BASE=http://localhost:5002/api/v1
+BASE=${BASE_URL:-http://localhost:5003/api/v1}
 USER="k6_$(date +%s)"
 PASS="K6test123!"
 KEY="123456"
@@ -30,6 +30,16 @@ if [[ -z "$ACCESS" || "$ACCESS" == "null" ]]; then
     echo "failed to extract tokens from response:"
     echo "$LOGIN_BODY"
     exit 1
+fi
+
+# 建券批次、初始化秒杀只对管理员开放：服务端设置了 ADMIN_BOOTSTRAP_TOKEN 且系统里
+# 还没有管理员时，用同一个 token 把这个测试用户提升为管理员。
+if [[ -n "${ADMIN_BOOTSTRAP_TOKEN:-}" ]]; then
+    curl -sS -X POST "$BASE/admin/bootstrap" \
+      -H 'Content-Type: application/json' \
+      -H "access_token: $ACCESS" -H "refresh_token: $REFRESH" \
+      -d "{\"token\":\"$ADMIN_BOOTSTRAP_TOKEN\"}"
+    echo
 fi
 
 cat > config.json <<EOF

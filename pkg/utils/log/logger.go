@@ -1,6 +1,7 @@
 package log
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path"
@@ -29,7 +30,21 @@ func InitLog() {
 	logger.SetFormatter(&logrus.JSONFormatter{
 		TimestampFormat: "2006-01-02 15:04:05",
 	})
+	logger.AddHook(stderrHook{})
 	LogrusObj = logger
+}
+
+// stderrHook 把 Fatal/Panic 日志同时打到终端。日志只写文件，
+// 没有这个 hook 时进程退出了终端也看不到原因。
+type stderrHook struct{}
+
+func (stderrHook) Levels() []logrus.Level {
+	return []logrus.Level{logrus.PanicLevel, logrus.FatalLevel}
+}
+
+func (stderrHook) Fire(e *logrus.Entry) error {
+	_, err := fmt.Fprintf(os.Stderr, "%s: %s\n", e.Level, e.Message)
+	return err
 }
 
 func setOutputFile() (*os.File, error) {
