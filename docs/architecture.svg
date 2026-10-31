@@ -225,11 +225,11 @@
       <text x="894" y="280" fill="rgba(255,255,255,0.7)" font-size="10">[MW]</text>
       <text x="894" y="297" fill="#ffffff" font-size="13" font-weight="700">Idempotency 幂等</text>
     </g>
-    <!-- Jaeger -->
+    <!-- CORS -->
     <g>
       <rect x="1036" y="258" width="100" height="50" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
       <text x="1048" y="280" fill="rgba(255,255,255,0.7)" font-size="10">[MW]</text>
-      <text x="1048" y="297" fill="#ffffff" font-size="13" font-weight="700">Jaeger 追踪</text>
+      <text x="1048" y="297" fill="#ffffff" font-size="13" font-weight="700">CORS 跨域</text>
     </g>
   </g>
 

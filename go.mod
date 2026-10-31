@@ -15,7 +15,6 @@ require (
 	github.com/go-playground/validator/v10 v10.12.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/milvus-io/milvus-sdk-go/v2 v2.4.2
-	github.com/opentracing/opentracing-go v1.2.0
 	github.com/qiniu/go-sdk/v7 v7.14.0
 	github.com/rabbitmq/amqp091-go v1.8.1
 	github.com/redis/go-redis/v9 v9.0.4

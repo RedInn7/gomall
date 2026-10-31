@@ -83,7 +83,7 @@ gomall 在组合根中先挂全局规则，再建立逐层收紧的路由组：
 
 ```go
 r.Use(middleware.TokenBucket(rate.Limit(100), 200))
-r.Use(middleware.Cors(), middleware.Jaeger())
+r.Use(middleware.Cors())
 r.Use(sessions.Sessions("mysession", store))
 
 v1 := r.Group("api/v1")
@@ -106,7 +106,7 @@ api/v1（匿名可访问）
 
 | 层级 | gomall 中的规则 | 为什么放这里 |
 |---|---|---|
-| 全局 | TokenBucket、CORS、Jaeger、Session | 每个动态请求都经过；越早拒绝越省资源 |
+| 全局 | TokenBucket、CORS、Session | 每个动态请求都经过；越早拒绝越省资源 |
 | 路由组 | Auth、RequireRole | 一批接口共享身份边界 |
 | 单路由 | HTTPCache | 只有公开只读响应适合交给浏览器或 CDN 缓存 |
 
@@ -241,7 +241,7 @@ TokenBucket → HTTPCache → Handler
 
 ## 课后延伸
 
-- 阅读 `middleware/cors.go` 和 `middleware/track.go`，说明 CORS、追踪与鉴权为何互不替代。
+- 阅读 `middleware/cors.go` 和 `middleware/jwt.go`，说明 CORS 与鉴权为何互不替代。
 - 用两次带 `If-None-Match` 的请求比较服务端日志，验证当前 304 仍会执行 handler。
 - 设计一次 token 版本缓存竞态，解释注释所说的 60 秒上界。
 - 为商品更新接口写一张表，分别列出角色检查与资源归属检查的位置。

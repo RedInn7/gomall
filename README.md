@@ -24,7 +24,7 @@ GoMall 是一套用 Go、Gin 和 React 实现的电商教学系统，覆盖商�
 | **商家** | 商品怎么卖 / 哪个 SKU 缺货 / 订单怎么履约 / 钱什么时候到 | 商品上架与改价 / BossID 归属校验 / 发货 / 退款审核 / 库存告警 / 托管结算 |
 | **运营 / 平台** | 大促能不能扛 / 黑产怎么挡 / GMV 受影响多少 | TokenBucket + SlidingWindow + CircuitBreaker / 双 11 异步下单削峰 |
 | **客服** | 用户怒投诉时能不能给个交代 | 完整业务码表 + 客服话术（70001 限流 / 70002 熔断 / 50001 缺货 / RP-EMPTY 红包抢完）|
-| **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Jaeger 链路追踪 / Skywalking / 外部依赖隔离 / Web3 链上对账 |
+| **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Skywalking / 外部依赖隔离 / Web3 链上对账 |
 
 Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.md`](docs/lecture/README.md) 进入。
 
@@ -34,7 +34,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 ### 整体架构
 
-客户端 → Gin Router + 中间件链（JWT / RBAC / 限流 / 熔断 / 幂等 / Jaeger）→ 按域分组的服务层 → MySQL / Redis / ES / Milvus / Web3，事件经 Outbox 旁路异步散给 RabbitMQ。核心链路同步落库收钱，搜索 / 统计 / 履约走异步，主线不被下游拖慢。
+客户端 → Gin Router + 中间件链（JWT / RBAC / 限流 / 熔断 / 幂等）→ 按域分组的服务层 → MySQL / Redis / ES / Milvus / Web3，事件经 Outbox 旁路异步散给 RabbitMQ。核心链路同步落库收钱，搜索 / 统计 / 履约走异步，主线不被下游拖慢。
 
 ![gomall 整体架构](docs/architecture.svg)
 
@@ -284,7 +284,6 @@ RMQ、ES、Web3 和 Milvus 分别由 `cmd/main.go` 中的 `tryInitX` 入口按�
 
 | 能力 | 关键代码 |
 |------|---------|
-| Jaeger 链路追踪 | `middleware/track.go` · `pkg/utils/track/` |
 | Skywalking-go agent | `Makefile` · `cmd/main.go` |
 | 结构化日志（logrus） | `pkg/utils/log/` |
 
@@ -425,11 +424,11 @@ gomall
 │   │   ├── response    # 统一错误响应
 │   │   └── outbox      # 事务发件箱（model / repo / publisher）
 │   └── migrate         # AutoMigrate 组合包，聚合全部领域 model
-├── middleware          # cors / jwt / rbac / track / idempotency / ratelimit / circuitbreaker / httpcache
+├── middleware          # cors / jwt / rbac / idempotency / ratelimit / circuitbreaker / httpcache
 ├── pkg
 │   ├── web3/contracts  # Solidity 合约（Web3 Escrow）
 │   ├── e               # 业务错误码
-│   ├── utils           # ctl / email / encryption / jwt / log / snowflake / track / upload
+│   ├── utils           # ctl / email / encryption / jwt / log / snowflake / upload
 │   └── web3            # Web3 escrow / signature 工具
 ├── repository
 │   ├── cache           # Redis（coupon / idempotency / inventory / product / ratelimit / redpacket / web3 / key）
