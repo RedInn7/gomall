@@ -11,6 +11,8 @@
 
 ## 单元测试结果
 
+> 下表这些单测已在 2026-07-05 的提交 3461689 中随全部测试一起删除，`middleware/` 和 `repository/cache/` 现在没有测试文件，下面的命令无法复现这张表；需要时从 `3461689^` 取回。
+
 ```
 go test ./middleware/ ./repository/cache/ -v -count=1
 ```
