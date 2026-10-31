@@ -14,7 +14,7 @@
 2. **是跨多个业务域、或本身不拥有业务表的"服务"吗？**
    → `service/<name>/`
    判据：被两个以上 internal 域依赖，或它不 own 任何业务表。
-   现有：`search`(跨商品读模型) · `inventory`(被 order/skill/groupbuy 共用) · `web3`(链上监听) · `events`(领域事件契约) · `grpc`(传输)
+   现有：`search`(跨商品读模型) · `inventory`(被 order/skill/groupbuy 共用) · `web3`(链上监听) · `events`(领域事件契约)
 
 3. **是基础设施客户端 / 存储适配器吗？**
    → `repository/<tech>/`（db、cache、es、milvus、rabbitmq）

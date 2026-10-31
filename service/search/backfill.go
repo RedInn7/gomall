@@ -43,7 +43,7 @@ func BackfillFromDB(ctx context.Context, batchSize int) (indexed int, failed []u
 	}
 	store, vectorEnabled := getProductVectorStore()
 	return backfill(ctx, batchSize, product.NewProductDao(ctx).ListAfterID, func(ctx context.Context, p *product.Product) error {
-		if err := es.UpsertProduct(ctx, p); err != nil {
+		if err := upsertProductDoc(ctx, p); err != nil {
 			return fmt.Errorf("es: %w", err)
 		}
 		if vectorEnabled {

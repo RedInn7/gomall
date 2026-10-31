@@ -192,10 +192,10 @@ func (u *User) SetMoneyPassword(pin string) error {
 
 - User 表只有 `PasswordDigest` 一列，**没有单独的 salt 列**——`CompareHashAndPassword` 从摘要里解析出盐和 cost 再重算比对。`bcrypt` 密文长这样： `$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy`，从中提取出salt
 - **6 位 PIN 只有 100 万种可能**：`10^6 × 300ms` 单核串行也只要约 3.5 天，多核并行按小时计。低熵凭证 bcrypt 只是兜底，真正的防线是在线侧的错误锁定 / 限流——哈希救不了熵不足。
-- **一个真实的兜底陷阱**：`CheckMoneyPassword` 对**空摘要直接放行**（历史 / 种子用户未设支付密码时 `return true`）。这是"兼容优先"的安全默认值，但对资金动作是 fail-open
+- **一个真实的兜底陷阱**：`CheckMoneyPassword` 曾对**空摘要直接放行**（历史 / 种子用户未设支付密码时 `return true`）。这是"兼容优先"的安全默认值，但对资金动作是 fail-open；现在空摘要一律拒绝，扣款路径统一走带失败限次的 `VerifyMoneyPassword`
 
 ```go
-// internal/user/model.go —— 注意这里的 fail-open
+// internal/user/model.go 修复前 —— 注意这里的 fail-open
 func (u *User) CheckMoneyPassword(pin string) bool {
     if u.MoneyPasswordDigest == "" {
         return true // 未设支付密码就放行——支付二次校验被整体跳过
@@ -627,7 +627,7 @@ func (s *UserSrv) preflight(ctx context.Context, name, cap string) error {
 - B/C 按用户粒度（改密码 / 强制下线），改一次字段全部作废。
 - gomall 推荐 **B+C 合并**：版本号 `++` 即生效，本地 sync.Map 命中 0ms。
 
-> ⚠️ **这是当前代码最大的缺口**：Claims 里只有 id + username，没有 `token_version`。改密码只更新 `PasswordDigest`，旧 token 照样有效。第一节讲的"改密码立即生效"目前是路线图，不是现状。这是最值得补的一件事。
+> 当前代码实现的是方案 B：Claims 带 `token_version`（`pkg/utils/jwt/jwt.go`），`AuthMiddleware` 逐请求和 `users.token_version` 比对，本地缓存 60s（`middleware/jwt.go`）；改密码时 `BumpTokenVersion` 把版本号加 1 并清缓存（`internal/user/service.go`），旧 token 下一个请求就被拒，第一节讲的"改密码立即生效"已经成立。方案 C 和下面的客服强制下线接口还没有实现。
 
 ### 客服强制下线时序
 
@@ -682,7 +682,7 @@ A：access 短，限制单个 token 泄露的损失；refresh 长，覆盖周末
 A：常规延迟可接受（提权慢生效无害）。关键路径用 `InvalidateRoleCache(userId)` 显式失效，提权/降权立即生效。真实风险点在退款审批挂 merchant 墙且触发资金结算，摘牌/降权必须走显式失效。
 
 **Q3：登出后老 token 还能用怎么办？**
-A：token 仅控访问、不直接控钱，大额动作有二次验证兜底。根治靠 Claims 加 `token_version`，登出/改密码时 `++`，解析时比对——目前是路线图。
+A：token 仅控访问、不直接控钱，大额动作有二次验证兜底。根治靠 Claims 里的 `token_version`：改密码时已经 `++`，`AuthMiddleware` 逐请求比对；登出还没有接上版本号，是下一步要补的。
 
 **Q4：bcrypt cost=12 怎么选？怎么无痛升 14？**
 A：250ms 在 300ms 感知阈值内，离线穷举不现实。登录成功路径探测旧 hash 顺便 re-hash，约 90 天自然升完，无需停机迁移。

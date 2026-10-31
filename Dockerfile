@@ -1,18 +1,29 @@
-FROM golang:1.25 AS builder
+# syntax=docker/dockerfile:1
+FROM golang:1.26 AS builder
 
 ENV GO111MODULE=on \
     GOPROXY=https://goproxy.cn,direct
 
 WORKDIR /app
+# 先只拷依赖清单，源码改动时可以复用依赖下载这一层缓存
+COPY go.mod go.sum ./
+# 模块和编译缓存挂到 BuildKit 缓存卷，跨次构建复用，不进镜像层
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
-RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o main ./cmd
-WORKDIR /app
-RUN mkdir publish  \
-    && cp main publish  \
-    && cp -r config web/dist static publish
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o main ./cmd
+# 路由从 ./web/dist 托管店面，产物要落在 publish/web/dist
+RUN mkdir -p publish/web \
+    && cp main publish \
+    && cp -r config static publish \
+    && cp -r web/dist publish/web
 
-FROM busybox:1.28.4
+FROM alpine:3.24
+
+# Stripe、Xcash、embedding 等 HTTPS 调用需要 CA 证书
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 

@@ -19,16 +19,6 @@ mysql:
     password: "CHANGE_ME"
     charset: "utf8mb4"
 
-kafka:
-  default:
-    debug: true
-    address: localhost:9092
-    requiredAck: -1
-    readTimeout: 30
-    writeTimeout: 30
-    maxOpenRequests: 5
-    partition: 2
-
 redis:
   redisDbName: 4
   redisHost: 127.0.0.1
@@ -36,14 +26,8 @@ redis:
   redisPassword: ""
   redisNetwork: "tcp"
 
-cache:
-  cacheType: redis
-  cacheEmpires: 600
-  cacheWarmUp: false
-  cacheServer:
-
 email:
-  address: http://localhost:8080/#/vaild/email/
+  validEmail: http://localhost:8080/#/vaild/email/
   smtpHost:
   smtpEmail:
   smtpPass:
@@ -71,7 +55,6 @@ photoPath:
 es:
   EsHost: 127.0.0.1
   EsPort: 9200
-  EsIndex: mylog
 
 rabbitMq:
   rabbitMQ: amqp
