@@ -549,10 +549,8 @@ func checkPayKey(ctx context.Context, userID uint, key string) error {
 	if err != nil {
 		return err
 	}
-	if !u.CheckMoneyPassword(key) {
-		return user.ErrMoneyKeyIncorrect
-	}
-	return nil
+	// 与 paydown 共用失败计数与锁定，防止借开团/参团接口爆破支付密码
+	return user.VerifyMoneyPassword(ctx, u, key)
 }
 
 // ShowGroup 拼团详情：用于分享落地页 / 客服回看。

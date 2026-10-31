@@ -42,7 +42,7 @@ const escrowUserID = money.ExternalClearingUserID
 //   - 托管 credit：仅追加 credit 流水(groupbuy_pay)，系统账户不维护钱包行
 //
 // 幂等：(refOrderID, debit, groupbuy_pay) 唯一索引兜底，重复点击 / 重复投递不重复扣款。
-// 拼团下单不收支付密码（加入即代扣，与普通下单后单独 PayDown 的形态不同），
+// 拼团开团 / 参团在 service 层先过支付密码（checkPayKey，与 paydown 共用失败锁定），加入即代扣，
 // 故这里不校验 money key，仅做服务端余额读改写。
 func collectToEscrow(tx *gorm.DB, memberID uint, amountCents int64, refOrderID uint) error {
 	if amountCents <= 0 {
