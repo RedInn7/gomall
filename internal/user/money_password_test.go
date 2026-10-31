@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
+
+	"github.com/RedInn7/gomall/pkg/utils/ctl"
 )
 
 func TestMoneyPasswordLocksAfterRepeatedFailures(t *testing.T) {
@@ -38,6 +41,45 @@ func TestMoneyPasswordLocksAfterRepeatedFailures(t *testing.T) {
 	}
 	if err := VerifyMoneyPassword(ctx, u, "123456"); !errors.Is(err, ErrMoneyPasswordLocked) {
 		t.Fatalf("correct password after %d failures must be locked, got %v", moneyPasswordMaxAttempts, err)
+	}
+}
+
+// 补设支付密码只给摘要为空的存量用户：凭登录密码设一次，之后不能再用这个接口覆盖。
+func TestSetMoneyPasswordOnlyWhenUnset(t *testing.T) {
+	db := openUserTestDB(t)
+	u := seedUserWithBalance(t, db, 1, 0)
+	digest, err := bcrypt.GenerateFromPassword([]byte("login-pass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 迁移加列时存量行的支付密码摘要是 NULL，不是空串。
+	if err := db.Model(u).Updates(map[string]interface{}{
+		"password_digest": string(digest), "money_password_digest": gorm.Expr("NULL"),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 1})
+
+	if _, err := GetUserSrv().SetMoneyPassword(ctx, &SetMoneyPasswordReq{Password: "wrong-pass", Key: "123456"}); !errors.Is(err, ErrCurrentPasswordIncorrect) {
+		t.Fatalf("wrong login password: want ErrCurrentPasswordIncorrect, got %v", err)
+	}
+	if _, err := GetUserSrv().SetMoneyPassword(ctx, &SetMoneyPasswordReq{Password: "login-pass", Key: "123456"}); err != nil {
+		t.Fatalf("set money password: %v", err)
+	}
+	if _, err := GetUserSrv().SetMoneyPassword(ctx, &SetMoneyPasswordReq{Password: "login-pass", Key: "654321"}); !errors.Is(err, ErrMoneyPasswordAlreadySet) {
+		t.Fatalf("overwrite: want ErrMoneyPasswordAlreadySet, got %v", err)
+	}
+	// 并发兜底：绕过服务层的前置判断，条件写入同样不覆盖已有摘要。
+	if set, err := NewUserDaoByDB(db).SetMoneyPasswordIfUnset(1, "overwritten"); err != nil || set {
+		t.Fatalf("conditional write must not overwrite: set=%v err=%v", set, err)
+	}
+
+	var got User
+	if err := db.First(&got, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !got.CheckMoneyPassword("123456") {
+		t.Fatal("money password must stay the first one set")
 	}
 }
 

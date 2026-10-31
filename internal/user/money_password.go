@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 )
@@ -24,7 +25,46 @@ var (
 	ErrMoneyPasswordNotSet = errors.New("尚未设置支付密码，请先设置支付密码")
 	// ErrMoneyPasswordLocked 连续输错次数达到上限。
 	ErrMoneyPasswordLocked = errors.New("支付密码错误次数过多，请 30 分钟后再试")
+	// ErrMoneyPasswordAlreadySet 补设接口只给没有支付密码的存量用户用，已设置过的不能拿它覆盖。
+	ErrMoneyPasswordAlreadySet = errors.New("支付密码已设置")
 )
+
+// SetMoneyPassword 给没有支付密码的存量用户（迁移前的种子用户）补设支付密码，要求当前登录密码。
+// 只允许摘要为空时设置一次，这不是"修改支付密码"：偷到登录态和登录密码也改不掉已有的支付密码。
+func (s *UserSrv) SetMoneyPassword(ctx context.Context, req *SetMoneyPasswordReq) (*UserInfoResp, error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
+	userDao := NewUserDao(ctx)
+	user, err := userDao.GetUserById(u.Id)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
+	// 先判是否已设置：已有支付密码的用户拿这个接口连登录密码都试不了
+	if user.MoneyPasswordDigest != "" {
+		return nil, ErrMoneyPasswordAlreadySet
+	}
+	if !user.CheckPassword(req.Password) {
+		return nil, ErrCurrentPasswordIncorrect
+	}
+	if err = user.SetMoneyPassword(req.Key); err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
+	// 条件写入兜底并发：两个请求同时补设，只有先到的生效
+	set, err := userDao.SetMoneyPasswordIfUnset(u.Id, user.MoneyPasswordDigest)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
+	if !set {
+		return nil, ErrMoneyPasswordAlreadySet
+	}
+	return nil, nil
+}
 
 // moneyPasswordAttempt 记一次尝试并返回是否放行；moneyPasswordReset 校验通过后清零。
 // 复用 cache.SlidingWindowAllow 的 Redis 滑动窗口；与 preorder.nowFn 一样留成函数变量，单测替换为内存实现。
