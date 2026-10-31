@@ -9,13 +9,13 @@ import (
 // Order 订单信息
 type Order struct {
 	dbmodel.Model
-	UserID    uint   `gorm:"not null"`
+	UserID    uint   `gorm:"not null;index:idx_order_user_type,priority:1"`
 	ProductID uint   `gorm:"not null"`
 	BossID    uint   `gorm:"not null"`
 	AddressID uint   `gorm:"not null"`
 	Num       int    // 数量
 	OrderNum  uint64 // 订单号
-	Type      uint   // 状态机参见 consts.OrderXxx (1 待付 / 2 待发 / 3 关闭 / 4 待收 / 5 完成 / 6 退款中 / 7 已退)
+	Type      uint   `gorm:"index:idx_order_user_type,priority:2"` // 状态机参见 consts.OrderXxx (1 待付 / 2 待发 / 3 关闭 / 4 待收 / 5 完成 / 6 退款中 / 7 已退)
 	// RefundFromType 记录进入 Refunding 前的状态，驳回退款时必须恢复原状态，不能一律跳到 Completed。
 	RefundFromType uint  `gorm:"not null;default:0"`
 	Money          int64 // 单位：分。单价口径（订单结算时下游可能再 * Num）；预售订单写定金 + 尾款累计金额

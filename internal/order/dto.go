@@ -22,9 +22,9 @@ type OrderServiceReq struct {
 type OrderCreateReq struct {
 	OrderId   uint `form:"order_id" json:"order_id"`
 	ProductID uint `form:"product_id" json:"product_id" binding:"required"`
-	// Num 由客户端传入，必须设上下界：下界 min=1 挡住 0 与负数；上界封顶让单价*数量远低于
-	// int64 上限，杜绝乘法溢出（Num 上限 1e4，配合服务端单价上限，乘积 ≪ 9.2e18）。
-	Num       uint `form:"num" json:"num" binding:"required,min=1,max=10000"`
+	// Num 由客户端传入，必须设上下界：下界 min=1 挡住 0 与负数；上界 99 既让单价*数量远低于
+	// int64 上限、杜绝乘法溢出，也限制一张未支付订单能占住的库存。
+	Num       uint `form:"num" json:"num" binding:"required,min=1,max=99"`
 	AddressID uint `form:"address_id" json:"address_id"`
 	UserID    uint `form:"user_id" json:"user_id"`
 	OrderNum  uint `form:"order_num" json:"order_num"`
