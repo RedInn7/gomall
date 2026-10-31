@@ -87,7 +87,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 	}
 
 	// 2) Redis reserve（available -> reserved）；预售单数固定 1（业务约束：1 单 1 件）
-	if err := cache.ReserveStock(ctx, req.ProductID, 1); err != nil {
+	if err := product.ReserveStock(ctx, req.ProductID, 1); err != nil {
 		util.LogrusObj.Errorf("preorder reserve stock failed product=%d err=%v", req.ProductID, err)
 		return nil, err
 	}

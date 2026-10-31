@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -29,9 +30,11 @@ func Healthy() bool {
 // InitRabbitMQ 在中间件中初始化rabbitMQ链接。
 // 连接失败时返回 error 由调用方决定 fail-fast 还是降级，
 // 不再内部 panic，便于上层按配置区分生产/开发行为。
-func InitRabbitMQ() error {
+// ctx 是之后启动的所有消费者的生命周期，取消后消费者停止拉新消息、不再重连，见 WaitConsumers。
+func InitRabbitMQ(ctx context.Context) error {
 	connMu.Lock()
 	defer connMu.Unlock()
+	consumerCtx = ctx
 	return dial()
 }
 

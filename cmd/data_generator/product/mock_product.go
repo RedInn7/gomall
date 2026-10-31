@@ -23,9 +23,10 @@ func main() {
 	if err != nil {
 		panic("链接数据库失败，err: " + err.Error())
 	}
-	err = db.AutoMigrate(&product.Product{})
-	if err != nil {
-		panic("链接数据库失败，err: " + err.Error())
+	// 表结构以服务启动时的 AutoMigrate 为准，这里只灌数据，不改表
+	// （这里的连接没带服务的 DisableDatetimePrecision，AutoMigrate 会改掉 datetime 精度）
+	if !db.Migrator().HasTable(&product.Product{}) {
+		panic("product 表不存在，请先启动一次服务完成迁移")
 	}
 	fmt.Printf("🚀 开始生成 %d 条数据...\n", TotalRecords)
 	startTime := time.Now()

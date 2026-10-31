@@ -43,19 +43,43 @@ type ProductShowReq struct {
 	ID uint `form:"id" json:"id"`
 }
 
+// ProductUpdateReq 部分更新：字段是指针，nil 表示请求里没传、该列保持原值。
+// 只传 on_sale=false 就只下架，不会把名称、价格、类目、库存写成零值。
 type ProductUpdateReq struct {
-	ID            uint   `form:"id" json:"id"`
-	Name          string `form:"name" json:"name"`
-	CategoryID    uint   `form:"category_id" json:"category_id"`
-	Title         string `form:"title" json:"title" `
-	Info          string `form:"info" json:"info" `
-	ImgPath       string `form:"img_path" json:"img_path"`
-	Price         string `form:"price" json:"price"`
-	DiscountPrice string `form:"discount_price" json:"discount_price"`
-	OnSale        bool   `form:"on_sale" json:"on_sale"`
-	Num           int    `form:"num" json:"num"`
+	ID            uint    `form:"id" json:"id"`
+	Name          *string `form:"name" json:"name"`
+	CategoryID    *uint   `form:"category_id" json:"category_id"`
+	Title         *string `form:"title" json:"title" `
+	Info          *string `form:"info" json:"info" `
+	ImgPath       string  `form:"img_path" json:"img_path"`
+	Price         *string `form:"price" json:"price"`
+	DiscountPrice *string `form:"discount_price" json:"discount_price"`
+	OnSale        *bool   `form:"on_sale" json:"on_sale"`
+	Num           *int    `form:"num" json:"num"`
 	// GroupbuyPriceCents 拼团价（分），0 表示不开放拼团
-	GroupbuyPriceCents int64 `form:"groupbuy_price_cents" json:"groupbuy_price_cents"`
+	GroupbuyPriceCents *int64 `form:"groupbuy_price_cents" json:"groupbuy_price_cents"`
+}
+
+// applyTo 把请求里传了的字段写到 p 上，返回要更新的列（列名 → 新值）。
+func (req *ProductUpdateReq) applyTo(p *Product) map[string]interface{} {
+	updates := map[string]interface{}{}
+	setIfPresent(updates, "name", &p.Name, req.Name)
+	setIfPresent(updates, "category_id", &p.CategoryID, req.CategoryID)
+	setIfPresent(updates, "title", &p.Title, req.Title)
+	setIfPresent(updates, "info", &p.Info, req.Info)
+	setIfPresent(updates, "price", &p.Price, req.Price)
+	setIfPresent(updates, "discount_price", &p.DiscountPrice, req.DiscountPrice)
+	setIfPresent(updates, "num", &p.Num, req.Num)
+	setIfPresent(updates, "on_sale", &p.OnSale, req.OnSale)
+	setIfPresent(updates, "groupbuy_price_cents", &p.GroupbuyPriceCents, req.GroupbuyPriceCents)
+	return updates
+}
+
+func setIfPresent[T any](updates map[string]interface{}, column string, dst *T, v *T) {
+	if v != nil {
+		*dst = *v
+		updates[column] = *v
+	}
 }
 
 type ListProductImgReq struct {

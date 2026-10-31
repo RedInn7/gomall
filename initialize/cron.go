@@ -16,7 +16,8 @@ import (
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 )
 
-func InitCron() {
+// InitCron 注册并启动定时任务，返回 cron 实例：退出时 <-c.Stop().Done() 等在跑的任务结束。
+func InitCron() *cron.Cron {
 	c := cron.New(cron.WithSeconds())
 	orderService := new(order.OrderTaskService)
 	// @every 5m 而非 "* */5 * * * *"：后者在 WithSeconds 下是「分钟能被 5 整除时每秒触发」，
@@ -108,6 +109,7 @@ func InitCron() {
 	}
 
 	c.Start()
+	return c
 }
 
 // runGroupbuyExpireSweep 拉一批过期 open 团，逐个调 ExpireGroup。
