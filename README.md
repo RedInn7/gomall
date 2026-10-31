@@ -327,7 +327,7 @@ RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和�
 
 ```bash
 # 启动数据库与缓存
-docker compose up -d mysql redis
+docker compose up -d --wait mysql redis
 
 # 需要混合搜索时，同时启动 ES 与 Milvus
 docker compose up -d --wait elasticsearch milvus-standalone
@@ -366,7 +366,7 @@ make                # 编二进制并自动运行（默认带 SNOWFLAKE_ALLOW_DE
 make build          # 仅编二进制
 make tools          # 编 SkyWalking Agent（需要先初始化子模块）
 make build-agent    # 使用 SkyWalking Agent 构建
-make env-up         # 拉起 docker-compose 中的完整依赖与观测组件
+make env-up         # 拉起 docker-compose.yml 中的完整依赖与观测组件
 make env-down       # 关依赖
 make docker-up      # 容器化拉起项目，挂载本地 config/locales/config.yaml
 make docker-down    # 关容器
@@ -379,7 +379,7 @@ make docker-down    # 关容器
 cp config/locales/config.example.yaml config/locales/config.yaml
 
 # 普通本地开发只启动必要依赖
-docker compose up -d mysql redis
+docker compose up -d --wait mysql redis
 make                # 单实例本地开发，雪花节点号默认 0；多实例部署要给每个副本设 SNOWFLAKE_NODE_ID
 
 # 需要 SkyWalking 时再执行
