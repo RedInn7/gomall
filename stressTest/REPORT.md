@@ -143,7 +143,7 @@ cd stressTest
 ACCESS=$(jq -r .access_token config.json)
 REFRESH=$(jq -r .refresh_token config.json)
 curl -s -X POST -H "access_token: $ACCESS" -H "refresh_token: $REFRESH" \
-     http://localhost:5002/api/v1/skill_product/init
+     http://localhost:5002/api/v1/admin/skill_product/init
 
 # 5. 跑全部压测
 ./run_all.sh

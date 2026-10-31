@@ -1,6 +1,7 @@
 package product
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -23,18 +24,46 @@ func (p *Product) UnitCents() (int64, bool) {
 	return 0, false
 }
 
-// ResolvePricing 反查商品并返回权威单价（分）与卖家 BossID，供需要计费的下单域使用。
-// 商品不存在或定价非法时返回 error，调用方据此拒单，绝不回退到客户端金额。
-func (d *ProductDao) ResolvePricing(id uint) (unitCents int64, bossID uint, err error) {
+// GroupbuyMinPriceBps 拼团价相对商品零售价的最低占比（基点，10000=100%）。
+// 拼团价由商家在商品上配置，写入与开团时都服务端封顶 + 兜底：上界=零售价（不得高于零售价），
+// 下界=零售价 * 该比例（默认 50%，挡住误配成 1 分钱）。运营要更低折扣调此常量。
+const GroupbuyMinPriceBps = 5000
+
+// ErrGroupbuyNotOpen 商品未开放拼团（GroupbuyPriceCents=0）。
+var ErrGroupbuyNotOpen = errors.New("该商品未开放拼团")
+
+// checkGroupbuyPrice 校验商家配置的拼团价：0 表示不开放拼团；
+// 否则须落在 [零售价 * GroupbuyMinPriceBps / 10000, 零售价]。
+func (p *Product) checkGroupbuyPrice() error {
+	if p.GroupbuyPriceCents == 0 {
+		return nil
+	}
+	retail, ok := p.UnitCents()
+	if !ok {
+		return fmt.Errorf("商品定价非法 discount=%q price=%q，无法设置拼团价", p.DiscountPrice, p.Price)
+	}
+	floor := retail * GroupbuyMinPriceBps / 10000
+	if p.GroupbuyPriceCents < floor || p.GroupbuyPriceCents > retail {
+		return fmt.Errorf("拼团价 %d 分越界，须落在 [%d, %d] 分（商品零售价 %d 分）", p.GroupbuyPriceCents, floor, retail, retail)
+	}
+	return nil
+}
+
+// ResolveGroupbuyPricing 反查商品的拼团价（分）与卖家 BossID，供拼团开团使用。
+// 价格只认商家配置的 GroupbuyPriceCents，绝不信客户端；未开放拼团，或配置已越界
+// （比如零售价绕过商品接口被改低）时返回 error，调用方据此拒单。
+func (d *ProductDao) ResolveGroupbuyPricing(id uint) (priceCents int64, bossID uint, err error) {
 	p, perr := d.GetProductById(id)
 	if perr != nil || p == nil {
 		return 0, 0, fmt.Errorf("商品不存在或查询失败 product=%d: %w", id, perr)
 	}
-	cents, ok := p.UnitCents()
-	if !ok {
-		return 0, 0, fmt.Errorf("商品定价非法 product=%d discount=%q price=%q", id, p.DiscountPrice, p.Price)
+	if p.GroupbuyPriceCents == 0 {
+		return 0, 0, ErrGroupbuyNotOpen
 	}
-	return cents, p.BossID, nil
+	if err = p.checkGroupbuyPrice(); err != nil {
+		return 0, 0, err
+	}
+	return p.GroupbuyPriceCents, p.BossID, nil
 }
 
 // ResolveBossID 反查商品卖家：仅需商品存在，不校验定价。
