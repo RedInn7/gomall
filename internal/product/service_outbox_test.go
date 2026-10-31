@@ -139,6 +139,26 @@ func TestDeleteProductAndEventCommitsTogether(t *testing.T) {
 	assertProductChangedEvent(t, db, p.ID, "delete")
 }
 
+// 被收藏过的商品也能删：收藏随商品一起删掉；别人来删时整个事务回滚，收藏还在。
+func TestDeleteProductAndEventRemovesFavorites(t *testing.T) {
+	db := openProductOutboxTestDB(t, true)
+	p := seedProduct(t, db)
+	if err := db.Exec(`INSERT INTO favorite (product_id) VALUES (?)`, p.ID).Error; err != nil {
+		t.Fatalf("seed favorite: %v", err)
+	}
+
+	if err := deleteProductAndEvent(db, p.ID, p.BossID+1); !errors.Is(err, ErrProductNotFoundOrForbidden) {
+		t.Fatalf("wrong seller error = %v, want %v", err, ErrProductNotFoundOrForbidden)
+	}
+	assertTableCount(t, db.Table("favorite"), 1)
+
+	if err := deleteProductAndEvent(db, p.ID, p.BossID); err != nil {
+		t.Fatalf("deleteProductAndEvent() error = %v", err)
+	}
+	assertTableCount(t, db.Table("favorite"), 0)
+	assertProductChangedEvent(t, db, p.ID, "delete")
+}
+
 func TestDeleteProductAndEventRollsBackWhenOutboxInsertFails(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
@@ -193,6 +213,16 @@ func openProductOutboxTestDB(t *testing.T, migrateOutbox bool) *gorm.DB {
 	}
 	if err := db.AutoMigrate(models...); err != nil {
 		t.Fatalf("migrate product outbox schema: %v", err)
+	}
+	// favorite 包依赖 product，测试里 import 不了：建一张带外键的最小 favorite 表，
+	// 并打开 SQLite 的外键检查，复现 MySQL 删除被收藏商品时的 1451。
+	for _, statement := range []string{
+		`PRAGMA foreign_keys = ON`,
+		`CREATE TABLE favorite (id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES product(id))`,
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatalf("prepare favorite table: %v", err)
+		}
 	}
 	return db
 }
