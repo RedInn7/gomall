@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
@@ -43,12 +44,40 @@ func (d *RedPacketDao) CreateClaim(c *RedPacketClaim) error {
 
 // DecrRemaining remaining-- (用 SQL 表达式避免覆盖写)
 //
-//	保护条件 remaining > 0，避免减出负数
+//	保护条件 remaining > 0，避免减出负数；status=active，已被过期回收的红包不能再领。
+//	这条 UPDATE 同时拿红包行锁，与回收事务的 FOR UPDATE 串行：回收先提交则这里影响 0 行，
+//	领取先提交则回收的 SUM 能看到这笔领取，剩余金额不会被重复发放。
 func (d *RedPacketDao) DecrRemaining(id uint) (int64, error) {
 	res := d.DB.Model(&RedPacket{}).
-		Where("id = ? AND remaining > 0", id).
+		Where("id = ? AND remaining > 0 AND status = ?", id, RedPacketStatusActive).
 		Update("remaining", gorm.Expr("remaining - 1"))
 	return res.RowsAffected, res.Error
+}
+
+// MarkFinishedIfDrained DB 剩余份数归零时把红包置为已抢完，与最后一笔领取同事务。
+func (d *RedPacketDao) MarkFinishedIfDrained(id uint) error {
+	return d.DB.Model(&RedPacket{}).
+		Where("id = ? AND status = ? AND remaining = 0", id, RedPacketStatusActive).
+		Update("status", RedPacketStatusFinished).Error
+}
+
+// GetForUpdate 事务内对红包行加 FOR UPDATE 后读取
+func (d *RedPacketDao) GetForUpdate(id uint) (*RedPacket, error) {
+	var rp RedPacket
+	if err := d.DB.Clauses(clause.Locking{Strength: "UPDATE"}).First(&rp, id).Error; err != nil {
+		return nil, err
+	}
+	return &rp, nil
+}
+
+// SumClaimed 红包已领总额（分），剩余金额 = Total - SumClaimed
+func (d *RedPacketDao) SumClaimed(id uint) (int64, error) {
+	var sum int64
+	err := d.DB.Model(&RedPacketClaim{}).
+		Where("red_packet_id = ?", id).
+		Select("COALESCE(SUM(amount), 0)").
+		Scan(&sum).Error
+	return sum, err
 }
 
 // MarkStatus 状态切换 (active->finished/expired/refunded)
@@ -96,11 +125,12 @@ func (d *RedPacketDao) GetClaim(redPacketID, userID uint) (*RedPacketClaim, erro
 	return &c, nil
 }
 
-// GetExpired 取出 status=active 且 expire_at <= now 的红包，限量
+// GetExpired 取出已过期、未退款、且按 DB 计算仍有剩余金额（Total > 已领总额）的红包，限量。
+// 不只看 status=active：被误标 finished 的、或发包后 Redis 准备失败的红包，剩余的钱同样要退。
 func (d *RedPacketDao) GetExpired(limit int) ([]*RedPacket, error) {
 	var out []*RedPacket
-	err := d.DB.Where("status = ? AND expire_at <= ?",
-		RedPacketStatusActive, time.Now()).
+	err := d.DB.Where("status <> ? AND expire_at <= ?", RedPacketStatusRefunded, time.Now()).
+		Where("total > (SELECT COALESCE(SUM(c.amount), 0) FROM red_packet_claim c WHERE c.red_packet_id = red_packet.id)").
 		Limit(limit).
 		Find(&out).Error
 	return out, err
