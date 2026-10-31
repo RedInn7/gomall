@@ -45,6 +45,7 @@ const (
 	AnomalyReasonAmountMismatch         = "amount_currency_mismatch"
 	AnomalyReasonPaymentDetailsMismatch = "payment_details_mismatch"
 	AnomalyReasonHighRiskPayment        = "high_risk_payment"
+	AnomalyReasonFulfillmentFailed      = "fulfillment_failed" // 已实收但本地确定性无法履约：库存不足 / 商品已删 / 订单不存在
 	AnomalyStatusPendingReview          = "pending_review"
 	AnomalyStatusReviewing              = "reviewing"
 	AnomalyStatusResolved               = "resolved"
