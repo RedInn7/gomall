@@ -38,7 +38,6 @@ func Run() error {
 			&cart.Cart{}, &category.Category{}, &carousel.Carousel{},
 			&notice.Notice{}, &product.Product{},
 			&product.ProductImg{}, &skill.SkillProduct{},
-			&skill.SkillProduct2MQ{},
 			&coupon.CouponBatch{}, &coupon.UserCoupon{},
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
 			&promo.PromoRule{}, &promo.PromoRelease{},
