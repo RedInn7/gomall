@@ -38,4 +38,7 @@ type Order struct {
 	// StockCommitPending 支付已落库，但 Redis 预占核销（CommitReservation）重试后仍失败。
 	// 库存对账把这份预占当合法占用并补核销，不会当泄漏退回 available（那样会超卖）。
 	StockCommitPending bool `gorm:"not null;default:false;index"`
+
+	// Ticket 异步下单的排队凭证，唯一索引保证一个 ticket 只建一张单；同步下单为 NULL。
+	Ticket *string `gorm:"size:32;uniqueIndex"`
 }

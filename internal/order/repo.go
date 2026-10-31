@@ -315,6 +315,19 @@ func (d *OrderDao) GetOrderByOrderNum(orderNum uint64) (*Order, error) {
 	return &o, nil
 }
 
+// GetOrderByTicket 按异步下单 ticket 查订单，不存在返回 nil。
+func (d *OrderDao) GetOrderByTicket(ticket string) (*Order, error) {
+	var o Order
+	err := d.DB.Model(&Order{}).Where("ticket = ?", ticket).First(&o).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
 // GetOrderByOrderNumForUpdate 在事务内锁住订单，供退款等“读取当前状态后再迁移”的流程使用。
 func (d *OrderDao) GetOrderByOrderNumForUpdate(orderNum uint64) (*Order, error) {
 	var o Order
