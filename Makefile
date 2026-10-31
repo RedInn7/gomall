@@ -1,12 +1,9 @@
-# For unix-based system, such as macOS/Linux, ARCH can be replace with $(shell uname -m)
-# For windows, can use 'systeminfo | findstr /C:"System Type"' to get ARCH
-# Or easily, just use 'amd64' for windows
-
-# amd64 arm64
-ARCH = arm64
-
-# linux darwin windows
-OS = darwin
+# VERSION 写进 SkyWalking agent 的文件名和 main.version。取子模块的提交而不是主仓库的，
+# 否则改完代码再 make build-agent 会找不到之前 make tools 编出的 agent。
+# OS/ARCH 默认取本机 Go 环境，交叉编译时在命令行覆盖，如 make tools OS=linux ARCH=amd64
+VERSION ?= $(shell git -C skywalking-go rev-parse --short HEAD)
+OS ?= $(shell go env GOOS)
+ARCH ?= $(shell go env GOARCH)
 
 DIR := $(shell pwd)
 OUTPUT = main
