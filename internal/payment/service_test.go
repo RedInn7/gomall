@@ -55,3 +55,59 @@ func newPaymentTestDB(t *testing.T, models ...any) *gorm.DB {
 	})
 	return db
 }
+
+func TestStripeOnlyChargesCNY(t *testing.T) {
+	for _, configured := range []string{"", "cny", " CNY "} {
+		t.Setenv(envStripeCurrency, configured)
+		got, err := stripeCurrency()
+		if err != nil || got != "cny" {
+			t.Fatalf("STRIPE_CURRENCY=%q: got %q, %v; want cny", configured, got, err)
+		}
+	}
+	t.Setenv(envStripeCurrency, "usd")
+	if _, err := stripeCurrency(); !errors.Is(err, ErrStripeCurrencyUnsupported) {
+		t.Fatalf("STRIPE_CURRENCY=usd must be rejected, got %v", err)
+	}
+}
+
+func TestWeb3AmountConvertsCNYCentsWithConfiguredRate(t *testing.T) {
+	t.Setenv(envWeb3PayToken, "usdc")
+	t.Setenv(envWeb3USDCDecimals, "6")
+	t.Setenv(envWeb3ToleranceBps, "0")
+	t.Setenv(envWeb3CentsPerUSDC, "")
+	if _, err := expectedTokenBaseUnits(720); !errors.Is(err, ErrWeb3USDCRateNotConfigured) {
+		t.Fatalf("USDC without rate must be rejected, got %v", err)
+	}
+
+	t.Setenv(envWeb3CentsPerUSDC, "720") // 1 USDC = ¥7.20
+	tests := []struct {
+		cents int64
+		want  string
+	}{
+		{cents: 1440, want: "2000000"}, // ¥14.40 = 2 USDC
+		{cents: 1000, want: "1388888"}, // ¥10.00 = 1.388888… USDC，向下取整到最小单位
+	}
+	for _, tt := range tests {
+		got, err := expectedTokenBaseUnits(tt.cents)
+		if err != nil || got.String() != tt.want {
+			t.Fatalf("%d cents: got %v, %v; want %s", tt.cents, got, err, tt.want)
+		}
+	}
+	// 按汇率应收 2 USDC（旧逻辑按 1:1 美分会要 14.4 USDC）。足额、超付通过，少付被拒。
+	if err := verifyOnchainAmount(1440, "2000000"); err != nil {
+		t.Fatalf("exact USDC amount rejected: %v", err)
+	}
+	if err := verifyOnchainAmount(1440, "14400000"); err != nil {
+		t.Fatalf("overpayment rejected: %v", err)
+	}
+	if err := verifyOnchainAmount(1440, "1999999"); !errors.Is(err, ErrWeb3AmountMismatch) {
+		t.Fatalf("underpayment must be rejected, got %v", err)
+	}
+
+	t.Setenv(envWeb3PayToken, "eth")
+	t.Setenv(envWeb3CentsPerETH, "2160000") // 1 ETH = ¥21600
+	got, err := expectedTokenBaseUnits(2160000)
+	if err != nil || got.String() != "1000000000000000000" {
+		t.Fatalf("ETH conversion: got %v, %v; want 1e18 wei", got, err)
+	}
+}

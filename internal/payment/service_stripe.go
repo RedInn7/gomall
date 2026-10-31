@@ -41,7 +41,13 @@ var (
 	ErrStripeWebhookNotConfigured = errors.New("Stripe webhook 未配置：缺少 STRIPE_WEBHOOK_SECRET")
 	// ErrStripeSignature 签名校验失败：请求可能被伪造或篡改，应拒绝且无需 Stripe 重投。
 	ErrStripeSignature = errors.New("Stripe webhook 签名校验失败")
+	// ErrStripeCurrencyUnsupported STRIPE_CURRENCY 配成了 cny 以外的币种。
+	ErrStripeCurrencyUnsupported = errors.New("Stripe 只能按 cny 收款：订单金额是人民币分，请删除 STRIPE_CURRENCY 或设为 cny")
 )
+
+// stripeOrderCurrency 订单按人民币分计价（与钱包 / Xcash 同一口径），Stripe 只能按 cny 收款。
+// 按 usd 收会把 1000 分人民币当成 10 美元收，清算单上的币种和金额也对不上。
+const stripeOrderCurrency = "cny"
 
 // stripeEventDedupeTTL Stripe 事件去重键的存活时长。Stripe 的重投窗口最长约 3 天，
 // 取 72h 覆盖其全部自动重试，过期后键自然回收，不长期占用 Redis。
@@ -56,11 +62,13 @@ func stripeEventDedupeKey(eventID string) string {
 func stripeSecretKey() string     { return strings.TrimSpace(os.Getenv(envStripeSecretKey)) }
 func stripeWebhookSecret() string { return strings.TrimSpace(os.Getenv(envStripeWebhookSecret)) }
 
-func stripeCurrency() string {
-	if c := strings.TrimSpace(strings.ToLower(os.Getenv(envStripeCurrency))); c != "" {
-		return c
+// stripeCurrency 收款币种。STRIPE_CURRENCY 只为兼容旧配置保留：留空或 cny 都按 cny 收，
+// 配成其他币种直接拒绝建单，不做静默换算。
+func stripeCurrency() (string, error) {
+	if c := strings.TrimSpace(strings.ToLower(os.Getenv(envStripeCurrency))); c != "" && c != stripeOrderCurrency {
+		return "", fmt.Errorf("%w（当前为 %s）", ErrStripeCurrencyUnsupported, c)
 	}
-	return "usd"
+	return stripeOrderCurrency, nil
 }
 
 func stripeSuccessURL() string {
@@ -96,6 +104,10 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 	if sk == "" {
 		return nil, ErrStripeNotConfigured
 	}
+	currency, err := stripeCurrency()
+	if err != nil {
+		return nil, err
+	}
 
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -129,7 +141,7 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 			{
 				Quantity: stripe.Int64(1),
 				PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
-					Currency:   stripe.String(stripeCurrency()),
+					Currency:   stripe.String(currency),
 					UnitAmount: stripe.Int64(payable),
 					ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
 						Name: stripe.String("Order #" + strconv.FormatUint(order.OrderNum, 10)),
@@ -248,7 +260,8 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 		paidNum          int
 		paymentConfirmed bool
 	)
-	expectCurrency := stripeCurrency()
+	// 无论配置如何，订单只认人民币实收；历史上按其他币种建的会话在下面走金额 / 币种不符的异常单。
+	expectCurrency := stripeOrderCurrency
 
 	err := orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		order, err := orderpkg.NewOrderDaoByDB(tx).GetOrderById(orderID, userID)
