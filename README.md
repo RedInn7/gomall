@@ -498,17 +498,17 @@ encryptSecret:
 
 | 名称 | 版本 |
 |------|------|
-| golang | go 1.25.0，toolchain go1.26.10 |
+| golang | go 1.26.0，toolchain go1.26.10 |
 | gin | v1.9.0 |
 | gorm | v1.25.0 |
 | mysql driver | v1.5.0 |
-| redis | v9.0.4 |
+| redis | v9.6.3 |
 | dbresolver | v1.4.1 |
 | golang-jwt/jwt | v4.5.2 |
-| crypto | v0.48.0 |
+| crypto | v0.57.0 |
 | logrus | v1.9.3 |
 | go-ethereum | v1.17.3 |
 | milvus-sdk-go | v2.4.2 |
-| rabbitmq/amqp091-go | v1.8.1 |
+| rabbitmq/amqp091-go | v1.14.0 |
 | elastic/go-elasticsearch | v0.0.0 |
 | Skywalking-go | v0.0.0-20230511 |
