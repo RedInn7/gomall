@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/milvus-io/milvus-sdk-go/v2/client"
 	"github.com/milvus-io/milvus-sdk-go/v2/entity"
@@ -24,6 +25,9 @@ const (
 	hnswEfConstruction = 200
 	hnswEfSearch       = 64
 )
+
+// ensureTimeout 建集合、建索引、同步 Load 都会一直等 Milvus 响应；超时即视为不可用，不拖住启动
+var ensureTimeout = 30 * time.Second
 
 var ProductVectorCollection = "product_vector_unversioned"
 
@@ -80,6 +84,8 @@ func EnsureProductVectorCollection(ctx context.Context) error {
 	if MilvusClient == nil {
 		return ErrMilvusNotInitialized
 	}
+	ctx, cancel := context.WithTimeout(ctx, ensureTimeout)
+	defer cancel()
 
 	has, err := MilvusClient.HasCollection(ctx, ProductVectorCollection)
 	if err != nil {

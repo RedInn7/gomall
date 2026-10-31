@@ -20,6 +20,7 @@ import (
 
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/web3/escrow"
 	"github.com/RedInn7/gomall/repository/cache"
 )
 
@@ -27,6 +28,7 @@ const (
 	envRPCURL       = "WEB3_RPC_URL"
 	envEscrowAddr   = "WEB3_ESCROW_ADDR"
 	envConfirmDepth = "WEB3_CONFIRM_DEPTH"
+	envChainID      = "WEB3_CHAIN_ID"
 	lastBlockKey    = "web3:listener:last_block"
 	eventDedupeTTL  = 72 * time.Hour
 	subscribeBuffer = 64
@@ -36,23 +38,21 @@ const (
 	// pollInterval 轮询链头推进确认水位的间隔。轮询而非纯订阅，
 	// 是为了让“未达确认深度先不处理”的 log 能在后续区块到达后被重新扫到。
 	pollInterval = 12 * time.Second
+	// maxBlockRange 单次 eth_getLogs 的区块跨度上限。长时间停机后追赶时按它分片，
+	// 避免一次查询过大被节点拒绝或超时，每片成功后推进一次水位。
+	maxBlockRange = 2000
 )
 
-// paymentConfirmedABI 与 escrow 合约里定义的 PaymentConfirmed event 形参对齐。
-// 解码用通用 ABI，避免依赖具体合约的 Go binding。
-const paymentConfirmedABI = `[{
-  "anonymous": false,
-  "inputs": [
-    {"indexed": true,  "internalType": "bytes32", "name": "orderID", "type": "bytes32"},
-    {"indexed": false, "internalType": "address", "name": "buyer",   "type": "address"},
-    {"indexed": false, "internalType": "uint256", "name": "amount",  "type": "uint256"}
-  ],
-  "name": "PaymentConfirmed",
-  "type": "event"
-}]`
+// errMalformedLog 标记日志本身解不出来的永久错误：重扫同一条日志结果不会变，
+// 告警后跳过即可；若当成临时错误卡住水位，之后所有链上付款都无法入账。
+var errMalformedLog = errors.New("malformed PaymentConfirmed log")
+
+// errChainIDMismatch RPC 节点所在链与 WEB3_CHAIN_ID 不一致。这是配置错误，重连不会好，listener 直接退出。
+var errChainIDMismatch = errors.New("rpc chain id mismatch")
 
 // ethClient 抽象出 listener 用到的 ethclient.Client 子集，便于单测注入 mock。
 type ethClient interface {
+	ChainID(ctx context.Context) (*big.Int, error)
 	BlockNumber(ctx context.Context) (uint64, error)
 	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
 	SubscribeFilterLogs(ctx context.Context, q ethereum.FilterQuery, ch chan<- types.Log) (ethereum.Subscription, error)
@@ -85,6 +85,7 @@ type redisCmd interface {
 	Get(ctx context.Context, key string) *redis.StringCmd
 	Set(ctx context.Context, key string, value any, expiration time.Duration) *redis.StatusCmd
 	SetNX(ctx context.Context, key string, value any, expiration time.Duration) *redis.BoolCmd
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
 var defaultRedis = func() redisCmd { return cache.RedisClient }
@@ -119,26 +120,41 @@ func StartPaymentListener(ctx context.Context) error {
 
 func startPaymentListener(ctx context.Context, opts listenerOpts) error {
 	rpcURL := strings.TrimSpace(os.Getenv(envRPCURL))
-	escrow := strings.TrimSpace(os.Getenv(envEscrowAddr))
-	if rpcURL == "" || escrow == "" {
+	escrowAddr := strings.TrimSpace(os.Getenv(envEscrowAddr))
+	if rpcURL == "" || escrowAddr == "" {
 		util.LogrusObj.Infoln("Web3 listener: WEB3_RPC_URL / WEB3_ESCROW_ADDR 未配置，跳过启动")
 		return nil
 	}
-	if !common.IsHexAddress(escrow) {
-		return fmt.Errorf("invalid escrow address %q", escrow)
+	if !common.IsHexAddress(escrowAddr) {
+		return fmt.Errorf("invalid escrow address %q", escrowAddr)
+	}
+	var chainID uint64
+	if raw := strings.TrimSpace(os.Getenv(envChainID)); raw != "" {
+		v, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil || v == 0 {
+			return fmt.Errorf("invalid %s %q", envChainID, raw)
+		}
+		chainID = v
+	} else {
+		util.LogrusObj.Warnf("Web3 listener: %s 未配置，跳过 RPC 链 ID 校验", envChainID)
 	}
 
-	parsedABI, err := abi.JSON(strings.NewReader(paymentConfirmedABI))
+	// 直接用合约构建产物里的 ABI，不再内嵌一份手抄版本，避免和 Escrow.sol 再次漂移
+	parsedABI, err := abi.JSON(strings.NewReader(escrow.EscrowABI))
 	if err != nil {
-		return fmt.Errorf("parse PaymentConfirmed abi: %w", err)
+		return fmt.Errorf("parse escrow abi: %w", err)
 	}
-	topic := crypto.Keccak256Hash([]byte("PaymentConfirmed(bytes32,address,uint256)"))
+	event, ok := parsedABI.Events["PaymentConfirmed"]
+	if !ok {
+		return errors.New("escrow abi has no PaymentConfirmed event")
+	}
 
 	l := &listener{
 		rpcURL:       rpcURL,
-		escrow:       common.HexToAddress(escrow),
+		escrow:       common.HexToAddress(escrowAddr),
+		chainID:      chainID,
 		abi:          parsedABI,
-		topic:        topic,
+		topic:        event.ID,
 		confirmDepth: confirmDepth(),
 		dial:         opts.dial,
 		outbox:       opts.outbox,
@@ -146,7 +162,7 @@ func startPaymentListener(ctx context.Context, opts listenerOpts) error {
 		backoff:      newBackoff(time.Second, time.Minute),
 	}
 	go l.run(ctx)
-	util.LogrusObj.Infof("Web3 listener started escrow=%s confirmDepth=%d", escrow, l.confirmDepth)
+	util.LogrusObj.Infof("Web3 listener started escrow=%s confirmDepth=%d", escrowAddr, l.confirmDepth)
 	return nil
 }
 
@@ -162,6 +178,7 @@ func confirmDepth() uint64 {
 type listener struct {
 	rpcURL       string
 	escrow       common.Address
+	chainID      uint64 // 0 表示未配置，不校验
 	abi          abi.ABI
 	topic        common.Hash
 	confirmDepth uint64
@@ -178,6 +195,10 @@ func (l *listener) run(ctx context.Context) {
 			return
 		}
 		if err := l.connectAndServe(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			if errors.Is(err, errChainIDMismatch) {
+				util.LogrusObj.Errorf("Web3 listener stopped: %v", err)
+				return
+			}
 			util.LogrusObj.Warnf("Web3 listener disconnected: %v", err)
 		}
 		if ctx.Err() != nil {
@@ -200,6 +221,17 @@ func (l *listener) connectAndServe(ctx context.Context) error {
 	}
 	defer client.Close()
 
+	if l.chainID != 0 {
+		got, err := client.ChainID(ctx)
+		if err != nil {
+			return fmt.Errorf("get chain id: %w", err)
+		}
+		// 连到别的链（如测试网节点配给主网合约）上“确认”的付款不能入账
+		if got.Cmp(new(big.Int).SetUint64(l.chainID)) != 0 {
+			return fmt.Errorf("%w: rpc=%s %s=%d", errChainIDMismatch, got, envChainID, l.chainID)
+		}
+	}
+
 	head, err := client.BlockNumber(ctx)
 	if err != nil {
 		return fmt.Errorf("get head block: %w", err)
@@ -208,18 +240,23 @@ func (l *listener) connectAndServe(ctx context.Context) error {
 	// 订阅仅作为“链头推进”的快速唤醒信号，真正的事件处理一律走 scanConfirmed 的
 	// FilterLogs 按确认深度回扫；不直接吃订阅推来的 log——它们多半尚未埋够确认数，
 	// 直接入账会被 reorg 撤销造成错误放货。订阅 + 定时器双触发，确保链头推进后及时回扫。
+	// HTTP RPC 不支持订阅（rpc.ErrNotificationsUnsupported）：订阅失败就退化成纯轮询，只是少了提前唤醒。
 	logsCh := make(chan types.Log, subscribeBuffer)
+	var subErr <-chan error // 没有订阅时保持 nil，select 永远不会选中
 	sub, err := client.SubscribeFilterLogs(ctx, l.query(big.NewInt(int64(head+1)), nil), logsCh)
 	if err != nil {
-		return fmt.Errorf("subscribe: %w", err)
+		util.LogrusObj.Infof("Web3 listener subscribe unavailable, polling every %s: %v", pollInterval, err)
+	} else {
+		defer sub.Unsubscribe()
+		subErr = sub.Err()
 	}
-	defer sub.Unsubscribe()
-	l.backoff.reset()
 
 	// 首次连接立即回扫一轮已确认区间（补停机期间漏掉且已埋够确认深度的事件）。
 	if err := l.scanConfirmed(ctx, client); err != nil {
 		return fmt.Errorf("initial scan: %w", err)
 	}
+	// 首轮回扫成功才算连上；连得上却扫不动（如 Redis 故障）时退避要继续增长，不能每次都从最小间隔重连
+	l.backoff.reset()
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -227,7 +264,7 @@ func (l *listener) connectAndServe(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case err := <-sub.Err():
+		case err := <-subErr:
 			if err == nil {
 				return errors.New("subscription closed")
 			}
@@ -261,7 +298,10 @@ func (l *listener) scanConfirmed(ctx context.Context, client ethClient) error {
 	}
 	safeHead := head - l.confirmDepth
 
-	last := l.loadLastBlock(ctx)
+	last, err := l.loadLastBlock(ctx)
+	if err != nil {
+		return fmt.Errorf("load last block: %w", err)
+	}
 	if last > safeHead {
 		// 游标已领先安全高度（如曾配置更小确认深度或链回退），不回退游标，等链头追上。
 		return nil
@@ -271,42 +311,50 @@ func (l *listener) scanConfirmed(ctx context.Context, client ethClient) error {
 		// 冷启动无游标：从安全高度起步，不回放整条链历史。
 		from = safeHead
 	}
-	if from > safeHead {
-		return nil
-	}
 
-	q := l.query(new(big.Int).SetUint64(from), new(big.Int).SetUint64(safeHead))
-	logs, err := client.FilterLogs(ctx, q)
-	if err != nil {
-		return fmt.Errorf("filter logs [%d,%d]: %w", from, safeHead, err)
-	}
+	// 按 maxBlockRange 分片追赶，每片处理完就推进水位，后面的分片失败也不用重扫前面的。
+	for from <= safeHead {
+		to := min(from+maxBlockRange-1, safeHead)
+		q := l.query(new(big.Int).SetUint64(from), new(big.Int).SetUint64(to))
+		logs, err := client.FilterLogs(ctx, q)
+		if err != nil {
+			return fmt.Errorf("filter logs [%d,%d]: %w", from, to, err)
+		}
 
-	// failedFromBlock 记录首个处理失败的区块号，watermark 不得越过它，
-	// 保证失败区块下一轮仍会被重新扫描。
-	var failedFromBlock uint64
-	for i := range logs {
-		lg := logs[i]
-		if lg.Removed {
-			// 已确认深度内仍标记 Removed 极少见（深 reorg），跳过即可，去重键兜底。
-			continue
-		}
-		if failedFromBlock != 0 && lg.BlockNumber >= failedFromBlock {
-			continue
-		}
-		if err := l.handleLog(ctx, lg); err != nil {
-			util.LogrusObj.Errorf("Web3 listener handle log tx=%s logIdx=%d block=%d err=%v", lg.TxHash.Hex(), lg.Index, lg.BlockNumber, err)
-			if failedFromBlock == 0 || lg.BlockNumber < failedFromBlock {
-				failedFromBlock = lg.BlockNumber
+		// failedFromBlock 记录首个处理失败的区块号，watermark 不得越过它，
+		// 保证失败区块下一轮仍会被重新扫描。
+		var failedFromBlock uint64
+		for i := range logs {
+			lg := logs[i]
+			if lg.Removed {
+				// 已确认深度内仍标记 Removed 极少见（深 reorg），跳过即可，去重键兜底。
+				continue
+			}
+			if failedFromBlock != 0 && lg.BlockNumber >= failedFromBlock {
+				continue
+			}
+			if err := l.handleLog(ctx, lg); err != nil {
+				if errors.Is(err, errMalformedLog) {
+					// 解码类错误重扫也不会好：记 error 留给人工核对后跳过，不卡水位
+					util.LogrusObj.Errorf("Web3 listener skip malformed log tx=%s logIdx=%d block=%d err=%v", lg.TxHash.Hex(), lg.Index, lg.BlockNumber, err)
+					continue
+				}
+				util.LogrusObj.Errorf("Web3 listener handle log tx=%s logIdx=%d block=%d err=%v", lg.TxHash.Hex(), lg.Index, lg.BlockNumber, err)
+				if failedFromBlock == 0 || lg.BlockNumber < failedFromBlock {
+					failedFromBlock = lg.BlockNumber
+				}
 			}
 		}
-	}
 
-	newWatermark := safeHead
-	if failedFromBlock != 0 && failedFromBlock-1 < newWatermark {
-		newWatermark = failedFromBlock - 1
-	}
-	if newWatermark >= from {
-		l.saveLastBlock(ctx, newWatermark)
+		if failedFromBlock != 0 {
+			// 水位停在失败区块之前；后面的分片先不扫，下一轮从失败区块重来
+			if failedFromBlock > from {
+				l.saveLastBlock(ctx, failedFromBlock-1)
+			}
+			return nil
+		}
+		l.saveLastBlock(ctx, to)
+		from = to + 1
 	}
 	return nil
 }
@@ -330,31 +378,28 @@ func (l *listener) handleLog(ctx context.Context, lg types.Log) error {
 	// 校验事件确实来自配置的 escrow 合约地址。FilterQuery 已按地址过滤，
 	// 这里再做一次防御性核对，杜绝任意合约伪造同名事件冒充结算来源。
 	if lg.Address != l.escrow {
-		return fmt.Errorf("event from unexpected contract %s, want %s", lg.Address.Hex(), l.escrow.Hex())
+		return fmt.Errorf("%w: event from unexpected contract %s, want %s", errMalformedLog, lg.Address.Hex(), l.escrow.Hex())
 	}
 	// 同理校验事件签名 topic，避免地址匹配但事件类型不符的脏数据。
 	if len(lg.Topics) == 0 || lg.Topics[0] != l.topic {
-		return fmt.Errorf("unexpected event topic")
+		return fmt.Errorf("%w: unexpected event topic", errMalformedLog)
 	}
-	if len(lg.Topics) < 2 {
-		return fmt.Errorf("malformed log: topics=%d", len(lg.Topics))
+	// 合约里 orderID、buyer 都是 indexed，分别在 topics[1]、topics[2]；data 里只有 amount
+	if len(lg.Topics) != 3 {
+		return fmt.Errorf("%w: topics=%d", errMalformedLog, len(lg.Topics))
 	}
-	// indexed 参数走 topic，non-indexed 走 data
 	orderID := lg.Topics[1]
+	buyer := common.BytesToAddress(lg.Topics[2].Bytes())
 	values, err := l.abi.Unpack("PaymentConfirmed", lg.Data)
 	if err != nil {
-		return fmt.Errorf("unpack data: %w", err)
+		return fmt.Errorf("%w: unpack data: %v", errMalformedLog, err)
 	}
-	if len(values) != 2 {
-		return fmt.Errorf("unexpected non-indexed args: %d", len(values))
+	if len(values) != 1 {
+		return fmt.Errorf("%w: unexpected non-indexed args: %d", errMalformedLog, len(values))
 	}
-	buyer, ok := values[0].(common.Address)
-	if !ok {
-		return fmt.Errorf("buyer type assertion failed")
-	}
-	amount, ok := values[1].(*big.Int)
+	amount, ok := values[0].(*big.Int)
 	if !ok || amount == nil {
-		return fmt.Errorf("amount type assertion failed")
+		return fmt.Errorf("%w: amount type assertion failed", errMalformedLog)
 	}
 
 	ev := PaymentConfirmed{
@@ -367,9 +412,10 @@ func (l *listener) handleLog(ctx context.Context, lg types.Log) error {
 	}
 
 	dedupeKey := fmt.Sprintf("web3:event:%s:%d", lg.TxHash.Hex(), lg.Index)
-	if first, err := l.tryClaim(ctx, dedupeKey); err != nil {
+	claimed, err := l.tryClaim(ctx, dedupeKey)
+	if err != nil {
 		util.LogrusObj.Warnf("Web3 listener dedupe redis err=%v key=%s, fallback to write", err, dedupeKey)
-	} else if !first {
+	} else if !claimed {
 		return nil
 	}
 
@@ -380,9 +426,27 @@ func (l *listener) handleLog(ctx context.Context, lg types.Log) error {
 		0,
 		ev,
 	); err != nil {
+		// 去重 key 已占位但事件没落库：不撤销的话，下一轮重扫会把它当成已处理跳过，事件就永久丢了
+		if claimed {
+			l.releaseClaim(ctx, dedupeKey)
+		}
 		return fmt.Errorf("outbox insert: %w", err)
 	}
 	return nil
+}
+
+// releaseClaim 撤销 tryClaim 的占位。用不随调用方取消的 ctx：outbox 失败常常正是 ctx 被取消，
+// DEL 不能跟着一起失败。
+func (l *listener) releaseClaim(ctx context.Context, key string) {
+	rdb := l.rdb()
+	if rdb == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	if err := rdb.Del(ctx, key).Err(); err != nil {
+		util.LogrusObj.Errorf("Web3 listener release dedupe key=%s err=%v", key, err)
+	}
 }
 
 // tryClaim 用 SETNX 占位，true 表示这是首次处理；redis 不可用时返回 err，由调用方决定降级策略
@@ -398,20 +462,26 @@ func (l *listener) tryClaim(ctx context.Context, key string) (bool, error) {
 	return ok, nil
 }
 
-func (l *listener) loadLastBlock(ctx context.Context) uint64 {
+// loadLastBlock 读取游标，返回 0 表示没有游标（冷启动）。
+// 只有 key 不存在（redis.Nil）才算没有游标；其他错误必须上抛，
+// 否则 Redis 一抖就会被当成冷启动，从 safeHead 起扫而跳过中间的块。
+func (l *listener) loadLastBlock(ctx context.Context) (uint64, error) {
 	rdb := l.rdb()
 	if rdb == nil {
-		return 0
+		return 0, nil
 	}
 	v, err := rdb.Get(ctx, lastBlockKey).Result()
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
+	}
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	var n uint64
-	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-		return 0
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s=%q: %w", lastBlockKey, v, err)
 	}
-	return n
+	return n, nil
 }
 
 func (l *listener) saveLastBlock(ctx context.Context, block uint64) {
