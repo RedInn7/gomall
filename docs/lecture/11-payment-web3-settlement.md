@@ -76,7 +76,10 @@ if head < l.confirmDepth {
 }
 safeHead := head - l.confirmDepth
 
-last := l.loadLastBlock(ctx)
+last, err := l.loadLastBlock(ctx) // 只有 redis.Nil 算没有游标，其他错误本轮直接返回
+if err != nil {
+    return err
+}
 from := last + 1
 if last == 0 {
     from = safeHead
@@ -117,7 +120,7 @@ if err == nil && !first {
 
 同一交易可以发多个事件，所以只有 txHash 不够；`logIndex` 区分同一交易里的日志。SETNX key 保存 72 小时。Redis 不可用时 listener 选择继续写 outbox，依靠后面的订单状态和流水唯一约束收敛重复。
 
-### 当前去重顺序会漏事件
+### 去重占位要能撤销
 
 现有顺序是：
 
@@ -125,7 +128,7 @@ if err == nil && !first {
 2. 写 `web3.payment.confirmed` outbox；
 3. 某个区块全部处理成功后推进 watermark。
 
-如果第 1 步成功、第 2 步失败，watermark 不推进，下一轮确实会重扫；可 SETNX key 还在，日志被当成重复直接跳过，于是 outbox 永远没有这条事件。
+如果第 1 步成功、第 2 步失败，watermark 不推进，下一轮会重扫；SETNX key 若还在，日志会被当成重复跳过，outbox 就永远没有这条事件。所以写 outbox 失败时 listener 先 DEL 掉这个去重 key 再返回错误；只有 DEL 也失败，这条事件才会在 72 小时内被去重挡住。
 
 修复方向不是简单缩短 TTL，而是让“处理完成标记”和持久化事件处于同一个可靠状态机。例如先按 `(tx_hash, log_index)` 向数据库幂等插入 inbox/outbox，再推进游标；Redis 只做加速，不做唯一真相。
 
@@ -245,7 +248,7 @@ err := orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 |---|---|---|
 | pending Redis 写失败或 30 分钟过期 | buyer 无法校验，消息持续回灌 | 暂停消费者并按链上交易人工对账 |
 | `last_block` Redis 丢失 | 冷启动从当前 safeHead 开始，可能漏历史 | 配置可信起点后补扫 |
-| SETNX 成功、outbox 失败 | 72 小时内重扫被去重挡住 | 数据库 inbox/outbox 改造或人工补事件 |
+| SETNX 成功、outbox 失败 | DEL 去重 key 后下一轮重扫补上；DEL 也失败时 72 小时内被去重挡住 | 数据库 inbox/outbox 改造或人工补事件 |
 | listener 配置缺失 | 主进程照常启动，但不监听 | 启动告警、健康检查 |
 | MQ/DB 暂时故障 | Nack 回灌，当前没有可靠重试上限 | 修复依赖；补重试计数与延迟队列 |
 | 合约 ABI 与 listener ABI 不一致 | 日志解码失败，记 error 后跳过，watermark 继续推进 | 按 error 日志里的交易哈希人工核对并补事件 |
