@@ -119,7 +119,7 @@ sequenceDiagram
     DB-->>H: commit
     H-->>C: 写出 HTTP 响应
     H-->>I: handler 返回
-    I->>I: 保存 done；失败则重试并回退 init
+    I->>I: 保存 done；失败则重试，仍失败保持 processing 等 TTL
 ```
 
 这里故意把 HTTP 响应画在 `done` 前面。当前 `responseRecorder` 会把响应继续写给底层 Writer，`c.Next()` 返回后，中间件才提交幂等结果。因此客户端已经看到成功、Redis 还没写成 `done` 的窗口真实存在。
@@ -152,7 +152,7 @@ stateDiagram-v2
     [*] --> init: 颁发 token
     init --> processing: 第一次提交，抢到执行权
     processing --> done: handler 成功，保存响应
-    processing --> init: handler 失败或保存失败
+    processing --> init: handler 失败（含 response.Fail 业务失败、panic）
     done --> done: 后续重试回放第一次响应
 ```
 
@@ -197,9 +197,9 @@ Redis 幂等：减少重复进入业务
 
 支付安全不是某个中间件“包治百病”，是每一层都知道自己可能失效。
 
-### 当前错误出口留下的缺口
+### 错误出口留下的缺口
 
-gomall 的支付 handler 把业务错误放在 HTTP 200 响应体里，也没有写入 `c.Errors`。因此当前幂等中间件会把这类失败保存成 `done`。
+gomall 的支付 handler 把业务错误放在 HTTP 200 响应体里，也没有写入 `c.Errors`。因此幂等中间件曾经把这类失败保存成 `done`。
 
 比如第一次支付密码输错：
 
@@ -217,7 +217,7 @@ HTTP 状态仍是 200
 
 - 业务失败用合适的 4xx；
 - 系统失败用 5xx；
-- 或者 handler 明确告诉幂等中间件“这次业务成功/失败”。
+- 或者 handler 明确告诉幂等中间件“这次业务成功/失败”：现在 `response.Fail` 会在 gin ctx 上打失败标记，幂等中间件据此回退到 `init`。
 
 不要让中间件猜 JSON 里的业务码。那会把中间件和响应格式绑死。
 
