@@ -1,12 +1,9 @@
-# For unix-based system, such as macOS/Linux, ARCH can be replace with $(shell uname -m)
-# For windows, can use 'systeminfo | findstr /C:"System Type"' to get ARCH
-# Or easily, just use 'amd64' for windows
-
-# amd64 arm64
-ARCH = arm64
-
-# linux darwin windows
-OS = darwin
+# VERSION 写进 SkyWalking agent 的文件名和 main.version。取子模块的提交而不是主仓库的，
+# 否则改完代码再 make build-agent 会找不到之前 make tools 编出的 agent。
+# OS/ARCH 默认取本机 Go 环境，交叉编译时在命令行覆盖，如 make tools OS=linux ARCH=amd64
+VERSION ?= $(shell git -C skywalking-go rev-parse --short HEAD)
+OS ?= $(shell go env GOOS)
+ARCH ?= $(shell go env GOARCH)
 
 DIR := $(shell pwd)
 OUTPUT = main
@@ -37,7 +34,7 @@ tools:
 .PHONY: run
 run:
 	@make build
-	@./$(OUTPUT)
+	@SNOWFLAKE_ALLOW_DEFAULT=$${SNOWFLAKE_ALLOW_DEFAULT:-true} ./$(OUTPUT)
 
 .PHONY: build
 build:
@@ -50,12 +47,12 @@ build-agent:
 
 .PHONY: env-up		# 启动环境
 env-up:
-	docker-compose up -d
+	docker compose up -d
 	@echo "env start success"
 
 .PHONY: env-down	# 关闭环境
 env-down:
-	docker-compose down
+	docker compose down
 	@echo "env stop success"
 
 .PHONY: docker-up	# 以容器形式部署项目
@@ -68,6 +65,8 @@ docker-up:
 	-it \
 	--name $(CONTAINER_NAME) \
 	--network host \
+	-e SNOWFLAKE_ALLOW_DEFAULT=true \
+	-v $(DIR)/config/locales/config.yaml:/app/config/locales/config.yaml:ro \
 	-d $(IMAGE_NAME)
 	@echo "container run success at localhost:5003"
 

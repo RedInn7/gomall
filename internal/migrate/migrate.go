@@ -20,6 +20,7 @@ import (
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/redpacket"
+	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/repository/db/dao"
@@ -37,7 +38,6 @@ func Run() error {
 			&cart.Cart{}, &category.Category{}, &carousel.Carousel{},
 			&notice.Notice{}, &product.Product{},
 			&product.ProductImg{}, &skill.SkillProduct{},
-			&skill.SkillProduct2MQ{},
 			&coupon.CouponBatch{}, &coupon.UserCoupon{},
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
 			&promo.PromoRule{}, &promo.PromoRelease{},
@@ -46,6 +46,7 @@ func Run() error {
 			&money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{},
 			&clearing.PaymentAnomalyTransition{},
 			&payment.XcashPaymentIntent{}, &payment.XcashWebhookReceipt{},
+			&outbox.OutboxEvent{},
 		); err != nil {
 		return err
 	}
