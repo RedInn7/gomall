@@ -8,11 +8,28 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
-	"github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 func secret() []byte {
 	return []byte(conf.Config.EncryptSecret.JwtSecret)
+}
+
+// 令牌用途（typ claim）。三类 token 共用同一把密钥，只能靠 typ 区分用途，
+// 否则 refresh / 邮件 token 能被当成 access token 使用。
+const (
+	tokenTypeAccess  = "access"
+	tokenTypeRefresh = "refresh"
+	tokenTypeEmail   = "email"
+)
+
+// errTokenType token 用途与当前场景不符（如拿 refresh / 邮件 token 当 access token）。
+var errTokenType = errors.New("token 类型不符")
+
+// validMethods 只接受 HS256，挡住 alg 混淆（none、换用其它算法伪造签名）。
+var validMethods = jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()})
+
+func keyFunc(*jwt.Token) (interface{}, error) {
+	return secret(), nil
 }
 
 type Claims struct {
@@ -23,6 +40,8 @@ type Claims struct {
 	// token（含被盗的）立即作废。旧 token 无此字段解析为 0，与存量用户 DB 默认值
 	// 0 相等 → 存量 token 平滑过渡，首次改密码后才强制重新登录。
 	TokenVersion uint `json:"token_version"`
+	// Type 令牌用途：access / refresh，解析时必须与使用场景一致。
+	Type string `json:"typ"`
 	jwt.RegisteredClaims
 }
 
@@ -35,6 +54,7 @@ func GenerateToken(id uint, username string, tokenVersion uint) (accessToken, re
 		ID:           id,
 		Username:     username,
 		TokenVersion: tokenVersion,
+		Type:         tokenTypeAccess,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expireTime),
 			Issuer:    "mall",
@@ -46,9 +66,15 @@ func GenerateToken(id uint, username string, tokenVersion uint) (accessToken, re
 		return "", "", err
 	}
 
-	refreshToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		ExpiresAt: jwt.NewNumericDate(rtExpireTime),
-		Issuer:    "mall",
+	// refresh token 写入用户 id：续签时必须与 access token 的 id 一致，
+	// 否则拿自己的 refresh token 配别人过期的 access token 就能续签成别人。
+	refreshToken, err = jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
+		ID:   id,
+		Type: tokenTypeRefresh,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(rtExpireTime),
+			Issuer:    "mall",
+		},
 	}).SignedString(secret())
 	if err != nil {
 		return "", "", err
@@ -57,39 +83,40 @@ func GenerateToken(id uint, username string, tokenVersion uint) (accessToken, re
 	return accessToken, refreshToken, err
 }
 
-// ParseToken 验证用户token
+// ParseToken 验证 access token：签名、过期、算法、typ=access 缺一不可。
 func ParseToken(token string) (*Claims, error) {
-	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return secret(), nil
-	})
-	if tokenClaims != nil {
-		if claims, ok := tokenClaims.Claims.(*Claims); ok && tokenClaims.Valid {
-			return claims, nil
-		}
-	}
-	return nil, err
+	return parseClaims(token, tokenTypeAccess)
 }
 
-// parseTokenAllowExpired 解析 token，仅容忍过期错误（ValidationErrorExpired）。
-// 签名错误、格式错误等非过期校验失败仍作为错误返回。
+// parseClaims 严格解析：签名有效、未过期、HS256，且 typ 与期望用途一致。
+func parseClaims(token, typ string) (*Claims, error) {
+	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, keyFunc, validMethods)
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := tokenClaims.Claims.(*Claims)
+	if !ok || claims.Type != typ {
+		return nil, errTokenType
+	}
+	return claims, nil
+}
+
+// parseTokenAllowExpired 解析 access token，仅容忍过期错误（ValidationErrorExpired）。
+// 签名错误、格式错误、算法或 typ 不符等非过期校验失败仍作为错误返回。
 func parseTokenAllowExpired(token string) (*Claims, error) {
-	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return secret(), nil
-	})
-	if tokenClaims != nil {
-		if claims, ok := tokenClaims.Claims.(*Claims); ok {
-			if tokenClaims.Valid {
-				return claims, nil
-			}
-			// token 无效，判断是否仅为过期
-			var ve *jwt.ValidationError
-			if errors.As(err, &ve) && ve.Errors == jwt.ValidationErrorExpired {
-				// 仅过期，claims 仍然可信（签名已通过），允许返回
-				return claims, nil
-			}
+	tokenClaims, err := jwt.ParseWithClaims(token, &Claims{}, keyFunc, validMethods)
+	if err != nil {
+		// 仅过期时签名已通过，claims 仍然可信；其余错误一律拒绝
+		var ve *jwt.ValidationError
+		if !errors.As(err, &ve) || ve.Errors != jwt.ValidationErrorExpired {
+			return nil, err
 		}
 	}
-	return nil, err
+	claims, ok := tokenClaims.Claims.(*Claims)
+	if !ok || claims.Type != tokenTypeAccess {
+		return nil, errTokenType
+	}
+	return claims, nil
 }
 
 // ParseRefreshToken 验证用户token
@@ -98,7 +125,6 @@ func ParseRefreshToken(accessToken, rToken string) (newAToken, newRToken string,
 	// 非过期的验证失败（如签名错误）仍视为致命错误
 	accessClaim, err := parseTokenAllowExpired(accessToken)
 	if err != nil {
-		log.LogrusObj.Infoln("[debug1]err==", err)
 		return
 	}
 
@@ -110,10 +136,13 @@ func ParseRefreshToken(accessToken, rToken string) (newAToken, newRToken string,
 	}
 
 	// access_token 已过期，必须校验 refresh_token（严格校验，包含过期检查）
-	refreshClaim, err := ParseToken(rToken)
+	refreshClaim, err := parseClaims(rToken, tokenTypeRefresh)
 	if err != nil {
-		log.LogrusObj.Infoln("[debug2]err==", err)
 		return
+	}
+	// refresh token 必须属于同一用户
+	if refreshClaim.ID != accessClaim.ID {
+		return "", "", errors.New("refresh token 与 access token 不属于同一用户")
 	}
 
 	if refreshClaim.ExpiresAt != nil && time.Now().Before(refreshClaim.ExpiresAt.Time) {
@@ -131,6 +160,8 @@ type EmailClaims struct {
 	Email          string `json:"email"`
 	PasswordDigest string `json:"password_digest,omitempty"`
 	OperationType  uint   `json:"operation_type"`
+	// Type 固定为 email，防止与登录 token 互相冒用
+	Type string `json:"typ"`
 	jwt.RegisteredClaims
 }
 
@@ -143,6 +174,7 @@ func GenerateEmailToken(userID, Operation uint, email, passwordDigest string) (s
 		Email:          email,
 		PasswordDigest: passwordDigest,
 		OperationType:  Operation,
+		Type:           tokenTypeEmail,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(expireTime),
 			Issuer:    "cmall",
@@ -153,15 +185,15 @@ func GenerateEmailToken(userID, Operation uint, email, passwordDigest string) (s
 	return token, err
 }
 
-// ParseEmailToken 验证邮箱验证token
+// ParseEmailToken 验证邮箱验证token：签名、过期、HS256、typ=email 缺一不可。
 func ParseEmailToken(token string) (*EmailClaims, error) {
-	tokenClaims, err := jwt.ParseWithClaims(token, &EmailClaims{}, func(token *jwt.Token) (interface{}, error) {
-		return secret(), nil
-	})
-	if tokenClaims != nil {
-		if claims, ok := tokenClaims.Claims.(*EmailClaims); ok && tokenClaims.Valid {
-			return claims, nil
-		}
+	tokenClaims, err := jwt.ParseWithClaims(token, &EmailClaims{}, keyFunc, validMethods)
+	if err != nil {
+		return nil, err
 	}
-	return nil, err
+	claims, ok := tokenClaims.Claims.(*EmailClaims)
+	if !ok || claims.Type != tokenTypeEmail {
+		return nil, errTokenType
+	}
+	return claims, nil
 }
