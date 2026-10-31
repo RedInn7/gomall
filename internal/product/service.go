@@ -318,6 +318,12 @@ func updateProductAndEvent(db *gorm.DB, productID, bossID uint, req *ProductUpda
 // deleteProductAndEvent 只有真实删除成功时才写删除事件，避免越权请求产生幽灵事件。
 func deleteProductAndEvent(db *gorm.DB, productID, bossID uint) error {
 	return db.Transaction(func(tx *gorm.DB) error {
+		// favorite.product_id 有外键指向 product，商品又是物理删除：先删收藏，否则 MySQL 报 1451。
+		// favorite 包依赖 product，这里不能反过来 import，直接按表名删。不是本人的商品时
+		// 下面删商品影响 0 行，整个事务回滚，收藏不会被误删。
+		if err := tx.Exec("DELETE FROM favorite WHERE product_id = ?", productID).Error; err != nil {
+			return err
+		}
 		affected, err := NewProductDaoByDB(tx).DeleteProduct(productID, bossID)
 		if err != nil {
 			return err
