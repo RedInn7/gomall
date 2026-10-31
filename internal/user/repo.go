@@ -150,6 +150,15 @@ func (d *UserDao) UpdateUserMoney(uId uint, money string) error {
 		Update("money", money).Error
 }
 
+// SetMoneyPasswordIfUnset 只在支付密码摘要为空时写入，返回是否写入。条件写进 WHERE：
+// 并发补设只有一个生效，已有的支付密码不会被覆盖。迁移加列时存量行是 NULL，与空串同样算未设置。
+func (d *UserDao) SetMoneyPasswordIfUnset(uId uint, digest string) (bool, error) {
+	res := d.DB.Model(&User{}).
+		Where("id=? AND (money_password_digest IS NULL OR money_password_digest='')", uId).
+		Update("money_password_digest", digest)
+	return res.RowsAffected > 0, res.Error
+}
+
 // BumpTokenVersion 版本号 +1：该用户所有已签发 JWT 立即作废（改密码/强制下线用）。
 // 用 SQL 表达式原子自增：读-改-写会与并发 bump 相互覆盖，且 struct Updates 会跳过
 // 零值导致 0→1 的首次 bump 静默丢失。

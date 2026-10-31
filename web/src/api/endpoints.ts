@@ -21,6 +21,7 @@ export const ENDPOINTS: Endpoint[] = [
     ['POST', '/api/v1/user/following', '账户', '关注用户', { id: 0 }],
     ['POST', '/api/v1/user/unfollowing', '账户', '取消关注', { id: 0 }],
     ['POST', '/api/v1/user/avatar', '账户', '上传头像'],
+    ['POST', '/api/v1/user/money_password', '账户', '设置支付密码', { password: '', key: '' }],
     ['GET', '/api/v1/category/list', '商品', '分类列表'],
     ['GET', '/api/v1/carousels', '商品', '轮播内容'],
     ['GET', '/api/v1/product/list', '商品', '商品列表', { page_size: 12, page_num: 1 }],

@@ -166,6 +166,15 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 	if alreadyCleared {
 		return nil
 	}
+	// 同一 tx 已记过异常单（如库存不足的 fulfillment_failed）：这笔钱已转人工退款，重投直接 ack。
+	// 否则库存补回后重投会把它正常结算，同一笔钱既发了货又可能被退回。
+	hasAnomaly, err := clearing.HasProviderAnomaly(ctx, clearing.ChannelWeb3, txHash)
+	if err != nil {
+		return err
+	}
+	if hasAnomaly {
+		return nil
+	}
 	// 先做 buyer 绑定校验：链上 buyer 必须等于签名 park 阶段写入的钱包地址，否则拒绝结算。
 	// 放在事务外、最前面，确保未通过绑定校验时不触碰任何账务 / 库存状态。
 	if err := verifyBuyerBinding(ctx, orderID, onchainBuyer); err != nil {
