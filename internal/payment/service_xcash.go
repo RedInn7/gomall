@@ -413,8 +413,8 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 	if err != nil {
 		return nil, err
 	}
-	if order.Type != consts.OrderWaitPay {
-		return nil, errors.New("订单状态非未支付")
+	if err := ensureOrderPayable(order); err != nil {
+		return nil, err
 	}
 	payableCents := orderPayableCents(order)
 	if payableCents <= 0 {

@@ -12,7 +12,6 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"gorm.io/gorm"
 
-	"github.com/RedInn7/gomall/consts"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -59,8 +58,8 @@ func (s *CryptoPaymentSrv) IssueNonce(ctx context.Context, req *CryptoNonceReq) 
 	if order == nil || order.ID == 0 {
 		return nil, errors.New("订单不存在")
 	}
-	if order.Type != consts.OrderWaitPay {
-		return nil, errors.New("订单状态非未支付")
+	if err := ensureOrderPayable(order); err != nil {
+		return nil, err
 	}
 
 	nonce, err := randomNonce()
@@ -97,8 +96,8 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *CryptoPaydown
 	if order == nil || order.ID == 0 {
 		return nil, errors.New("订单不存在")
 	}
-	if order.Type != consts.OrderWaitPay {
-		return nil, errors.New("订单状态非未支付")
+	if err := ensureOrderPayable(order); err != nil {
+		return nil, err
 	}
 
 	// 1) 一次性消费 nonce，原子 GET+DEL，防重放

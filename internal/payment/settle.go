@@ -6,6 +6,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
@@ -18,6 +19,24 @@ import (
 // 本文件收口三条支付渠道（余额 / Stripe / Web3）此前各自抄一遍的"确认收款"公共逻辑：
 // 应付口径、支付确认事务尾段、预留核销。各渠道只保留真正差异化的发起流程与清算，
 // 尾段统一走这里——新增渠道时无法再漏写库存/状态/outbox 任一步，杜绝行为漂移。
+
+var (
+	errOrderNotPayable    = errors.New("订单状态非未支付，无法发起支付")
+	errPreorderNotPayable = errors.New("预售订单请在预售页支付尾款")
+)
+
+// ensureOrderPayable 普通支付入口（余额 PayDown / Stripe、Xcash 建单 / Web3 取 nonce 与签名）共用的
+// 可支付校验。预售单付完定金后 type 仍是 WaitPay，但尾款只能走 preorder 的 PayFinal，
+// 在这里按全款再收一次就是重复收费。MarkOrderPaidWithCheck 的 WHERE 另有同一守卫兜底。
+func ensureOrderPayable(o *order.Order) error {
+	if o.Type != consts.OrderWaitPay {
+		return errOrderNotPayable
+	}
+	if o.PreorderStage != 0 {
+		return errPreorderNotPayable
+	}
+	return nil
+}
 
 // orderPayableCents 订单应付金额（分）的统一口径，所有支付渠道共用。
 //
