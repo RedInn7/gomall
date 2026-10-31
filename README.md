@@ -362,7 +362,7 @@ SNOWFLAKE_ALLOW_DEFAULT=true ./main
 ### Makefile
 
 ```bash
-make                # 编二进制并自动运行
+make                # 编二进制并自动运行（默认带 SNOWFLAKE_ALLOW_DEFAULT=true）
 make build          # 仅编二进制
 make tools          # 编 SkyWalking Agent（需要先初始化子模块）
 make build-agent    # 使用 SkyWalking Agent 构建
@@ -375,9 +375,12 @@ make docker-down    # 关容器
 第一次跑：
 
 ```bash
+# 复制配置后把 mysql.default.password 改成 docker-compose.yml 里的 123456
+cp config/locales/config.example.yaml config/locales/config.yaml
+
 # 普通本地开发只启动必要依赖
 docker compose up -d mysql redis
-make
+make                # 单实例本地开发，雪花节点号默认 0；多实例部署要给每个副本设 SNOWFLAKE_NODE_ID
 
 # 需要 SkyWalking 时再执行
 git submodule update --init --recursive
