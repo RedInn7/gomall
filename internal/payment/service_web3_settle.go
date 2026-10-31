@@ -223,7 +223,7 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 			txHash, onchainAmount, strings.ToUpper(web3PayToken()))
 	}
 
-	commitReservationBestEffort(ctx, paidProductID, paidNum)
+	orderpkg.CommitStockReservation(ctx, orderID, paidProductID, paidNum)
 	// 结算成功后清掉 Redis pending 占位（best-effort）。
 	if delErr := cache.DelWeb3Pending(ctx, orderID); delErr != nil {
 		log.LogrusObj.Warnf("del web3 pending placeholder order=%d err=%v", orderID, delErr)

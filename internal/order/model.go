@@ -34,4 +34,8 @@ type Order struct {
 	PromoRuleID        uint  `gorm:"not null;default:0;index"`
 	PromoDiscountCents int64 `gorm:"not null;default:0"`
 	FinalCents         int64 `gorm:"not null;default:0"`
+
+	// StockCommitPending 支付已落库，但 Redis 预占核销（CommitReservation）重试后仍失败。
+	// 库存对账把这份预占当合法占用并补核销，不会当泄漏退回 available（那样会超卖）。
+	StockCommitPending bool `gorm:"not null;default:false;index"`
 }
