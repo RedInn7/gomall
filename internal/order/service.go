@@ -122,7 +122,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 	}
 
 	// 1) Redis 预扣库存: available -> reserved，失败直接拒单
-	if err = cache.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
+	if err = product.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
 		util.LogrusObj.Errorf("reserve stock failed product=%d num=%d err=%v", req.ProductID, req.Num, err)
 		return nil, err
 	}

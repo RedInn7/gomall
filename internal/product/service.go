@@ -179,6 +179,11 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 	}
 	// 清掉可能由提前探测未来 ID 写入的空值缓存，让新商品提交后立即可读。
 	_ = cache.DelProductDetail(ctx, product.ID)
+	// 建库存桶，新商品提交后立即可下单。商品已落库，写 Redis 不跟着请求取消；
+	// 失败只记日志，下单时 ReserveStock 会按 DB 库存补建。
+	if err = cache.InitStock(context.WithoutCancel(ctx), product.ID, int64(product.Num)); err != nil {
+		log.LogrusObj.Errorf("init stock product=%d failed: %v", product.ID, err)
+	}
 
 	return product, nil
 }
@@ -280,8 +285,9 @@ func createProductAndEvent(db *gorm.DB, product *Product, imagePaths ...string) 
 }
 
 // updateProductAndEvent 锁住归属于 bossID 的商品行，只写请求里传了的字段，并写更新事件。
-func updateProductAndEvent(db *gorm.DB, productID, bossID uint, req *ProductUpdateReq) error {
-	return db.Transaction(func(tx *gorm.DB) error {
+// 返回改之前的库存 oldNum：行锁保证它和这次写入之间没有并发的付款扣减，调用方据此算库存差值。
+func updateProductAndEvent(db *gorm.DB, productID, bossID uint, req *ProductUpdateReq) (oldNum int, err error) {
+	err = db.Transaction(func(tx *gorm.DB) error {
 		productDao := NewProductDaoByDB(tx)
 		p, err := productDao.GetProductForUpdate(productID, bossID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -290,6 +296,7 @@ func updateProductAndEvent(db *gorm.DB, productID, bossID uint, req *ProductUpda
 		if err != nil {
 			return err
 		}
+		oldNum = p.Num
 		updates := req.applyTo(p)
 		// 改了零售价、折后价或拼团价时，按合并后的新值校验拼团价，改价不会留下越界的拼团价
 		if req.Price != nil || req.DiscountPrice != nil || req.GroupbuyPriceCents != nil {
@@ -305,6 +312,7 @@ func updateProductAndEvent(db *gorm.DB, productID, bossID uint, req *ProductUpda
 		}
 		return insertProductChanged(tx, productID, "update")
 	})
+	return oldNum, err
 }
 
 // deleteProductAndEvent 只有真实删除成功时才写删除事件，避免越权请求产生幽灵事件。
@@ -336,11 +344,20 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (
 		return nil, err
 	}
 	_ = cache.DelProductDetail(ctx, req.ID)
-	if err := updateProductAndEvent(NewProductDao(ctx).DB, req.ID, u.Id, req); err != nil {
+	oldNum, err := updateProductAndEvent(NewProductDao(ctx).DB, req.ID, u.Id, req)
+	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
 	cache.DoubleDeleteAsync(req.ID, 0)
+	// 改了库存：Redis available 按差值同步（算法见 cache.AdjustAvailable）。DB 已提交，写 Redis
+	// 不跟着请求取消；失败只记日志，留下的偏差由定时任务 ReconcileAvailable 纠正。
+	if req.Num != nil && *req.Num != oldNum {
+		delta := int64(*req.Num - oldNum)
+		if err = cache.AdjustAvailable(context.WithoutCancel(ctx), req.ID, delta); err != nil {
+			log.LogrusObj.Errorf("adjust stock product=%d delta=%d failed: %v", req.ID, delta, err)
+		}
+	}
 
 	return nil, nil
 }
