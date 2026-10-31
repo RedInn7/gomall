@@ -97,11 +97,18 @@ func DelProductDetail(ctx context.Context, id uint) error {
 	return RedisClient.Del(ctx, ProductDetailKey(id)).Err()
 }
 
+// productLoadTimeout 单飞回源（查 DB + 写缓存）的超时。
+const productLoadTimeout = 3 * time.Second
+
 // LoadProductOnce 用进程内 singleflight 合并同 id 的并发回源调用。
 // load 只会被其中一个 goroutine 实际执行，其余等待并共享同一结果。
-func LoadProductOnce(id uint, load func() (interface{}, error)) (interface{}, error) {
+// 结果是同一批请求共享的，所以 load 拿到的 ctx 与发起请求的 ctx 脱钩（保留 value、不随它取消），
+// 另设 productLoadTimeout 超时：领头请求断开时，等在后面的请求不会跟着失败，缓存也照样写进去。
+func LoadProductOnce(ctx context.Context, id uint, load func(ctx context.Context) (interface{}, error)) (interface{}, error) {
 	v, err, _ := productLoadGroup.Do(ProductDetailKey(id), func() (interface{}, error) {
-		return load()
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), productLoadTimeout)
+		defer cancel()
+		return load(loadCtx)
 	})
 	return v, err
 }
@@ -112,6 +119,9 @@ const ProductCountTTL = 60 * time.Second
 
 // productCountGroup 合并同一 key 的并发 COUNT 回源，防 TTL 到期瞬间的计数惊群。
 var productCountGroup singleflight.Group
+
+// productCountTimeout 单飞 COUNT 回源的超时。COUNT(*) 在百万行上要秒级，比详情回源宽。
+const productCountTimeout = 10 * time.Second
 
 func ProductCountKey(categoryID uint) string {
 	if categoryID == 0 {
@@ -124,7 +134,8 @@ func ProductCountKey(categoryID uint) string {
 // 动机：InnoDB 的 COUNT(*) 没有现成计数、只能全索引扫描（1M 行秒级），而总数与
 // 页码无关——没必要每翻一页都重数一遍；缓存后每类目每 60s 至多回源一次。
 // Redis 故障时直接回源 DB（fail-open：宁可退回慢路径，不能把列表打挂）。
-func ProductCountCached(ctx context.Context, categoryID uint, load func() (int64, error)) (int64, error) {
+// 和 LoadProductOnce 一样，load 与写缓存用脱钩的 ctx，领头请求断开不影响同一批请求。
+func ProductCountCached(ctx context.Context, categoryID uint, load func(ctx context.Context) (int64, error)) (int64, error) {
 	key := ProductCountKey(categoryID)
 	if raw, err := RedisClient.Get(ctx, key).Result(); err == nil {
 		if n, perr := strconv.ParseInt(raw, 10, 64); perr == nil {
@@ -132,11 +143,13 @@ func ProductCountCached(ctx context.Context, categoryID uint, load func() (int64
 		}
 	}
 	v, err, _ := productCountGroup.Do(key, func() (interface{}, error) {
-		n, loadErr := load()
+		loadCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), productCountTimeout)
+		defer cancel()
+		n, loadErr := load(loadCtx)
 		if loadErr != nil {
 			return int64(0), loadErr
 		}
-		if setErr := RedisClient.Set(ctx, key, n, ProductCountTTL).Err(); setErr != nil {
+		if setErr := RedisClient.Set(loadCtx, key, n, ProductCountTTL).Err(); setErr != nil {
 			log.LogrusObj.Warnln("write product count cache failed:", setErr)
 		}
 		return n, nil

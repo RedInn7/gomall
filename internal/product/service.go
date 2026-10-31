@@ -63,23 +63,25 @@ func (s *ProductSrv) ProductShow(ctx context.Context, req *ProductShowReq) (*Pro
 	}
 
 	// 进程内 singleflight 合并同 id 的并发回源，叠加在 Redis 互斥锁之上防惊群。
-	loaded, err := cache.LoadProductOnce(req.ID, func() (interface{}, error) {
-		return s.loadProductFromDB(ctx, req.ID)
-	})
-	if err != nil {
-		// 商品不存在: 写短 TTL 空值标记，挡住后续穿透。
+	// 查库和写缓存都在单飞里、用 LoadProductOnce 给的脱钩 ctx 做，领头请求断开不影响同批请求。
+	loaded, err := cache.LoadProductOnce(ctx, req.ID, func(ctx context.Context) (interface{}, error) {
+		pResp, err := s.loadProductFromDB(ctx, req.ID)
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// 商品不存在: 写短 TTL 空值标记，挡住后续穿透。
 			if setErr := cache.SetProductNotFound(ctx, req.ID); setErr != nil {
 				log.LogrusObj.Warnln("write product null cache failed:", setErr)
 			}
+		} else if err == nil {
+			if setErr := cache.SetProductDetail(ctx, req.ID, pResp); setErr != nil {
+				log.LogrusObj.Warnln("write product cache failed:", setErr)
+			}
 		}
+		return pResp, err
+	})
+	if err != nil {
 		return nil, err
 	}
-	pResp := loaded.(*ProductResp)
-	if setErr := cache.SetProductDetail(ctx, req.ID, pResp); setErr != nil {
-		log.LogrusObj.Warnln("write product cache failed:", setErr)
-	}
-	return pResp, nil
+	return loaded.(*ProductResp), nil
 }
 
 func (s *ProductSrv) loadProductFromDB(ctx context.Context, id uint) (*ProductResp, error) {
@@ -203,8 +205,8 @@ func (s *ProductSrv) ProductList(ctx context.Context, req *ProductListReq) (*typ
 	}
 	// 总数走 60s 缓存 + singleflight：COUNT(*) 是全索引扫描且结果与页码无关，
 	// 不缓存时每翻一页都重数一遍全表——列表 p95 2.5s 的根因就在这。
-	total, err = cache.ProductCountCached(ctx, req.CategoryID, func() (int64, error) {
-		return productDao.CountProductByCondition(condition)
+	total, err = cache.ProductCountCached(ctx, req.CategoryID, func(ctx context.Context) (int64, error) {
+		return NewProductDao(ctx).CountProductByCondition(condition)
 	})
 	if err != nil {
 		log.LogrusObj.Error(err)

@@ -3,14 +3,17 @@ package product
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
@@ -55,6 +58,7 @@ func TestProductUpdateAdjustsAvailableByDelta(t *testing.T) {
 	useTestDB(t, db)
 	p := seedProduct(t, db)
 	f := useFakeRedis(t)
+	discardLog(t)
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: p.BossID})
 
 	for _, req := range []*ProductUpdateReq{{ID: p.ID, OnSale: new(false)}, {ID: p.ID, Num: new(15)}} {
@@ -73,6 +77,14 @@ func TestProductUpdateAdjustsAvailableByDelta(t *testing.T) {
 			t.Fatal("延迟双删没有执行")
 		}
 	}
+}
+
+func discardLog(t *testing.T) {
+	t.Helper()
+	prev := log.LogrusObj
+	log.LogrusObj = logrus.New()
+	log.LogrusObj.Out = io.Discard
+	t.Cleanup(func() { log.LogrusObj = prev })
 }
 
 func useTestDB(t *testing.T, db *gorm.DB) {
@@ -133,7 +145,7 @@ func (f *fakeRedis) ProcessHook(redis.ProcessHook) redis.ProcessHook {
 			}
 			c.SetVal(ret)
 		case *redis.StringCmd:
-			c.SetErr(redis.Nil)
+			return redis.Nil // hook 的返回值会覆盖命令的 err
 		case *redis.BoolCmd:
 			c.SetVal(true)
 		}
