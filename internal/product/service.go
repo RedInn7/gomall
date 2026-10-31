@@ -51,7 +51,7 @@ func (s *ProductSrv) ProductShow(ctx context.Context, req *ProductShowReq) (*Pro
 		log.LogrusObj.Warnln("read product cache failed:", cacheErr)
 	}
 
-	locked, _ := cache.TryProductLock(ctx, req.ID)
+	lockToken, locked, _ := cache.TryProductLock(ctx, req.ID)
 	if !locked {
 		time.Sleep(50 * time.Millisecond)
 		if cacheErr := cache.GetProductDetail(ctx, req.ID, cached); cacheErr == nil {
@@ -60,7 +60,7 @@ func (s *ProductSrv) ProductShow(ctx context.Context, req *ProductShowReq) (*Pro
 			return nil, gorm.ErrRecordNotFound
 		}
 	} else {
-		defer cache.UnlockProduct(ctx, req.ID)
+		defer cache.UnlockProduct(ctx, req.ID, lockToken)
 	}
 
 	// 进程内 singleflight 合并同 id 的并发回源，叠加在 Redis 互斥锁之上防惊群。
