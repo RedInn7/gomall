@@ -35,6 +35,9 @@ var (
 	ErrGroupbuyClosed        = e.New(e.ErrGroupbuyClosed)
 	ErrGroupbuyDuplicateJoin = e.New(e.ErrGroupbuyDuplicateJoin)
 	ErrGroupbuyNotFound      = errors.New("拼团不存在")
+
+	// errGroupbuyStockShort 成团时 DB 库存不够每个成员各扣 1 件。
+	errGroupbuyStockShort = errors.New("拼团成团库存不足")
 )
 
 var (
@@ -344,8 +347,8 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 
 // MarkGroupSuccess 凑齐 N 人后的成团：
 //
-//	tx 内：MarkGroupSuccessIfFull + 成员订单 WaitGroup → WaitShip + member.status=succeed
-//	+ outbox(groupbuy.success)；tx 外：库存 reserved→sold（每个成员 1 份）
+//	tx 内：MarkGroupSuccessIfFull + 每个成员扣 DB 库存 + 成员订单 WaitGroup → WaitShip
+//	+ member.status=succeed + outbox(groupbuy.success)；tx 外：Redis 预占 reserved→sold（每个成员 1 份）
 //
 // 多次调用幂等：第一次切 status，之后 MarkGroupSuccessIfFull 返回 false 直接 no-op。
 func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error {
@@ -382,6 +385,7 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 		// 关键：先结算资金、再翻状态。只有钱真的从托管账户划到卖家，订单才允许进 WaitShip，
 		// 从源头堵住"没收钱就发货"。任一失败回滚整个成团操作，cron 重新拉起。
 		orderDao := orderpkg.NewOrderDaoByDB(tx)
+		productDao := product.NewProductDaoWithDB(tx)
 		for _, m := range members {
 			o, e := orderDao.GetOrderByIdOnly(uint(m.OrderID))
 			if e != nil {
@@ -389,6 +393,14 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			}
 			if o == nil || o.ID == 0 {
 				return fmt.Errorf("成员订单缺失 orderID=%d", m.OrderID)
+			}
+			// 成团才算真正卖出：与支付确认同口径扣 DB 库存（条件 UPDATE 防超卖），不够扣就整体回滚。
+			ok, e := productDao.DeductStock(o.ProductID, o.Num)
+			if e != nil {
+				return e
+			}
+			if !ok {
+				return errGroupbuyStockShort
 			}
 			// 结算托管款给卖家（o.Money 即加入时收的拼团价），(ref, credit, groupbuy_settle) 幂等。
 			if e = settleToSeller(tx, o.BossID, o.Money, o.ID); e != nil {
