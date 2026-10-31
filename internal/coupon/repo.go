@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
@@ -56,7 +57,7 @@ func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*UserCoupon, error) {
 			return errors.New("活动未开始或已结束")
 		}
 		if batch.Claimed >= batch.Total {
-			return errors.New("已抢光")
+			return cache.ErrCouponSoldOut
 		}
 
 		// 单用户配额
@@ -90,8 +91,9 @@ func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*UserCoupon, error) {
 }
 
 // PersistClaim Lua 已经把 stock 在 redis 扣减成功，这里负责落库。
-// 事务内二次校验单用户配额，使得 DB 成为领券上限的权威来源：即使 Redis
-// 计数器因重启或 TTL 到期丢失，也不会造成超发。
+// 事务内在批次行锁下二次校验总量与单用户配额，使 DB 成为发放上限的权威来源：
+// 即使 Redis 计数器因重启、TTL 到期或与 db 模式混用而偏离，也不会超发。
+// 返回错误时调用方负责把 Redis 侧已扣的库存补回去。
 func (d *CouponDao) PersistClaim(userId, batchId uint, validDays int) (*UserCoupon, error) {
 	now := time.Now()
 	uc := &UserCoupon{
@@ -103,11 +105,15 @@ func (d *CouponDao) PersistClaim(userId, batchId uint, validDays int) (*UserCoup
 		ExpireAt:  now.AddDate(0, 0, validDays),
 	}
 	err := d.Transaction(func(tx *gorm.DB) error {
-		// 查批次的 per_user 上限，同时加行锁防止并发绕过。
+		// 查批次的总量与 per_user 上限，同时加行锁防止并发绕过。
 		var batch CouponBatch
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ?", batchId).First(&batch).Error; err != nil {
 			return err
+		}
+		// 总量守卫：db 模式只加 claimed 不扣 Redis，两种模式混用时 Redis 库存会偏多。
+		if batch.Claimed >= batch.Total {
+			return cache.ErrCouponSoldOut
 		}
 
 		// DB 层单用户配额守卫：Redis 计数器只是前置快速路径，不能作为唯一防线。
