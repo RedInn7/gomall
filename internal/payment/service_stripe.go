@@ -41,7 +41,24 @@ var (
 	ErrStripeWebhookNotConfigured = errors.New("Stripe webhook 未配置：缺少 STRIPE_WEBHOOK_SECRET")
 	// ErrStripeSignature 签名校验失败：请求可能被伪造或篡改，应拒绝且无需 Stripe 重投。
 	ErrStripeSignature = errors.New("Stripe webhook 签名校验失败")
+	// ErrStripeCurrencyUnsupported STRIPE_CURRENCY 配成了 cny 以外的币种。
+	ErrStripeCurrencyUnsupported = errors.New("Stripe 只能按 cny 收款：订单金额是人民币分，请删除 STRIPE_CURRENCY 或设为 cny")
 )
+
+// stripeOrderCurrency 订单按人民币分计价（与钱包 / Xcash 同一口径），Stripe 只能按 cny 收款。
+// 按 usd 收会把 1000 分人民币当成 10 美元收，清算单上的币种和金额也对不上。
+const stripeOrderCurrency = "cny"
+
+// stripeCheckoutTTL Checkout 会话有效期，从建单时刻算起：同一订单每次建会话的 expires_at 都一样，
+// 复用的幂等键参数才一致。Stripe 要求会话至少 30 分钟后过期，所以建单超过约 30 分钟就不能再发起 Stripe 支付；
+// 超时关单在 15 分钟，正常的待支付订单都在这个窗口内。会话过期前关单任务会跳过这张单（见 order.CancelUnpaidOrder）。
+const stripeCheckoutTTL = time.Hour
+
+// stripeMinCheckoutTTL Stripe 接受的最短会话有效期，多留 1 分钟网络余量。
+const stripeMinCheckoutTTL = 31 * time.Minute
+
+// errStripeCheckoutTooLate 订单已过可发起 Stripe 支付的时间窗口。
+var errStripeCheckoutTooLate = errors.New("订单已超过 Stripe 支付时限，请重新下单")
 
 // stripeEventDedupeTTL Stripe 事件去重键的存活时长。Stripe 的重投窗口最长约 3 天，
 // 取 72h 覆盖其全部自动重试，过期后键自然回收，不长期占用 Redis。
@@ -56,11 +73,13 @@ func stripeEventDedupeKey(eventID string) string {
 func stripeSecretKey() string     { return strings.TrimSpace(os.Getenv(envStripeSecretKey)) }
 func stripeWebhookSecret() string { return strings.TrimSpace(os.Getenv(envStripeWebhookSecret)) }
 
-func stripeCurrency() string {
-	if c := strings.TrimSpace(strings.ToLower(os.Getenv(envStripeCurrency))); c != "" {
-		return c
+// stripeCurrency 收款币种。STRIPE_CURRENCY 只为兼容旧配置保留：留空或 cny 都按 cny 收，
+// 配成其他币种直接拒绝建单，不做静默换算。
+func stripeCurrency() (string, error) {
+	if c := strings.TrimSpace(strings.ToLower(os.Getenv(envStripeCurrency))); c != "" && c != stripeOrderCurrency {
+		return "", fmt.Errorf("%w（当前为 %s）", ErrStripeCurrencyUnsupported, c)
 	}
-	return "usd"
+	return stripeOrderCurrency, nil
 }
 
 func stripeSuccessURL() string {
@@ -96,6 +115,10 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 	if sk == "" {
 		return nil, ErrStripeNotConfigured
 	}
+	currency, err := stripeCurrency()
+	if err != nil {
+		return nil, err
+	}
 
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -108,14 +131,24 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	if order.Type != consts.OrderWaitPay {
-		return nil, errors.New("订单状态非未支付，无法发起支付")
+	if err := ensureOrderPayable(order); err != nil {
+		return nil, err
 	}
 
 	// 实付口径统一走 orderPayableCents（命中促销取折后 FinalCents），与钱包 / Web3 路径一致。
 	payable := orderPayableCents(order)
 	if payable <= 0 {
 		return nil, errors.New("订单应付金额非法")
+	}
+	expiresAt := order.CreatedAt.Add(stripeCheckoutTTL)
+	ttl := time.Until(expiresAt)
+	if ttl < stripeMinCheckoutTTL {
+		return nil, errStripeCheckoutTooLate
+	}
+	// 先占位再建会话：占位写不进去就不建，避免会话还能付款时订单被超时关掉。
+	if err := cache.RedisClient.Set(ctx, cache.StripeCheckoutKey(order.ID), "1", ttl).Err(); err != nil {
+		log.LogrusObj.Errorf("stripe mark checkout active failed order=%d err=%v", order.ID, err)
+		return nil, err
 	}
 
 	stripe.Key = sk
@@ -124,12 +157,13 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 		ClientReferenceID: stripe.String(strconv.FormatUint(uint64(order.ID), 10)),
 		SuccessURL:        stripe.String(stripeSuccessURL()),
 		CancelURL:         stripe.String(stripeCancelURL()),
+		ExpiresAt:         stripe.Int64(expiresAt.Unix()),
 		// 不传 payment_method_types：启用动态支付方式，由 Dashboard 配置，最大化转化。
 		LineItems: []*stripe.CheckoutSessionLineItemParams{
 			{
 				Quantity: stripe.Int64(1),
 				PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
-					Currency:   stripe.String(stripeCurrency()),
+					Currency:   stripe.String(currency),
 					UnitAmount: stripe.Int64(payable),
 					ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
 						Name: stripe.String("Order #" + strconv.FormatUint(order.OrderNum, 10)),
@@ -248,7 +282,8 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 		paidNum          int
 		paymentConfirmed bool
 	)
-	expectCurrency := stripeCurrency()
+	// 无论配置如何，订单只认人民币实收；历史上按其他币种建的会话在下面走金额 / 币种不符的异常单。
+	expectCurrency := stripeOrderCurrency
 
 	err := orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 		order, err := orderpkg.NewOrderDaoByDB(tx).GetOrderById(orderID, userID)
@@ -307,13 +342,15 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 	})
 	if err != nil {
 		log.LogrusObj.Errorf("stripe settle order=%d failed: %v", orderID, err)
-		return err
+		// 库存不足 / 商品已删等确定性失败：钱已在 Stripe，改记异常单并返回成功，停止 webhook 重投。
+		return recordUnfulfillable(orderpkg.NewOrderDao(ctx).DB, err, orderID, clearing.ChannelStripe,
+			providerRef, strconv.FormatInt(paidAmount, 10), paidCurrency)
 	}
 
 	// 只有正常清算并推进订单后才核销预留。payment_anomaly 只是接管外部异常，订单仍是 WaitPay，
 	// 绝不能把它的 reserved 提交掉，否则 DB 库存未扣而缓存预占消失，会重新暴露可售量。
 	if paymentConfirmed {
-		commitReservationBestEffort(ctx, paidProductID, paidNum)
+		orderpkg.CommitStockReservation(ctx, orderID, paidProductID, paidNum)
 	}
 	return nil
 }

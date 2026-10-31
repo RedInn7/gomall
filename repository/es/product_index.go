@@ -14,6 +14,10 @@ import (
 
 const ProductIndex = "product"
 
+// ErrBadRequest ES 以 4xx 拒绝了查询（如 from+size 超过 max_result_window）。请求本身有问题，
+// 调用方不应换 DB 重查，只有连接错误和 5xx 才算 ES 故障。
+var ErrBadRequest = errors.New("es rejected search request")
+
 // productIndexMapping IK 分词器 (常用中文搜索) 如果集群没装也能跑，会退回 standard
 var productIndexMapping = `{
   "settings": {
@@ -53,6 +57,8 @@ type ProductDoc struct {
 	BossID        uint   `json:"boss_id"`
 	ImgPath       string `json:"img_path"`
 	CreatedAt     int64  `json:"created_at"`
+	// Version 外部版本号（商品 updated_at 的 UnixNano），只用于写入时的版本控制，不进文档
+	Version int64 `json:"-"`
 }
 
 // EnsureProductIndex 幂等地创建索引。已存在则跳过
@@ -93,18 +99,24 @@ func UpsertProduct(ctx context.Context, doc *ProductDoc) error {
 	if err != nil {
 		return err
 	}
+	// 以商品 updated_at 作外部版本：回填拿旧快照晚到时 ES 返回 409，不会盖掉更新的增量写入；
+	// external_gte 允许同版本重写，重复投递照样幂等
+	version := int(doc.Version)
 	req := esapi.IndexRequest{
-		Index:      ProductIndex,
-		DocumentID: strconv.FormatUint(uint64(doc.ID), 10),
-		Body:       bytes.NewReader(body),
-		Refresh:    "false",
+		Index:       ProductIndex,
+		DocumentID:  strconv.FormatUint(uint64(doc.ID), 10),
+		Body:        bytes.NewReader(body),
+		Refresh:     "false",
+		Version:     &version,
+		VersionType: "external_gte",
 	}
 	res, err := req.Do(ctx, EsClient)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	if res.IsError() {
+	// 409 说明 ES 里已是更新的快照，目标状态已达成，视作成功
+	if res.IsError() && res.StatusCode != 409 {
 		bz, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("upsert failed: %s", string(bz))
 	}
@@ -237,6 +249,9 @@ func SearchProducts(ctx context.Context, keyword string, from, size int) ([]*Pro
 	defer res.Body.Close()
 	if res.IsError() {
 		bz, _ := io.ReadAll(res.Body)
+		if res.StatusCode >= 400 && res.StatusCode < 500 {
+			return nil, 0, fmt.Errorf("%w: %s", ErrBadRequest, string(bz))
+		}
 		return nil, 0, fmt.Errorf("search failed: %s", string(bz))
 	}
 

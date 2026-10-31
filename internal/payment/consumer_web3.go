@@ -44,7 +44,7 @@ func decodeOrderIDFromBytes32(hexStr string) (uint, error) {
 }
 
 // HandleWeb3PaymentConfirmed 消费 web3.payment.confirmed：解码订单 id + 校验金额 + 结算订单。
-// 解码 / order_id 非法 / 金额不足 → 毒消息进 DLQ；DB 抖动等可重试错误 → 由调用方 Nack 重排。
+// 解码 / order_id 非法 / 金额不足 → 毒消息进 DLQ；DB 抖动等可重试错误 → 由调用方进延迟队列重试。
 func HandleWeb3PaymentConfirmed(ctx context.Context, payload []byte) error {
 	var ev web3ConfirmedEvent
 	if err := json.Unmarshal(payload, &ev); err != nil {
@@ -67,7 +67,8 @@ func HandleWeb3PaymentConfirmed(ctx context.Context, payload []byte) error {
 	if err := GetWeb3SettleSrv().SettleConfirmedOrder(ctx, orderID, ev.Buyer, ev.Amount, ev.TxHash); err != nil {
 		// 金额不足 / 喂价缺失 / buyer 不匹配：不可靠重投解决，标记毒消息进 DLQ 人工核查
 		//（防资损 / 配置问题 / 越权结算）。
-		if errors.Is(err, ErrWeb3AmountMismatch) || errors.Is(err, ErrWeb3PriceNotConfigured) || errors.Is(err, ErrWeb3BuyerMismatch) {
+		if errors.Is(err, ErrWeb3AmountMismatch) || errors.Is(err, ErrWeb3PriceNotConfigured) ||
+			errors.Is(err, ErrWeb3USDCRateNotConfigured) || errors.Is(err, ErrWeb3BuyerMismatch) {
 			return fmt.Errorf("%w: %v", errWeb3PoisonMessage, err)
 		}
 		return err // 其它（DB 抖动等）可重试
@@ -88,12 +89,12 @@ func DispatchWeb3SettleEvent(ctx context.Context, routingKey string, payload []b
 // web3SettlePrefetch 单次预取条数：链上结算走 DB 事务，控制并发避免锁竞争。
 const web3SettlePrefetch = 32
 
-// StartWeb3SettleConsumer 绑定 web3.payment.confirmed 并启动自愈消费循环（毒消息进 DLQ，可重试 Nack 重排）。
+// StartWeb3SettleConsumer 绑定 web3.payment.confirmed 并启动自愈消费循环（毒消息进 DLQ，可重试的逐级退避重试）。
 //   - 解析失败 / order_id 非法 / 金额不足 / buyer 不匹配（毒消息）：直接进 DLQ 并告警
-//   - 投递次数超限：即便业务判为可重试也兜底进 DLQ，避免无限 requeue
-//   - 业务可重试错误（DB 抖动等）：Nack 重排，依赖 at-least-once + 台账幂等收敛
+//   - 业务可重试错误（DB 抖动等）：按 SettleRetryDelays 逐级退避进延迟队列重试，超过上限进 DLQ；
+//     依赖 at-least-once + 台账幂等收敛
 //
-// 复用 SuperviseDomainConsumer 提供断连重订阅 + panic 兜底，替换原裸 ch.Consume
+// 复用 SuperviseDomainConsumerWithRetry 提供断连重订阅 + panic 兜底，替换原裸 ch.Consume
 // 首次断连即永久停摆的实现。
 func StartWeb3SettleConsumer(ctx context.Context) error {
 	if err := rabbitmq.InitDeadLetterTopology(); err != nil {
@@ -102,19 +103,22 @@ func StartWeb3SettleConsumer(ctx context.Context) error {
 	if err := rabbitmq.BindDomainQueue(web3SettleQueue, "web3.payment.confirmed"); err != nil {
 		return err
 	}
-	rabbitmq.SuperviseDomainConsumer(web3SettleQueue, web3SettlePrefetch, func(d amqp.Delivery) {
-		err := DispatchWeb3SettleEvent(ctx, d.RoutingKey, d.Body)
+	if err := rabbitmq.InitRetryQueue(web3SettleQueue, rabbitmq.SettleRetryDelays...); err != nil {
+		return err
+	}
+	rabbitmq.SuperviseDomainConsumerWithRetry(web3SettleQueue, web3SettlePrefetch, func(d amqp.Delivery) {
+		key := rabbitmq.OriginalRoutingKey(d)
+		err := DispatchWeb3SettleEvent(ctx, key, d.Body)
 		if err == nil {
 			_ = d.Ack(false)
 			return
 		}
-		util.LogrusObj.Errorf("web3 settle handle key=%s err=%v", d.RoutingKey, err)
-		poison := errors.Is(err, errWeb3PoisonMessage)
-		if poison || rabbitmq.ExceededDeliveryLimit(d) {
-			rabbitmq.RouteToDLQ(d, web3SettleQueue, d.RoutingKey, poison)
+		util.LogrusObj.Errorf("web3 settle handle key=%s err=%v", key, err)
+		if errors.Is(err, errWeb3PoisonMessage) {
+			rabbitmq.RouteToDLQ(d, web3SettleQueue, key, true)
 			return
 		}
-		_ = d.Nack(false, true)
+		rabbitmq.RetryToQueueOrDLQ(d, web3SettleQueue, key)
 	})
 	return nil
 }

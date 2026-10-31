@@ -71,14 +71,13 @@ func (d *GroupbuyDao) JoinGroupAtomic(groupID uint, member *GroupbuyMember) erro
 	return nil
 }
 
-// MarkGroupSuccessIfFull 当 current_count >= target_count 且尚未过期时把 status 推到 success。
+// MarkGroupSuccessIfFull 当 current_count >= target_count 时把 status 推到 success。
 // 返回 (推进与否, error)；幂等：多次调用只有第一次切 status。
-// now 由调用方传入，与 JoinGroupAtomic 保持相同的截止口径，防止在截单线附近
-// 将本应散团的拼团误判成成团。
-func (d *GroupbuyDao) MarkGroupSuccessIfFull(groupID uint, now time.Time) (bool, error) {
+// 不看 expire_at：JoinGroupAtomic 带截止条件，满员一定发生在截止前；过了截止线才来成团，
+// 只说明加入时成团失败、由 cron 补成团，不能因此把已凑齐、已收款的团判失败。
+func (d *GroupbuyDao) MarkGroupSuccessIfFull(groupID uint) (bool, error) {
 	res := d.DB.Model(&GroupbuyGroup{}).
-		Where("id=? AND status=? AND current_count>=target_count AND expire_at>?",
-			groupID, GroupbuyStatusOpen, now).
+		Where("id=? AND status=? AND current_count>=target_count", groupID, GroupbuyStatusOpen).
 		Update("status", GroupbuyStatusSuccess)
 	if res.Error != nil {
 		return false, res.Error
@@ -98,7 +97,8 @@ func (d *GroupbuyDao) MarkGroupExpired(groupID uint) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
-// ExpireOpenGroupsBefore 拉所有"已过期但状态仍 open"的团 id，给 cron 兜底散团用。
+// ExpireOpenGroupsBefore 拉所有"已过期、状态仍 open 且没凑齐"的团 id，给 cron 兜底散团用。
+// 满员的团交给 ListFullOpenGroups 补成团，不散。
 // 拉 id 而不是整行：散团本身在 service 内对每个 group 单事务推进。
 func (d *GroupbuyDao) ExpireOpenGroupsBefore(now time.Time, limit int) ([]uint, error) {
 	if limit <= 0 {
@@ -106,10 +106,20 @@ func (d *GroupbuyDao) ExpireOpenGroupsBefore(now time.Time, limit int) ([]uint, 
 	}
 	var ids []uint
 	err := d.DB.Model(&GroupbuyGroup{}).
-		Where("status=? AND expire_at<=?", GroupbuyStatusOpen, now).
+		Where("status=? AND expire_at<=? AND current_count<target_count", GroupbuyStatusOpen, now).
 		Limit(limit).
 		Pluck("id", &ids).Error
 	return ids, err
+}
+
+// ListFullOpenGroups 拉满员但仍 open 的团（加入时成团失败留下的），给 cron 补成团。
+func (d *GroupbuyDao) ListFullOpenGroups(limit int) ([]*GroupbuyGroup, error) {
+	var groups []*GroupbuyGroup
+	err := d.DB.Model(&GroupbuyGroup{}).
+		Where("status=? AND current_count>=target_count", GroupbuyStatusOpen).
+		Limit(limit).
+		Find(&groups).Error
+	return groups, err
 }
 
 // ListMembers 列出团内所有成员，按加入时间升序（团长在最前）。

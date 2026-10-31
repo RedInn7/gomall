@@ -210,12 +210,3 @@ func RollbackRedPacketClaim(ctx context.Context, id, userID uint, amount int64) 
 	).Result()
 	return err
 }
-
-// GetRedPacketRemainingCount Redis 视角下还剩多少份
-func GetRedPacketRemainingCount(ctx context.Context, id uint) (int64, error) {
-	n, err := RedisClient.LLen(ctx, RedPacketAmountsKey(id)).Result()
-	if err != nil && err != redis.Nil {
-		return 0, err
-	}
-	return n, nil
-}
