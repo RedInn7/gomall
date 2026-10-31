@@ -89,6 +89,7 @@ func InitCron() {
 		// 静默降级：仅记录日志，不让 cron 注册失败把整个进程拖崩
 		util.LogrusObj.Errorf("GroupbuyExpire Cron 注册失败: %v", e)
 	}
+	_, _ = c.AddFunc("@every 5m", groupbuy.GetGroupbuySrv().RunCompleteFullGroups) // 满员但成团失败的团补成团
 
 	// 预售尾款没收兜底：每 1h 扫一次 FinalEndAt 已过但 stage 仍 DepositPaid 的订单，
 	// service 层内部已做"扫 + 逐条单事务 + 单条 ERROR log"，cron 层只兜 panic。
