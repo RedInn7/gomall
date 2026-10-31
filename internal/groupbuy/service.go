@@ -365,9 +365,8 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 		switched bool
 		members  []*GroupbuyMember
 	)
-	now := time.Now()
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupSuccessIfFull(groupID, now)
+		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupSuccessIfFull(groupID)
 		if e != nil {
 			return e
 		}
@@ -550,6 +549,35 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 		}
 	}
 	return nil
+}
+
+// RunCompleteFullGroups cron 补成团：满员但仍 open 的团（加入时 MarkGroupSuccess 失败留下的）逐个重试，
+// 单团失败不影响其它团。库存不够每人各扣一件时重试也成不了团，过了截止时间就散团退款，
+// 不让成员的钱一直押在托管里。
+func (s *GroupbuySrv) RunCompleteFullGroups() {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Errorf("GroupbuyComplete Cron Panic: %v", r)
+		}
+	}()
+	ctx := context.Background()
+	groups, err := NewGroupbuyDao(ctx).ListFullOpenGroups(200)
+	if err != nil {
+		util.LogrusObj.Errorf("GroupbuyComplete 扫表失败: %v", err)
+		return
+	}
+	for _, g := range groups {
+		err := s.MarkGroupSuccess(ctx, g.ID)
+		if err == nil {
+			continue
+		}
+		util.LogrusObj.Errorf("补成团失败 groupID=%d err=%v", g.ID, err)
+		if errors.Is(err, errGroupbuyStockShort) && !g.ExpireAt.After(time.Now()) {
+			if err := s.ExpireGroup(ctx, g.ID); err != nil {
+				util.LogrusObj.Errorf("库存不足散团失败 groupID=%d err=%v", g.ID, err)
+			}
+		}
+	}
 }
 
 // checkPayKey 校验支付密码。放在预扣库存之前：密码错误不占库存，也不开事务。
