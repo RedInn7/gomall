@@ -33,4 +33,10 @@ func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 	authed.POST("user/following", UserFollowingHandler())
 	authed.POST("user/unfollowing", UserUnFollowingHandler())
 	authed.POST("user/avatar", UploadAvatarHandler()) // 上传头像
+	// 存量用户补设支付密码（只能设一次）：要校验登录密码，按用户限频挡住借接口试密码
+	authed.POST("user/money_password",
+		middleware.SlidingWindow(middleware.SlidingWindowOption{
+			Scope: "set_money_password", Window: time.Minute, Limit: 5, ByUser: true,
+		}),
+		SetMoneyPasswordHandler())
 }

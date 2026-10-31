@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
@@ -226,16 +227,20 @@ func (d *OrderDao) ShowOrderById(id, uId uint) (r *OrderListRespItem, err error)
 // DeletedAt 是普通可空列不是 gorm.DeletedAt，这里是物理 DELETE：订单一删，托管款、清算单和
 // 结算消费者都找不到它，所以只删资金已闭环的终态单——
 //   - Closed：没收过款，或收的款已原路退回；
-//   - Completed / Refunded：清算单已 settled / refunded，或根本没有清算单（迁移前旧单、预售 / 拼团单）。
+//   - Completed：清算单已 settled / refunded，或根本没有清算单（迁移前旧单、预售 / 拼团单）；
+//   - Refunded：退款已落账，即已有 SettleRefund 写的买家退款入账流水（0 元退款也写）。
+//     ApproveRefund 只改状态，钱要等 order.refunded 消费者退，这期间删单退款就永远到不了账。
 //
 // 条件写进 DELETE 的 WHERE，与并发的状态推进 / 结算竞争时也不会误删。
 func (d *OrderDao) DeleteOrderById(id, uId uint) (bool, error) {
 	res := d.DB.Model(&Order{}).
 		Where("id=? AND user_id = ?", id, uId).
-		Where("(type=? OR (type IN ? AND NOT EXISTS (SELECT 1 FROM payment_clearing WHERE order_id=? AND status NOT IN ?)))",
-			consts.OrderClosed, []uint{consts.OrderCompleted, consts.OrderRefunded}, id,
+		Where("(type=? OR (type=? AND NOT EXISTS (SELECT 1 FROM payment_clearing WHERE order_id=? AND status NOT IN ?))"+
+			" OR (type=? AND EXISTS (SELECT 1 FROM account_transaction WHERE ref_order_id=? AND direction=? AND biz_type IN ?)))",
+			consts.OrderClosed,
 			// 即 clearing.StatusSettled / StatusRefunded；clearing 依赖 order，这里不能反向 import。
-			[]string{"settled", "refunded"}).
+			consts.OrderCompleted, id, []string{"settled", "refunded"},
+			consts.OrderRefunded, id, money.DirectionCredit, []string{money.BizTypeRefund, money.BizTypeEscrowRefund}).
 		Delete(&Order{})
 	if res.Error != nil {
 		return false, res.Error
