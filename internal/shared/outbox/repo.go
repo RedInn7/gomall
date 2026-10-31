@@ -99,8 +99,8 @@ func (d *OutboxDao) MarkSent(id uint) error {
 }
 
 // MarkFailed 在 SQL 内自增 attempts（gorm.Expr 避免 Go 侧读改写丢增量），
-// 超过 maxAttempts 标记为 dead；否则按指数退避排期并退回 pending，
-// 让该行重新可被下一轮 FetchBatch 认领（从 publishing 释放）。
+// 超过 maxAttempts 标记为 dead（maxAttempts<=0 表示永不 dead）；否则按指数退避（封顶 5 分钟）
+// 排期并退回 pending，让该行重新可被下一轮 FetchBatch 认领（从 publishing 释放）。
 func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string) error {
 	now := time.Now()
 	updates := map[string]any{
@@ -108,12 +108,12 @@ func (d *OutboxDao) MarkFailed(id uint, attempts, maxAttempts int, errMsg string
 		"last_error": truncate(errMsg, 500),
 		"updated_at": now,
 	}
-	if attempts+1 >= maxAttempts {
+	if maxAttempts > 0 && attempts+1 >= maxAttempts {
 		updates["status"] = OutboxStatusDead
 	} else {
-		backoff := time.Duration(1<<attempts) * time.Second
-		if backoff > 5*time.Minute {
-			backoff = 5 * time.Minute
+		backoff := 5 * time.Minute
+		if attempts < 9 { // 2^9 秒已过封顶；永不 dead 的事件 attempts 会一直涨，再移位会溢出成负数
+			backoff = min(time.Duration(1<<attempts)*time.Second, backoff)
 		}
 		updates["status"] = OutboxStatusPending
 		updates["next_retry_at"] = now.Add(backoff)

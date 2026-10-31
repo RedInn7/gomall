@@ -3,11 +3,13 @@ package refund
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -20,6 +22,7 @@ import (
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
@@ -57,6 +60,7 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			db := openRefundTestDB(t)
+			restocks := stubRestockRedis(t)
 			seedRefundUser(t, db, 11, 100)
 			seedRefundUser(t, db, 22, tt.sellerBefore)
 			p := &product.Product{Name: "book", CategoryID: 1, Num: 0, BossID: 22}
@@ -105,6 +109,9 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 			if gotProduct.Num != 1 {
 				t.Fatalf("duplicate refund must restore stock once, got %d", gotProduct.Num)
 			}
+			if len(*restocks) != 1 || (*restocks)[0] != "stock:available:33+1" {
+				t.Fatalf("redis available must be restocked once after commit, got %v", *restocks)
+			}
 			var gotClearing clearing.PaymentClearing
 			if err := db.First(&gotClearing, record.ID).Error; err != nil {
 				t.Fatalf("load clearing: %v", err)
@@ -118,6 +125,7 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 
 func TestZeroAmountLegacyRefundIsIdempotent(t *testing.T) {
 	db := openRefundTestDB(t)
+	stubRestockRedis(t)
 	seedRefundUser(t, db, 11, 100)
 	seedRefundUser(t, db, 22, 50)
 	p := &product.Product{Name: "free", CategoryID: 1, Num: 0, BossID: 22}
@@ -156,11 +164,61 @@ func TestZeroAmountLegacyRefundIsIdempotent(t *testing.T) {
 	}
 }
 
+// order.completed / order.refunded 事件丢了（outbox 死信、消费者进 DLQ）：补偿任务按订单与清算单状态补结算、补退款，
+// 刚完成的订单留给正常事件链路。
+func TestSettleCompensationSettlesMissedOrders(t *testing.T) {
+	db := openRefundTestDB(t)
+	stubRestockRedis(t)
+	seedRefundUser(t, db, 11, 0)
+	seedRefundUser(t, db, 22, 0)
+	p := &product.Product{Name: "book", CategoryID: 1, Num: 0, BossID: 22}
+	p.ID = 33
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("seed product: %v", err)
+	}
+	old := time.Now().Add(-time.Hour)
+	seed := func(id, orderType uint, updatedAt time.Time) {
+		o := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: p.ID, AddressID: 1, Num: 1, Money: 300, Type: orderType}
+		o.ID, o.UpdatedAt = id, updatedAt
+		if err := db.Create(o).Error; err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+		if err := db.Create(&clearing.PaymentClearing{
+			OrderID: id, BuyerID: 11, SellerID: 22, Channel: clearing.ChannelWallet,
+			GrossCents: 300, NetCents: 300, Currency: "CNY", Status: clearing.StatusCleared, ClearedAt: old,
+		}).Error; err != nil {
+			t.Fatalf("seed clearing: %v", err)
+		}
+	}
+	seed(44, consts.OrderCompleted, old)
+	seed(45, consts.OrderRefunded, old)
+	seed(46, consts.OrderCompleted, time.Now())
+
+	GetRefundSrv().RunSettleCompensation()
+
+	for orderID, want := range map[uint]string{44: clearing.StatusSettled, 45: clearing.StatusRefunded, 46: clearing.StatusCleared} {
+		var c clearing.PaymentClearing
+		if err := db.Where("order_id = ?", orderID).First(&c).Error; err != nil {
+			t.Fatal(err)
+		}
+		if c.Status != want {
+			t.Fatalf("order %d clearing status = %s, want %s", orderID, c.Status, want)
+		}
+	}
+	if got := refundUserBalance(t, db, 22); got != 300 {
+		t.Fatalf("seller balance = %d, want 300 from the settled order", got)
+	}
+	if got := refundUserBalance(t, db, 11); got != 300 {
+		t.Fatalf("buyer balance = %d, want 300 from the refunded order", got)
+	}
+}
+
 func TestRejectRefundRestoresOriginalState(t *testing.T) {
 	tests := []uint{consts.OrderWaitShip, consts.OrderWaitReceive, consts.OrderCompleted}
 	for _, fromType := range tests {
 		t.Run(fmt.Sprintf("from-%d", fromType), func(t *testing.T) {
 			db := openRefundTestDB(t)
+			seedRoleUser(t, db, 22, user.RoleMerchant)
 			o := &orderpkg.Order{
 				UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1,
 				Money: 300, Type: fromType, OrderNum: uint64(1000 + fromType),
@@ -180,7 +238,8 @@ func TestRejectRefundRestoresOriginalState(t *testing.T) {
 			if refunding.Type != consts.OrderRefunding || refunding.RefundFromType != fromType {
 				t.Fatalf("refund origin not preserved: type=%d from=%d", refunding.Type, refunding.RefundFromType)
 			}
-			if err := GetRefundSrv().RejectRefund(context.Background(), o.OrderNum, "not approved"); err != nil {
+			merchantCtx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: o.BossID})
+			if err := GetRefundSrv().RejectRefund(merchantCtx, o.OrderNum, "not approved"); err != nil {
 				t.Fatalf("reject refund: %v", err)
 			}
 			var restored orderpkg.Order
@@ -205,6 +264,67 @@ func TestRejectRefundRestoresOriginalState(t *testing.T) {
 	}
 }
 
+func TestMerchantCannotHandleAnotherMerchantsRefund(t *testing.T) {
+	db := openRefundTestDB(t)
+	seedRoleUser(t, db, 21, user.RoleMerchant)
+	seedRoleUser(t, db, 22, user.RoleMerchant)
+	seedRoleUser(t, db, 99, user.RoleAdmin)
+	asUser := func(id uint) context.Context {
+		return ctl.NewContext(context.Background(), &ctl.UserInfo{Id: id})
+	}
+	approveOrder := &orderpkg.Order{
+		UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1, Money: 300,
+		Type: consts.OrderRefunding, RefundFromType: consts.OrderWaitShip, OrderNum: 7001,
+	}
+	rejectOrder := &orderpkg.Order{
+		UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1, Money: 300,
+		Type: consts.OrderRefunding, RefundFromType: consts.OrderWaitShip, OrderNum: 7002,
+	}
+	for _, o := range []*orderpkg.Order{approveOrder, rejectOrder} {
+		if err := db.Create(o).Error; err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+	}
+
+	if err := GetRefundSrv().ApproveRefund(asUser(21), approveOrder.OrderNum); !errors.Is(err, orderpkg.ErrOrderForbidden) {
+		t.Fatalf("merchant A approved merchant B's refund: err=%v", err)
+	}
+	if err := GetRefundSrv().RejectRefund(asUser(21), rejectOrder.OrderNum, "no"); !errors.Is(err, orderpkg.ErrOrderForbidden) {
+		t.Fatalf("merchant A rejected merchant B's refund: err=%v", err)
+	}
+	assertRefundOrderType(t, db, approveOrder.ID, consts.OrderRefunding)
+	assertRefundOrderType(t, db, rejectOrder.ID, consts.OrderRefunding)
+
+	if err := GetRefundSrv().ApproveRefund(asUser(99), approveOrder.OrderNum); err != nil {
+		t.Fatalf("admin approve: %v", err)
+	}
+	if err := GetRefundSrv().RejectRefund(asUser(99), rejectOrder.OrderNum, "no"); err != nil {
+		t.Fatalf("admin reject: %v", err)
+	}
+	assertRefundOrderType(t, db, approveOrder.ID, consts.OrderRefunded)
+	assertRefundOrderType(t, db, rejectOrder.ID, consts.OrderWaitShip)
+}
+
+func seedRoleUser(t *testing.T, db *gorm.DB, id uint, role string) {
+	t.Helper()
+	u := &user.User{UserName: fmt.Sprintf("refund-role-u%d", id), Role: role}
+	u.ID = id
+	if err := db.Create(u).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+}
+
+func assertRefundOrderType(t *testing.T, db *gorm.DB, id uint, want uint) {
+	t.Helper()
+	var o orderpkg.Order
+	if err := db.First(&o, id).Error; err != nil {
+		t.Fatalf("load order: %v", err)
+	}
+	if o.Type != want {
+		t.Fatalf("order %d type got %d want %d", id, o.Type, want)
+	}
+}
+
 func openRefundTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	conf.Config = &conf.Conf{EncryptSecret: &conf.EncryptSecret{MoneySecret: "refund-test-secret"}}
@@ -226,6 +346,39 @@ func openRefundTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
+}
+
+// stubRestockRedis 不连真实 Redis，记录退款回补 available 的调用（key+件数）。
+func stubRestockRedis(t *testing.T) *[]string {
+	t.Helper()
+	var calls []string
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:0"})
+	client.AddHook(restockHook{calls: &calls})
+	prev := cache.RedisClient
+	cache.RedisClient = client
+	t.Cleanup(func() {
+		cache.RedisClient = prev
+		_ = client.Close()
+	})
+	return &calls
+}
+
+type restockHook struct{ calls *[]string }
+
+func (restockHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (restockHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (h restockHook) ProcessHook(redis.ProcessHook) redis.ProcessHook {
+	return func(_ context.Context, cmd redis.Cmder) error {
+		if c, ok := cmd.(*redis.Cmd); ok {
+			// evalsha sha 1 key n
+			args := c.Args()
+			*h.calls = append(*h.calls, fmt.Sprintf("%v+%v", args[3], args[4]))
+			c.SetVal(int64(1))
+		}
+		return nil
+	}
 }
 
 func seedRefundUser(t *testing.T, db *gorm.DB, id uint, balance int64) {

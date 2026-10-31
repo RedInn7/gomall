@@ -3,12 +3,14 @@ package redpacket
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/internal/shared/outbox"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -20,6 +22,9 @@ const (
 	defaultRedPacketTTL = 24 * time.Hour
 	maxRedPacketTTL     = 7 * 24 * time.Hour
 )
+
+// errRedPacketClosed 领取事务里发现红包已不在进行中（已被过期回收）。
+var errRedPacketClosed = errors.New("红包已结束")
 
 var (
 	redPacketSrvIns  *RedPacketSrv
@@ -47,6 +52,17 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (int
 	}
 	if req.Total < int64(req.Count) {
 		return nil, errors.New("总额必须 ≥ 份数 (每份至少 1 分)")
+	}
+	if req.Total > MaxRedPacketTotalCents {
+		return nil, fmt.Errorf("红包总额不能超过 %d 分", MaxRedPacketTotalCents)
+	}
+	// 发红包是从钱包出账，和 paydown 一样先校验支付密码。
+	sender, err := user.NewUserDao(ctx).GetUserById(u.Id)
+	if err != nil {
+		return nil, err
+	}
+	if err = user.VerifyMoneyPassword(ctx, sender, req.Key); err != nil {
+		return nil, err
 	}
 
 	ttl := time.Duration(req.ExpireSec) * time.Second
@@ -101,6 +117,11 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (int
 	// Redis list TTL 比红包过期多留 1h，给 cron 兜底回收留窗口
 	if e := cache.PrepareRedPacket(ctx, rp.ID, amounts, ttl+time.Hour); e != nil {
 		util.LogrusObj.Errorf("prepare redpacket cache failed id=%d err=%v", rp.ID, e)
+		// 钱已扣进 escrow 但红包抢不了：立即按 DB 把总额退回发包人。补偿也失败时，
+		// 红包过期后回收任务按 DB 剩余金额兜底退款。
+		if _, rbErr := refundRedPacketLeft(ctx, rp.ID); rbErr != nil {
+			util.LogrusObj.Errorf("refund unprepared redpacket failed id=%d err=%v", rp.ID, rbErr)
+		}
 		return nil, e
 	}
 
@@ -109,8 +130,9 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (int
 
 // Claim 抢红包：
 //  1. Lua 原子 LPOP + 标记 claimed -> amount
-//  2. DB 事务：写 RedPacketClaim + remaining-- + 领取人钱包入账 amount(同事务写台账，escrow 出账) + outbox(red_packet.claimed)
-//  3. DB 事务失败 -> Saga 回滚 Lua (LPUSH 金额回 list, 撤销 claimed 标记)
+//  2. DB 事务：写 RedPacketClaim + remaining--（DB 剩余份额为准，归零即置 finished）+ 领取人钱包入账 amount
+//     (同事务写台账，escrow 出账) + outbox(red_packet.claimed)
+//  3. DB 事务失败 -> Saga 回滚 Lua (LPUSH 金额回 list, 撤销 claimed 标记)；红包已被回收则不回滚
 //
 // 资金在第 2 步同事务原子落地（settleClaimTx）：领取人 credit / 清算 debit，
 // ref 用领取记录 id 保证同红包不同领取人各自唯一、只入账一次。
@@ -148,7 +170,15 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (inter
 		if e := txDao.CreateClaim(claim); e != nil {
 			return e
 		}
-		if _, e := txDao.DecrRemaining(rp.ID); e != nil {
+		// DB 是剩余份额的权威：红包已被过期回收（剩余金额已退回发包人）时这里影响 0 行，整笔领取作废。
+		n, e := txDao.DecrRemaining(rp.ID)
+		if e != nil {
+			return e
+		}
+		if n == 0 {
+			return errRedPacketClosed
+		}
+		if e := txDao.MarkFinishedIfDrained(rp.ID); e != nil {
 			return e
 		}
 		// 领取人钱包入账，escrow 出账；ref=领取记录 id（CreateClaim 后已回填自增主键）。
@@ -167,18 +197,14 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (inter
 	if txErr != nil {
 		util.LogrusObj.Errorf("redpacket claim tx failed id=%d uid=%d err=%v",
 			rp.ID, u.Id, txErr)
-		if rbErr := cache.RollbackRedPacketClaim(ctx, rp.ID, u.Id, amount); rbErr != nil {
-			util.LogrusObj.Errorf("redpacket claim rollback failed id=%d uid=%d err=%v",
-				rp.ID, u.Id, rbErr)
+		// 红包已结束时剩余金额已按 DB 退回，这份不能再塞回 Redis 给别人抢。
+		if !errors.Is(txErr, errRedPacketClosed) {
+			if rbErr := cache.RollbackRedPacketClaim(ctx, rp.ID, u.Id, amount); rbErr != nil {
+				util.LogrusObj.Errorf("redpacket claim rollback failed id=%d uid=%d err=%v",
+					rp.ID, u.Id, rbErr)
+			}
 		}
 		return nil, txErr
-	}
-
-	// 抢完后异步置位 finished (有竞争也只是状态稍滞后，cron 兜底)
-	if remain, _ := cache.GetRedPacketRemainingCount(ctx, rp.ID); remain == 0 {
-		if e := rpDao.MarkStatus(rp.ID, RedPacketStatusFinished); e != nil {
-			util.LogrusObj.Errorf("mark redpacket finished failed id=%d err=%v", rp.ID, e)
-		}
 	}
 
 	return &RedPacketClaimResp{

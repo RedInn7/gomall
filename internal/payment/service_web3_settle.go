@@ -20,15 +20,17 @@ import (
 	"github.com/RedInn7/gomall/repository/cache"
 )
 
-// 链上支付代币与计价配置走环境变量（与 WEB3_* 一致）。
+// 链上支付代币与计价配置走环境变量（与 WEB3_* 一致）。订单金额是人民币分，两种代币都要喂人民币汇率。
 //   - WEB3_PAY_TOKEN          : usdc(默认) | eth
 //   - WEB3_USDC_DECIMALS      : USDC 代币精度，默认 6
-//   - WEB3_ETH_CENTS_PER_ETH  : ETH 计价，1 ETH 折多少法币分（如 300000 = $3000/ETH）。
-//     走 ETH 必填；稳定币 USDC 与法币 1:1 无需喂价。
-//   - WEB3_AMOUNT_TOLERANCE_BPS: 允许的链上金额下浮容差（基点），默认 50 = 0.5%，吸收 ETH 报价滑点。
+//   - WEB3_USDC_CENTS_PER_USDC: USDC 计价，1 USDC 折多少人民币分（如 720 = ¥7.20/USDC）。
+//     走 USDC 必填：USDC 锚定美元，不能把人民币分按 1:1 当美分收。
+//   - WEB3_ETH_CENTS_PER_ETH  : ETH 计价，1 ETH 折多少人民币分（如 2160000 = ¥21600/ETH）。走 ETH 必填。
+//   - WEB3_AMOUNT_TOLERANCE_BPS: 允许的链上金额下浮容差（基点），默认 50 = 0.5%，吸收报价滑点。
 const (
 	envWeb3PayToken     = "WEB3_PAY_TOKEN"
 	envWeb3USDCDecimals = "WEB3_USDC_DECIMALS"
+	envWeb3CentsPerUSDC = "WEB3_USDC_CENTS_PER_USDC"
 	envWeb3CentsPerETH  = "WEB3_ETH_CENTS_PER_ETH"
 	envWeb3ToleranceBps = "WEB3_AMOUNT_TOLERANCE_BPS"
 	tokenUSDC           = "usdc"
@@ -36,7 +38,8 @@ const (
 	defaultUSDCDecimals = 6
 	defaultToleranceBps = 50
 	weiDecimals         = 18
-	fiatDecimals        = 2 // 法币以「分」为最小单位
+	// web3ClearingCurrency 清算单币种：订单人民币分，与钱包 / Stripe / Xcash 一致。
+	web3ClearingCurrency = "CNY"
 )
 
 var (
@@ -44,6 +47,8 @@ var (
 	ErrWeb3AmountMismatch = errors.New("链上确认金额低于订单应付")
 	// ErrWeb3PriceNotConfigured 走 ETH 但未配置喂价。
 	ErrWeb3PriceNotConfigured = errors.New("Web3 ETH 支付未配置 WEB3_ETH_CENTS_PER_ETH 喂价")
+	// ErrWeb3USDCRateNotConfigured 走 USDC 但未配置人民币汇率。
+	ErrWeb3USDCRateNotConfigured = errors.New("Web3 USDC 支付未配置 WEB3_USDC_CENTS_PER_USDC 人民币汇率")
 	// ErrWeb3BuyerMismatch 链上 buyer 与签名 park 阶段写入的钱包地址不一致（防越权结算）。
 	ErrWeb3BuyerMismatch = errors.New("链上 buyer 与 park 钱包地址不匹配")
 	// ErrWeb3PendingMissing park 占位缺失（过期 / 从未签名）。无可信绑定来源，拒绝结算。
@@ -75,28 +80,19 @@ func pow10(n int) *big.Int {
 	return new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(n)), nil)
 }
 
-// expectedTokenBaseUnits 把订单应付法币分换算成所选代币的最小单位（USDC 6 位 / ETH wei）。
-//   - USDC（稳定币≈法币）：units = cents * 10^(decimals-2)，1:1 不需喂价。
-//   - ETH：wei = cents * 10^18 / centsPerETH，需喂价。
+// expectedTokenBaseUnits 把订单应付人民币分换算成所选代币的最小单位（USDC 6 位 / ETH wei）：
+// units = cents * 10^decimals / centsPerToken，两种代币都按配置的人民币汇率换算，向下取整。
 func expectedTokenBaseUnits(payableCents int64) (*big.Int, error) {
-	cents := big.NewInt(payableCents)
-	switch web3PayToken() {
-	case tokenETH:
-		centsPerETH, err := strconv.ParseInt(strings.TrimSpace(os.Getenv(envWeb3CentsPerETH)), 10, 64)
-		if err != nil || centsPerETH <= 0 {
-			return nil, ErrWeb3PriceNotConfigured
-		}
-		// wei = cents * 10^18 / centsPerETH
-		wei := new(big.Int).Mul(cents, pow10(weiDecimals))
-		wei.Div(wei, big.NewInt(centsPerETH))
-		return wei, nil
-	default: // usdc
-		scale := web3USDCDecimals() - fiatDecimals
-		if scale < 0 {
-			scale = 0
-		}
-		return new(big.Int).Mul(cents, pow10(scale)), nil
+	envRate, decimals, errMissing := envWeb3CentsPerUSDC, web3USDCDecimals(), ErrWeb3USDCRateNotConfigured
+	if web3PayToken() == tokenETH {
+		envRate, decimals, errMissing = envWeb3CentsPerETH, weiDecimals, ErrWeb3PriceNotConfigured
 	}
+	centsPerToken, err := strconv.ParseInt(strings.TrimSpace(os.Getenv(envRate)), 10, 64)
+	if err != nil || centsPerToken <= 0 {
+		return nil, errMissing
+	}
+	units := new(big.Int).Mul(big.NewInt(payableCents), pow10(decimals))
+	return units.Div(units, big.NewInt(centsPerToken)), nil
 }
 
 // verifyOnchainAmount 校验链上确认金额是否覆盖订单应付（允许超付，按容差允许 ETH 报价小幅下浮）。
@@ -170,6 +166,15 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 	if alreadyCleared {
 		return nil
 	}
+	// 同一 tx 已记过异常单（如库存不足的 fulfillment_failed）：这笔钱已转人工退款，重投直接 ack。
+	// 否则库存补回后重投会把它正常结算，同一笔钱既发了货又可能被退回。
+	hasAnomaly, err := clearing.HasProviderAnomaly(ctx, clearing.ChannelWeb3, txHash)
+	if err != nil {
+		return err
+	}
+	if hasAnomaly {
+		return nil
+	}
 	// 先做 buyer 绑定校验：链上 buyer 必须等于签名 park 阶段写入的钱包地址，否则拒绝结算。
 	// 放在事务外、最前面，确保未通过绑定校验时不触碰任何账务 / 库存状态。
 	if err := verifyBuyerBinding(ctx, orderID, onchainBuyer); err != nil {
@@ -211,7 +216,8 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 		}
 
 		// 链上已收资金从外部清算账户转入商户托管；履约完成前不增加卖家可用余额。
-		if err = clearing.RecordClearedTx(tx, order, clearing.ChannelWeb3, txHash, strings.ToUpper(web3PayToken()), nil); err != nil {
+		// 清算金额是按汇率核过的订单人民币分，币种记 CNY 与金额同口径；实收代币以 tx hash 为准。
+		if err = clearing.RecordClearedTx(tx, order, clearing.ChannelWeb3, txHash, web3ClearingCurrency, nil); err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
@@ -221,10 +227,12 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 	})
 	if err != nil {
 		log.LogrusObj.Errorf("web3 settle order=%d failed: %v", orderID, err)
-		return err
+		// 链上已到账却确定性无法履约：改记异常单并返回成功，消费者 ack，不再热重投。
+		return recordUnfulfillable(orderpkg.NewOrderDao(ctx).DB, err, orderID, clearing.ChannelWeb3,
+			txHash, onchainAmount, strings.ToUpper(web3PayToken()))
 	}
 
-	commitReservationBestEffort(ctx, paidProductID, paidNum)
+	orderpkg.CommitStockReservation(ctx, orderID, paidProductID, paidNum)
 	// 结算成功后清掉 Redis pending 占位（best-effort）。
 	if delErr := cache.DelWeb3Pending(ctx, orderID); delErr != nil {
 		log.LogrusObj.Warnf("del web3 pending placeholder order=%d err=%v", orderID, delErr)

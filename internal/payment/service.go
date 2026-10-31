@@ -57,8 +57,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 
-		if order.Type != consts.OrderWaitPay {
-			err = errors.New("订单状态非未支付，无法重复支付")
+		if err = ensureOrderPayable(order); err != nil {
 			log.LogrusObj.Error(err)
 			return err
 		}
@@ -76,9 +75,9 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			log.LogrusObj.Error(err)
 			return err
 		}
-		if !buyer.CheckMoneyPassword(req.Key) {
-			log.LogrusObj.Error(user.ErrMoneyKeyIncorrect)
-			return user.ErrMoneyKeyIncorrect
+		if err := user.VerifyMoneyPassword(ctx, buyer, req.Key); err != nil {
+			log.LogrusObj.Error(err)
+			return err
 		}
 
 		userMoney, err := buyer.DecryptMoney()
@@ -87,8 +86,8 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 		if userMoney-payable < 0 {
-			log.LogrusObj.Error("金额不足")
-			return errors.New("金额不足")
+			log.LogrusObj.Error(user.ErrInsufficientBalance)
+			return user.ErrInsufficientBalance
 		}
 
 		buyerBalanceAfter := userMoney - payable
@@ -99,7 +98,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 
-		err = userDao.UpdateUserById(uId, buyer)
+		err = userDao.UpdateUserMoney(uId, buyer.Money)
 		if err != nil { // 更新用户金额失败，回滚
 			log.LogrusObj.Error(err)
 			return err
@@ -122,7 +121,7 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 	}
 
 	// TX 已经把 product.Num 真正扣减了；同步把 Redis reserved 桶减掉
-	commitReservationBestEffort(ctx, paidProductID, paidNum)
+	orderpkg.CommitStockReservation(ctx, req.OrderId, paidProductID, paidNum)
 
 	return nil, nil
 }

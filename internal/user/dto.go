@@ -14,6 +14,12 @@ type UserRegisterReq struct {
 	Key      string `form:"key" json:"key"` // 前端进行判断
 }
 
+// SetMoneyPasswordReq 存量用户补设支付密码：Password 是当前登录密码，Key 是新的 6 位支付密码。
+type SetMoneyPasswordReq struct {
+	Password string `form:"password" json:"password"`
+	Key      string `form:"key" json:"key"`
+}
+
 type UserTokenData struct {
 	User         interface{} `json:"user"`
 	AccessToken  string      `json:"access_token"`
@@ -41,8 +47,12 @@ type UserUnFollowingReq struct {
 }
 
 type SendEmailServiceReq struct {
-	Email    string `form:"email" json:"email"`
+	// Email 仅绑定邮箱时使用（发到新邮箱确认归属）；解绑 / 改密码一律发到已绑定的邮箱
+	Email string `form:"email" json:"email"`
+	// Password 改密码时的新密码
 	Password string `form:"password" json:"password"`
+	// CurrentPassword 当前登录密码，绑定邮箱和改密码时必填
+	CurrentPassword string `form:"current_password" json:"current_password"`
 	// OpertionType 1:绑定邮箱 2：解绑邮箱 3：改密码
 	OperationType uint `form:"operation_type" json:"operation_type"`
 }

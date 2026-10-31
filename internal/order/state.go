@@ -31,6 +31,9 @@ var orderStateTransitions = map[uint][]uint{
 // 上层应当把它转成 4xx 业务错误，而不是 5xx。
 var ErrInvalidOrderStateTransition = errors.New("非法订单状态转换")
 
+// ErrOrderForbidden 订单不属于当前操作者（买家操作别人的订单 / 商家处理别家的订单）。
+var ErrOrderForbidden = errors.New("无权操作该订单")
+
 // CanTransition 校验 from -> to 是否在合法转换表里。
 // 终态 (Closed / Refunded) 没有出边，任何调用都返回 false。
 func CanTransition(from, to uint) bool {

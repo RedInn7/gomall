@@ -44,7 +44,7 @@ type XcashPaymentSrv struct {
 	gateway           XcashGateway
 	policy            xcashSettlementPolicy
 	db                xcashDBProvider
-	commitReservation func(context.Context, uint, int)
+	commitReservation func(ctx context.Context, orderID, productID uint, num int)
 	initErr           error
 }
 
@@ -65,7 +65,7 @@ func GetXcashPaymentSrv() *XcashPaymentSrv {
 
 func newXcashPaymentSrv(gateway XcashGateway, policy xcashSettlementPolicy, db xcashDBProvider) *XcashPaymentSrv {
 	return &XcashPaymentSrv{
-		gateway: gateway, policy: policy, db: db, commitReservation: commitReservationBestEffort,
+		gateway: gateway, policy: policy, db: db, commitReservation: orderpkg.CommitStockReservation,
 	}
 }
 
@@ -138,7 +138,7 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 	if db == nil {
 		return errors.New("数据库未初始化")
 	}
-	var settledProductID uint
+	var settledOrderID, settledProductID uint
 	var settledNum int
 	err := db.Transaction(func(tx *gorm.DB) error {
 		if receiptHeaders != nil {
@@ -243,15 +243,32 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 		}).Error; err != nil {
 			return err
 		}
-		settledProductID = order.ProductID
+		settledOrderID, settledProductID = order.ID, order.ProductID
 		settledNum = order.Num
 		return nil
 	})
 	if err != nil {
-		return err
+		if !isUnfulfillable(err) {
+			return err
+		}
+		// 已确认收款却确定性无法履约（库存不足 / 商品已删 / 订单不存在）：原事务整体回滚后，
+		// 在独立事务里把账单隔离成异常单，向 Xcash 返回成功停止重投，由运营走异常退款。
+		return db.Transaction(func(tx *gorm.DB) error {
+			var intent XcashPaymentIntent
+			if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("sys_no = ?", event.Data.SysNo).First(&intent).Error; e != nil {
+				return errors.Join(err, e)
+			}
+			if intent.Status == XcashIntentAnomaly || intent.Status == XcashIntentCompleted {
+				return nil
+			}
+			o := &orderpkg.Order{}
+			o.ID = intent.OrderID
+			return quarantineXcashPayment(tx, &intent, o, event, providerRef, clearing.AnomalyReasonFulfillmentFailed)
+		})
 	}
 	if settledProductID != 0 && settledNum > 0 {
-		s.commitReservation(ctx, settledProductID, settledNum)
+		s.commitReservation(ctx, settledOrderID, settledProductID, settledNum)
 	}
 	return nil
 }
@@ -413,8 +430,8 @@ func (s *XcashPaymentSrv) CreateCheckout(ctx context.Context, req *XcashCheckout
 	if err != nil {
 		return nil, err
 	}
-	if order.Type != consts.OrderWaitPay {
-		return nil, errors.New("订单状态非未支付")
+	if err := ensureOrderPayable(order); err != nil {
+		return nil, err
 	}
 	payableCents := orderPayableCents(order)
 	if payableCents <= 0 {

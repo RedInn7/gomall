@@ -37,3 +37,8 @@ func RedPacketAmountsKey(id uint) string {
 func RedPacketClaimedKey(id uint) string {
 	return fmt.Sprintf("redpacket:%d:claimed", id)
 }
+
+// StripeCheckoutKey 订单有一个还能付款的 Stripe Checkout 会话，随会话过期；存在期间超时关单会跳过这张单。
+func StripeCheckoutKey(orderID uint) string {
+	return fmt.Sprintf("stripe:checkout:%d", orderID)
+}
