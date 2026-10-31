@@ -26,6 +26,7 @@ require (
 	golang.org/x/sync v0.23.0
 	golang.org/x/time v0.9.0
 	gopkg.in/mail.v2 v2.3.1
+	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.5.0
 	gorm.io/driver/sqlite v1.4.4
 	gorm.io/gorm v1.25.0
@@ -115,6 +116,5 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/alexcesaro/quotedprintable.v3 v3.0.0-20150716171945-2caba252f4dc // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	skywalking.apache.org/repo/goapi v0.0.0-20230314034821-0c5a44bb767a // indirect
 )
