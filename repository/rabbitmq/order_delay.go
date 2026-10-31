@@ -85,7 +85,7 @@ func PublishOrderCancelDelay(ctx context.Context, orderNum uint64, delay time.Du
 // ConsumeOrderCancelDelay 启动消费者，对每个超时订单调用 handler。
 // 消费在自愈 supervisor 中运行：连接抖动 / channel 关闭后会自动重连并重新订阅。
 func ConsumeOrderCancelDelay(handler func(orderNum uint64) error) error {
-	superviseConsumer(consumerConfig{
+	superviseConsumer(consumerCtx, consumerConfig{
 		queue:    orderDeadQueue,
 		prefetch: 16,
 		deliver: func(d amqp.Delivery) {

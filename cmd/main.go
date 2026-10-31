@@ -8,10 +8,12 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	_ "github.com/apache/skywalking-go"
+	"github.com/robfig/cron/v3"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/initialize"
@@ -26,8 +28,17 @@ import (
 	"github.com/RedInn7/gomall/routes"
 )
 
+// backgroundShutdownTimeout HTTP 关停后，等 cron、MQ 消费者、outbox 等后台任务收尾的上限。
+const backgroundShutdownTimeout = 20 * time.Second
+
 func main() {
-	loading()
+	// 根 ctx：收到 SIGINT / SIGTERM 时取消，后台组件据此停止接新活。
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	// 第一次信号之后恢复默认处理：启动或收尾卡住时，再发一次信号就直接结束进程。
+	context.AfterFunc(ctx, stop)
+
+	c := loading(ctx)
 	r := routes.NewRouter()
 
 	srv := &http.Server{
@@ -48,21 +59,37 @@ func main() {
 	util.LogrusObj.Infof("server listening on %s", conf.Config.System.HttpPort)
 	fmt.Println("启动配成功...")
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	<-ctx.Done()
 
 	util.LogrusObj.Info("shutting down server...")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// ctx 已取消：MQ 消费者、outbox 发布器、Xcash 对账不再接新活；cron 也停止调度新任务
+	cronStopped := c.Stop()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		util.LogrusObj.Errorf("server forced shutdown: %v", err)
 	}
-	util.LogrusObj.Info("shutdown complete")
+
+	// 等后台把在途的任务做完再退出：cron 里在跑的任务、消费者手上的消息、outbox 已认领的那批
+	var wg sync.WaitGroup
+	wg.Go(func() { <-cronStopped.Done() })
+	wg.Go(rabbitmq.WaitConsumers)
+	wg.Go(initialize.WaitBackground)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		util.LogrusObj.Info("shutdown complete")
+	case <-time.After(backgroundShutdownTimeout):
+		util.LogrusObj.Warnf("后台任务 %s 内没有收尾完，直接退出", backgroundShutdownTimeout)
+	}
 }
 
-// loading一些配置
-func loading() {
+// loading 加载配置、连接依赖并启动后台组件。ctx 是根 ctx，返回的 cron 由 main 在退出时停止。
+func loading(ctx context.Context) *cron.Cron {
 	conf.InitConfig()
 	util.InitLog() // 必须在使用 LogrusObj 的初始化之前完成
 	// 节点号配错要在连库、迁移之前就退出，避免先改了表结构才发现起不来
@@ -72,25 +99,29 @@ func loading() {
 		panic(err)
 	}
 	cache.InitCache()
-	initialize.InitCron()
-	// 大数据集的库存预热可能需要数分钟。放到后台执行，让商品浏览、登录等
-	// 不依赖库存桶的接口先开始服务；下单仍由库存服务校验对应商品的桶。
-	go initialize.InitInventory(context.Background())
-	tryInitRabbitMQ()
-	initialize.InitOutboxPublisher(context.Background())
-	initialize.InitOrderAsyncConsumer(context.Background())
-	initialize.InitPromoReleaseConsumer(context.Background())
-	initialize.InitRefundSettleConsumer(context.Background())
-	initialize.InitClearingSettleConsumer(context.Background())
-	initialize.InitRedPacketSettleConsumer(context.Background())
-	initialize.InitGroupbuySettleConsumer(context.Background())
-	initialize.InitWeb3SettleConsumer(context.Background())
-	initialize.InitXcashReconciler(context.Background())
+	c := initialize.InitCron(ctx)
+	// 大数据集的库存预热可能需要数分钟，InitInventory 在后台执行，让商品浏览、登录等
+	// 不依赖库存桶的接口先开始服务；还没建桶的商品下单时按 DB 补建。
+	initialize.InitInventory(ctx)
+	tryInitRabbitMQ(ctx)
+	initialize.InitOutboxPublisher(ctx)
+	// 消费者的 handler 用这个 ctx 写库、发消息，不能随退出信号取消，否则在途消息会半路失败；
+	// 消费者什么时候停止拉新消息由 InitRabbitMQ(ctx) 控制。
+	handlerCtx := context.WithoutCancel(ctx)
+	initialize.InitOrderAsyncConsumer(handlerCtx)
+	initialize.InitPromoReleaseConsumer(handlerCtx)
+	initialize.InitRefundSettleConsumer(handlerCtx)
+	initialize.InitClearingSettleConsumer(handlerCtx)
+	initialize.InitRedPacketSettleConsumer(handlerCtx)
+	initialize.InitGroupbuySettleConsumer(handlerCtx)
+	initialize.InitWeb3SettleConsumer(handlerCtx)
+	initialize.InitXcashReconciler(ctx)
 	// 先装配 Milvus，再启动商品索引消费者，避免启动窗口内的商品事件只写 ES。
-	tryInitMilvus(context.Background())
-	tryInitES(context.Background())
-	tryInitWeb3Listener(context.Background())
+	tryInitMilvus(ctx)
+	tryInitES(ctx)
+	tryInitWeb3Listener(ctx)
 	fmt.Println("加载配置完成...")
+	return c
 }
 
 // snowflakeNodeID 从环境变量 SNOWFLAKE_NODE_ID（或 NODE_ID）读取雪花算法节点 ID。
@@ -123,8 +154,8 @@ func snowflakeNodeID() int64 {
 // tryInitRabbitMQ 初始化 RabbitMQ 连接与延迟队列消费者。
 //   - 配置 requireOnStartup=true（生产）时连不上直接 panic 中止启动，避免静默降级；
 //   - 否则打 error 级日志并标记不健康，订单延迟关单 / 事件消费能力关闭，主链路继续。
-func tryInitRabbitMQ() {
-	if err := rabbitmq.InitRabbitMQ(); err != nil {
+func tryInitRabbitMQ(ctx context.Context) {
+	if err := rabbitmq.InitRabbitMQ(ctx); err != nil {
 		if rabbitmq.RequireOnStartup() {
 			util.LogrusObj.Errorf("RabbitMQ 初始化失败且 requireOnStartup=true，启动中止: %v", err)
 			panic(err)

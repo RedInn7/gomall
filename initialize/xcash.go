@@ -22,7 +22,7 @@ func InitXcashReconciler(ctx context.Context) {
 		return
 	}
 	service := payment.GetXcashPaymentSrv()
-	go func() {
+	background.Go(func() {
 		reconcile := func() {
 			count, err := service.ReconcilePending(ctx, xcashReconcileBatch)
 			if err != nil {
@@ -40,5 +40,5 @@ func InitXcashReconciler(ctx context.Context) {
 				reconcile()
 			}
 		}
-	}()
+	})
 }

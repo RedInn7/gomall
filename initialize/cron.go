@@ -16,7 +16,9 @@ import (
 	"github.com/RedInn7/gomall/service/inventory"
 )
 
-func InitCron() {
+// InitCron 注册并启动定时任务，返回 cron 实例：退出时 <-c.Stop().Done() 等在跑的任务结束。
+// ctx 取消后，接收 ctx 的任务（available 对账）会尽快结束本轮。
+func InitCron(ctx context.Context) *cron.Cron {
 	c := cron.New(cron.WithSeconds())
 	orderService := new(order.OrderTaskService)
 	// @every 5m 而非 "* */5 * * * *"：后者在 WithSeconds 下是「分钟能被 5 整除时每秒触发」，
@@ -57,7 +59,7 @@ func InitCron() {
 				util.LogrusObj.Errorf("AvailableReconcile Cron Panic: %v", r)
 			}
 		}()
-		if err := inventory.ReconcileAvailable(context.Background(), 500); err != nil {
+		if err := inventory.ReconcileAvailable(ctx, 500); err != nil {
 			util.LogrusObj.Errorf("AvailableReconcile 执行失败: %v", err)
 		}
 	}))); e != nil {
@@ -122,6 +124,7 @@ func InitCron() {
 	}
 
 	c.Start()
+	return c
 }
 
 // runGroupbuyExpireSweep 拉一批过期 open 团，逐个调 ExpireGroup。
