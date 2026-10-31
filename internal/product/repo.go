@@ -90,6 +90,8 @@ func (d *ProductDao) UpdateProduct(pId, uId uint, product *Product) (int64, erro
 			"discount_price": product.DiscountPrice,
 			"num":            product.Num,
 			"on_sale":        product.OnSale,
+			// 拼团价随整单更新一并写入，调用方已按新的零售价校验过
+			"groupbuy_price_cents": product.GroupbuyPriceCents,
 		})
 	return res.RowsAffected, res.Error
 }
