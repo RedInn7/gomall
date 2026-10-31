@@ -48,16 +48,17 @@ func PutWeb3Nonce(ctx context.Context, userID, orderID uint, nonce string) error
 	return RedisClient.Set(ctx, Web3NonceKey(userID, orderID), nonce, Web3NonceTTL).Err()
 }
 
-// consumeNonceScript: GET 后立刻 DEL，保证同一个 nonce 只能用一次
+// compareAndDeleteScript: 值与 ARGV[1] 相同才 DEL。用于一次性消费 web3 nonce，
+// 也用于商品回源锁按 token 解锁
 //
-// KEYS[1] = nonce key
-// ARGV[1] = 客户端提交的 nonce
+// KEYS[1] = key
+// ARGV[1] = 期望的值
 //
 // 返回:
-//   1  = 成功 (nonce 匹配并已删除)
+//   1  = 成功 (值匹配并已删除)
 //   -1 = 不存在 / 过期
 //   -2 = 不匹配
-var consumeNonceScript = redis.NewScript(`
+var compareAndDeleteScript = redis.NewScript(`
 local cur = redis.call('GET', KEYS[1])
 if cur == false then
     return -1
@@ -71,7 +72,7 @@ return 1
 
 // ConsumeWeb3Nonce 校验 + 一次性消费 nonce，校验通过后立即 DEL，防重放
 func ConsumeWeb3Nonce(ctx context.Context, userID, orderID uint, nonce string) error {
-	res, err := consumeNonceScript.Run(ctx, RedisClient,
+	res, err := compareAndDeleteScript.Run(ctx, RedisClient,
 		[]string{Web3NonceKey(userID, orderID)}, nonce).Result()
 	if err != nil {
 		return err
