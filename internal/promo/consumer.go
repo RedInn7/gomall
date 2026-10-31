@@ -64,11 +64,11 @@ func DispatchReleaseEvent(ctx context.Context, routingKey string, payload []byte
 
 // StartReleaseConsumer 绑定 order.cancelled / order.refunded 并启动自愈消费循环。
 //   - 解析失败（毒消息）：直接进 DLQ 并告警，不回灌业务队列
-//   - 投递次数超限：即便业务判为可重试也兜底进 DLQ，避免无限 requeue
-//   - 业务处理失败（DB 抖动等）：Nack 重排，依赖 at-least-once + 台账幂等收敛
+//   - 业务处理失败（DB 抖动等）：按 SettleRetryDelays 逐级退避进延迟队列重试，超过上限进 DLQ；
+//     依赖 at-least-once + 台账幂等收敛
 //
-// 消费在 SuperviseDomainConsumer 中运行：连接抖动 / channel 关闭后自动重连重订阅，
-// handler panic 也由其兜底，避免首次断连后 goroutine 退出永久静默停摆。
+// 消费在 SuperviseDomainConsumerWithRetry 中运行：连接抖动 / channel 关闭后自动重连重订阅，
+// handler panic 也走同一套延迟重试，避免首次断连后 goroutine 退出永久静默停摆。
 func StartReleaseConsumer(ctx context.Context) error {
 	if err := rabbitmq.InitDeadLetterTopology(); err != nil {
 		return err
@@ -78,21 +78,22 @@ func StartReleaseConsumer(ctx context.Context) error {
 			return err
 		}
 	}
-	rabbitmq.SuperviseDomainConsumer(releaseQueue, 32, func(d amqp.Delivery) {
-		err := DispatchReleaseEvent(ctx, d.RoutingKey, d.Body)
+	if err := rabbitmq.InitRetryQueue(releaseQueue, rabbitmq.SettleRetryDelays...); err != nil {
+		return err
+	}
+	rabbitmq.SuperviseDomainConsumerWithRetry(releaseQueue, 32, func(d amqp.Delivery) {
+		key := rabbitmq.OriginalRoutingKey(d)
+		err := DispatchReleaseEvent(ctx, key, d.Body)
 		if err == nil {
 			_ = d.Ack(false)
 			return
 		}
-		util.LogrusObj.Errorf("promo release handle key=%s err=%v", d.RoutingKey, err)
-		// 毒消息（解析失败 / 未知 routing key）不可恢复，直接进 DLQ。
-		// 业务可重试错误也要在投递次数超限后兜底进 DLQ，避免无限 requeue。
-		poison := errors.Is(err, errReleasePoisonMessage)
-		if poison || rabbitmq.ExceededDeliveryLimit(d) {
-			rabbitmq.RouteToDLQ(d, releaseQueue, d.RoutingKey, poison)
+		util.LogrusObj.Errorf("promo release handle key=%s err=%v", key, err)
+		if errors.Is(err, errReleasePoisonMessage) {
+			rabbitmq.RouteToDLQ(d, releaseQueue, key, true)
 			return
 		}
-		_ = d.Nack(false, true)
+		rabbitmq.RetryToQueueOrDLQ(d, releaseQueue, key)
 	})
 	return nil
 }
