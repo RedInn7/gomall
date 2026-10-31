@@ -129,8 +129,15 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *CryptoPaydown
 		return nil, errors.New("签名与钱包地址不匹配")
 	}
 
-	// 3) 同一事务里写 outbox web3.payment.pending，保证消息一定与业务校验“同生共死”
 	walletAddr := web3sig.NormalizeAddress(req.WalletAddr)
+	// 3) Redis pending 占位，30min TTL；链上 listener 收到 confirm 后会 DEL。
+	// 结算时靠它校验链上 buyer，占位写不进去就让请求直接失败，不能让用户去付一笔注定结算不了的款。
+	if err := cache.SetWeb3Pending(ctx, order.ID, walletAddr); err != nil {
+		log.LogrusObj.Errorf("set web3 pending placeholder fail order=%d err=%v", order.ID, err)
+		return nil, err
+	}
+
+	// 4) 同一事务里写 outbox web3.payment.pending，保证消息一定与业务校验“同生共死”
 	// 实付口径统一走 orderPayableCents（命中促销取折后 FinalCents），与余额 / Stripe 路径一致。
 	totalAmount := orderPayableCents(order)
 	err = orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
@@ -152,12 +159,6 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *CryptoPaydown
 	if err != nil {
 		log.LogrusObj.Errorf("write outbox web3.payment.pending fail: %v", err)
 		return nil, err
-	}
-
-	// 4) Redis pending 占位，30min TTL；链上 listener 收到 confirm 后会 DEL
-	if err := cache.SetWeb3Pending(ctx, order.ID, walletAddr); err != nil {
-		// 占位失败不阻塞主流程，outbox 已经把事件落了
-		log.LogrusObj.Errorf("set web3 pending placeholder fail order=%d err=%v", order.ID, err)
 	}
 
 	return &CryptoPaydownResp{
