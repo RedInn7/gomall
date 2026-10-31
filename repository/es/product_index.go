@@ -16,6 +16,10 @@ import (
 
 const ProductIndex = "product"
 
+// ErrBadRequest ES 以 4xx 拒绝了查询（如 from+size 超过 max_result_window）。请求本身有问题，
+// 调用方不应换 DB 重查，只有连接错误和 5xx 才算 ES 故障。
+var ErrBadRequest = errors.New("es rejected search request")
+
 // productIndexMapping IK 分词器 (常用中文搜索) 如果集群没装也能跑，会退回 standard
 var productIndexMapping = `{
   "settings": {
@@ -256,6 +260,9 @@ func SearchProducts(ctx context.Context, keyword string, from, size int) ([]*Pro
 	defer res.Body.Close()
 	if res.IsError() {
 		bz, _ := io.ReadAll(res.Body)
+		if res.StatusCode >= 400 && res.StatusCode < 500 {
+			return nil, 0, fmt.Errorf("%w: %s", ErrBadRequest, string(bz))
+		}
 		return nil, 0, fmt.Errorf("search failed: %s", string(bz))
 	}
 
