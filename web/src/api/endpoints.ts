@@ -60,7 +60,7 @@ export const ENDPOINTS: Endpoint[] = [
     ['GET', '/api/v1/coupon/batches', '优惠活动', '优惠券批次'],
     ['POST', '/api/v1/coupon/claim', '优惠活动', '领取优惠券'],
     ['GET', '/api/v1/coupon/my', '优惠活动', '我的优惠券'],
-    ['POST', '/api/v1/redpacket/create', '优惠活动', '发红包'],
+    ['POST', '/api/v1/redpacket/create', '优惠活动', '发红包', { total: 100, count: 1, key: '' }],
     ['POST', '/api/v1/redpacket/claim', '优惠活动', '抢红包'],
     ['GET', '/api/v1/redpacket/show', '优惠活动', '红包详情'],
     ['GET', '/api/v1/redpacket/list', '优惠活动', '我的红包'],

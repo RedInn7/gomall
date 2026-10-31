@@ -1,11 +1,11 @@
 package redpacket
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
@@ -15,17 +15,22 @@ import (
 	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
-	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
-func TestCreateRejectsInsufficientBalance(t *testing.T) {
+func TestSendRejectsInsufficientBalance(t *testing.T) {
 	db := openRedPacketTestDB(t)
 	seedRedPacketUser(t, db, 7, 100)
-	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: 7})
 
-	_, err := GetRedPacketSrv().Create(ctx, &RedPacketCreateReq{Total: 500, Count: 5})
+	// 与 Create 同一事务形态：写红包主记录 + 发包扣款，任一失败整体回滚。
+	err := db.Transaction(func(tx *gorm.DB) error {
+		rp := &RedPacket{UserID: 7, Total: 500, Count: 5, Remaining: 5, ExpireAt: time.Now().Add(time.Hour), Status: RedPacketStatusActive}
+		if err := NewRedPacketDaoByDB(tx).Create(rp); err != nil {
+			return err
+		}
+		return settleSendTx(tx, rp.ID, 7, rp.Total)
+	})
 	if !errors.Is(err, user.ErrInsufficientBalance) {
 		t.Fatalf("want ErrInsufficientBalance, got %v", err)
 	}

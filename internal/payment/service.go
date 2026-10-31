@@ -75,9 +75,9 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			log.LogrusObj.Error(err)
 			return err
 		}
-		if !buyer.CheckMoneyPassword(req.Key) {
-			log.LogrusObj.Error(user.ErrMoneyKeyIncorrect)
-			return user.ErrMoneyKeyIncorrect
+		if err := user.VerifyMoneyPassword(ctx, buyer, req.Key); err != nil {
+			log.LogrusObj.Error(err)
+			return err
 		}
 
 		userMoney, err := buyer.DecryptMoney()
