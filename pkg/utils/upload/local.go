@@ -1,6 +1,8 @@
 package upload
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -8,8 +10,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 
 	conf "github.com/RedInn7/gomall/config"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -28,24 +28,21 @@ var allowedImageTypes = map[string]string{
 	"image/webp": ".webp",
 }
 
-func ProductUploadToLocalStatic(file multipart.File, bossId uint, productName string) (filePath string, err error) {
-	bId := strconv.Itoa(int(bossId))
-	basePath := "." + conf.Config.PhotoPath.ProductPath + "boss" + bId + "/"
-	return saveImage(file, basePath, productName, fmt.Sprintf("boss%s/", bId))
+// ProductUploadToLocalStatic 商品图存到 ProductPath 下，返回随机文件名。
+func ProductUploadToLocalStatic(file multipart.File) (filePath string, err error) {
+	return saveImage(file, "."+conf.Config.PhotoPath.ProductPath)
 }
 
-func AvatarUploadToLocalStatic(file multipart.File, userId uint, userName string) (filePath string, err error) {
-	uId := strconv.Itoa(int(userId))
-	basePath := "." + conf.Config.PhotoPath.AvatarPath + "user" + uId + "/"
-	return saveImage(file, basePath, userName, fmt.Sprintf("user%s/", uId))
+// AvatarUploadToLocalStatic 头像存到 AvatarPath 下，返回随机文件名。
+// ponytail: userId / userName 已不参与命名，形参只为兼容 user/service.go 的现有调用，那边改调用时一起删。
+func AvatarUploadToLocalStatic(file multipart.File, _ uint, _ string) (filePath string, err error) {
+	return saveImage(file, "."+conf.Config.PhotoPath.AvatarPath)
 }
 
-func saveImage(file multipart.File, baseDir, name, returnPrefix string) (string, error) {
-	safe := safeName(name)
-	if safe == "" {
-		return "", errors.New("文件名非法")
-	}
-
+// saveImage 校验图片后以随机 hex 命名落到 baseDir，返回文件名。
+// 文件名不含用户 id、用户名或商品名，没法拿 /static 下的路径反推用户；
+// 历史上传的 userN/、bossN/ 子目录文件不动，旧路径照常可访问。
+func saveImage(file multipart.File, baseDir string) (string, error) {
 	content, ext, err := readAndValidateImage(file)
 	if err != nil {
 		util.LogrusObj.Error(err)
@@ -58,13 +55,15 @@ func saveImage(file multipart.File, baseDir, name, returnPrefix string) (string,
 		}
 	}
 
-	fullPath := filepath.Join(baseDir, safe+ext)
-	if err := os.WriteFile(fullPath, content, fileMode); err != nil {
+	var buf [16]byte
+	_, _ = rand.Read(buf[:]) // Go 1.24 起 crypto/rand.Read 不会返回错误
+	name := hex.EncodeToString(buf[:]) + ext
+	if err := os.WriteFile(filepath.Join(baseDir, name), content, fileMode); err != nil {
 		util.LogrusObj.Error(err)
 		return "", err
 	}
 
-	return returnPrefix + safe + ext, nil
+	return name, nil
 }
 
 func readAndValidateImage(file multipart.File) ([]byte, string, error) {
@@ -86,25 +85,6 @@ func readAndValidateImage(file multipart.File) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("不支持的图片类型: %s", contentType)
 	}
 	return content, ext, nil
-}
-
-func safeName(name string) string {
-	name = strings.TrimSpace(name)
-	name = filepath.Base(name)
-	if name == "." || name == ".." || name == "/" {
-		return ""
-	}
-	var b strings.Builder
-	for _, r := range name {
-		switch {
-		case r >= 'a' && r <= 'z',
-			r >= 'A' && r <= 'Z',
-			r >= '0' && r <= '9',
-			r == '-', r == '_':
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 func DirExistOrNot(fileAddr string) bool {
