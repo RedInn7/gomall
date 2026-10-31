@@ -74,7 +74,8 @@ export const ENDPOINTS: Endpoint[] = [
     ['POST', '/api/v1/preorder/:id/final', '团购与预售', '支付尾款', { id: 0 }],
     ['POST', '/api/v1/preorder/:id/cancel', '团购与预售', '取消预售', { id: 0 }],
     ['POST', '/api/v1/product/create', '商家', '上架商品', { name: '', category_id: 1, price: '', discount_price: '', num: 1, groupbuy_price_cents: 0 }],
-    ['POST', '/api/v1/product/update', '商家', '修改商品', { id: 0, name: '', category_id: 1, price: '', discount_price: '', num: 1, on_sale: true, groupbuy_price_cents: 0 }],
+    // 部分更新：只传要改的字段，没传的保持原值
+    ['POST', '/api/v1/product/update', '商家', '修改商品', { id: 0, num: 1, on_sale: true }],
     ['POST', '/api/v1/product/delete', '商家', '删除商品', { id: 0 }],
     ['POST', '/api/v1/orders/ship', '商家', '订单发货', { order_num: 0, tracking_no: '', carrier: '' }],
     ['POST', '/api/v1/orders/refund/approve', '商家', '同意退款', { order_num: 0 }],

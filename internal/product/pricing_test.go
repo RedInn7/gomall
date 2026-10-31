@@ -28,6 +28,30 @@ func TestCheckGroupbuyPriceBounds(t *testing.T) {
 	}
 }
 
+func TestUpdateReqCheckPrices(t *testing.T) {
+	tests := []struct {
+		name     string
+		price    *string
+		discount *string
+		wantErr  bool
+	}{
+		{"都没传", nil, nil, false},
+		{"两位小数", new("99.50"), new("88"), false},
+		{"取消折扣", nil, new(""), false},
+		{"零售价为 0", new("0.00"), nil, true},
+		{"零售价为空", new(""), nil, true},
+		{"三位小数", new("9.999"), nil, true},
+		{"科学计数法", new("1e3"), nil, true},
+		{"负数", nil, new("-1"), true},
+	}
+	for _, tt := range tests {
+		req := &ProductUpdateReq{Price: tt.price, DiscountPrice: tt.discount}
+		if err := req.checkPrices(); (err != nil) != tt.wantErr {
+			t.Fatalf("%s: err=%v wantErr=%v", tt.name, err, tt.wantErr)
+		}
+	}
+}
+
 func TestResolveGroupbuyPricingOnlyTrustsMerchantPrice(t *testing.T) {
 	db := openProductOutboxTestDB(t, false)
 	productDao := NewProductDaoByDB(db)
