@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"mime/multipart"
-	"strconv"
 	"sync"
 	"time"
 
@@ -154,16 +153,15 @@ func (s *ProductSrv) ProductCreate(ctx context.Context, files []*multipart.FileH
 	// 文件上传属于数据库外部 I/O，不能放进 SQL 事务长期占锁。
 	// 先上传并收集路径，随后把商品、图片记录和 Outbox 事件一次性提交。
 	imagePaths := make([]string, 0, len(files))
-	for index, file := range files {
+	for _, file := range files {
 		tmp, openErr := file.Open()
 		if openErr != nil {
 			log.LogrusObj.Error("打开商品图片失败，err:", openErr)
 			return nil, openErr
 		}
-		fileName := req.Name + strconv.Itoa(index)
 		var imagePath string
 		if conf.Config.System.UploadModel == consts.UploadModelLocal {
-			imagePath, err = util.ProductUploadToLocalStatic(tmp, uId, fileName)
+			imagePath, err = util.ProductUploadToLocalStatic(tmp)
 		} else {
 			imagePath, err = util.UploadToQiNiu(tmp, file.Size)
 		}

@@ -74,7 +74,8 @@ func NewRouter() *gin.Engine {
 	r.Use(middleware.TokenBucket(rate.Limit(100), 200))
 	r.Use(middleware.Cors(), middleware.Jaeger())
 	r.Use(sessions.Sessions("mysession", store))
-	r.StaticFS("/static", http.Dir("./static"))
+	// Static 不列目录（StaticFS + http.Dir 会列出目录，暴露上传文件清单）
+	r.Static("/static", "./static")
 
 	// storefront：ATELIER 前端（Vite + React 构建产物），挂在 /app 下；
 	// base=/app/ 让产物内的资源引用正确解析，根路径重定向过去。
