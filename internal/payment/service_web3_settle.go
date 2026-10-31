@@ -218,7 +218,9 @@ func (s *Web3SettleSrv) SettleConfirmedOrder(ctx context.Context, orderID uint, 
 	})
 	if err != nil {
 		log.LogrusObj.Errorf("web3 settle order=%d failed: %v", orderID, err)
-		return err
+		// 链上已到账却确定性无法履约：改记异常单并返回成功，消费者 ack，不再热重投。
+		return recordUnfulfillable(orderpkg.NewOrderDao(ctx).DB, err, orderID, clearing.ChannelWeb3,
+			txHash, onchainAmount, strings.ToUpper(web3PayToken()))
 	}
 
 	commitReservationBestEffort(ctx, paidProductID, paidNum)
