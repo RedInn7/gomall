@@ -10,6 +10,7 @@ import (
 	"github.com/RedInn7/gomall/internal/shared/response"
 	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/utils/upload"
 )
 
 func UserRegisterHandler() gin.HandlerFunc {
@@ -101,6 +102,8 @@ func ShowUserInfoHandler() gin.HandlerFunc {
 
 func UploadAvatarHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		// 先限住请求体再解析 multipart，超大包直接报错
+		ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, upload.AvatarBodyLimit)
 		var req UserServiceReq
 		if err := ctx.ShouldBind(&req); err != nil {
 			// 参数校验
