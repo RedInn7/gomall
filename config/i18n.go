@@ -1,42 +1,43 @@
 package conf
 
 import (
+	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
-// Dictinary 字典
-var Dictinary *map[interface{}]interface{}
+// Dictinary 参数校验提示的字典，由 InitConfig 从 config/locales/zh-cn.yaml 加载
+var Dictinary map[string]interface{}
 
-// T 翻译
-func T(key string) string {
-	dic := *Dictinary
-	keys := strings.Split(key, ".")
-	for index, path := range keys {
-		// 如果到达了最后一层，寻找目标翻译
-		if len(keys) == (index + 1) {
-			for k, v := range dic {
-				if k, ok := k.(string); ok {
-					if k == path {
-						if value, ok := v.(string); ok {
-							return value
-						}
-					}
-				}
-			}
-			return path
-		}
-		// 如果还有下一层，继续寻找
-		for k, v := range dic {
-			if ks, ok := k.(string); ok {
-				if ks == path {
-					if dic, ok = v.(map[interface{}]interface{}); !ok {
-						return path
-					}
-				}
-			} else {
-				return ""
-			}
-		}
+// LoadLocales 读取国际化文件
+func LoadLocales(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
 	}
-	return ""
+	m := make(map[string]interface{})
+	if err := yaml.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	Dictinary = m
+	return nil
+}
+
+// T 按点分路径翻译，如 T("Field.UserName") 返回 "用户名"。
+// 字典没加载或查不到时返回 key 的最后一段（"Field.Email" 返回 "Email"），不会 panic。
+func T(key string) string {
+	keys := strings.Split(key, ".")
+	var cur interface{} = Dictinary
+	for _, k := range keys {
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return keys[len(keys)-1]
+		}
+		cur = m[k]
+	}
+	if s, ok := cur.(string); ok {
+		return s
+	}
+	return keys[len(keys)-1]
 }
