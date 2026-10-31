@@ -25,6 +25,8 @@ type ProductCreateReq struct {
 	DiscountPrice string `form:"discount_price" json:"discount_price"`
 	OnSale        bool   `form:"on_sale" json:"on_sale"`
 	Num           int    `form:"num" json:"num"`
+	// GroupbuyPriceCents 拼团价（分），0 表示不开放拼团
+	GroupbuyPriceCents int64 `form:"groupbuy_price_cents" json:"groupbuy_price_cents"`
 }
 
 type ProductListReq struct {
@@ -52,6 +54,8 @@ type ProductUpdateReq struct {
 	DiscountPrice string `form:"discount_price" json:"discount_price"`
 	OnSale        bool   `form:"on_sale" json:"on_sale"`
 	Num           int    `form:"num" json:"num"`
+	// GroupbuyPriceCents 拼团价（分），0 表示不开放拼团
+	GroupbuyPriceCents int64 `form:"groupbuy_price_cents" json:"groupbuy_price_cents"`
 }
 
 type ListProductImgReq struct {
