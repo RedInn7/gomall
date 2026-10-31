@@ -50,6 +50,10 @@ func adjustWallet(tx *gorm.DB, userID, refID uint, delta int64, bizType string) 
 		return false, 0, err
 	}
 	balanceAfter = bal + delta
+	if delta < 0 && balanceAfter < 0 {
+		// 出账不允许透支：余额扣成负数等于凭空造钱。
+		return false, 0, user.ErrInsufficientBalance
+	}
 	u.Money = strconv.FormatInt(balanceAfter, 10)
 	if u.Money, err = u.EncryptMoney(); err != nil {
 		return false, 0, err

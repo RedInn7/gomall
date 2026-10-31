@@ -3,6 +3,7 @@ package redpacket
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -47,6 +48,9 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (int
 	}
 	if req.Total < int64(req.Count) {
 		return nil, errors.New("总额必须 ≥ 份数 (每份至少 1 分)")
+	}
+	if req.Total > MaxRedPacketTotalCents {
+		return nil, fmt.Errorf("红包总额不能超过 %d 分", MaxRedPacketTotalCents)
 	}
 
 	ttl := time.Duration(req.ExpireSec) * time.Second
