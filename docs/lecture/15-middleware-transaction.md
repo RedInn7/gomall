@@ -120,8 +120,8 @@ cb.report(failed, gen)
 stateDiagram-v2
     [*] --> init: 颁发 token
     init --> processing: 首次提交并抢锁
-    processing --> done: 成功或未被识别的 HTTP 200 业务失败
-    processing --> init: c.Errors / HTTP≥400，或保存失败
+    processing --> done: 成功（含未走 response.Fail 的 HTTP 200 失败）
+    processing --> init: c.Errors / HTTP≥400 / response.Fail / panic
     done --> done: 重试时回放响应
 ```
 
@@ -129,18 +129,18 @@ stateDiagram-v2
 
 ```go
 c.Next()
-if len(c.Errors) > 0 || recorder.Status() >= http.StatusBadRequest {
+if len(c.Errors) > 0 || recorder.Status() >= http.StatusBadRequest || response.Failed(c) {
     releaseIdempotencyLock(key)
     return
 }
 commitIdempotencyResult(key, recorder.body.String())
 ```
 
-提交 Redis 结果最多重试 3 次；仍失败就回退到 `init`，避免 token 长时间卡在 `processing`。但业务副作用可能已经提交，此时再次放行仍有重复风险，所以余额支付还用数据库流水唯一约束 `(ref_order_id, direction, biz_type)` 兜底扣款和入账。Redis 幂等改善重试体验，数据库约束守住最终副作用，两层不能互换。
+提交 Redis 结果最多重试 3 次；仍失败就让 token 停在 `processing` 等 TTL 过期：业务副作用已经提交，回退到 `init` 会让同一 token 再执行一次。Redis 记录本身也可能丢，所以余额支付还用数据库流水唯一约束 `(ref_order_id, direction, biz_type)` 兜底扣款和入账。Redis 幂等改善重试体验，数据库约束守住最终副作用，两层不能互换。
 
 ### 同一个 HTTP 200 缺口再次出现
 
-幂等中间件把“没有 `c.Errors` 且 HTTP 状态小于 400”视为成功。`response.Fail` 返回 HTTP 200，又不写 `c.Errors`，因此支付密码错误等失败响应也会被保存为 `done`；下一次使用同一 token，只会回放失败，不能重新提交。
+幂等中间件原先把“没有 `c.Errors` 且 HTTP 状态小于 400”视为成功。`response.Fail` 返回 HTTP 200，又不写 `c.Errors`，支付密码错误等失败响应曾被保存为 `done`，同一 token 只能回放失败。现在 `response.Fail` 会在 gin ctx 上打失败标记，中间件看到标记就回退到 `init`。
 
 修复时应让中间件基于可靠的成功信号提交结果。可以统一 HTTP 状态码，也可以由 handler 显式设置业务成功标记；只解析 JSON 会让中间件与响应格式紧耦合。
 
@@ -228,7 +228,7 @@ X-Idempotent-Replay: true
 
 并回放第一次 JSON，handler 不再扣款。演示完成后查看订单状态与两条资金流水，说明真正的最后防线仍在数据库事务和唯一索引。
 
-再用错误支付密钥和一个新 token 重复两次。第二次也会出现 replay，这不是正确的“失败幂等”，而是 HTTP 200 业务失败被错误提交为 `done` 的现场证据。
+再用错误支付密钥和一个新 token 重复两次。第二次不会出现 replay：业务失败经 `response.Fail` 标记后回退到 `init`，同一 token 会重新执行。
 
 ---
 
@@ -237,7 +237,7 @@ X-Idempotent-Replay: true
 - SlidingWindow 管具体主体在时间窗口内的操作频率，并借 Redis 跨实例共享状态。
 - CircuitBreaker 在故障连续发生时暂停调用，不负责防重复交易。
 - Idempotency 负责请求重试，数据库事务和唯一约束负责副作用的最后一致性。
-- 当前统一 HTTP 200 让三类判断都失真：熔断看不见业务失败，幂等会缓存失败，公开 GET 还可能缓存错误响应。HTTP 语义必须成为接口设计的一部分。
+- 当前统一 HTTP 200 让熔断看不见业务失败，公开 GET 还可能缓存错误响应；幂等靠 `response.Fail` 的失败标记才不缓存失败。HTTP 语义必须成为接口设计的一部分。
 
 ## 课后延伸
 
