@@ -270,8 +270,8 @@ func resolveProductSettlement(ctx context.Context, productID uint) (unitCents in
 	return cents, boss, err
 }
 
-// OrderDelete 软删订单。成功时不回传订单体（保持既有 API 契约：data 为 null），
-// 仅用 ShowOrderById 做存在性校验。
+// OrderDelete 删除订单（物理删除）。成功时不回传订单体（保持既有 API 契约：data 为 null）。
+// 只能删资金已闭环的终态订单，判定见 DeleteOrderById。
 func (s *OrderSrv) OrderDelete(ctx context.Context, req *OrderDeleteReq) (*OrderListRespItem, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -279,18 +279,21 @@ func (s *OrderSrv) OrderDelete(ctx context.Context, req *OrderDeleteReq) (*Order
 		return nil, err
 	}
 	db := NewOrderDao(ctx)
-	ret, err := db.ShowOrderById(req.OrderId, u.Id)
-	if err != nil {
-		util.LogrusObj.Error("ShowOrderById失败，err:", err)
-		return nil, err
-	}
-	if ret == nil || ret.ID == 0 {
-		return nil, errors.New("没有查找到数据")
-	}
-
-	if err = db.DeleteOrderById(req.OrderId, u.Id); err != nil {
+	if _, err = db.GetOrderById(req.OrderId, u.Id); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("没有查找到数据")
+		}
 		util.LogrusObj.Error(err)
 		return nil, err
+	}
+
+	deleted, err := db.DeleteOrderById(req.OrderId, u.Id)
+	if err != nil {
+		util.LogrusObj.Error(err)
+		return nil, err
+	}
+	if !deleted {
+		return nil, errors.New("订单尚未结束或资金未结清，暂不能删除")
 	}
 
 	return nil, nil
