@@ -58,7 +58,7 @@ func NewRouter() *gin.Engine {
 	store := cookie.NewStore([]byte(conf.Config.EncryptSecret.SessionSecret))
 	// 全局令牌桶：每 IP 100 RPS、突发 200，挡正常流量同时防爬虫脚本
 	r.Use(middleware.TokenBucket(rate.Limit(100), 200))
-	r.Use(middleware.Cors(), middleware.Jaeger())
+	r.Use(middleware.Cors())
 	r.Use(sessions.Sessions("mysession", store))
 	r.StaticFS("/static", http.Dir("./static"))
 
