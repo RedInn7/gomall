@@ -65,12 +65,13 @@ func main() {
 func loading() {
 	conf.InitConfig()
 	util.InitLog() // 必须在使用 LogrusObj 的初始化之前完成
+	// 节点号配错要在连库、迁移之前就退出，避免先改了表结构才发现起不来
+	snowflake.InitSnowflake(snowflakeNodeID())
 	dao.InitMySQL()
 	if err := migrate.Run(); err != nil {
 		panic(err)
 	}
 	cache.InitCache()
-	snowflake.InitSnowflake(snowflakeNodeID())
 	initialize.InitCron()
 	// 大数据集的库存预热可能需要数分钟。放到后台执行，让商品浏览、登录等
 	// 不依赖库存桶的接口先开始服务；下单仍由库存服务校验对应商品的桶。

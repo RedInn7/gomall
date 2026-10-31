@@ -61,7 +61,25 @@ func startProductIndexConsumer(ctx context.Context, queue string, handler produc
 }
 
 func handleKeywordProductChanged(ctx context.Context, ev events.ProductChanged) error {
-	return handleKeywordProductChangedWith(ctx, ev, product.NewProductDao(ctx).GetProductById, es.UpsertProduct, es.DeleteProduct)
+	return handleKeywordProductChangedWith(ctx, ev, product.NewProductDao(ctx).GetProductById, upsertProductDoc, es.DeleteProduct)
+}
+
+// upsertProductDoc 把商品模型映射成 ES 文档后写入
+func upsertProductDoc(ctx context.Context, p *product.Product) error {
+	return es.UpsertProduct(ctx, &es.ProductDoc{
+		ID:            p.ID,
+		Name:          p.Name,
+		Title:         p.Title,
+		Info:          p.Info,
+		CategoryID:    p.CategoryID,
+		Price:         p.Price,
+		DiscountPrice: p.DiscountPrice,
+		OnSale:        p.OnSale,
+		Num:           p.Num,
+		BossID:        p.BossID,
+		ImgPath:       p.ImgPath,
+		CreatedAt:     p.CreatedAt.Unix(),
+	})
 }
 
 func handleKeywordProductChangedWith(ctx context.Context, ev events.ProductChanged, load func(uint) (*product.Product, error), upsert func(context.Context, *product.Product) error, deleteProduct func(context.Context, uint) error) error {

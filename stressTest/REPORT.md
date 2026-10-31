@@ -7,7 +7,11 @@
 **依赖**：MySQL 8 (本机 :3306)、Redis (本机 :6379)、RabbitMQ 未启动 (不影响 HTTP 链路)
 **数据规模**：`order` 表 ~6M 行 / 653MB；`product` 表 ~956K 行 / 364MB
 
+> **适用条件（2026-10 补充）**：压测时全局令牌桶 `TokenBucket(rate.Limit(100), 200)` 已经挂在路由上：本报告原来的「待办」一节（现改为下文「更正」）写的就是它没有触发；仓库历史在 2026-05-16 被压成一个根提交，根提交里的 `routes/router.go` 也已有这一行，更早的提交查不到。k6 从本机发起，gin 的 `c.ClientIP()` 返回不带端口的 IP，所有 VU 共用 127.0.0.1 一个桶，超过 100 RPS / 突发 200 的请求返回 HTTP 200 + 业务码 70001。当时的脚本只检查 HTTP 状态码，这些拒绝都被算成了成功。因此下表上万 RPS 的几行主要反映限流拒绝路径的开销，不是接口容量；低于 100 RPS 的两行不受影响。复测接口容量要临时放宽 `routes/router.go` 里的全局令牌桶，脚本现在会断言响应不是 70001。
+
 ## 单元测试结果
+
+> 下表这些单测已在 2026-07-05 的提交 3461689 中随全部测试一起删除，`middleware/` 和 `repository/cache/` 现在没有测试文件，下面的命令无法复现这张表；需要时从 `3461689^` 取回。
 
 ```
 go test ./middleware/ ./repository/cache/ -v -count=1
@@ -41,7 +45,7 @@ go test ./middleware/ ./repository/cache/ -v -count=1
 | 优惠券领取 - DB 悲观锁 (PR #50) | coupon_claim_db.js | 80 | 20s | **50,142** | 0.83ms | 3.65ms | **453ms** | 0% |
 | 秒杀+滑动窗口限流 (PR #49) | seckill_rate_limit.js | 30 | 15s | 52,082 | 0.32ms | 1.24ms | 94ms | 0% |
 | 商品列表 (DB count 全表) | product_list.js | 50 | 30s | **24.5** | 2.27s | 2.50s | 2.67s | 0% |
-| 订单列表 - 旧版深分页 | order_list_deep_pagination.js | 100 | 30s | **8.3** | 10.5s | 15.95s | 16.29s | 0% |
+| 订单列表 - 旧版深分页 | order_list_deep_pagination.js（脚本和 `/orders/old/list` 路由均已删除） | 100 | 30s | **8.3** | 10.5s | 15.95s | 16.29s | 0% |
 
 > 注：错误率 = HTTP 非 2xx 比例。业务上的"被限流/被熔断/被幂等命中"由于 HTTP code 仍是 200，分别用 status 字段 70001/70002/60002 区分（详见各场景分析）。
 
@@ -54,6 +58,8 @@ go test ./middleware/ ./repository/cache/ -v -count=1
 商品详情接口未来接缓存后（feat/product-cache-consistency 分支）应当在更大并发下保持稳定（当前已经接近 ping 极限，单机硬件层面 cap 在这里），主要收益体现在**降低 DB 负载**而不是单次延迟。
 
 ### 2. 订单列表：游标分页的代差碾压
+
+> 注：优化版的 58,406 RPS 绝大部分是限流拒绝（见开头「适用条件」），下面的倍数不能当作分页优化的实际收益；旧版深分页的脚本和路由都已删除。
 
 |                | 优化版 (PR #38) | 旧版深分页    |
 |----------------|-----------------|---------------|
@@ -86,11 +92,13 @@ SELECT COUNT(*) FROM `order` WHERE user_id = 10 AND created_at > NOW() - INTERVA
 
 **恰好 1 笔订单**。第一次成功后，所有后续请求由 Lua 脚本直接读 done 态缓存返回 → 50K RPS、p95 2.3ms，与读 Redis 单值的成本相当。
 
+> 注：755,033 次请求里绝大多数在全局令牌桶就被 70001 拒绝，没有进入幂等中间件；50K RPS 主要是拒绝路径的吞吐。
+
 ### 5. 限流中间件：分布式滑动窗口精准生效
 
 `seckill_rate_limit.js`：30 个 VU 用同一 token 打 `/skill_product/skill`，配置 `Limit=3 Window=1s ByUser=true`。
 
-- 781,624 次返回 70001（被限流）
+- 781,624 次返回 70001（被限流；其中绝大多数是全局令牌桶拒绝，不是滑动窗口，脚本现在分开计数）
 - **46 次通过**
 - 15s × 3/s = **45 期望**
 
@@ -119,11 +127,9 @@ PR #51 (订单延迟关单) 引入了 `tryInitRabbitMQ()` 在 `cmd/main.go` 中�
 
 修复方案：把 `util.InitLog()` 调用提前到 `tryInitRabbitMQ()` 之前。
 
-### 待办：全局 TokenBucket 在 localhost 测试下不触发
+### 更正：全局 TokenBucket 在本机压测时一直在限流
 
-`stress_test = 64K RPS` 但 `r.Use(middleware.TokenBucket(100, 200))` 应该把单 IP 限制在 100 RPS。猜测原因：k6 80 个 VU 各开一个 TCP 连接，每个连接的 RemoteAddr 端口不同；如果 `c.ClientIP()` 实际返回的不是纯 IP 而是带端口的形式，map key 就会全部错开。需要后续验证 + 修复。
-
-> 短期影响：生产环境用 Nginx 转发时这个问题不存在（XFF 会规范化），但本地直连缺乏防护。
+当时的猜测是 `c.ClientIP()` 带端口，导致每个 VU 落在不同的桶里、令牌桶不触发。实际上 gin 的 `ClientIP()` 用 `net.SplitHostPort` 去掉了端口，本机压测时所有 VU 共用 127.0.0.1 一个桶，令牌桶一直在生效：超过 100 RPS / 突发 200 的请求都返回 HTTP 200 + 70001。脚本只检查 HTTP 200，把这些拒绝记成了成功，所以上面上万 RPS 的结果主要是拒绝路径。脚本已加上 70001 断言。
 
 ## 复现方式
 
@@ -131,22 +137,23 @@ PR #51 (订单延迟关单) 引入了 `tryInitRabbitMQ()` 在 `cmd/main.go` 中�
 # 1. 启动依赖
 docker compose up -d mysql redis  # rabbitmq 可选
 
-# 2. 起服务
+# 2. 起服务（要测接口容量，先临时放宽 routes/router.go 里的全局令牌桶）
 go build -o /tmp/gomall-bin ./cmd
-/tmp/gomall-bin &
+SNOWFLAKE_ALLOW_DEFAULT=true /tmp/gomall-bin &
 
 # 3. 准备测试 token
 cd stressTest
 ./setup_token.sh   # 注册新用户 + 写 config.json
+# 建券批次、初始化秒杀需要管理员：服务端和上面的脚本设置同一个 ADMIN_BOOTSTRAP_TOKEN（系统里还没有管理员时生效）
 
 # 4. 初始化秒杀数据
 ACCESS=$(jq -r .access_token config.json)
 REFRESH=$(jq -r .refresh_token config.json)
 curl -s -X POST -H "access_token: $ACCESS" -H "refresh_token: $REFRESH" \
-     http://localhost:5002/api/v1/admin/skill_product/init
+     ${BASE_URL:-http://localhost:5003/api/v1}/admin/skill_product/init
 
 # 5. 跑全部压测
 ./run_all.sh
 ```
 
-每个脚本独立可跑：`k6 run stressTest/<name>.js`。
+每个脚本独立可跑：`k6 run stressTest/<name>.js`。服务地址默认 `http://localhost:5003/api/v1`，可用环境变量 `BASE_URL` 覆盖。

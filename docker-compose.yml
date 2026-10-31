@@ -1,10 +1,10 @@
-version: '3.7'
-
 networks:
     mall:
         driver: bridge
 
 volumes:
+  redis-data:
+  es-data:
   milvus-etcd-data:
   milvus-minio-data:
   milvus-data:
@@ -12,7 +12,7 @@ volumes:
 services:
   mysql:
     container_name: mysql
-    image: mysql:latest
+    image: mysql:8.4
     restart: always
     environment:
       - MYSQL_ROOT_PASSWORD=root
@@ -20,31 +20,24 @@ services:
       - MYSQL_USER=mall
       - MYSQL_PASSWORD=123456
       - TZ=Asia/Shanghai
-    volumes:
-      - ./config/sql:/docker-entrypoint-initdb.d/
+    # 表结构由服务启动时的 AutoMigrate 创建；走 TCP ping，初始化阶段的临时实例不会被误判为就绪
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
     ports:
       - "3306:3306"
 
   redis:
     container_name: redis
-    image: redis:latest
+    image: redis:7.4
     restart: always
-    environment:
-      - REDIS_PASSWORD=123456
-      - ALLOW_EMPTY_PASSWORD=no
     volumes:
-      - /usr/local/redis:/usr/local/redis
+      - redis-data:/data
     ports:
       - "6379:6379"
-
-  jaeger:
-    container_name: jaeger
-    image: jaegertracing/all-in-one:latest
-    ports:
-      - "16686:16686"
-    restart: always
-    networks:
-      - mall
 
   elasticsearch:
       image: elasticsearch:8.4.2
@@ -67,8 +60,7 @@ services:
               soft: -1
               hard: -1
       volumes:
-          - /usr/local/elasticsearch/data:/usr/local/elasticsearch/data
-          - /usr/local/elasticsearch/config/es/config:/usr/local/elasticsearch/config
+          - es-data:/usr/share/elasticsearch/data
       ports:
           - "9200:9200"
       restart: always

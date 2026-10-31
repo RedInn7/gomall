@@ -27,7 +27,7 @@ func BackfillFromDB(ctx context.Context, batchSize int) (indexed int, err error)
 			return indexed, nil
 		}
 		for _, p := range rows {
-			if e := es.UpsertProduct(ctx, p); e != nil {
+			if e := upsertProductDoc(ctx, p); e != nil {
 				util.LogrusObj.Errorf("backfill upsert product=%d failed: %v", p.ID, e)
 				continue
 			}

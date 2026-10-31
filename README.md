@@ -24,7 +24,7 @@ GoMall 是一套用 Go、Gin 和 React 实现的电商教学系统，覆盖商�
 | **商家** | 商品怎么卖 / 哪个 SKU 缺货 / 订单怎么履约 / 钱什么时候到 | 商品上架与改价 / BossID 归属校验 / 发货 / 退款审核 / 库存告警 / 托管结算 |
 | **运营 / 平台** | 大促能不能扛 / 黑产怎么挡 / GMV 受影响多少 | TokenBucket + SlidingWindow + CircuitBreaker / 双 11 异步下单削峰 |
 | **客服** | 用户怒投诉时能不能给个交代 | 完整业务码表 + 客服话术（70001 限流 / 70002 熔断 / 50001 缺货 / RP-EMPTY 红包抢完）|
-| **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Jaeger 链路追踪 / Skywalking / 外部依赖隔离 / Web3 链上对账 |
+| **SRE / 法务** | 99.95% 可用、合规、链路追溯 | Skywalking / 外部依赖隔离 / Web3 链上对账 |
 
 Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.md`](docs/lecture/README.md) 进入。
 
@@ -34,7 +34,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 ### 整体架构
 
-客户端 → Gin Router + 中间件链（JWT / RBAC / 限流 / 熔断 / 幂等 / Jaeger）→ 按域分组的服务层 → MySQL / Redis / ES / Milvus / Web3，事件经 Outbox 旁路异步散给 RabbitMQ。核心链路同步落库收钱，搜索 / 统计 / 履约走异步，主线不被下游拖慢。
+客户端 → Gin Router + 中间件链（JWT / RBAC / 限流 / 熔断 / 幂等）→ 按域分组的服务层 → MySQL / Redis / ES / Milvus / Web3，事件经 Outbox 旁路异步散给 RabbitMQ。核心链路同步落库收钱，搜索 / 统计 / 履约走异步，主线不被下游拖慢。
 
 ![gomall 整体架构](docs/architecture.svg)
 
@@ -99,7 +99,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 | P2 营销秒杀 | 抢券 / 秒杀 / 抢红包 | 99.9%（年宕 8h46min） | < 200ms |
 | P3 信息类 | 轮播 / 分类 | 99.5%（年宕 1d19h） | < 1s |
 
-实测对照：基线 `/ping` 64K RPS / p95 3.5ms，全链路 `/orders/list` 58K RPS / p95 5ms，留 5-10× 余量给 GC / 网络抖动。
+压测报告里 `/ping` 64K RPS、`/orders/list` 58K RPS 是在全局令牌桶开着时从本机压出来的，绝大部分请求在令牌桶就返回了 70001，只反映限流拒绝路径的开销，不是接口容量（见下文「压测数据」）。
 
 当前入口统一经过全局 IP 令牌桶（100 RPS / 200 burst）。异步下单用于削平写入峰值；实际部署时应根据核心交易与普通读取的容量分别配置限流策略。
 
@@ -111,7 +111,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 挑几个硬的讲：难在哪、怎么解的、压出来多少、为什么这么取舍。
 
-### 1 · 幂等 Lua 三态机：755K 次请求 = 1 笔订单
+### 1 · 幂等 Lua 三态机：同一个 key 只落 1 笔订单
 
 **难**：`GET → check → SET` 两步在高并发下必有竞态（两个请求同时 GET 都拿到"未处理"）。
 **解**：用 Lua 把"状态判断 + 写入响应"做成单条原子操作，三态 `init → processing → done`：
@@ -119,7 +119,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 处理中：返回 `60002`，让客户端等
 - 已完成：直接 replay 上一次响应体（responseRecorder 拦截过的）
 
-实测：50 VU × 15s 持续打 `/orders/create` 同 Idempotency-Key → 累计 **755,033 次请求 → DB 实际 1 笔订单**。
+实测：50 VU × 15s 持续打 `/orders/create` 同 Idempotency-Key → 累计 755,033 次请求 → DB 实际 1 笔订单。压测时全局令牌桶开着，绝大多数请求在令牌桶就被 70001 拒绝，真正进入幂等中间件的只是放行的一小部分。
 `middleware/idempotency.go` + `repository/cache/idempotency.go`，详见 [`docs/lecture/15-middleware-transaction.md`](docs/lecture/15-middleware-transaction.md)。
 
 ### 2 · 两桶库存 + Saga 回滚：500 抢 100 零超发
@@ -130,8 +130,8 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 支付时 Lua `reserved -= n`；取消时 Lua `reserved → available`
 - DB 事务失败 → defer 调 release Lua 把扣的退回
 
-实测：1000 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms。
-`repository/cache/inventory.go` 4 个 Lua 脚本 + `internal/order/cancel.go` Saga 回滚。
+实测（单测 `TestCoupon_AtomicClaimNoOversell`，已在 3461689 删除）：500 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms（k6 压测时同样被全局令牌桶限流，max 延迟只作参考）。
+`repository/cache/inventory.go` 3 个 Lua 脚本（reserve / commit / release）+ `internal/order/cancel.go` Saga 回滚。
 
 ### 3 · Outbox + 协同 Saga：解双写问题
 
@@ -167,7 +167,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 **难**：fixed window 限流在窗口边界有 2× 突发（59 秒 + 0 秒并发）。
 **解**：Redis ZSet score = 时间戳，Lua 一次性 `ZREMRANGEBYSCORE 清过期 + ZCARD 数当前 + ZADD 加新` → 精确滑动窗口
 - 秒杀场景 `Scope:seckill, Limit:3, Window:1s, ByUser:true`
-- 30VU × 15s 实测：通过 46 次（期望 45）、限流 781,624 次，**误差 2.2%**
+- 30VU × 15s 实测：通过 46 次（期望 45），**误差 2.2%**；返回 70001 的 781,624 次里绝大多数是全局令牌桶拒绝的，不是滑动窗口
 
 `middleware/ratelimit.go::SlidingWindow` + `repository/cache/ratelimit.go` Lua。
 
@@ -199,20 +199,19 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 **解**：保留同步 `/orders/create` 兼容老客户端；新增异步路径
 - `POST /orders/enqueue`：reserve 库存 + 写 RMQ + 立即返回 ticket（<10ms）
 - `internal/order/consumer.go`：消费 MQ 慢慢落 DB（沿用同事务 + outbox）
-- `GET /orders/status?ticket=`：前端轮询，0.5s × 6 次后切换"长等待"文案
+- `GET /orders/status?ticket=`：按 ticket 查询落库结果；店面目前只能在 Workbench 里手动调用，还没有自动轮询
 - 失败 → consumer 调 release 释放 reserved（Saga）
 
 `internal/order/async.go` + `internal/order/consumer.go` + `repository/rabbitmq/order_async.go`。
 
-### 10 · 订单 7 态机：兼容存量 + 业务对齐
+### 10 · 订单 8 态机：兼容存量 + 业务对齐
 
 **难**：原系统只有 3 态（WaitPay/Paid/Cancelled），且 consts 里两套常量数值重叠（`Cancelled=3` = `OrderTypeShipping=3` 撞值不同义，是 bug）。
-**解**：升到业界标配 7 态：`WaitPay → WaitShip → WaitReceive → Completed | Closed | Refunding | Refunded`
-- 数值兼容：1/2/3 保留原义（存量数据零迁移），4-7 新增
-- 旧名 `UnPaid/Paid/Cancelled` 标 Deprecated 别名保留
+**解**：升到 8 态：业界标配的 `WaitPay → WaitShip → WaitReceive → Completed | Closed | Refunding | Refunded`，加上拼团成员订单的 `WaitGroup`（成团进 WaitShip，超时散团进 Closed）
+- 数值兼容：1/2/3 保留原义（存量数据零迁移），4-7 新增，8 是拼团中
 - 状态机校验 `CanTransition(from, to)` + DAO 条件 UPDATE 双兜底幂等
 - 7 天 Cron 自动确认收货
-- 单测 17 例覆盖所有合法 / 非法转换
+- 单测覆盖全部 11 条合法转换和 10 条典型非法转换（`internal/order/order_state_test.go`）
 
 `consts/order.go` + `internal/order/state.go` + `internal/order/shipping.go` + `internal/refund/service.go`。
 
@@ -236,7 +235,7 @@ RMQ、ES、Web3 和 Milvus 分别由 `cmd/main.go` 中的 `tryInitX` 入口按�
 | 异步下单（削峰填谷 enqueue → consumer → ticket polling） | `internal/order/async.go` · `internal/order/consumer.go` |
 | HTTP cache（ETag + Cache-Control + 304） | `middleware/httpcache.go` |
 | 雪花算法订单号 | `pkg/utils/snowflake/` |
-| 订单状态机 7 态（WaitPay → WaitShip → WaitReceive → Completed / Closed / Refunding / Refunded） | `consts/order.go` · `internal/order/state.go` · `internal/order/shipping.go` · `internal/refund/service.go` |
+| 订单状态机 8 态（WaitPay → WaitShip → WaitReceive → Completed / Closed / Refunding / Refunded，拼团 WaitGroup） | `consts/order.go` · `internal/order/state.go` · `internal/order/shipping.go` · `internal/refund/service.go` |
 
 ### 流量治理
 
@@ -284,7 +283,6 @@ RMQ、ES、Web3 和 Milvus 分别由 `cmd/main.go` 中的 `tryInitX` 入口按�
 
 | 能力 | 关键代码 |
 |------|---------|
-| Jaeger 链路追踪 | `middleware/track.go` · `pkg/utils/track/` |
 | Skywalking-go agent | `Makefile` · `cmd/main.go` |
 | 结构化日志（logrus） | `pkg/utils/log/` |
 
@@ -304,18 +302,19 @@ RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和�
 
 ---
 
-## 真实压测数据（`stressTest/REPORT.md`）
+## 压测数据（`stressTest/REPORT.md`）
+
+> 适用条件：2026-05-15 压测时全局令牌桶（每 IP 100 RPS / 突发 200）已经开着，k6 从本机发起，所有 VU 共用 127.0.0.1 一个桶。超出的请求直接返回 HTTP 200 + 业务码 70001，当时的脚本只检查 HTTP 状态码，把这些拒绝也算成了成功。所以下表上万 RPS 的几行主要反映限流拒绝路径的开销，不是接口容量；不到 100 RPS 的 `/product/list` 不受影响。复测接口容量要临时放宽 `routes/router.go` 里的全局令牌桶，脚本现在会断言响应不是 70001。
 
 | 链路 | RPS | p95 | 备注 |
 |------|----:|----:|------|
 | `/ping` 基线 | 64,254 | 3.51ms | 裸 gin 链路上限 |
 | `/product/show`（无缓存 + PK 查询）| 62,226 | 3.01ms | 接近裸 ping |
-| `/orders/list`（游标分页 + 缓存）| 58,406 | 5.00ms | PR #38 7000× 提升 |
+| `/orders/list`（游标分页 + 缓存）| 58,406 | 5.00ms | PR #38 |
 | `/orders/create`（幂等 50 VU × 15s）| 50,319 | 2.33ms | **755,033 次请求 → 1 笔订单** |
 | `/coupon/claim` Redis Lua | 51,362 | 3.52ms | 500 抢 100 张零超发 |
 | `/coupon/claim` DB FOR UPDATE | 50,142 | 3.65ms | max 453ms（vs Lua max 136ms）|
 | `/skill_product/skill` + SlidingWindow | 52,082 | 1.24ms | 30VU 通过 46 / 限流 781,624 / 误差 2.2% |
-| `/orders/old/list`（旧深分页 反例）| 8.3 | 15.95s | OFFSET 1999999 必扫全表 |
 | `/product/list`（COUNT 全表 反例） | 24.5 | 2.50s | 956K 行 product 表 |
 
 数据规模：order 表 ~6M 行 / 653 MB，product 表 ~956K 行 / 364 MB。
@@ -328,7 +327,7 @@ RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和�
 
 ```bash
 # 启动数据库与缓存
-docker compose up -d mysql redis
+docker compose up -d --wait mysql redis
 
 # 需要混合搜索时，同时启动 ES 与 Milvus
 docker compose up -d --wait elasticsearch milvus-standalone
@@ -363,22 +362,25 @@ SNOWFLAKE_ALLOW_DEFAULT=true ./main
 ### Makefile
 
 ```bash
-make                # 编二进制并自动运行
+make                # 编二进制并自动运行（默认带 SNOWFLAKE_ALLOW_DEFAULT=true）
 make build          # 仅编二进制
 make tools          # 编 SkyWalking Agent（需要先初始化子模块）
 make build-agent    # 使用 SkyWalking Agent 构建
-make env-up         # 拉起 docker-compose 中的完整依赖与观测组件
+make env-up         # 拉起 docker-compose.yml 中的完整依赖与观测组件
 make env-down       # 关依赖
-make docker-up      # 容器化拉起项目
+make docker-up      # 容器化拉起项目，挂载本地 config/locales/config.yaml
 make docker-down    # 关容器
 ```
 
 第一次跑：
 
 ```bash
+# 复制配置后把 mysql.default.password 改成 docker-compose.yml 里的 123456
+cp config/locales/config.example.yaml config/locales/config.yaml
+
 # 普通本地开发只启动必要依赖
-docker compose up -d mysql redis
-make
+docker compose up -d --wait mysql redis
+make                # 单实例本地开发，雪花节点号默认 0；多实例部署要给每个副本设 SNOWFLAKE_NODE_ID
 
 # 需要 SkyWalking 时再执行
 git submodule update --init --recursive
@@ -399,6 +401,9 @@ make tools build-agent
 | `EMBEDDING_API_URL` | 为商品与查询生成同一套 768 维 embedding；生产语义搜索应配置真实模型服务 |
 | `EMBEDDING_PROVIDER_ID` / `EMBEDDING_MODEL` | 标识不可变的模型供应方和模型版本；变更后自动使用新的 Milvus 物理集合 |
 | `EMBEDDING_TEXT_VERSION` | 商品 embedding 文本拼接规则版本，默认 `product-v1` |
+| `TRUSTED_PROXIES` | 部署在反向代理或负载均衡后面时，填它们的 CIDR（逗号分隔）；不填时 ClientIP 取 TCP 对端，伪造的 `X-Forwarded-For` 绕不过按 IP 的限流 |
+| `ADMIN_BOOTSTRAP_TOKEN` | 系统里还没有管理员时，登录用户带上这个 token 调用 `POST /api/v1/admin/bootstrap` 把自己设为管理员；不设置则接口关闭 |
+| `COUPON_ALLOW_DB_MODE=true` | 允许领券接口按 `mode=db` 走数据库悲观锁（压测对比用），默认只走 Redis Lua |
 
 Milvus 第一次启用，或模型/供应方/文本版本变化后，以管理员身份调用一次 `POST /api/v1/admin/search/backfill`，把已有商品同时灌入 ES 和当前版本的 Milvus 集合。不同 embedding 契约使用不同物理集合，避免新旧模型向量混用；回填期间关键词搜索继续可用。之后 `product.changed` Outbox 消费者会维护两份索引；前端搜索框直接调用 Hybrid Search。未配置 `EMBEDDING_API_URL` 时仅使用确定性的开发占位向量，链路可验证，但不代表真实语义质量。
 
@@ -425,13 +430,12 @@ gomall
 │   │   ├── response    # 统一错误响应
 │   │   └── outbox      # 事务发件箱（model / repo / publisher）
 │   └── migrate         # AutoMigrate 组合包，聚合全部领域 model
-├── middleware          # cors / jwt / rbac / track / idempotency / ratelimit / circuitbreaker / httpcache
+├── middleware          # cors / jwt / rbac / idempotency / ratelimit / circuitbreaker / httpcache
 ├── pkg
 │   ├── web3/contracts  # Solidity 合约（Web3 Escrow）
 │   ├── e               # 业务错误码
-│   ├── utils           # ctl / email / encryption / jwt / log / snowflake / track / upload
+│   ├── utils           # ctl / email / encryption / jwt / log / snowflake / upload
 │   └── web3            # Web3 escrow / signature 工具
-├── proto               # gRPC proto
 ├── repository
 │   ├── cache           # Redis（coupon / idempotency / inventory / product / ratelimit / redpacket / web3 / key）
 │   ├── db
@@ -440,7 +444,7 @@ gomall
 │   ├── milvus          # Milvus 向量库
 │   └── rabbitmq        # RMQ（domain / order_async / order_delay）
 ├── routes              # 路由 + 中间件链
-├── service             # 横切服务子包（events / grpc / inventory / search / web3）
+├── service             # 横切服务子包（events / inventory / search / web3）
 ├── static              # 静态资源
 ├── stressTest          # k6 压测脚本 + REPORT.md
 ├── types               # 公共信封（BasePage / DataListResp）
@@ -500,17 +504,17 @@ encryptSecret:
 
 | 名称 | 版本 |
 |------|------|
-| golang | 1.25.0 |
+| golang | go 1.26.0，toolchain go1.26.10 |
 | gin | v1.9.0 |
 | gorm | v1.25.0 |
 | mysql driver | v1.5.0 |
-| redis | v9.0.4 |
+| redis | v9.6.3 |
 | dbresolver | v1.4.1 |
 | golang-jwt/jwt | v4.5.2 |
-| crypto | v0.48.0 |
+| crypto | v0.57.0 |
 | logrus | v1.9.3 |
 | go-ethereum | v1.17.3 |
 | milvus-sdk-go | v2.4.2 |
-| rabbitmq/amqp091-go | v1.8.1 |
+| rabbitmq/amqp091-go | v1.14.0 |
 | elastic/go-elasticsearch | v0.0.0 |
 | Skywalking-go | v0.0.0-20230511 |
