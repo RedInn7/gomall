@@ -1,0 +1,45 @@
+name: CI Go
+
+# 只在 Go 代码、依赖或测试会读的配置变化时跑；只改讲义、README、前端的提交不触发。
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'config/**'
+      - 'scripts/grade-exercises.sh'
+      - '.github/workflows/ci-go.yml'
+  push:
+    branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'config/**'
+      - 'scripts/grade-exercises.sh'
+      - '.github/workflows/ci-go.yml'
+
+permissions:
+  contents: read
+
+# 同一分支有新提交时取消还在跑的旧运行
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # 按 go.mod 的 toolchain 指令安装 Go；默认缓存模块和编译产物（按 go.sum 区分）
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # vet 要求每个包都能通过类型检查，已覆盖 go build 能发现的编译错误
+      - run: go vet ./...
+      - run: go test ./...
+      - name: 练习参考答案
+        run: ./scripts/grade-exercises.sh solution
