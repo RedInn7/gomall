@@ -68,6 +68,14 @@ func CircuitBreaker(opt CircuitBreakerOption) gin.HandlerFunc {
 			return
 		}
 
+		// handler panic 会被外层 gin Recovery 接住，直接跳过下面的 report：半开探测名额被占住却永远等不到结果，
+		// 熔断器从此一直拒绝。所以 panic 先按失败回报，再原样抛给 Recovery 写 500。
+		defer func() {
+			if r := recover(); r != nil {
+				cb.report(true, gen)
+				panic(r)
+			}
+		}()
 		c.Next()
 
 		failed := len(c.Errors) > 0 || c.Writer.Status() >= http.StatusInternalServerError

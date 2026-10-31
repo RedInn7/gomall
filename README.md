@@ -396,6 +396,7 @@ make tools build-agent
 | RabbitMQ | Outbox 事件发布与订单延迟关单 |
 | ElasticSearch | 商品关键词检索与增量索引 |
 | `WEB3_RPC_URL` / `WEB3_ESCROW_ADDR` | Web3 托管合约监听与链上支付确认 |
+| `WEB3_CHAIN_ID` | 校验 RPC 节点的链 ID，与配置不一致时 Web3 监听报错退出；不配置则跳过校验 |
 | `WEB3_USDC_CENTS_PER_USDC` / `WEB3_ETH_CENTS_PER_ETH` | 链上支付的人民币汇率：1 USDC / 1 ETH 折多少人民币分；未配置时拒绝对应代币的支付 |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Stripe 托管支付；订单按人民币计价，固定用 cny 收款，`STRIPE_CURRENCY` 只接受 `cny` |
 | `XCASH_BASE_URL` / `XCASH_APP_ID` / `XCASH_HMAC_KEY` / `XCASH_NOTIFY_URL` / `XCASH_METHODS_JSON` / `XCASH_VAULTSLOT_CONFIRMED=true` | Xcash 多链、多币种账单、签名回调、AML 门禁与主动对账；订单固定按 CNY 计价，部署要求见 [Xcash 接入说明](docs/architecture/XCASH_CRYPTO_PAYMENTS.md) |
