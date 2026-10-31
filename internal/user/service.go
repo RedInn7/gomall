@@ -2,10 +2,13 @@ package user
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"mime/multipart"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -17,6 +20,7 @@ import (
 	"github.com/RedInn7/gomall/pkg/utils/jwt"
 	"github.com/RedInn7/gomall/pkg/utils/log"
 	util "github.com/RedInn7/gomall/pkg/utils/upload"
+	"github.com/RedInn7/gomall/repository/cache"
 )
 
 var UserSrvIns *UserSrv
@@ -179,16 +183,54 @@ func (s *UserSrv) UserAvatarUpload(ctx context.Context, file multipart.File, fil
 	return nil, nil
 }
 
-// SendEmail 发送邮件
+var (
+	// ErrCurrentPasswordIncorrect 改密码 / 绑定邮箱前校验当前登录密码失败。
+	ErrCurrentPasswordIncorrect = errors.New("当前密码不正确")
+	// ErrEmailTokenUsed 邮件链接只能用一次。
+	ErrEmailTokenUsed = errors.New("链接已使用，请重新获取邮件")
+)
+
+// SendEmail 发送邮件。收件地址以服务端为准：
+//   - 绑定邮箱：发到请求里的新邮箱，用来确认邮箱归属；要求当前密码
+//   - 解绑邮箱：发到已绑定的邮箱
+//   - 改密码：发到已绑定的邮箱，要求当前密码
+//
+// 不再发到请求里任填的地址：否则偷到登录态就能把改密链接发给自己，或拿接口给任意地址发信。
+// 每用户每分钟 1 封的限频挂在路由上（routes.go）。
 func (s *UserSrv) SendEmail(ctx context.Context, req *SendEmailServiceReq) (*UserInfoResp, error) {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
+	user, err := NewUserDao(ctx).GetUserById(u.Id)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
 
-	var passwordDigest string
-	if req.OperationType == consts.EmailOperationUpdatePassword {
+	var target, passwordDigest string
+	switch req.OperationType {
+	case consts.EmailOperationBinding:
+		if !user.CheckPassword(req.CurrentPassword) {
+			return nil, ErrCurrentPasswordIncorrect
+		}
+		if req.Email == "" {
+			return nil, errors.New("请填写要绑定的邮箱")
+		}
+		target = req.Email
+	case consts.EmailOperationNoBinding:
+		if user.Email == "" {
+			return nil, errors.New("尚未绑定邮箱")
+		}
+		target = user.Email
+	case consts.EmailOperationUpdatePassword:
+		if user.Email == "" {
+			return nil, errors.New("请先绑定邮箱再修改密码")
+		}
+		if !user.CheckPassword(req.CurrentPassword) {
+			return nil, ErrCurrentPasswordIncorrect
+		}
 		if req.Password == "" {
 			err = errors.New("修改密码场景必须提供新密码")
 			log.LogrusObj.Error(err)
@@ -200,23 +242,42 @@ func (s *UserSrv) SendEmail(ctx context.Context, req *SendEmailServiceReq) (*Use
 			return nil, hashErr
 		}
 		passwordDigest = string(digest)
+		target = user.Email
+	default:
+		return nil, errors.New("操作不符合")
 	}
 
-	var address string
-	token, err := jwt.GenerateEmailToken(u.Id, req.OperationType, req.Email, passwordDigest)
+	token, err := jwt.GenerateEmailToken(u.Id, req.OperationType, target, passwordDigest)
 	if err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
 	sender := email.NewEmailSender()
-	address = conf.Config.Email.ValidEmail + token
+	address := conf.Config.Email.ValidEmail + token
 	mailText := fmt.Sprintf(consts.EmailOperationMap[req.OperationType], address)
-	if err = sender.Send(mailText, req.Email, "FanOneMall"); err != nil {
+	if err = sender.Send(mailText, target, "FanOneMall"); err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
 
 	return nil, nil
+}
+
+// emailTokenClaim 以 SETNX 把邮件 token 标记为已使用，返回是否首次；emailTokenRelease 撤销标记。
+// 与 preorder.nowFn 一样留成函数变量，单测替换为内存实现。
+var (
+	emailTokenClaim = func(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+		return cache.RedisClient.SetNX(ctx, key, "1", ttl).Result()
+	}
+	emailTokenRelease = func(ctx context.Context, key string) error {
+		return cache.RedisClient.Del(ctx, key).Err()
+	}
+)
+
+// emailTokenUsedKey 已用邮件 token 的占位 key，存 sha256 不存原文。
+func emailTokenUsedKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return "email:token:used:" + hex.EncodeToString(sum[:])
 }
 
 // Valid 验证内容
@@ -241,6 +302,34 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserIn
 		passwordDigest = claims.PasswordDigest
 		operationType = claims.OperationType
 	}
+
+	// token 一次性：先占位再改库，并发重放只有一个能进来；改库失败释放占位，同一封邮件可以重试。
+	// 占位 TTL 取 token 剩余有效期，过期后 token 本身也失效，占位自然回收。
+	var ttl time.Duration
+	if claims.ExpiresAt != nil {
+		ttl = time.Until(claims.ExpiresAt.Time)
+	}
+	if ttl <= 0 {
+		return nil, errors.New("链接已过期，请重新获取邮件")
+	}
+	usedKey := emailTokenUsedKey(req.Token)
+	first, err := emailTokenClaim(ctx, usedKey, ttl)
+	if err != nil {
+		log.LogrusObj.Error(err)
+		return nil, err
+	}
+	if !first {
+		return nil, ErrEmailTokenUsed
+	}
+	applied := false
+	defer func() {
+		if applied {
+			return
+		}
+		if rbErr := emailTokenRelease(ctx, usedKey); rbErr != nil {
+			log.LogrusObj.Errorf("release email token failed user=%d err=%v", userId, rbErr)
+		}
+	}()
 
 	// 获取该用户信息
 	userDao := NewUserDao(ctx)
@@ -286,6 +375,7 @@ func (s *UserSrv) Valid(ctx context.Context, req *ValidEmailServiceReq) (*UserIn
 		}
 		middleware.InvalidateTokenVersionCache(userId)
 	}
+	applied = true
 
 	return &UserInfoResp{
 		ID:       user.ID,

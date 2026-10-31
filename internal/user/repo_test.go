@@ -5,10 +5,12 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
 	conf "github.com/RedInn7/gomall/config"
+	"github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
@@ -63,7 +65,11 @@ func TestProfileUpdateDoesNotOverwriteConcurrentBalanceChange(t *testing.T) {
 
 func openUserTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	conf.Config = &conf.Conf{EncryptSecret: &conf.EncryptSecret{MoneySecret: "user-test-secret"}}
+	conf.Config = &conf.Conf{
+		EncryptSecret: &conf.EncryptSecret{MoneySecret: "user-test-secret", JwtSecret: "user-test-jwt"},
+		System:        &conf.System{},
+		PhotoPath:     &conf.LocalPhotoPath{},
+	}
 	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:user-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -74,8 +80,11 @@ func openUserTestDB(t *testing.T) *gorm.DB {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	previous := dao.SetTestDB(db)
+	previousLogger := log.LogrusObj
+	log.LogrusObj = logrus.New()
 	t.Cleanup(func() {
 		dao.SetTestDB(previous)
+		log.LogrusObj = previousLogger
 		_ = sqlDB.Close()
 	})
 	if err := db.AutoMigrate(&User{}); err != nil {
