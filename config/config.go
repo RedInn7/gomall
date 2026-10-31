@@ -11,115 +11,94 @@ import (
 var Config *Conf
 
 type Conf struct {
-	System        *System                 `yaml:"system"`
-	Oss           *Oss                    `yaml:"oss"`
-	MySql         map[string]*MySql       `yaml:"mysql"`
-	Email         *Email                  `yaml:"email"`
-	Redis         *Redis                  `yaml:"redis"`
-	EncryptSecret *EncryptSecret          `yaml:"encryptSecret"`
-	Cache         *Cache                  `yaml:"cache"`
-	KafKa         map[string]*KafkaConfig `yaml:"kafKa"`
-	RabbitMq      *RabbitMq               `yaml:"rabbitMq"`
-	Es            *Es                     `yaml:"es"`
-	PhotoPath     *LocalPhotoPath         `yaml:"photoPath"`
+	System        *System
+	Oss           *Oss
+	MySql         map[string]*MySql
+	Email         *Email
+	Redis         *Redis
+	EncryptSecret *EncryptSecret
+	RabbitMq      *RabbitMq
+	Es            *Es
+	PhotoPath     *LocalPhotoPath
 }
 
 type RabbitMq struct {
-	RabbitMQ         string `yaml:"rabbitMq"`
-	RabbitMQUser     string `yaml:"rabbitMqUser"`
-	RabbitMQPassWord string `yaml:"rabbitMqPassWord"`
-	RabbitMQHost     string `yaml:"rabbitMqHost"`
-	RabbitMQPort     string `yaml:"rabbitMqPort"`
+	RabbitMQ         string
+	RabbitMQUser     string
+	RabbitMQPassWord string
+	RabbitMQHost     string
+	RabbitMQPort     string
 	// RequireOnStartup 为 true 时连不上 broker 直接 fail-fast，
 	// 用于生产环境避免静默降级（订单延迟关单 / 事件投递不可用却照常起服务）。
 	// 缺省 false 保持开发态容错行为。
-	RequireOnStartup bool `yaml:"requireOnStartup"`
+	RequireOnStartup bool
 	// MaxDeliveryAttempts 单条消息进 DLQ 前允许的最大投递次数，<=0 时取默认值 3。
-	MaxDeliveryAttempts int `yaml:"maxDeliveryAttempts"`
-}
-
-type KafkaConfig struct {
-	DisableConsumer bool   `yaml:"disableConsumer"`
-	Debug           bool   `yaml:"debug"`
-	Address         string `yaml:"address"`
-	RequiredAck     int    `yaml:"requiredAck"`
-	ReadTimeout     int64  `yaml:"readTimeout"`
-	WriteTimeout    int64  `yaml:"writeTimeout"`
-	MaxOpenRequests int    `yaml:"maxOpenRequests"`
-	Partition       int    `yaml:"partition"`
+	MaxDeliveryAttempts int
 }
 
 type System struct {
-	AppEnv         string   `yaml:"appEnv"`
-	Domain         string   `yaml:"domain"`
-	Version        string   `yaml:"version"`
-	HttpPort       string   `yaml:"httpPort"`
-	Host           string   `yaml:"host"`
-	UploadModel    string   `yaml:"uploadModel"`
-	AllowedOrigins []string `yaml:"allowedOrigins"`
+	AppEnv         string
+	Domain         string
+	Version        string
+	HttpPort       string
+	Host           string
+	UploadModel    string
+	AllowedOrigins []string
 }
 
 type Oss struct {
-	BucketName      string `yaml:"bucketName"`
-	AccessKeyId     string `yaml:"accessKeyId"`
-	AccessKeySecret string `yaml:"accessKeySecret"`
-	Endpoint        string `yaml:"endPoint"`
-	EndpointOut     string `yaml:"endpointOut"`
-	QiNiuServer     string `yaml:"qiNiuServer"`
+	BucketName      string
+	AccessKeyId     string
+	AccessKeySecret string
+	Endpoint        string
+	EndpointOut     string
+	QiNiuServer     string
 }
 
 type MySql struct {
-	Dialect  string `yaml:"dialect"`
-	DbHost   string `yaml:"dbHost"`
-	DbPort   string `yaml:"dbPort"`
-	DbName   string `yaml:"dbName"`
-	UserName string `yaml:"userName"`
-	Password string `yaml:"password"`
-	Charset  string `yaml:"charset"`
+	Dialect  string
+	DbHost   string
+	DbPort   string
+	DbName   string
+	UserName string
+	Password string
+	Charset  string
 }
 
 type Email struct {
-	ValidEmail string `yaml:"validEmail"`
-	SmtpHost   string `yaml:"smtpHost"`
-	SmtpEmail  string `yaml:"smtpEmail"`
-	SmtpPass   string `yaml:"smtpPass"`
+	ValidEmail string
+	SmtpHost   string
+	SmtpEmail  string
+	SmtpPass   string
 }
 
 type Redis struct {
-	RedisHost     string `yaml:"redisHost"`
-	RedisPort     string `yaml:"redisPort"`
-	RedisUsername string `yaml:"redisUsername"`
-	RedisPassword string `yaml:"redisPwd"`
-	RedisDbName   int    `yaml:"redisDbName"`
-	RedisNetwork  string `yaml:"redisNetwork"`
+	RedisHost     string
+	RedisPort     string
+	RedisUsername string
+	RedisPassword string
+	RedisDbName   int
+	RedisNetwork  string
 }
 
 // EncryptSecret 加密相关密钥。生产环境请通过环境变量覆盖。
 type EncryptSecret struct {
-	JwtSecret     string `yaml:"jwtSecret"`
-	SessionSecret string `yaml:"sessionSecret"`
-	EmailSecret   string `yaml:"emailSecret"`
-	PhoneSecret   string `yaml:"phoneSecret"`
-	MoneySecret   string `yaml:"moneySecret"`
+	JwtSecret     string
+	SessionSecret string
+	EmailSecret   string
+	PhoneSecret   string
+	MoneySecret   string
 }
 
 type LocalPhotoPath struct {
-	PhotoHost   string `yaml:"photoHost"`
-	ProductPath string `yaml:"productPath"`
-	AvatarPath  string `yaml:"avatarPath"`
-}
-
-type Cache struct {
-	CacheType    string `yaml:"cacheType"`
-	CacheExpires int64  `yaml:"cacheExpires"`
-	CacheWarmUp  bool   `yaml:"cacheWarmUp"`
-	CacheServer  string `yaml:"cacheServer"`
+	PhotoHost   string
+	ProductPath string
+	AvatarPath  string
 }
 
 type Es struct {
-	EsHost  string `yaml:"esHost"`
-	EsPort  string `yaml:"esPort"`
-	EsIndex string `yaml:"esIndex"`
+	EsHost string
+	EsPort string
 }
 
 func InitConfig() {
@@ -189,4 +168,3 @@ func mustHaveSecrets(c *Conf) {
 		panic("encryptSecret.sessionSecret is required (set via config or env SESSION_SECRET)")
 	}
 }
-

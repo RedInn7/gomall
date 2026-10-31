@@ -21,8 +21,12 @@ var (
 
 func InitMySQL() {
 	mConfig := conf.Config.MySql["default"]
-	pathRead := strings.Join([]string{mConfig.UserName, ":", mConfig.Password, "@tcp(", mConfig.DbHost, ":", mConfig.DbPort, ")/", mConfig.DbName, "?charset=" + mConfig.Charset + "&parseTime=true"}, "")
-	pathWrite := strings.Join([]string{mConfig.UserName, ":", mConfig.Password, "@tcp(", mConfig.DbHost, ":", mConfig.DbPort, ")/", mConfig.DbName, "?charset=" + mConfig.Charset + "&parseTime=true"}, "")
+	charset := mConfig.Charset
+	if charset == "" {
+		charset = "utf8mb4" // 为空时驱动会执行 "SET NAMES " 导致连接失败
+	}
+	pathRead := strings.Join([]string{mConfig.UserName, ":", mConfig.Password, "@tcp(", mConfig.DbHost, ":", mConfig.DbPort, ")/", mConfig.DbName, "?charset=" + charset + "&parseTime=true"}, "")
+	pathWrite := strings.Join([]string{mConfig.UserName, ":", mConfig.Password, "@tcp(", mConfig.DbHost, ":", mConfig.DbPort, ")/", mConfig.DbName, "?charset=" + charset + "&parseTime=true"}, "")
 
 	var ormLogger logger.Interface
 	if gin.Mode() == "debug" {
@@ -46,11 +50,18 @@ func InitMySQL() {
 	if err != nil {
 		panic(err)
 	}
+	// 主连接池和 dbresolver 新开的 source/replica 连接池用同一套参数
+	const (
+		maxIdleConns    = 20
+		maxOpenConns    = 100
+		connMaxLifetime = 5 * time.Minute
+		connMaxIdleTime = 5 * time.Minute
+	)
 	sqlDB, _ := db.DB()
-	sqlDB.SetMaxIdleConns(20)
-	sqlDB.SetMaxOpenConns(100)
-	sqlDB.SetConnMaxLifetime(5 * time.Minute)
-	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
+	sqlDB.SetMaxIdleConns(maxIdleConns)
+	sqlDB.SetMaxOpenConns(maxOpenConns)
+	sqlDB.SetConnMaxLifetime(connMaxLifetime)
+	sqlDB.SetConnMaxIdleTime(connMaxIdleTime)
 	_db = db
 	_ = _db.Use(dbresolver.
 		Register(dbresolver.Config{
@@ -58,7 +69,11 @@ func InitMySQL() {
 			Sources:  []gorm.Dialector{mysql.Open(pathRead)},                         // 写操作
 			Replicas: []gorm.Dialector{mysql.Open(pathWrite), mysql.Open(pathWrite)}, // 读操作
 			Policy:   dbresolver.RandomPolicy{},                                      // sources/replicas 负载均衡策略
-		}))
+		}).
+		SetMaxIdleConns(maxIdleConns).
+		SetMaxOpenConns(maxOpenConns).
+		SetConnMaxLifetime(connMaxLifetime).
+		SetConnMaxIdleTime(connMaxIdleTime))
 
 	_db = _db.Set("gorm:table_options", "charset=utf8mb4")
 }
