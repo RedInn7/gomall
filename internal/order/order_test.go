@@ -5,14 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/clearing"
 	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -39,9 +42,49 @@ func TestMerchantCannotShipAnotherMerchantsOrder(t *testing.T) {
 	assertOrderType(t, db, o.ID, consts.OrderWaitReceive)
 }
 
+func TestDepositPaidPreorderIsNotTreatedAsUnpaid(t *testing.T) {
+	db := openOrderTestDB(t)
+	longAgo := time.Now().Add(-time.Hour)
+	preorder := seedOrder(t, db, &order.Order{
+		UserID: 11, BossID: 22, Type: consts.OrderWaitPay, OrderNum: 6001, PreorderStage: 1,
+		Model: dbmodel.Model{CreatedAt: longAgo},
+	})
+	normal := seedOrder(t, db, &order.Order{
+		UserID: 11, BossID: 22, Type: consts.OrderWaitPay, OrderNum: 6002,
+		Model: dbmodel.Model{CreatedAt: longAgo},
+	})
+	orderDao := order.NewOrderDaoByDB(db)
+
+	timedOut, err := orderDao.GetTimeoutOrders(15, 100)
+	if err != nil {
+		t.Fatalf("scan timeout orders: %v", err)
+	}
+	if len(timedOut) != 1 || timedOut[0].ID != normal.ID {
+		t.Fatalf("timeout scan must only return the normal order, got %+v", timedOut)
+	}
+
+	// MQ 延迟关单与 cron 都走 CancelUnpaidOrder -> CloseOrderWithCheck。
+	if err := order.CancelUnpaidOrder(preorder.OrderNum); err != nil {
+		t.Fatalf("cancel preorder: %v", err)
+	}
+	assertOrderType(t, db, preorder.ID, consts.OrderWaitPay)
+	if closed, err := orderDao.CloseOrderWithCheck(normal.OrderNum); err != nil || !closed {
+		t.Fatalf("normal unpaid order should close: closed=%v err=%v", closed, err)
+	}
+
+	// 普通支付确认的状态守卫同样不认预售单。
+	if paid, err := orderDao.MarkOrderPaidWithCheck(preorder.ID, preorder.UserID); err != nil || paid {
+		t.Fatalf("preorder must not be marked paid by normal payment: paid=%v err=%v", paid, err)
+	}
+	assertOrderType(t, db, preorder.ID, consts.OrderWaitPay)
+}
+
 func openOrderTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:order-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	// 与生产同一命名策略（单数表名），DAO 里的原生 SQL 才能对上表名。
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:order-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{
+		NamingStrategy: schema.NamingStrategy{SingularTable: true},
+	})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

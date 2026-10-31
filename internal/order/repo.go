@@ -249,13 +249,19 @@ func (d *OrderDao) UpdateOrderById(id, uId uint, order *Order) error {
 	return nil
 }
 
+// notPreorderSQL 普通订单条件。预售单付完定金后 type 仍是 WaitPay（preorder_stage=1），
+// 但它不是"未支付订单"：定金已经划给卖家，超时关单会把定金吞掉，普通支付入口会按全款再收一次。
+// 预售单只能走 preorder 包自己的尾款 / 取消 / 没收流程。
+const notPreorderSQL = "preorder_stage=0"
+
 // MarkOrderPaidWithCheck 条件推进订单状态 WaitPay -> WaitShip。
-// 把状态守卫塞进 WHERE：只有仍处于 WaitPay 的订单才会被改为 WaitShip。
+// 把状态守卫塞进 WHERE：只有仍处于 WaitPay 的普通订单才会被改为 WaitShip。
 // 并发支付 / 支付与取消竞争时，只有第一个事务影响 1 行，其余 RowsAffected=0，
 // 上层据此回滚，杜绝重复支付。返回 ok=true 表示本次推进成功。
 func (d *OrderDao) MarkOrderPaidWithCheck(orderID, userID uint) (bool, error) {
 	res := d.DB.Model(&Order{}).
 		Where("id=? AND user_id=? AND type=?", orderID, userID, consts.OrderWaitPay).
+		Where(notPreorderSQL).
 		Update("type", consts.OrderWaitShip)
 	if res.Error != nil {
 		return false, res.Error
@@ -266,10 +272,12 @@ func (d *OrderDao) MarkOrderPaidWithCheck(orderID, userID uint) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
+// GetTimeoutOrders 拉取超时未支付的普通订单，供 cron 兜底关单。预售单不在其列（见 notPreorderSQL）。
 func (d *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*Order, err error) {
 	expireTime := time.Now().Add(-time.Duration(minutes) * time.Minute)
 	err = d.DB.Model(&Order{}).Where(
 		"type=? and created_at <=?", consts.OrderWaitPay, expireTime).
+		Where(notPreorderSQL).
 		Limit(limit).
 		Find(&orders).Error
 
@@ -303,9 +311,12 @@ func (d *OrderDao) GetOrderByOrderNumForUpdate(orderNum uint64) (*Order, error) 
 	return &o, nil
 }
 
+// CloseOrderWithCheck 关闭未支付订单：WaitPay -> Closed。cron 超时扫描与 MQ 延迟关单共用。
+// 已付定金的预售单不关（见 notPreorderSQL），RowsAffected=0 由上层按幂等 no-op 处理。
 func (d *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 	res := d.DB.Model(&Order{}).Where(
 		"order_num=? and type=?", orderNum, consts.OrderWaitPay).
+		Where(notPreorderSQL).
 		Update("type", consts.OrderClosed)
 
 	if res.Error != nil {
