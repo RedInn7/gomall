@@ -16,7 +16,7 @@ type CouponBatchCreateReq struct {
 
 type CouponClaimReq struct {
 	BatchId uint `json:"batch_id" form:"batch_id" binding:"required"`
-	// Mode: "redis" 走 Lua 原子扣减；"db" 走 SELECT FOR UPDATE
+	// Mode: "redis" 走 Lua 原子扣减；"db" 走 SELECT FOR UPDATE（需服务端 COUPON_ALLOW_DB_MODE=true，否则按 redis 处理）
 	Mode string `json:"mode" form:"mode"`
 }
 
