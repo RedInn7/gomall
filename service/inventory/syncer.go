@@ -33,6 +33,9 @@ func SeedFromDB(ctx context.Context, batchSize int) error {
 			break
 		}
 		for _, p := range rows {
+			if err := ctx.Err(); err != nil {
+				return err // 进程退出：别对剩下的商品逐个报错
+			}
 			lastID = p.ID
 			// 判断和建桶在一段 Lua 里原子完成：预热和下单时的懒初始化并发，也不会覆盖已有预占
 			if err := cache.InitStockIfAbsent(ctx, p.ID, int64(p.Num)); err != nil {
