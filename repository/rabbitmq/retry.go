@@ -2,15 +2,20 @@ package rabbitmq
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+
+	util "github.com/RedInn7/gomall/pkg/utils/log"
 )
 
 const retryCountHeader = "x-gomall-retry-count"
 
 // InitRetryQueue 声明固定延迟重试队列。TTL 到期后，消息经默认交换机回到原队列。
+// 同名队列已按别的延迟声明过时 broker 返回 406：沿用已有队列并告警，不让消费者因此起不来；
+// 删掉该 .retry 队列后重启才会换成新延迟。
 func InitRetryQueue(queue string, delay time.Duration) error {
 	ch, err := GlobalRabbitMQ.Channel()
 	if err != nil {
@@ -22,6 +27,11 @@ func InitRetryQueue(queue string, delay time.Duration) error {
 		"x-dead-letter-exchange":    "",
 		"x-dead-letter-routing-key": queue,
 	})
+	var amqpErr *amqp.Error
+	if errors.As(err, &amqpErr) && amqpErr.Code == amqp.PreconditionFailed {
+		util.LogrusObj.Warnf("retry queue %s.retry 已存在且参数不同，沿用旧队列: %v", queue, err)
+		return nil
+	}
 	return err
 }
 
