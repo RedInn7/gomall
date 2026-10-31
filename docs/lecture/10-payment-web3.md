@@ -195,7 +195,7 @@ event PaymentConfirmed(
 
 当前事件没有 token 地址和 recipient 字段。链下能校验 buyer 与 amount，却无法只靠事件确认“使用了预期代币并付给预期收款方”。而且当前 `Escrow.sol` 收的是原生币 `msg.value`，讲 USDC 时不能把它说成已经接通的合约路径。
 
-代码里还有一处必须当场指出的契约漂移：Solidity 把 `buyer` 声明为 `indexed`，`service/web3/listener.go` 内嵌 ABI 却把 buyer 写成非 indexed。真实日志会把 buyer 放进 topic，当前解码器试图从 data 取 buyer，可能直接解码失败。上线前必须让合约 ABI、listener ABI 和测试样本来自同一个构建产物。
+这里曾有一处契约漂移：Solidity 把 `buyer` 声明为 `indexed`，`service/web3/listener.go` 早先内嵌的 ABI 却把 buyer 写成非 indexed，真实日志必然解码失败。现在 listener 直接解析 `pkg/web3/escrow` 嵌入的合约 ABI，从 `topics[2]` 取 buyer，测试样本也用同一份 ABI 编码。
 
 ## 七、哪些已经实现，哪些只是接口形状
 

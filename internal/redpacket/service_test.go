@@ -67,7 +67,7 @@ func TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty(t *testing.T) {
 		}
 	}
 	seed(1, 1000, RedPacketStatusActive, past, 300, 200) // 正常过期：退 500
-	seed(2, 800, RedPacketStatusFinished, past, 100)     // 旧逻辑误标已抢完：仍要退 700
+	seed(2, 800, RedPacketStatusExpired, past, 100)      // 已标过期：同样按 DB 退 700
 	seed(3, 500, RedPacketStatusFinished, past, 500)     // 真抢完：不退
 	seed(4, 600, RedPacketStatusActive, future)          // 未过期：不动
 
