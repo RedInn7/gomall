@@ -192,10 +192,10 @@ func (u *User) SetMoneyPassword(pin string) error {
 
 - User 表只有 `PasswordDigest` 一列，**没有单独的 salt 列**——`CompareHashAndPassword` 从摘要里解析出盐和 cost 再重算比对。`bcrypt` 密文长这样： `$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy`，从中提取出salt
 - **6 位 PIN 只有 100 万种可能**：`10^6 × 300ms` 单核串行也只要约 3.5 天，多核并行按小时计。低熵凭证 bcrypt 只是兜底，真正的防线是在线侧的错误锁定 / 限流——哈希救不了熵不足。
-- **一个真实的兜底陷阱**：`CheckMoneyPassword` 对**空摘要直接放行**（历史 / 种子用户未设支付密码时 `return true`）。这是"兼容优先"的安全默认值，但对资金动作是 fail-open
+- **一个真实的兜底陷阱**：`CheckMoneyPassword` 曾对**空摘要直接放行**（历史 / 种子用户未设支付密码时 `return true`）。这是"兼容优先"的安全默认值，但对资金动作是 fail-open；现在空摘要一律拒绝，扣款路径统一走带失败限次的 `VerifyMoneyPassword`
 
 ```go
-// internal/user/model.go —— 注意这里的 fail-open
+// internal/user/model.go 修复前 —— 注意这里的 fail-open
 func (u *User) CheckMoneyPassword(pin string) bool {
     if u.MoneyPasswordDigest == "" {
         return true // 未设支付密码就放行——支付二次校验被整体跳过

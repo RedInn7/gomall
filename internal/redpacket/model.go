@@ -16,14 +16,14 @@ const (
 
 // RedPacket 红包发放记录
 //
-//	权威剩余份数在 Redis LIST 里 (RPUSH 预拆 + LPOP 抢)
-//	DB.Remaining 仅为最终一致快照，用于历史查询/对账
+//	Redis LIST 只负责分发份额 (RPUSH 预拆 + LPOP 抢)
+//	资金以 DB 为准：剩余金额 = Total - SUM(领取金额)，Remaining 在领取事务内递减，过期回收按 DB 退款
 type RedPacket struct {
 	dbmodel.Model
 	UserID    uint      `gorm:"not null;index"`               // 发包人
 	Total     int64     `gorm:"not null"`                     // 总额，单位：分
 	Count     int       `gorm:"not null"`                     // 红包总份数
-	Remaining int       `gorm:"not null"`                     // DB 同步剩余份数 (Redis 为权威)
+	Remaining int       `gorm:"not null"`                     // 剩余份数，领取事务内递减
 	ExpireAt  time.Time `gorm:"not null;index:idx_rp_expire"` // 过期时间
 	Status    uint      `gorm:"not null;default:1;index"`     // 1 active / 2 expired / 3 finished / 4 refunded
 	Greeting  string    `gorm:"size:128"`                     // 祝福语

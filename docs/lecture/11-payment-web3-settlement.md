@@ -166,7 +166,7 @@ if !strings.EqualFold(parked, onchainBuyer) {
 
 ### amount 要覆盖订单应付
 
-订单金额以分保存。USDC 路径按配置的小数位换算；ETH 路径还依赖 `WEB3_ETH_CENTS_PER_ETH` 喂价。当前默认允许 50 bps，也就是 0.5% 的下浮容差，并允许超付。
+订单金额以人民币分保存。USDC 路径依赖 `WEB3_USDC_CENTS_PER_USDC` 汇率，ETH 路径依赖 `WEB3_ETH_CENTS_PER_ETH` 喂价，再按代币小数位换算。当前默认允许 50 bps，也就是 0.5% 的下浮容差，并允许超付。
 
 ```go
 want, err := expectedTokenBaseUnits(payableCents)
