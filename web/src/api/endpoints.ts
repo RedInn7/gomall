@@ -81,7 +81,7 @@ export const ENDPOINTS: Endpoint[] = [
     ['POST', '/api/v1/orders/ship', '商家', '订单发货', { order_num: 0, tracking_no: '', carrier: '' }],
     ['POST', '/api/v1/orders/refund/approve', '商家', '同意退款', { order_num: 0 }],
     ['POST', '/api/v1/orders/refund/reject', '商家', '驳回退款', { order_num: 0, reason: '' }],
-    ['POST', '/api/v1/admin/bootstrap', '管理员', '初始化管理员'],
+    ['POST', '/api/v1/admin/bootstrap', '管理员', '初始化管理员', { token: '' }],
     ['GET', '/api/v1/admin/users', '管理员', '用户列表'],
     ['POST', '/api/v1/admin/users/promote', '管理员', '调整用户角色'],
     ['POST', '/api/v1/admin/search/backfill', '管理员', '重建商品索引'],
