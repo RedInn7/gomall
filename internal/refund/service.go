@@ -296,7 +296,7 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 			if buyer.Money, err = buyer.EncryptMoney(); err != nil {
 				return err
 			}
-			if err = userDao.UpdateUserById(o.UserID, buyer); err != nil {
+			if err = userDao.UpdateUserMoney(o.UserID, buyer.Money); err != nil {
 				return err
 			}
 		}
@@ -325,7 +325,7 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 				if seller.Money, err = seller.EncryptMoney(); err != nil {
 					return err
 				}
-				if err = userDao.UpdateUserById(o.BossID, seller); err != nil {
+				if err = userDao.UpdateUserMoney(o.BossID, seller.Money); err != nil {
 					return err
 				}
 			}

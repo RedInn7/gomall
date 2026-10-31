@@ -67,7 +67,7 @@ func collectToEscrow(tx *gorm.DB, memberID uint, amountCents int64, refOrderID u
 	if u.Money, err = u.EncryptMoney(); err != nil {
 		return err
 	}
-	if err = userDao.UpdateUserById(memberID, u); err != nil {
+	if err = userDao.UpdateUserMoney(memberID, u.Money); err != nil {
 		return err
 	}
 	if err = ledgerDao.AppendTransaction(memberID, refOrderID, money.DirectionDebit, amountCents, after, BizTypeGroupBuyPay); err != nil {
@@ -118,7 +118,7 @@ func settleToSeller(tx *gorm.DB, sellerID uint, amountCents int64, refOrderID ui
 	if seller.Money, err = seller.EncryptMoney(); err != nil {
 		return err
 	}
-	if err = userDao.UpdateUserById(sellerID, seller); err != nil {
+	if err = userDao.UpdateUserMoney(sellerID, seller.Money); err != nil {
 		return err
 	}
 	return ledgerDao.AppendTransaction(sellerID, refOrderID, money.DirectionCredit, amountCents, after, BizTypeGroupBuySettle)
@@ -163,7 +163,7 @@ func refundFromEscrow(tx *gorm.DB, memberID uint, amountCents int64, refOrderID 
 	if u.Money, err = u.EncryptMoney(); err != nil {
 		return err
 	}
-	if err = userDao.UpdateUserById(memberID, u); err != nil {
+	if err = userDao.UpdateUserMoney(memberID, u.Money); err != nil {
 		return err
 	}
 	return ledgerDao.AppendTransaction(memberID, refOrderID, money.DirectionCredit, amountCents, after, BizTypeGroupBuyRefund)

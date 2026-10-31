@@ -54,7 +54,7 @@ func adjustWallet(tx *gorm.DB, userID, refID uint, delta int64, bizType string) 
 	if u.Money, err = u.EncryptMoney(); err != nil {
 		return false, 0, err
 	}
-	if err = userDao.UpdateUserById(userID, u); err != nil {
+	if err = userDao.UpdateUserMoney(userID, u.Money); err != nil {
 		return false, 0, err
 	}
 
