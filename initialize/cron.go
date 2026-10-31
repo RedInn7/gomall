@@ -12,6 +12,7 @@ import (
 	"github.com/RedInn7/gomall/internal/preorder"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 	"github.com/RedInn7/gomall/service/inventory"
 )
@@ -59,6 +60,11 @@ func InitCron(ctx context.Context) *cron.Cron {
 				util.LogrusObj.Errorf("AvailableReconcile Cron Panic: %v", r)
 			}
 		}()
+		// 多实例部署时每个实例都会触发：抢一把 9 分钟后自动过期的锁，每 10 分钟只有一个实例跑。
+		// ponytail: 单轮超过 9 分钟仍可能和别的实例重叠，漂移商品很多时再换成带续期的锁
+		if ok, err := cache.RedisClient.SetNX(ctx, "stock:reconcile:available:lock", 1, 9*time.Minute).Result(); err != nil || !ok {
+			return
+		}
 		if err := inventory.ReconcileAvailable(ctx, 500); err != nil {
 			util.LogrusObj.Errorf("AvailableReconcile 执行失败: %v", err)
 		}
