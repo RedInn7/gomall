@@ -49,6 +49,17 @@ var (
 // 按 usd 收会把 1000 分人民币当成 10 美元收，清算单上的币种和金额也对不上。
 const stripeOrderCurrency = "cny"
 
+// stripeCheckoutTTL Checkout 会话有效期，从建单时刻算起：同一订单每次建会话的 expires_at 都一样，
+// 复用的幂等键参数才一致。Stripe 要求会话至少 30 分钟后过期，所以建单超过约 30 分钟就不能再发起 Stripe 支付；
+// 超时关单在 15 分钟，正常的待支付订单都在这个窗口内。会话过期前关单任务会跳过这张单（见 order.CancelUnpaidOrder）。
+const stripeCheckoutTTL = time.Hour
+
+// stripeMinCheckoutTTL Stripe 接受的最短会话有效期，多留 1 分钟网络余量。
+const stripeMinCheckoutTTL = 31 * time.Minute
+
+// errStripeCheckoutTooLate 订单已过可发起 Stripe 支付的时间窗口。
+var errStripeCheckoutTooLate = errors.New("订单已超过 Stripe 支付时限，请重新下单")
+
 // stripeEventDedupeTTL Stripe 事件去重键的存活时长。Stripe 的重投窗口最长约 3 天，
 // 取 72h 覆盖其全部自动重试，过期后键自然回收，不长期占用 Redis。
 const stripeEventDedupeTTL = 72 * time.Hour
@@ -129,6 +140,16 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 	if payable <= 0 {
 		return nil, errors.New("订单应付金额非法")
 	}
+	expiresAt := order.CreatedAt.Add(stripeCheckoutTTL)
+	ttl := time.Until(expiresAt)
+	if ttl < stripeMinCheckoutTTL {
+		return nil, errStripeCheckoutTooLate
+	}
+	// 先占位再建会话：占位写不进去就不建，避免会话还能付款时订单被超时关掉。
+	if err := cache.RedisClient.Set(ctx, cache.StripeCheckoutKey(order.ID), "1", ttl).Err(); err != nil {
+		log.LogrusObj.Errorf("stripe mark checkout active failed order=%d err=%v", order.ID, err)
+		return nil, err
+	}
 
 	stripe.Key = sk
 	params := &stripe.CheckoutSessionParams{
@@ -136,6 +157,7 @@ func (s *StripePaymentSrv) CreateCheckout(ctx context.Context, req *StripeChecko
 		ClientReferenceID: stripe.String(strconv.FormatUint(uint64(order.ID), 10)),
 		SuccessURL:        stripe.String(stripeSuccessURL()),
 		CancelURL:         stripe.String(stripeCancelURL()),
+		ExpiresAt:         stripe.Int64(expiresAt.Unix()),
 		// 不传 payment_method_types：启用动态支付方式，由 Dashboard 配置，最大化转化。
 		LineItems: []*stripe.CheckoutSessionLineItemParams{
 			{

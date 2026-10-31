@@ -47,6 +47,35 @@ func TestStockReconcileKeepsGroupbuyAndCommitPendingReservations(t *testing.T) {
 	}
 }
 
+// 订单还有能付款的外部支付（Stripe 会话 / Xcash 账单）就推迟关单；账单过期后照常关单并释放预占。
+func TestCancelUnpaidOrderWaitsForActivePaymentIntent(t *testing.T) {
+	db := openOrderTestDB(t)
+	stock := stubStockRedis(t, map[string]int64{
+		cache.StockAvailableKey(1): 0, cache.StockReservedKey(1): 3,
+		cache.StripeCheckoutKey(301): 1,
+	})
+	if err := db.Exec("CREATE TABLE xcash_payment_intent (id INTEGER PRIMARY KEY, order_id INTEGER, status TEXT, expires_at DATETIME)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO xcash_payment_intent (order_id, status, expires_at) VALUES (?, ?, ?), (?, ?, ?)",
+		302, "waiting", time.Now().Add(time.Hour), 303, "waiting", time.Now().Add(-time.Hour)).Error; err != nil {
+		t.Fatal(err)
+	}
+	want := map[uint]uint{301: consts.OrderWaitPay, 302: consts.OrderWaitPay, 303: consts.OrderClosed}
+	for id := range want {
+		o := seedOrder(t, db, &order.Order{Model: dbmodel.Model{ID: id}, UserID: 11, BossID: 22, Type: consts.OrderWaitPay, OrderNum: uint64(id)})
+		if err := order.CancelUnpaidOrder(o.OrderNum); err != nil {
+			t.Fatalf("cancel order %d: %v", id, err)
+		}
+	}
+	for id, typ := range want {
+		assertOrderType(t, db, id, typ)
+	}
+	if stock[cache.StockReservedKey(1)] != 2 || stock[cache.StockAvailableKey(1)] != 1 {
+		t.Fatalf("only the closed order's reservation should be released: %v", stock)
+	}
+}
+
 // stubStockRedis 用内存 map 顶替 Redis，只实现库存相关命令：GET / SCAN / EXISTS 与三个库存 Lua。
 func stubStockRedis(t *testing.T, kv map[string]int64) map[string]int64 {
 	t.Helper()
