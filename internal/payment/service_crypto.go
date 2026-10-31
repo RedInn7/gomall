@@ -61,6 +61,10 @@ func (s *CryptoPaymentSrv) IssueNonce(ctx context.Context, req *CryptoNonceReq) 
 	if err := ensureOrderPayable(order); err != nil {
 		return nil, err
 	}
+	// 汇率 / 喂价没配就不让用户去链上付款：否则结算时换算不出应付代币数，钱只能卡在死信里。
+	if _, err := expectedTokenBaseUnits(orderPayableCents(order)); err != nil {
+		return nil, err
+	}
 
 	nonce, err := randomNonce()
 	if err != nil {
@@ -97,6 +101,9 @@ func (s *CryptoPaymentSrv) VerifyAndPark(ctx context.Context, req *CryptoPaydown
 		return nil, errors.New("订单不存在")
 	}
 	if err := ensureOrderPayable(order); err != nil {
+		return nil, err
+	}
+	if _, err := expectedTokenBaseUnits(orderPayableCents(order)); err != nil {
 		return nil, err
 	}
 
