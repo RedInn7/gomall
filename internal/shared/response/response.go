@@ -17,7 +17,7 @@ func ErrorResponse(ctx *gin.Context, err error) *ctl.Response {
 	if ve, ok := err.(validator.ValidationErrors); ok {
 		for _, fieldError := range ve {
 			field := conf.T(fmt.Sprintf("Field.%s", fieldError.Field()))
-			tag := conf.T(fmt.Sprintf("Tag.Valid.%s", fieldError.Tag()))
+			tag := conf.T(fmt.Sprintf("Tag.%s", fieldError.Tag()))
 			return ctl.RespError(ctx, err, fmt.Sprintf("%s%s", field, tag))
 		}
 	}

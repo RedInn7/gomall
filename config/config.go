@@ -1,6 +1,7 @@
 package conf
 
 import (
+	"log"
 	"os"
 	"strings"
 
@@ -139,6 +140,11 @@ func InitConfig() {
 	applySecretOverrides(Config)
 	applySystemOverrides(Config)
 	mustHaveSecrets(Config)
+
+	// 参数校验的中文提示；缺文件只影响提示文案，不阻止启动
+	if err := LoadLocales(workDir + "/config/locales/zh-cn.yaml"); err != nil {
+		log.Printf("加载 zh-cn.yaml 失败，参数校验提示退回字段名: %v", err)
+	}
 }
 
 func applySystemOverrides(c *Conf) {
