@@ -40,7 +40,7 @@ abckkk
 
 - **业务需求不仅是“包含字符”：** 真正的搜索场景通常需要**中文分词**（搜“苹果手机”能匹配“苹果 iPhone 15”）、**纠错**（搜“华唯”能找到“华为”）和**权重排序**，这些在关系型数据库中几乎无法高效实现。
 
-用户只传 `name=咖啡壶`，ES 正常时能搜到咖啡壶；ES 一旦故障，同一请求却可能从 MySQL 返回近似全量商品。接口没有换，请求也没有换，答案为什么变了？这处真实偏差正好能把商品搜索的读链和降级边界串起来。
+用户只传 `name=咖啡壶`，ES 正常时能搜到咖啡壶；早先 ES 一旦故障，同一请求却可能从 MySQL 返回近似全量商品。接口没有换，请求也没有换，答案为什么变了？这处真实出现过的偏差正好能把商品搜索的读链和降级边界串起来。
 
 商城搜索要从大量商品中找出候选，按相关性排列，并排除不该展示的商品。gomall 为此保留了两份数据：MySQL 记录商品事实，Elasticsearch（下文简称 ES）保存用于检索的副本。
 
@@ -81,7 +81,7 @@ Content-Type: application/x-www-form-urlencoded
 info=露营咖啡壶&category_id=7&page_num=2&page_size=10
 ```
 
-按当前实现，关键词“露营咖啡壶”和分页会进入 ES，`category_id=7` 不会进入普通搜索条件。ES 报错后，数据库继续使用 `info` 做 `LIKE` 查询。
+按当前实现，关键词“露营咖啡壶”和分页会进入 ES，`category_id=7` 不会进入普通搜索条件。ES 连接失败或返回 5xx 后，数据库用同一个关键词做 `LIKE` 查询。
 
 路由在 `service/search/routes.go` 注册，`POST /api/v1/product/search` 可以匿名访问。
 
@@ -91,6 +91,8 @@ info=露营咖啡壶&category_id=7&page_num=2&page_size=10
 func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (
     resp *types.DataListResp, err error,
 ) {
+    // ES 与 MySQL 共用同一个关键词（深分页、空关键词的拦截此处省略）。
+    kw := searchKeyword(req)
     // 正常情况下优先使用 ES：它负责关键词召回和相关性排序。
     if es.EsClient != nil {
         docs, total, esErr := SearchProducts(ctx, req)
@@ -98,13 +100,16 @@ func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (
             // 搜索成功但结果为空也是正常答案，不能因此改查 MySQL。
             return buildESResponse(docs, total), nil
         }
-        // 只有 ES 真正出错时才降级，避免一次故障让搜索接口完全不可用。
+        // 4xx 是请求本身的问题，原样返回；只有连接错误和 5xx 才降级。
+        if errors.Is(esErr, es.ErrBadRequest) {
+            return nil, esErr
+        }
         log.LogrusObj.Errorf("ES search failed, fall back to DB: %v", esErr)
     }
 
     // MySQL 只提供基础包含匹配，保住可用性，不保证与 ES 排序一致。
     products, count, err := product.NewProductDao(ctx).
-        SearchProduct(req.Info, req.BasePage)
+        SearchProduct(kw, req.BasePage)
     if err != nil {
         return nil, err
     }
@@ -115,12 +120,12 @@ func ProductSearch(ctx context.Context, req *product.ProductSearchReq) (
 `buildESResponse` 和 `buildDBResponse` 是讲义中的代称，不是仓库函数名。这里有三种结果需要分清：
 
 - `EsClient == nil`，直接查 MySQL；
-- ES 客户端存在，但请求、解析或 ES 状态码出错，记录日志后查 MySQL；
+- ES 客户端存在，但连接、解析出错或返回 5xx，记录日志后查 MySQL；返回 4xx（如超出 10000 条的深分页）则原样返回错误；
 - ES 成功返回空数组，接口直接返回空结果，不会降级。
 
 空数组表示“没有匹配商品”，不是搜索服务故障。
 
-MySQL 在这里保住的是接口可用性，不是完整的搜索体验。它没有复刻 ES 的分词、字段权重和相关性排序；后面还会看到，两条路径目前连关键词来源都不完全相同。
+MySQL 在这里保住的是接口可用性，不是完整的搜索体验。它没有复刻 ES 的分词、字段权重和相关性排序；后面还会看到，两条路径曾经连关键词来源都不相同。
 
 | **维度**            | **MySQL**                                                    | **Redis**                                                  | **Elasticsearch (ES)**                                       |
 | ------------------- | ------------------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------ |
@@ -355,7 +360,7 @@ func (d *ProductDao) SearchProduct(info string, page types.BasePage) (
 
 | 对比项     | ES 正常路径                         | MySQL 降级路径      |
 | ---------- | ----------------------------------- | ------------------- |
-| 关键词来源 | `info / title / name` 中第一个非空值 | 只传 `req.Info`     |
+| 关键词来源 | `info / title / name` 中第一个非空值 | 与 ES 相同          |
 | 匹配字段   | `name`、`title`、`info`             | `name`、`info`      |
 | 排序       | ES 文本相关性                       | 没有显式 `ORDER BY` |
 | 类目过滤   | 未使用                              | 未使用              |
@@ -369,11 +374,11 @@ func (d *ProductDao) SearchProduct(info string, page types.BasePage) (
 <details>
 <summary>参考答案</summary>
 
-ES 正常时，`firstNonEmpty` 会选到 `name`，搜索“咖啡壶”。ES 故障后，降级分支只把空的 `req.Info` 传给数据库，条件变成 `LIKE '%%'`。大多数记录都会满足条件，接口可能返回近似全量商品，而不是继续搜索“咖啡壶”。
+ES 正常时，`firstNonEmpty` 会选到 `name`，搜索“咖啡壶”。早先 ES 故障后，降级分支只把空的 `req.Info` 传给数据库，条件变成 `LIKE '%%'`，接口可能返回近似全量商品；现在两条路径共用 `searchKeyword`，降级后仍搜索“咖啡壶”。
 
 </details>
 
-这已经超出排序差异，两条路径执行的查询契约并不一致。修复时可以在服务层只计算一次规范化关键词，再把同一个值交给两个仓储实现；类目和上架条件也应有共同定义。
+这已经超出排序差异，两条路径执行的查询契约曾经并不一致。现在服务层用 `searchKeyword` 只计算一次关键词，再把同一个值交给两个仓储实现；类目和上架条件也应有共同定义。
 
 从业务上看，降级不是“换个数据库继续查”这么简单。降级前后至少要约定关键词、过滤条件和分页含义；排序可以变朴素，但不能把“搜咖啡壶”变成“返回所有商品”。
 
@@ -490,7 +495,7 @@ for d := range msgs {
 
 1. ES 客户端存在，但查询返回 500。`ProductSearch` 会记录错误并查数据库；数据库也失败时，接口仍然失败。
 2. 删除消息重复投递。第二次 ES Delete 返回 404，仓储层视为成功，消费者 Ack，不会持续重试。
-3. 请求为 `title=防水跑鞋&page_num=2&page_size=10`。ES 使用“防水跑鞋”、`from=10`、`size=10`；降级路径读取空的 `req.Info`，查询条件变为 `name LIKE '%%' OR info LIKE '%%'`。
+3. 请求为 `title=防水跑鞋&page_num=2&page_size=10`。ES 使用“防水跑鞋”、`from=10`、`size=10`；降级路径同样搜索“防水跑鞋”，查询条件为 `name LIKE '%防水跑鞋%' OR info LIKE '%防水跑鞋%'`。
 4. 商品更新事务中 Outbox 插入失败。事务整体回滚，MySQL 保留旧商品，Outbox 不留事件；接口返回失败，不会对外宣称这次更新已经完成。
 
 ## 课后练习
@@ -499,7 +504,7 @@ for d := range msgs {
 
 为 ES 正常和 ES 故障设计表驱动测试，覆盖只传 `name`、只传 `info`、同时传多个关键词字段、指定 `category_id` 和分页越界值。除了响应，还要断言仓储层收到的关键词、分页参数、过滤条件与总数。
 
-先用测试记录现状：ES 路径按 `info → title → name` 取值，数据库只接收 `req.Info`，普通 ES 与数据库路径都没有使用 `category_id`。之后再增加一组理想契约的失败用例，避免修改实现时把原问题一并改进测试里。
+先用测试记录现状：两条路径都按 `info → title → name` 取关键词，普通 ES 与数据库路径都没有使用 `category_id`。之后再增加一组理想契约的失败用例，避免修改实现时把原问题一并改进测试里。
 
 ### 2. 补上结构化过滤
 
