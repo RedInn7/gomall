@@ -37,15 +37,6 @@ services:
     ports:
       - "6379:6379"
 
-  jaeger:
-    container_name: jaeger
-    image: jaegertracing/all-in-one:latest
-    ports:
-      - "16686:16686"
-    restart: always
-    networks:
-      - mall
-
   elasticsearch:
       image: elasticsearch:8.4.2
       container_name: elasticsearch

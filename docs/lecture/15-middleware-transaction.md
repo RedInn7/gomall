@@ -156,7 +156,6 @@ Client
   → Recovery（gin.Default）
   → TokenBucket（全局，按 IP）
   → CORS
-  → Jaeger
   → Session
   → AuthMiddleware（authed 路由组）
   → CircuitBreaker（单路由）
@@ -164,7 +163,7 @@ Client
   → OrderPaymentHandler
 ```
 
-后面的时序图省略 Logger、Recovery、CORS、Jaeger 和 Session，只展开会改变交易放行结果的业务护栏。
+后面的时序图省略 Logger、Recovery、CORS 和 Session，只展开会改变交易放行结果的业务护栏。
 
 ```mermaid
 sequenceDiagram

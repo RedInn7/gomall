@@ -13,7 +13,7 @@ import (
 )
 
 // ErrorResponse 将校验错误翻译成可读文案，其余错误透传原始信息。
-func ErrorResponse(ctx *gin.Context, err error) *ctl.TrackedErrorResponse {
+func ErrorResponse(ctx *gin.Context, err error) *ctl.Response {
 	if ve, ok := err.(validator.ValidationErrors); ok {
 		for _, fieldError := range ve {
 			field := conf.T(fmt.Sprintf("Field.%s", fieldError.Field()))
