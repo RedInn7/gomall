@@ -69,39 +69,16 @@ return 1
 `)
 
 // initIfAbsentScript: available 不存在时按 DB 库存建桶，已存在则不动（返回 0）。
-// DB 的 num 里还算着已预占、没付款的件数，所以 available = num - reserved（最低 0），
-// reserved 不存在按 0 算。判断和写入在同一段 Lua 里，并发的懒初始化 / 启动预热不会互相覆盖。
+// DB 的 num 里还算着已预占、没付款的件数，所以 available = num - reserved，reserved 不存在按 0 算；
+// 预占比 num 还多时为负（含义见 AdjustAvailable）。判断和写入在同一段 Lua 里，
+// 并发的懒初始化 / 启动预热不会互相覆盖。
 // KEYS[1]=available, KEYS[2]=reserved, ARGV[1]=DB product.num
 var initIfAbsentScript = redis.NewScript(`
 if redis.call('EXISTS', KEYS[1]) == 1 then
     return 0
 end
-local avail = tonumber(ARGV[1]) - tonumber(redis.call('GET', KEYS[2]) or '0')
-if avail < 0 then
-    avail = 0
-end
-redis.call('SET', KEYS[1], avail)
+redis.call('SET', KEYS[1], tonumber(ARGV[1]) - tonumber(redis.call('GET', KEYS[2]) or '0'))
 return 1
-`)
-
-// adjustAvailableScript: 商家改库存后按差值调整 available。
-// 静止时 available + reserved == DB num；商家把 num 从 old 改成 new，已预占的 reserved 不变，
-// available 跟着变 delta = new - old，即 available = available + delta，最低为 0
-// （new 比已预占的件数还少时先停卖，多出来的预占付款时由 DB 条件扣减拦住）。
-// 不直接写 new - reserved：付款事务已扣 DB、还没扣 reserved 时改库存，这笔会被重复扣掉，差值不会。
-// available 不存在时不动（返回 -1），下单时会按 DB 的新库存懒建桶。
-// KEYS[1]=available, ARGV[1]=delta
-var adjustAvailableScript = redis.NewScript(`
-local avail = redis.call('GET', KEYS[1])
-if avail == false then
-    return -1
-end
-local target = tonumber(avail) + tonumber(ARGV[1])
-if target < 0 then
-    target = 0
-end
-redis.call('SET', KEYS[1], target)
-return target
 `)
 
 // restockScript: 退款回补，available += n；available 不存在（未初始化）时不建桶
@@ -127,9 +104,14 @@ func InitStockIfAbsent(ctx context.Context, productID uint, num int64) error {
 		[]string{StockAvailableKey(productID), StockReservedKey(productID)}, num).Err()
 }
 
-// AdjustAvailable 商家把 DB 库存改了 delta 件后，同步调整 available，算法见 adjustAvailableScript。
+// AdjustAvailable 商家把 DB 库存从 old 改成 new 后，available 跟着加 delta = new - old（可为负）。
+// 静止时 available + reserved == DB num，改库存不动已预占的 reserved，所以 available 变 delta。
+// 不直接写 new - reserved：付款事务已扣 DB、还没扣 reserved 时改库存，这笔会被重复扣掉，差值不会。
+// 不夹到 0：new 比已预占的件数还少时 available 为负，就是欠下的件数，预占释放回来先还欠账，
+// reserve 脚本把负数当无货；夹到 0 会丢掉欠账，之后释放回来的预占会凭空多出可卖库存。
+// 和退款回补用同一段脚本：桶不存在时不动，下单时按 DB 的新库存懒建桶。
 func AdjustAvailable(ctx context.Context, productID uint, delta int64) error {
-	return adjustAvailableScript.Run(ctx, RedisClient, []string{StockAvailableKey(productID)}, delta).Err()
+	return restockScript.Run(ctx, RedisClient, []string{StockAvailableKey(productID)}, delta).Err()
 }
 
 // ReserveStock 预扣 n 件 (available -> reserved)
