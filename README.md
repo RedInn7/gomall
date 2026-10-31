@@ -99,7 +99,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 | P2 营销秒杀 | 抢券 / 秒杀 / 抢红包 | 99.9%（年宕 8h46min） | < 200ms |
 | P3 信息类 | 轮播 / 分类 | 99.5%（年宕 1d19h） | < 1s |
 
-实测对照：基线 `/ping` 64K RPS / p95 3.5ms，全链路 `/orders/list` 58K RPS / p95 5ms，留 5-10× 余量给 GC / 网络抖动。
+压测报告里 `/ping` 64K RPS、`/orders/list` 58K RPS 是在全局令牌桶开着时从本机压出来的，绝大部分请求在令牌桶就返回了 70001，只反映限流拒绝路径的开销，不是接口容量（见下文「压测数据」）。
 
 当前入口统一经过全局 IP 令牌桶（100 RPS / 200 burst）。异步下单用于削平写入峰值；实际部署时应根据核心交易与普通读取的容量分别配置限流策略。
 
@@ -111,7 +111,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 挑几个硬的讲：难在哪、怎么解的、压出来多少、为什么这么取舍。
 
-### 1 · 幂等 Lua 三态机：755K 次请求 = 1 笔订单
+### 1 · 幂等 Lua 三态机：同一个 key 只落 1 笔订单
 
 **难**：`GET → check → SET` 两步在高并发下必有竞态（两个请求同时 GET 都拿到"未处理"）。
 **解**：用 Lua 把"状态判断 + 写入响应"做成单条原子操作，三态 `init → processing → done`：
@@ -119,7 +119,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 处理中：返回 `60002`，让客户端等
 - 已完成：直接 replay 上一次响应体（responseRecorder 拦截过的）
 
-实测：50 VU × 15s 持续打 `/orders/create` 同 Idempotency-Key → 累计 **755,033 次请求 → DB 实际 1 笔订单**。
+实测：50 VU × 15s 持续打 `/orders/create` 同 Idempotency-Key → 累计 755,033 次请求 → DB 实际 1 笔订单。压测时全局令牌桶开着，绝大多数请求在令牌桶就被 70001 拒绝，真正进入幂等中间件的只是放行的一小部分。
 `middleware/idempotency.go` + `repository/cache/idempotency.go`，详见 [`docs/lecture/15-middleware-transaction.md`](docs/lecture/15-middleware-transaction.md)。
 
 ### 2 · 两桶库存 + Saga 回滚：500 抢 100 零超发
@@ -130,7 +130,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 支付时 Lua `reserved -= n`；取消时 Lua `reserved → available`
 - DB 事务失败 → defer 调 release Lua 把扣的退回
 
-实测：1000 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms。
+实测：1000 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms（k6 压测时同样被全局令牌桶限流，max 延迟只作参考）。
 `repository/cache/inventory.go` 4 个 Lua 脚本 + `internal/order/cancel.go` Saga 回滚。
 
 ### 3 · Outbox + 协同 Saga：解双写问题
@@ -167,7 +167,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 **难**：fixed window 限流在窗口边界有 2× 突发（59 秒 + 0 秒并发）。
 **解**：Redis ZSet score = 时间戳，Lua 一次性 `ZREMRANGEBYSCORE 清过期 + ZCARD 数当前 + ZADD 加新` → 精确滑动窗口
 - 秒杀场景 `Scope:seckill, Limit:3, Window:1s, ByUser:true`
-- 30VU × 15s 实测：通过 46 次（期望 45）、限流 781,624 次，**误差 2.2%**
+- 30VU × 15s 实测：通过 46 次（期望 45），**误差 2.2%**；返回 70001 的 781,624 次里绝大多数是全局令牌桶拒绝的，不是滑动窗口
 
 `middleware/ratelimit.go::SlidingWindow` + `repository/cache/ratelimit.go` Lua。
 
@@ -303,18 +303,19 @@ RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和�
 
 ---
 
-## 真实压测数据（`stressTest/REPORT.md`）
+## 压测数据（`stressTest/REPORT.md`）
+
+> 适用条件：2026-05-15 压测时全局令牌桶（每 IP 100 RPS / 突发 200）已经开着，k6 从本机发起，所有 VU 共用 127.0.0.1 一个桶。超出的请求直接返回 HTTP 200 + 业务码 70001，当时的脚本只检查 HTTP 状态码，把这些拒绝也算成了成功。所以下表上万 RPS 的几行主要反映限流拒绝路径的开销，不是接口容量；不到 100 RPS 的 `/product/list` 不受影响。复测接口容量要临时放宽 `routes/router.go` 里的全局令牌桶，脚本现在会断言响应不是 70001。
 
 | 链路 | RPS | p95 | 备注 |
 |------|----:|----:|------|
 | `/ping` 基线 | 64,254 | 3.51ms | 裸 gin 链路上限 |
 | `/product/show`（无缓存 + PK 查询）| 62,226 | 3.01ms | 接近裸 ping |
-| `/orders/list`（游标分页 + 缓存）| 58,406 | 5.00ms | PR #38 7000× 提升 |
+| `/orders/list`（游标分页 + 缓存）| 58,406 | 5.00ms | PR #38 |
 | `/orders/create`（幂等 50 VU × 15s）| 50,319 | 2.33ms | **755,033 次请求 → 1 笔订单** |
 | `/coupon/claim` Redis Lua | 51,362 | 3.52ms | 500 抢 100 张零超发 |
 | `/coupon/claim` DB FOR UPDATE | 50,142 | 3.65ms | max 453ms（vs Lua max 136ms）|
 | `/skill_product/skill` + SlidingWindow | 52,082 | 1.24ms | 30VU 通过 46 / 限流 781,624 / 误差 2.2% |
-| `/orders/old/list`（旧深分页 反例）| 8.3 | 15.95s | OFFSET 1999999 必扫全表 |
 | `/product/list`（COUNT 全表 反例） | 24.5 | 2.50s | 956K 行 product 表 |
 
 数据规模：order 表 ~6M 行 / 653 MB，product 表 ~956K 行 / 364 MB。
