@@ -137,10 +137,11 @@ func (d *OrderDao) ListStockCommitPending(limit int) (orders []*Order, err error
 
 // SetStockCommitPending 条件翻转待核销标记，返回是否真的翻转了。
 // 补核销前先翻成 false 抢占，多实例对账时同一份预占只会被一个实例核销。
+// 用 UpdateColumn 不刷 updated_at：自动确认收货、补偿结算都按它计时。
 func (d *OrderDao) SetStockCommitPending(orderID uint, pending bool) (bool, error) {
 	res := d.DB.Model(&Order{}).
 		Where("id = ? AND stock_commit_pending = ?", orderID, !pending).
-		Update("stock_commit_pending", pending)
+		UpdateColumn("stock_commit_pending", pending)
 	return res.RowsAffected > 0, res.Error
 }
 
