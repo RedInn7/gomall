@@ -20,6 +20,7 @@ import (
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
@@ -224,8 +225,9 @@ func refundAmount(o *orderpkg.Order) int64 {
 // 不做项（留待后续）：买家购买时生成的商品归属副本不在此回退——买家可能已改价 / 已转售，
 // 删除副本不安全，需配套的副本溯源与人工/对账流程，本期不动。
 func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
+	var restocked *orderpkg.Order
 	db := dao.NewDBClient(ctx)
-	return db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		orderDao := orderpkg.NewOrderDaoByDB(tx)
 		o, err := orderDao.GetOrderByIdOnly(orderID)
 		if err != nil {
@@ -355,6 +357,7 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 			util.LogrusObj.Error(err)
 			return err
 		}
+		restocked = o
 		if clearingFound {
 			now := time.Now()
 			if err = tx.Model(&clearing.PaymentClearing{}).Where("id = ?", clearingRecord.ID).
@@ -366,6 +369,16 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 		// 商品归属副本回退不做，原因见方法注释。
 		return nil
 	})
+	if err != nil || restocked == nil {
+		return err
+	}
+	// DB 提交后再把回补的件数加回 Redis available，否则缓存里这批库存卖不出去。
+	// 失败只记日志：DB 已是真相，交给库存对账。
+	if e := cache.RestockAvailable(ctx, restocked.ProductID, int64(restocked.Num)); e != nil {
+		util.LogrusObj.Errorf("refund restock redis failed order=%d product=%d num=%d err=%v",
+			restocked.ID, restocked.ProductID, restocked.Num, e)
+	}
+	return nil
 }
 
 func inUintSlice(v uint, s []uint) bool {

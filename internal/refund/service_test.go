@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
@@ -58,6 +60,7 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			db := openRefundTestDB(t)
+			restocks := stubRestockRedis(t)
 			seedRefundUser(t, db, 11, 100)
 			seedRefundUser(t, db, 22, tt.sellerBefore)
 			p := &product.Product{Name: "book", CategoryID: 1, Num: 0, BossID: 22}
@@ -106,6 +109,9 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 			if gotProduct.Num != 1 {
 				t.Fatalf("duplicate refund must restore stock once, got %d", gotProduct.Num)
 			}
+			if len(*restocks) != 1 || (*restocks)[0] != "stock:available:33+1" {
+				t.Fatalf("redis available must be restocked once after commit, got %v", *restocks)
+			}
 			var gotClearing clearing.PaymentClearing
 			if err := db.First(&gotClearing, record.ID).Error; err != nil {
 				t.Fatalf("load clearing: %v", err)
@@ -119,6 +125,7 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 
 func TestZeroAmountLegacyRefundIsIdempotent(t *testing.T) {
 	db := openRefundTestDB(t)
+	stubRestockRedis(t)
 	seedRefundUser(t, db, 11, 100)
 	seedRefundUser(t, db, 22, 50)
 	p := &product.Product{Name: "free", CategoryID: 1, Num: 0, BossID: 22}
@@ -290,6 +297,39 @@ func openRefundTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
+}
+
+// stubRestockRedis 不连真实 Redis，记录退款回补 available 的调用（key+件数）。
+func stubRestockRedis(t *testing.T) *[]string {
+	t.Helper()
+	var calls []string
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:0"})
+	client.AddHook(restockHook{calls: &calls})
+	prev := cache.RedisClient
+	cache.RedisClient = client
+	t.Cleanup(func() {
+		cache.RedisClient = prev
+		_ = client.Close()
+	})
+	return &calls
+}
+
+type restockHook struct{ calls *[]string }
+
+func (restockHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (restockHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (h restockHook) ProcessHook(redis.ProcessHook) redis.ProcessHook {
+	return func(_ context.Context, cmd redis.Cmder) error {
+		if c, ok := cmd.(*redis.Cmd); ok {
+			// evalsha sha 1 key n
+			args := c.Args()
+			*h.calls = append(*h.calls, fmt.Sprintf("%v+%v", args[3], args[4]))
+			c.SetVal(int64(1))
+		}
+		return nil
+	}
 }
 
 func seedRefundUser(t *testing.T, db *gorm.DB, id uint, balance int64) {

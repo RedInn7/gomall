@@ -105,6 +105,34 @@ func TestGroupbuyRequiresPayPassword(t *testing.T) {
 	}
 }
 
+// 成团才真正卖出：每个成员扣 1 件 DB 库存，否则 DB 水位虚高，后续按 DB 校验的支付会超卖。
+func TestMarkGroupSuccessDeductsProductStock(t *testing.T) {
+	db := openGroupbuyTestDB(t)
+	stubInventoryLua(t)
+	seedGroupbuyUser(t, db, 1, 100000)
+	seedGroupbuyUser(t, db, 2, 0) // 卖家
+	seedGroupbuyUser(t, db, 3, 100000)
+	p := seedGroupbuyProduct(t, db, 8000)
+
+	ctx := context.Background()
+	created, err := GetGroupbuySrv().CreateGroup(ctx, 1, p.ID, 2, 0, 0, 0, testPayKey)
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	joined, err := GetGroupbuySrv().JoinGroup(ctx, 3, created.GroupID, 0, 0, testPayKey)
+	if err != nil || !joined.IsSuccess {
+		t.Fatalf("join should complete the group: resp=%+v err=%v", joined, err)
+	}
+
+	var got product.Product
+	if err := db.First(&got, p.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if got.Num != 3 {
+		t.Fatalf("product stock after group success = %d, want 3", got.Num)
+	}
+}
+
 // okLuaHook 让所有 Redis 命令直接放行、不连真实 Redis：库存 Lua 返回 1，
 // 支付密码限次的滑动窗口脚本返回 {1, 1}。
 type okLuaHook struct{}
