@@ -11,6 +11,7 @@ import (
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/preorder"
 	"github.com/RedInn7/gomall/internal/redpacket"
+	"github.com/RedInn7/gomall/internal/refund"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
 )
@@ -90,6 +91,7 @@ func InitCron() {
 		util.LogrusObj.Errorf("GroupbuyExpire Cron 注册失败: %v", e)
 	}
 	_, _ = c.AddFunc("@every 5m", groupbuy.GetGroupbuySrv().RunCompleteFullGroups) // 满员但成团失败的团补成团
+	_, _ = c.AddFunc("@every 10m", refund.GetRefundSrv().RunSettleCompensation)    // 资金事件丢失时按订单 / 清算单状态补结算、补退款
 
 	// 预售尾款没收兜底：每 1h 扫一次 FinalEndAt 已过但 stage 仍 DepositPaid 的订单，
 	// service 层内部已做"扫 + 逐条单事务 + 单条 ERROR log"，cron 层只兜 panic。
