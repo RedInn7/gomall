@@ -115,8 +115,8 @@ if req.CategoryID != 0 {
 }
 
 products, err := productDao.ListProductByCondition(condition, req.BasePage)
-total, err := cache.ProductCountCached(ctx, req.CategoryID, func() (int64, error) {
-    return productDao.CountProductByCondition(condition)
+total, err := cache.ProductCountCached(ctx, req.CategoryID, func(ctx context.Context) (int64, error) {
+    return NewProductDao(ctx).CountProductByCondition(condition)
 })
 ```
 
