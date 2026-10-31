@@ -3,6 +3,8 @@ package routes
 import (
 	"context"
 	"net/http"
+	"os"
+	"strings"
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-contrib/sessions/cookie"
@@ -55,6 +57,18 @@ func NewRouter() *gin.Engine {
 	})
 
 	r := gin.Default()
+	// gin 默认信任所有代理，客户端伪造 X-Forwarded-For 就能绕过按 IP 的限流。
+	// 直连部署不信任任何代理（ClientIP 取 TCP 对端）；挂在反代 / LB 后面时用
+	// TRUSTED_PROXIES 配置其 CIDR，逗号分隔。
+	var trustedProxies []string
+	for _, p := range strings.Split(os.Getenv("TRUSTED_PROXIES"), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			trustedProxies = append(trustedProxies, p)
+		}
+	}
+	if err := r.SetTrustedProxies(trustedProxies); err != nil {
+		panic("TRUSTED_PROXIES 配置非法: " + err.Error())
+	}
 	store := cookie.NewStore([]byte(conf.Config.EncryptSecret.SessionSecret))
 	// 全局令牌桶：每 IP 100 RPS、突发 200，挡正常流量同时防爬虫脚本
 	r.Use(middleware.TokenBucket(rate.Limit(100), 200))
