@@ -8,11 +8,14 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/shared/response"
+	"github.com/RedInn7/gomall/pkg/utils/upload"
 )
 
 // CreateProductHandler 创建商品
 func CreateProductHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
+		// 先限住请求体再解析 multipart，超大包直接报错
+		ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, upload.ProductBodyLimit)
 		req, ok := response.Bind[ProductCreateReq](ctx)
 		if !ok {
 			return
