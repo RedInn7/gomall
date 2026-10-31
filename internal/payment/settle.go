@@ -1,7 +1,6 @@
 package payment
 
 import (
-	"context"
 	"errors"
 
 	"gorm.io/gorm"
@@ -13,12 +12,11 @@ import (
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/log"
-	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/service/events"
 )
 
 // 本文件收口三条支付渠道（余额 / Stripe / Web3）此前各自抄一遍的"确认收款"公共逻辑：
-// 应付口径、支付确认事务尾段、预留核销。各渠道只保留真正差异化的发起流程与清算，
+// 应付口径、支付确认事务尾段（预留核销见 order.CommitStockReservation）。各渠道只保留真正差异化的发起流程与清算，
 // 尾段统一走这里——新增渠道时无法再漏写库存/状态/outbox 任一步，杜绝行为漂移。
 
 var (
@@ -151,15 +149,4 @@ func recordUnfulfillable(db *gorm.DB, settleErr error, orderID uint, channel, pr
 	log.LogrusObj.Errorf("%s payment recorded for refund review, order cannot be fulfilled: order=%d ref=%s err=%v",
 		channel, orderID, providerRef, settleErr)
 	return nil
-}
-
-// commitReservationBestEffort 在结算事务提交后核销 Redis 预留（reserved）桶。
-// DB 已真正扣减 product.Num，这里只同步缓存视图；失败仅记日志，绝不回滚已落库的支付。
-func commitReservationBestEffort(ctx context.Context, productID uint, num int) {
-	if productID == 0 || num <= 0 {
-		return
-	}
-	if err := cache.CommitReservation(ctx, productID, int64(num)); err != nil {
-		log.LogrusObj.Errorf("commit reservation failed product=%d num=%d err=%v", productID, num, err)
-	}
 }

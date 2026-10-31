@@ -120,7 +120,7 @@ func TestXcashPaymentServiceSettlesConfirmedWebhookExactlyOnce(t *testing.T) {
 	now := time.Unix(1_788_466_500, 0)
 	client.now = func() time.Time { return now }
 	service := newTestXcashPaymentSrv(client, db)
-	service.commitReservation = func(context.Context, uint, int) {}
+	service.commitReservation = func(context.Context, uint, uint, int) {}
 
 	body := []byte(fmt.Sprintf(`{
 		"type":"invoice",
@@ -272,7 +272,7 @@ func TestXcashPaymentServiceQuarantinesMismatchedPayment(t *testing.T) {
 	now := time.Unix(1_788_466_500, 0)
 	client.now = func() time.Time { return now }
 	service := newTestXcashPaymentSrv(client, db)
-	service.commitReservation = func(context.Context, uint, int) {}
+	service.commitReservation = func(context.Context, uint, uint, int) {}
 
 	body := []byte(fmt.Sprintf(`{
 		"type":"invoice",
@@ -360,7 +360,7 @@ func TestXcashPaymentServiceReconcilesCompletedInvoiceWithoutWebhook(t *testing.
 		Methods: map[string][]string{"USDT": {"arbitrum-one"}}, VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
 	service := newTestXcashPaymentSrv(client, db)
-	service.commitReservation = func(context.Context, uint, int) {}
+	service.commitReservation = func(context.Context, uint, uint, int) {}
 	processed, err := service.ReconcilePending(context.Background(), 50)
 	if err != nil {
 		t.Fatal(err)
@@ -439,7 +439,7 @@ func TestXcashPaymentServiceSettlesCompletedIdempotentCreateResponse(t *testing.
 		Methods: map[string][]string{"DAI": {"base"}}, VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
 	service := newTestXcashPaymentSrv(client, db)
-	service.commitReservation = func(context.Context, uint, int) {}
+	service.commitReservation = func(context.Context, uint, uint, int) {}
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: buyer.ID})
 
 	status, err := service.CreateCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
@@ -497,7 +497,7 @@ func TestXcashPaymentServiceWaitsForAMLThenQuarantinesHighRisk(t *testing.T) {
 		Methods: map[string][]string{"USDC": {"base"}}, VaultSlotConfirmed: true, RequireAML: true, AllowHTTP: true,
 	}, server.Client())
 	service := newTestXcashPaymentSrv(client, db)
-	service.commitReservation = func(context.Context, uint, int) {}
+	service.commitReservation = func(context.Context, uint, uint, int) {}
 	ctx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: order.UserID})
 
 	first, err := service.GetCheckout(ctx, &XcashCheckoutReq{OrderID: order.ID})
@@ -651,7 +651,7 @@ func TestXcashPaymentServiceReconcilesRecentExpiredAttemptBySysNo(t *testing.T) 
 		Methods: map[string][]string{"DAI": {"base"}}, VaultSlotConfirmed: true, AllowHTTP: true,
 	}, server.Client())
 	service := newTestXcashPaymentSrv(client, db)
-	service.commitReservation = func(context.Context, uint, int) {}
+	service.commitReservation = func(context.Context, uint, uint, int) {}
 
 	processed, err := service.ReconcilePending(context.Background(), 1)
 	if err != nil {

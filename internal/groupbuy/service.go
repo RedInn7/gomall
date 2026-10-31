@@ -35,6 +35,9 @@ var (
 	ErrGroupbuyClosed        = e.New(e.ErrGroupbuyClosed)
 	ErrGroupbuyDuplicateJoin = e.New(e.ErrGroupbuyDuplicateJoin)
 	ErrGroupbuyNotFound      = errors.New("拼团不存在")
+
+	// errGroupbuyStockShort 成团时 DB 库存不够每个成员各扣 1 件。
+	errGroupbuyStockShort = errors.New("拼团成团库存不足")
 )
 
 var (
@@ -344,8 +347,8 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 
 // MarkGroupSuccess 凑齐 N 人后的成团：
 //
-//	tx 内：MarkGroupSuccessIfFull + 成员订单 WaitGroup → WaitShip + member.status=succeed
-//	+ outbox(groupbuy.success)；tx 外：库存 reserved→sold（每个成员 1 份）
+//	tx 内：MarkGroupSuccessIfFull + 每个成员扣 DB 库存 + 成员订单 WaitGroup → WaitShip
+//	+ member.status=succeed + outbox(groupbuy.success)；tx 外：Redis 预占 reserved→sold（每个成员 1 份）
 //
 // 多次调用幂等：第一次切 status，之后 MarkGroupSuccessIfFull 返回 false 直接 no-op。
 func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error {
@@ -362,9 +365,8 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 		switched bool
 		members  []*GroupbuyMember
 	)
-	now := time.Now()
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupSuccessIfFull(groupID, now)
+		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupSuccessIfFull(groupID)
 		if e != nil {
 			return e
 		}
@@ -382,6 +384,7 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 		// 关键：先结算资金、再翻状态。只有钱真的从托管账户划到卖家，订单才允许进 WaitShip，
 		// 从源头堵住"没收钱就发货"。任一失败回滚整个成团操作，cron 重新拉起。
 		orderDao := orderpkg.NewOrderDaoByDB(tx)
+		productDao := product.NewProductDaoWithDB(tx)
 		for _, m := range members {
 			o, e := orderDao.GetOrderByIdOnly(uint(m.OrderID))
 			if e != nil {
@@ -389,6 +392,14 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			}
 			if o == nil || o.ID == 0 {
 				return fmt.Errorf("成员订单缺失 orderID=%d", m.OrderID)
+			}
+			// 成团才算真正卖出：与支付确认同口径扣 DB 库存（条件 UPDATE 防超卖），不够扣就整体回滚。
+			ok, e := productDao.DeductStock(o.ProductID, o.Num)
+			if e != nil {
+				return e
+			}
+			if !ok {
+				return errGroupbuyStockShort
 			}
 			// 结算托管款给卖家（o.Money 即加入时收的拼团价），(ref, credit, groupbuy_settle) 幂等。
 			if e = settleToSeller(tx, o.BossID, o.Money, o.ID); e != nil {
@@ -433,11 +444,8 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 	}
 
 	// 库存：每位成员 reserved -> sold（真扣）
-	for range members {
-		if commitErr := cache.CommitReservation(ctx, g.ProductID, 1); commitErr != nil {
-			util.LogrusObj.Errorf("commit reservation on group success group=%d product=%d err=%v",
-				groupID, g.ProductID, commitErr)
-		}
+	for _, m := range members {
+		orderpkg.CommitStockReservation(ctx, uint(m.OrderID), g.ProductID, 1)
 	}
 	return nil
 }
@@ -541,6 +549,35 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 		}
 	}
 	return nil
+}
+
+// RunCompleteFullGroups cron 补成团：满员但仍 open 的团（加入时 MarkGroupSuccess 失败留下的）逐个重试，
+// 单团失败不影响其它团。库存不够每人各扣一件时重试也成不了团，过了截止时间就散团退款，
+// 不让成员的钱一直押在托管里。
+func (s *GroupbuySrv) RunCompleteFullGroups() {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Errorf("GroupbuyComplete Cron Panic: %v", r)
+		}
+	}()
+	ctx := context.Background()
+	groups, err := NewGroupbuyDao(ctx).ListFullOpenGroups(200)
+	if err != nil {
+		util.LogrusObj.Errorf("GroupbuyComplete 扫表失败: %v", err)
+		return
+	}
+	for _, g := range groups {
+		err := s.MarkGroupSuccess(ctx, g.ID)
+		if err == nil {
+			continue
+		}
+		util.LogrusObj.Errorf("补成团失败 groupID=%d err=%v", g.ID, err)
+		if errors.Is(err, errGroupbuyStockShort) && !g.ExpireAt.After(time.Now()) {
+			if err := s.ExpireGroup(ctx, g.ID); err != nil {
+				util.LogrusObj.Errorf("库存不足散团失败 groupID=%d err=%v", g.ID, err)
+			}
+		}
+	}
 }
 
 // checkPayKey 校验支付密码。放在预扣库存之前：密码错误不占库存，也不开事务。

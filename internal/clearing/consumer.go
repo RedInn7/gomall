@@ -55,8 +55,8 @@ func DispatchSettleEvent(ctx context.Context, routingKey string, payload []byte)
 	}
 }
 
-// StartSettleConsumer 以独立队列消费 order.completed / order.refund_rejected。数据库抖动重排，
-// 解码错误等毒消息和超过投递上限的消息进入 DLQ；重复事件由清算状态机吸收。
+// StartSettleConsumer 以独立队列消费 order.completed / order.refund_rejected。数据库抖动按
+// SettleRetryDelays 逐级退避重试，解码错误等毒消息和超过重试上限的消息进入 DLQ；重复事件由清算状态机吸收。
 func StartSettleConsumer(ctx context.Context) error {
 	if err := rabbitmq.InitDeadLetterTopology(); err != nil {
 		return err
@@ -66,19 +66,22 @@ func StartSettleConsumer(ctx context.Context) error {
 			return err
 		}
 	}
-	rabbitmq.SuperviseDomainConsumer(settleQueue, 16, func(d amqp.Delivery) {
-		err := DispatchSettleEvent(ctx, d.RoutingKey, d.Body)
+	if err := rabbitmq.InitRetryQueue(settleQueue, rabbitmq.SettleRetryDelays...); err != nil {
+		return err
+	}
+	rabbitmq.SuperviseDomainConsumerWithRetry(settleQueue, 16, func(d amqp.Delivery) {
+		key := rabbitmq.OriginalRoutingKey(d)
+		err := DispatchSettleEvent(ctx, key, d.Body)
 		if err == nil {
 			_ = d.Ack(false)
 			return
 		}
-		util.LogrusObj.Errorf("clearing settle handle key=%s err=%v", d.RoutingKey, err)
-		poison := errors.Is(err, errSettlePoisonMessage)
-		if poison || rabbitmq.ExceededDeliveryLimit(d) {
-			rabbitmq.RouteToDLQ(d, settleQueue, d.RoutingKey, poison)
+		util.LogrusObj.Errorf("clearing settle handle key=%s err=%v", key, err)
+		if errors.Is(err, errSettlePoisonMessage) {
+			rabbitmq.RouteToDLQ(d, settleQueue, key, true)
 			return
 		}
-		_ = d.Nack(false, true)
+		rabbitmq.RetryToQueueOrDLQ(d, settleQueue, key)
 	})
 	return nil
 }

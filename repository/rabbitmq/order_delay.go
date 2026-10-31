@@ -84,31 +84,25 @@ func PublishOrderCancelDelay(ctx context.Context, orderNum uint64, delay time.Du
 
 // ConsumeOrderCancelDelay 启动消费者，对每个超时订单调用 handler。
 // 消费在自愈 supervisor 中运行：连接抖动 / channel 关闭后会自动重连并重新订阅。
+// 关单失败（含 handler panic）按 SettleRetryDelays 逐级退避进延迟队列重试，超过上限进 DLQ；
+// Nack 重排不计投递次数，会无限热重投。cron 超时扫描仍会兜底关单。
 func ConsumeOrderCancelDelay(handler func(orderNum uint64) error) error {
-	superviseConsumer(consumerConfig{
-		queue:    orderDeadQueue,
-		prefetch: 16,
-		deliver: func(d amqp.Delivery) {
-			orderNum, err := strconv.ParseUint(string(d.Body), 10, 64)
-			if err != nil {
-				util.LogrusObj.Errorln("delay queue body 不是合法 orderNum:", err)
-				_ = d.Nack(false, false)
-				return
-			}
-			if err := handler(orderNum); err != nil {
-				util.LogrusObj.Errorf("处理延迟关单失败 orderNum=%d err=%v\n", orderNum, err)
-				// 按 broker 维护的投递次数（x-death，跨重连可靠）判定毒丸：
-				// 达到上限即显式投 DLQ（带 confirm）并 Ack，否则 Nack 重排重试。
-				// 不再依赖 d.Redelivered——它会在重连后被重置，可能无限 requeue。
-				if ExceededDeliveryLimit(d) {
-					RouteToDLQ(d, orderDeadQueue, orderDeadRouting, false)
-					return
-				}
-				_ = d.Nack(false, true)
-				return
-			}
-			_ = d.Ack(false)
-		},
+	if err := InitRetryQueue(orderDeadQueue, SettleRetryDelays...); err != nil {
+		return err
+	}
+	SuperviseDomainConsumerWithRetry(orderDeadQueue, 16, func(d amqp.Delivery) {
+		orderNum, err := strconv.ParseUint(string(d.Body), 10, 64)
+		if err != nil {
+			util.LogrusObj.Errorln("delay queue body 不是合法 orderNum:", err)
+			_ = d.Nack(false, false)
+			return
+		}
+		if err := handler(orderNum); err != nil {
+			util.LogrusObj.Errorf("处理延迟关单失败 orderNum=%d err=%v\n", orderNum, err)
+			RetryToQueueOrDLQ(d, orderDeadQueue, orderDeadRouting)
+			return
+		}
+		_ = d.Ack(false)
 	})
 	return nil
 }

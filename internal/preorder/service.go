@@ -232,9 +232,7 @@ func (s *PreorderSrv) PayFinal(ctx context.Context, req *PreorderFinalReq) (*Pre
 	}
 
 	// 事务成功后再清 Redis reserved，cache 失败不回滚 DB（业务真相在 DB）
-	if cErr := cache.CommitReservation(ctx, ord.ProductID, int64(ord.Num)); cErr != nil {
-		util.LogrusObj.Errorf("commit reservation on final paid failed orderID=%d err=%v", ord.ID, cErr)
-	}
+	order.CommitStockReservation(ctx, ord.ID, ord.ProductID, ord.Num)
 
 	return &PreorderActionResp{
 		OrderID:       ord.ID,
