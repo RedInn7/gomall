@@ -328,7 +328,7 @@ func (s *StripePaymentSrv) settleStripeOrder(ctx context.Context, orderID, userI
 	// 只有正常清算并推进订单后才核销预留。payment_anomaly 只是接管外部异常，订单仍是 WaitPay，
 	// 绝不能把它的 reserved 提交掉，否则 DB 库存未扣而缓存预占消失，会重新暴露可售量。
 	if paymentConfirmed {
-		commitReservationBestEffort(ctx, paidProductID, paidNum)
+		orderpkg.CommitStockReservation(ctx, orderID, paidProductID, paidNum)
 	}
 	return nil
 }

@@ -92,17 +92,32 @@ func (d *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, finalC
 		}).Error
 }
 
-// SumWaitPayNumByProduct 汇总每个商品当前 WaitPay 订单的预占数量(Σ Num)。
+// SumReservedNumByProduct 汇总每个商品仍持有预占的订单数量(Σ Num)：WaitPay 未支付单（含已付定金的
+// 预售单），以及 WaitGroup 拼团中订单（参团已收款，成团时才核销预占）。
 // 这是 Redis reserved 桶的对账基准：DB 订单是真相，reserved 不该超过这个口径，
 // 超出的部分即为崩溃在「写 Redis、提交 DB」之间留下的孤儿预占。
-func (d *OrderDao) SumWaitPayNumByProduct() (map[uint]int64, error) {
+func (d *OrderDao) SumReservedNumByProduct() (map[uint]int64, error) {
+	return d.sumNumByProduct("type IN ?", []uint{consts.OrderWaitPay, consts.OrderWaitGroup})
+}
+
+// SumCommitPendingNumByProduct 汇总每个商品「已支付、Redis 预占还没核销」的数量(Σ Num)：
+//   - type=WaitShip 且 updated_at 在 since 之后：刚由支付推进而来，核销还在途；
+//   - StockCommitPending：支付时重试核销仍失败、等对账补核销的订单，不论已推进到什么状态。
+//
+// 宽限期只取新近订单，避免把早已核销完成的 WaitShip 也算进基准而漏掉真实泄漏。
+func (d *OrderDao) SumCommitPendingNumByProduct(since time.Time) (map[uint]int64, error) {
+	return d.sumNumByProduct("(type = ? AND updated_at >= ?) OR stock_commit_pending = ?",
+		consts.OrderWaitShip, since, true)
+}
+
+func (d *OrderDao) sumNumByProduct(query string, args ...interface{}) (map[uint]int64, error) {
 	var rows []struct {
 		ProductID uint
 		Total     int64
 	}
 	if err := d.DB.Model(&Order{}).
 		Select("product_id, SUM(num) AS total").
-		Where("type = ?", consts.OrderWaitPay).
+		Where(query, args...).
 		Group("product_id").
 		Scan(&rows).Error; err != nil {
 		return nil, err
@@ -114,26 +129,19 @@ func (d *OrderDao) SumWaitPayNumByProduct() (map[uint]int64, error) {
 	return m, nil
 }
 
-// SumRecentlyPaidNumByProduct 汇总每个商品「刚支付成功、Redis 预占可能尚未 commit」的在途数量(Σ Num)。
-// 口径：type=WaitShip 且 updated_at 在 since 之后（刚由支付推进而来、仍在 commit 宽限期内）。
-// 仅取宽限期内的新近订单，避免把早已 commit 完成的 WaitShip 也算进基准而漏掉真实泄漏。
-func (d *OrderDao) SumRecentlyPaidNumByProduct(since time.Time) (map[uint]int64, error) {
-	var rows []struct {
-		ProductID uint
-		Total     int64
-	}
-	if err := d.DB.Model(&Order{}).
-		Select("product_id, SUM(num) AS total").
-		Where("type = ? AND updated_at >= ?", consts.OrderWaitShip, since).
-		Group("product_id").
-		Scan(&rows).Error; err != nil {
-		return nil, err
-	}
-	m := make(map[uint]int64, len(rows))
-	for _, r := range rows {
-		m[r.ProductID] = r.Total
-	}
-	return m, nil
+// ListStockCommitPending 拉一批预占待补核销的订单，供库存对账补核销。
+func (d *OrderDao) ListStockCommitPending(limit int) (orders []*Order, err error) {
+	err = d.DB.Model(&Order{}).Where("stock_commit_pending = ?", true).Limit(limit).Find(&orders).Error
+	return
+}
+
+// SetStockCommitPending 条件翻转待核销标记，返回是否真的翻转了。
+// 补核销前先翻成 false 抢占，多实例对账时同一份预占只会被一个实例核销。
+func (d *OrderDao) SetStockCommitPending(orderID uint, pending bool) (bool, error) {
+	res := d.DB.Model(&Order{}).
+		Where("id = ? AND stock_commit_pending = ?", orderID, !pending).
+		Update("stock_commit_pending", pending)
+	return res.RowsAffected > 0, res.Error
 }
 
 // ListOrderByCondition 获取订单List

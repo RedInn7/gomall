@@ -44,7 +44,7 @@ type XcashPaymentSrv struct {
 	gateway           XcashGateway
 	policy            xcashSettlementPolicy
 	db                xcashDBProvider
-	commitReservation func(context.Context, uint, int)
+	commitReservation func(ctx context.Context, orderID, productID uint, num int)
 	initErr           error
 }
 
@@ -65,7 +65,7 @@ func GetXcashPaymentSrv() *XcashPaymentSrv {
 
 func newXcashPaymentSrv(gateway XcashGateway, policy xcashSettlementPolicy, db xcashDBProvider) *XcashPaymentSrv {
 	return &XcashPaymentSrv{
-		gateway: gateway, policy: policy, db: db, commitReservation: commitReservationBestEffort,
+		gateway: gateway, policy: policy, db: db, commitReservation: orderpkg.CommitStockReservation,
 	}
 }
 
@@ -138,7 +138,7 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 	if db == nil {
 		return errors.New("数据库未初始化")
 	}
-	var settledProductID uint
+	var settledOrderID, settledProductID uint
 	var settledNum int
 	err := db.Transaction(func(tx *gorm.DB) error {
 		if receiptHeaders != nil {
@@ -243,7 +243,7 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 		}).Error; err != nil {
 			return err
 		}
-		settledProductID = order.ProductID
+		settledOrderID, settledProductID = order.ID, order.ProductID
 		settledNum = order.Num
 		return nil
 	})
@@ -268,7 +268,7 @@ func (s *XcashPaymentSrv) processConfirmedEvent(ctx context.Context, event *xcas
 		})
 	}
 	if settledProductID != 0 && settledNum > 0 {
-		s.commitReservation(ctx, settledProductID, settledNum)
+		s.commitReservation(ctx, settledOrderID, settledProductID, settledNum)
 	}
 	return nil
 }

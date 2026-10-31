@@ -433,11 +433,8 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 	}
 
 	// 库存：每位成员 reserved -> sold（真扣）
-	for range members {
-		if commitErr := cache.CommitReservation(ctx, g.ProductID, 1); commitErr != nil {
-			util.LogrusObj.Errorf("commit reservation on group success group=%d product=%d err=%v",
-				groupID, g.ProductID, commitErr)
-		}
+	for _, m := range members {
+		orderpkg.CommitStockReservation(ctx, uint(m.OrderID), g.ProductID, 1)
 	}
 	return nil
 }
