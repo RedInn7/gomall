@@ -197,7 +197,7 @@ func esScores(hits []es.ScoredProductDoc) []float32 {
 	return out
 }
 
-// minMaxNormalize 把分数线性压到 [0,1]；同值或空集合返回与输入等长的 0 切片
+// minMaxNormalize 把分数线性压到 [0,1]；空集合返回 nil，全部同分时每项都是 1
 func minMaxNormalize(scores []float32) []float32 {
 	if len(scores) == 0 {
 		return nil
