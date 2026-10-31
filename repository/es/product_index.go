@@ -116,18 +116,24 @@ func UpsertProduct(ctx context.Context, p *product.Product) error {
 	if err != nil {
 		return err
 	}
+	// 以商品 updated_at 作外部版本：回填拿旧快照晚到时 ES 返回 409，不会盖掉更新的增量写入；
+	// external_gte 允许同版本重写，重复投递照样幂等
+	version := int(p.UpdatedAt.UnixNano())
 	req := esapi.IndexRequest{
-		Index:      ProductIndex,
-		DocumentID: strconv.FormatUint(uint64(p.ID), 10),
-		Body:       bytes.NewReader(body),
-		Refresh:    "false",
+		Index:       ProductIndex,
+		DocumentID:  strconv.FormatUint(uint64(p.ID), 10),
+		Body:        bytes.NewReader(body),
+		Refresh:     "false",
+		Version:     &version,
+		VersionType: "external_gte",
 	}
 	res, err := req.Do(ctx, EsClient)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	if res.IsError() {
+	// 409 说明 ES 里已是更新的快照，目标状态已达成，视作成功
+	if res.IsError() && res.StatusCode != 409 {
 		bz, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("upsert failed: %s", string(bz))
 	}
