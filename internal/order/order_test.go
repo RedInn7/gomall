@@ -2,6 +2,7 @@ package order_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -16,11 +17,13 @@ import (
 	"github.com/RedInn7/gomall/internal/clearing"
 	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/order"
+	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/pkg/utils/snowflake"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
@@ -144,6 +147,78 @@ func TestOrderDeleteOnlyRemovesOrdersWithSettledFunds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// 下架商品不能下单；未支付订单挂满上限后也不能再下单（每张未支付单都占着库存）。
+func TestOrderCreateRejectsOffSaleProductAndTooManyUnpaidOrders(t *testing.T) {
+	db := openOrderTestDB(t)
+	if err := db.AutoMigrate(&product.Product{}); err != nil {
+		t.Fatal(err)
+	}
+	offSale := &product.Product{Name: "old mug", CategoryID: 1, Price: "10.00", Num: 5, BossID: 22}
+	if err := db.Create(offSale).Error; err != nil {
+		t.Fatal(err)
+	}
+	srv := order.NewOrderSrv(nil)
+
+	if _, err := srv.OrderCreate(asUser(11), &order.OrderCreateReq{ProductID: offSale.ID, Num: 1}); !errors.Is(err, product.ErrProductNotOnSale) {
+		t.Fatalf("off-sale product must be rejected, got %v", err)
+	}
+
+	for i := 0; i < 20; i++ {
+		seedOrder(t, db, &order.Order{UserID: 12, BossID: 22, Type: consts.OrderWaitPay, OrderNum: uint64(9100 + i)})
+	}
+	if _, err := srv.OrderCreate(asUser(12), &order.OrderCreateReq{ProductID: offSale.ID, Num: 1}); !errors.Is(err, order.ErrTooManyUnpaidOrders) {
+		t.Fatalf("unpaid order quota must be enforced, got %v", err)
+	}
+}
+
+// MQ 重投同一个 ticket（上次建完单没来得及 Ack）只能有一张订单，第二次直接回写成功。
+func TestAsyncOrderTaskCreatesOneOrderPerTicket(t *testing.T) {
+	db := openOrderTestDB(t)
+	stubStockRedis(t, map[string]int64{})
+	snowflake.InitSnowflake(1)
+	if err := db.AutoMigrate(&product.Product{}); err != nil {
+		t.Fatal(err)
+	}
+	p := &product.Product{Name: "mug", CategoryID: 1, Price: "10.00", Num: 5, OnSale: true, BossID: 22}
+	if err := db.Create(p).Error; err != nil {
+		t.Fatal(err)
+	}
+	tickets := memTicketStore{}
+	prev := order.AsyncOrderTicketStoreInstance()
+	order.SetAsyncOrderTicketStore(tickets)
+	t.Cleanup(func() { order.SetAsyncOrderTicketStore(prev) })
+
+	body, _ := json.Marshal(order.AsyncOrderTask{Ticket: "424242", UserID: 11, ProductID: p.ID, Num: 1})
+	for i := 0; i < 2; i++ {
+		if err := order.HandleAsyncOrderTask(context.Background(), body); err != nil {
+			t.Fatalf("delivery %d: %v", i+1, err)
+		}
+	}
+
+	var orders []order.Order
+	if err := db.Where("user_id = ?", 11).Find(&orders).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("redelivered ticket created %d orders, want 1", len(orders))
+	}
+	if st := tickets["424242"]; st.Status != order.OrderTicketStatusOK || st.OrderID != orders[0].ID {
+		t.Fatalf("ticket status = %+v, want ok for order %d", st, orders[0].ID)
+	}
+}
+
+type memTicketStore map[string]order.OrderTicketStatus
+
+func (m memTicketStore) Put(_ context.Context, ticket string, st order.OrderTicketStatus, _ time.Duration) error {
+	m[ticket] = st
+	return nil
+}
+
+func (m memTicketStore) Get(_ context.Context, ticket string) (order.OrderTicketStatus, bool, error) {
+	st, ok := m[ticket]
+	return st, ok, nil
 }
 
 func openOrderTestDB(t *testing.T) *gorm.DB {

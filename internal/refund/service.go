@@ -20,6 +20,7 @@ import (
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
 )
@@ -224,8 +225,9 @@ func refundAmount(o *orderpkg.Order) int64 {
 // 不做项（留待后续）：买家购买时生成的商品归属副本不在此回退——买家可能已改价 / 已转售，
 // 删除副本不安全，需配套的副本溯源与人工/对账流程，本期不动。
 func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
+	var restocked *orderpkg.Order
 	db := dao.NewDBClient(ctx)
-	return db.Transaction(func(tx *gorm.DB) error {
+	err := db.Transaction(func(tx *gorm.DB) error {
 		orderDao := orderpkg.NewOrderDaoByDB(tx)
 		o, err := orderDao.GetOrderByIdOnly(orderID)
 		if err != nil {
@@ -355,6 +357,7 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 			util.LogrusObj.Error(err)
 			return err
 		}
+		restocked = o
 		if clearingFound {
 			now := time.Now()
 			if err = tx.Model(&clearing.PaymentClearing{}).Where("id = ?", clearingRecord.ID).
@@ -366,6 +369,54 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 		// 商品归属副本回退不做，原因见方法注释。
 		return nil
 	})
+	if err != nil || restocked == nil {
+		return err
+	}
+	// DB 提交后再把回补的件数加回 Redis available，否则缓存里这批库存卖不出去。
+	// 失败只记日志：DB 已是真相，交给库存对账。
+	if e := cache.RestockAvailable(ctx, restocked.ProductID, int64(restocked.Num)); e != nil {
+		util.LogrusObj.Errorf("refund restock redis failed order=%d product=%d num=%d err=%v",
+			restocked.ID, restocked.ProductID, restocked.Num, e)
+	}
+	return nil
+}
+
+// settleCompensationDelay 补偿任务只碰这么久之前就该结算完的订单，给正常的事件链路留出时间。
+const settleCompensationDelay = 10 * time.Minute
+
+// RunSettleCompensation cron 资金兜底：order.completed / order.refunded 事件丢了（outbox 死信、消费者进 DLQ），
+// 卖家就永远拿不到钱、买家永远退不到款。这里直接按订单与清算单状态补：已完成但清算单还是 cleared 的补结算，
+// 已退款但清算单还不是 refunded 的补退款。两边都按清算单状态幂等，与正常消费者并发也只生效一次。
+// ponytail: 每轮各补 100 单，永久失败的单会一直占名额；量大时改成按 id 游标翻页。
+func (s *RefundSrv) RunSettleCompensation() {
+	defer func() {
+		if r := recover(); r != nil {
+			util.LogrusObj.Errorf("SettleCompensation Cron Panic: %v", r)
+		}
+	}()
+	ctx := context.Background()
+	db := dao.NewDBClient(ctx)
+	before := time.Now().Add(-settleCompensationDelay)
+	missed := func(orderType uint, clearingCond, clearingStatus string) []uint {
+		var ids []uint
+		if err := db.Model(&orderpkg.Order{}).
+			Where("type = ? AND updated_at <= ? AND id IN (?)", orderType, before,
+				db.Model(&clearing.PaymentClearing{}).Select("order_id").Where(clearingCond, clearingStatus)).
+			Limit(100).Pluck("id", &ids).Error; err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 扫表失败 type=%d err=%v", orderType, err)
+		}
+		return ids
+	}
+	for _, id := range missed(consts.OrderCompleted, "status = ?", clearing.StatusCleared) {
+		if err := clearing.SettleCompletedOrder(ctx, id); err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 补结算失败 order=%d err=%v", id, err)
+		}
+	}
+	for _, id := range missed(consts.OrderRefunded, "status <> ?", clearing.StatusRefunded) {
+		if err := s.SettleRefund(ctx, id); err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 补退款失败 order=%d err=%v", id, err)
+		}
+	}
 }
 
 func inUintSlice(v uint, s []uint) bool {
