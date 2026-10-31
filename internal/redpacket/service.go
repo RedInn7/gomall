@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/internal/shared/outbox"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -51,6 +52,14 @@ func (s *RedPacketSrv) Create(ctx context.Context, req *RedPacketCreateReq) (int
 	}
 	if req.Total > MaxRedPacketTotalCents {
 		return nil, fmt.Errorf("红包总额不能超过 %d 分", MaxRedPacketTotalCents)
+	}
+	// 发红包是从钱包出账，和 paydown 一样先校验支付密码。
+	sender, err := user.NewUserDao(ctx).GetUserById(u.Id)
+	if err != nil {
+		return nil, err
+	}
+	if err = user.VerifyMoneyPassword(ctx, sender, req.Key); err != nil {
+		return nil, err
 	}
 
 	ttl := time.Duration(req.ExpireSec) * time.Second

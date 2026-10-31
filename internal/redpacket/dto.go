@@ -9,6 +9,7 @@ type RedPacketCreateReq struct {
 	Count     int    `json:"count" form:"count" binding:"required,min=1,max=1000"` // 份数
 	ExpireSec int    `json:"expire_sec" form:"expire_sec"`                         // 过期秒数，缺省 24h
 	Greeting  string `json:"greeting" form:"greeting"`
+	Key       string `json:"key" form:"key" binding:"required"` // 支付密码，与 paydown 同名
 }
 
 type RedPacketClaimReq struct {
