@@ -101,7 +101,7 @@ listener 记录第一个处理失败的区块，只把游标推进到它之前�
 
 `handleLog` 先检查日志来自配置的 escrow 合约，并核对 `topic[0]` 是 `PaymentConfirmed`。然后从 topic 和 data 中解码 orderID、buyer、amount，附上交易哈希、日志序号和区块高度。
 
-这里承接上一讲的 ABI 契约问题：Solidity 当前把 buyer 声明为 `indexed`，listener 内嵌 ABI 却按非 indexed 解码。若不先修正并用真实日志测试，后面的可靠性设计没有输入可处理。
+这里承接上一讲的 ABI 契约问题：buyer 是 `indexed`，listener 按 `pkg/web3/escrow` 里的合约 ABI 从 `topics[2]` 取 buyer，data 里只解 amount。解码失败属于永久错误，记 error 后跳过这条日志，不卡住 watermark。
 
 每条日志的去重 key 是：
 
@@ -248,7 +248,7 @@ err := orderpkg.NewOrderDao(ctx).Transaction(func(tx *gorm.DB) error {
 | SETNX 成功、outbox 失败 | 72 小时内重扫被去重挡住 | 数据库 inbox/outbox 改造或人工补事件 |
 | listener 配置缺失 | 主进程照常启动，但不监听 | 启动告警、健康检查 |
 | MQ/DB 暂时故障 | Nack 回灌，当前没有可靠重试上限 | 修复依赖；补重试计数与延迟队列 |
-| 合约 ABI 与 listener ABI 不一致 | 日志解码失败，watermark 停在失败区块前 | 统一 ABI 后重扫失败区间 |
+| 合约 ABI 与 listener ABI 不一致 | 日志解码失败，记 error 后跳过，watermark 继续推进 | 按 error 日志里的交易哈希人工核对并补事件 |
 
 这套实现具备确认深度、回扫、消息重试和数据库幂等，但还不能承诺“链上付款必然自动入账”。可靠性最薄的两处都是把 Redis 当成了不可丢的业务事实：pending 绑定与 listener 游标。
 
