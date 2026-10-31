@@ -500,7 +500,7 @@ encryptSecret:
 
 | 名称 | 版本 |
 |------|------|
-| golang | 1.25.0 |
+| golang | go 1.25.0，toolchain go1.26.10 |
 | gin | v1.9.0 |
 | gorm | v1.25.0 |
 | mysql driver | v1.5.0 |

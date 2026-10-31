@@ -2,6 +2,8 @@ module github.com/RedInn7/gomall
 
 go 1.25.0
 
+toolchain go1.26.10
+
 require (
 	github.com/CocaineCong/secret v1.0.4
 	github.com/apache/skywalking-go v0.0.0-20230511031014-a2c5f8e67468
