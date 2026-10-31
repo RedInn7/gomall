@@ -37,7 +37,7 @@ tools:
 .PHONY: run
 run:
 	@make build
-	@./$(OUTPUT)
+	@SNOWFLAKE_ALLOW_DEFAULT=$${SNOWFLAKE_ALLOW_DEFAULT:-true} ./$(OUTPUT)
 
 .PHONY: build
 build:
