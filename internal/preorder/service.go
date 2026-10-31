@@ -557,6 +557,12 @@ func refundUser(ctx context.Context, tx *gorm.DB, userID, bossID uint, key strin
 		return err
 	}
 
+	// 自买自卖时买家和卖家是同一行：u 是扣款前读的旧快照，要沿用刚写回的 boss，
+	// 否则会用旧余额覆盖掉上面这笔卖家扣款，每取消一次凭空多出一笔定金。
+	// 买卖不同人时 u 的行锁从事务开头一直持有，快照仍是最新的，不用重读。
+	if userID == bossID {
+		u = boss
+	}
 	userMoney, err := u.DecryptMoney()
 	if err != nil {
 		return err
