@@ -481,7 +481,7 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, 
 	if err != nil {
 		return err
 	}
-	if err := userDao.UpdateUserById(userID, u); err != nil {
+	if err := userDao.UpdateUserMoney(userID, u.Money); err != nil {
 		return err
 	}
 	// 买家扣款流水：与余额变动同事务追加
@@ -504,7 +504,7 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, 
 	if err != nil {
 		return err
 	}
-	if err := userDao.UpdateUserById(bossID, boss); err != nil {
+	if err := userDao.UpdateUserMoney(bossID, boss.Money); err != nil {
 		return err
 	}
 	// 卖家入账流水：方向与买家相反，与买家流水配对保持 SUM(debit)=SUM(credit)
@@ -549,7 +549,7 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64,
 	if err != nil {
 		return err
 	}
-	if err := userDao.UpdateUserById(bossID, boss); err != nil {
+	if err := userDao.UpdateUserMoney(bossID, boss.Money); err != nil {
 		return err
 	}
 	// 卖家退款出账流水
@@ -567,7 +567,7 @@ func refundUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64,
 	if err != nil {
 		return err
 	}
-	if err := userDao.UpdateUserById(userID, u); err != nil {
+	if err := userDao.UpdateUserMoney(userID, u.Money); err != nil {
 		return err
 	}
 	// 买家退款入账流水：与卖家出账配对保持 SUM(debit)=SUM(credit)
