@@ -87,8 +87,8 @@ func (s *PaymentSrv) PayDown(ctx context.Context, req *PaymentDownReq) (resp *Pa
 			return err
 		}
 		if userMoney-payable < 0 {
-			log.LogrusObj.Error("金额不足")
-			return errors.New("金额不足")
+			log.LogrusObj.Error(user.ErrInsufficientBalance)
+			return user.ErrInsufficientBalance
 		}
 
 		buyerBalanceAfter := userMoney - payable

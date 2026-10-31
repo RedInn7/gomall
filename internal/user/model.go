@@ -15,6 +15,9 @@ import (
 // ErrMoneyKeyIncorrect 支付密码错误：密文无法用该密钥还原出合法金额
 var ErrMoneyKeyIncorrect = errors.New("支付密码错误")
 
+// ErrInsufficientBalance 钱包余额不够本次出账。所有扣款路径共用，余额不允许扣成负数。
+var ErrInsufficientBalance = errors.New("金额不足")
+
 // User 用户模型
 type User struct {
 	dbmodel.Model

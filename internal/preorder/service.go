@@ -473,7 +473,7 @@ func debitUser(tx *gorm.DB, userID, bossID uint, key string, amountCents int64, 
 		return err
 	}
 	if userMoney-amountCents < 0 {
-		return errors.New("金额不足")
+		return user.ErrInsufficientBalance
 	}
 	buyerBalanceAfter := userMoney - amountCents
 	u.Money = strconv.FormatInt(buyerBalanceAfter, 10)
