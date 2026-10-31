@@ -322,10 +322,10 @@ Redis 去重是减压层，不是最终资金安全边界。Redis 不可用时�
 - [ ] 数据库提交后 reserved 核销或 pending 删除失败，不把已提交事务伪装成失败支付。
 - [ ] `payment_clearing` 与 `account_transaction` 可以按订单还原完整的清算、结算或退款资金路径。
 
-建议执行：
+建议执行（`internal/money`、`service/web3` 目前没有单测，相关条目要人工核对）：
 
 ```bash
-go test ./internal/clearing ./internal/payment ./internal/refund ./internal/money ./internal/order ./service/web3
+go test ./internal/clearing ./internal/payment ./internal/refund
 go test -race ./internal/clearing ./internal/payment ./internal/refund
 go test ./...
 ```
