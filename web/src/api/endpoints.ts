@@ -16,7 +16,7 @@ export const ENDPOINTS: Endpoint[] = [
     ['POST', '/api/v1/user/login', '账户', '登录', { user_name: '', password: '' }],
     ['GET', '/api/v1/user/show_info', '账户', '查看资料'],
     ['POST', '/api/v1/user/update', '账户', '修改昵称', { nick_name: '' }],
-    ['POST', '/api/v1/user/send_email', '账户', '发送验证邮件', { email: '', password: '', operation_type: 1 }],
+    ['POST', '/api/v1/user/send_email', '账户', '发送验证邮件', { email: '', current_password: '', password: '', operation_type: 1 }],
     ['GET', '/api/v1/user/valid_email', '账户', '验证邮箱', { token: '' }],
     ['POST', '/api/v1/user/following', '账户', '关注用户', { id: 0 }],
     ['POST', '/api/v1/user/unfollowing', '账户', '取消关注', { id: 0 }],
