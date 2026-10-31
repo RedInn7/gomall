@@ -32,6 +32,16 @@ if [[ -z "$ACCESS" || "$ACCESS" == "null" ]]; then
     exit 1
 fi
 
+# 建券批次、初始化秒杀只对管理员开放：服务端设置了 ADMIN_BOOTSTRAP_TOKEN 且系统里
+# 还没有管理员时，用同一个 token 把这个测试用户提升为管理员。
+if [[ -n "${ADMIN_BOOTSTRAP_TOKEN:-}" ]]; then
+    curl -sS -X POST "$BASE/admin/bootstrap" \
+      -H 'Content-Type: application/json' \
+      -H "access_token: $ACCESS" -H "refresh_token: $REFRESH" \
+      -d "{\"token\":\"$ADMIN_BOOTSTRAP_TOKEN\"}"
+    echo
+fi
+
 cat > config.json <<EOF
 {
   "access_token": "$ACCESS",

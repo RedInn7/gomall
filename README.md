@@ -401,6 +401,9 @@ make tools build-agent
 | `EMBEDDING_API_URL` | 为商品与查询生成同一套 768 维 embedding；生产语义搜索应配置真实模型服务 |
 | `EMBEDDING_PROVIDER_ID` / `EMBEDDING_MODEL` | 标识不可变的模型供应方和模型版本；变更后自动使用新的 Milvus 物理集合 |
 | `EMBEDDING_TEXT_VERSION` | 商品 embedding 文本拼接规则版本，默认 `product-v1` |
+| `TRUSTED_PROXIES` | 部署在反向代理或负载均衡后面时，填它们的 CIDR（逗号分隔）；不填时 ClientIP 取 TCP 对端，伪造的 `X-Forwarded-For` 绕不过按 IP 的限流 |
+| `ADMIN_BOOTSTRAP_TOKEN` | 系统里还没有管理员时，登录用户带上这个 token 调用 `POST /api/v1/admin/bootstrap` 把自己设为管理员；不设置则接口关闭 |
+| `COUPON_ALLOW_DB_MODE=true` | 允许领券接口按 `mode=db` 走数据库悲观锁（压测对比用），默认只走 Redis Lua |
 
 Milvus 第一次启用，或模型/供应方/文本版本变化后，以管理员身份调用一次 `POST /api/v1/admin/search/backfill`，把已有商品同时灌入 ES 和当前版本的 Milvus 集合。不同 embedding 契约使用不同物理集合，避免新旧模型向量混用；回填期间关键词搜索继续可用。之后 `product.changed` Outbox 消费者会维护两份索引；前端搜索框直接调用 Hybrid Search。未配置 `EMBEDDING_API_URL` 时仅使用确定性的开发占位向量，链路可验证，但不代表真实语义质量。
 
