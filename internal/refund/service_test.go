@@ -3,6 +3,7 @@ package refund
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"testing"
@@ -161,6 +162,7 @@ func TestRejectRefundRestoresOriginalState(t *testing.T) {
 	for _, fromType := range tests {
 		t.Run(fmt.Sprintf("from-%d", fromType), func(t *testing.T) {
 			db := openRefundTestDB(t)
+			seedRoleUser(t, db, 22, user.RoleMerchant)
 			o := &orderpkg.Order{
 				UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1,
 				Money: 300, Type: fromType, OrderNum: uint64(1000 + fromType),
@@ -180,7 +182,8 @@ func TestRejectRefundRestoresOriginalState(t *testing.T) {
 			if refunding.Type != consts.OrderRefunding || refunding.RefundFromType != fromType {
 				t.Fatalf("refund origin not preserved: type=%d from=%d", refunding.Type, refunding.RefundFromType)
 			}
-			if err := GetRefundSrv().RejectRefund(context.Background(), o.OrderNum, "not approved"); err != nil {
+			merchantCtx := ctl.NewContext(context.Background(), &ctl.UserInfo{Id: o.BossID})
+			if err := GetRefundSrv().RejectRefund(merchantCtx, o.OrderNum, "not approved"); err != nil {
 				t.Fatalf("reject refund: %v", err)
 			}
 			var restored orderpkg.Order
@@ -202,6 +205,67 @@ func TestRejectRefundRestoresOriginalState(t *testing.T) {
 				t.Fatalf("event restored type got %d want %d", evt.RestoredType, fromType)
 			}
 		})
+	}
+}
+
+func TestMerchantCannotHandleAnotherMerchantsRefund(t *testing.T) {
+	db := openRefundTestDB(t)
+	seedRoleUser(t, db, 21, user.RoleMerchant)
+	seedRoleUser(t, db, 22, user.RoleMerchant)
+	seedRoleUser(t, db, 99, user.RoleAdmin)
+	asUser := func(id uint) context.Context {
+		return ctl.NewContext(context.Background(), &ctl.UserInfo{Id: id})
+	}
+	approveOrder := &orderpkg.Order{
+		UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1, Money: 300,
+		Type: consts.OrderRefunding, RefundFromType: consts.OrderWaitShip, OrderNum: 7001,
+	}
+	rejectOrder := &orderpkg.Order{
+		UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1, Money: 300,
+		Type: consts.OrderRefunding, RefundFromType: consts.OrderWaitShip, OrderNum: 7002,
+	}
+	for _, o := range []*orderpkg.Order{approveOrder, rejectOrder} {
+		if err := db.Create(o).Error; err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+	}
+
+	if err := GetRefundSrv().ApproveRefund(asUser(21), approveOrder.OrderNum); !errors.Is(err, orderpkg.ErrOrderForbidden) {
+		t.Fatalf("merchant A approved merchant B's refund: err=%v", err)
+	}
+	if err := GetRefundSrv().RejectRefund(asUser(21), rejectOrder.OrderNum, "no"); !errors.Is(err, orderpkg.ErrOrderForbidden) {
+		t.Fatalf("merchant A rejected merchant B's refund: err=%v", err)
+	}
+	assertRefundOrderType(t, db, approveOrder.ID, consts.OrderRefunding)
+	assertRefundOrderType(t, db, rejectOrder.ID, consts.OrderRefunding)
+
+	if err := GetRefundSrv().ApproveRefund(asUser(99), approveOrder.OrderNum); err != nil {
+		t.Fatalf("admin approve: %v", err)
+	}
+	if err := GetRefundSrv().RejectRefund(asUser(99), rejectOrder.OrderNum, "no"); err != nil {
+		t.Fatalf("admin reject: %v", err)
+	}
+	assertRefundOrderType(t, db, approveOrder.ID, consts.OrderRefunded)
+	assertRefundOrderType(t, db, rejectOrder.ID, consts.OrderWaitShip)
+}
+
+func seedRoleUser(t *testing.T, db *gorm.DB, id uint, role string) {
+	t.Helper()
+	u := &user.User{UserName: fmt.Sprintf("refund-role-u%d", id), Role: role}
+	u.ID = id
+	if err := db.Create(u).Error; err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+}
+
+func assertRefundOrderType(t *testing.T, db *gorm.DB, id uint, want uint) {
+	t.Helper()
+	var o orderpkg.Order
+	if err := db.First(&o, id).Error; err != nil {
+		t.Fatalf("load order: %v", err)
+	}
+	if o.Type != want {
+		t.Fatalf("order %d type got %d want %d", id, o.Type, want)
 	}
 }
 
