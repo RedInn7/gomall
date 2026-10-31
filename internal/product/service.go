@@ -279,15 +279,29 @@ func createProductAndEvent(db *gorm.DB, product *Product, imagePaths ...string) 
 	})
 }
 
-// updateProductAndEvent 只有归属校验通过时才更新商品并写更新事件。
-func updateProductAndEvent(db *gorm.DB, productID, bossID uint, product *Product) error {
+// updateProductAndEvent 锁住归属于 bossID 的商品行，只写请求里传了的字段，并写更新事件。
+func updateProductAndEvent(db *gorm.DB, productID, bossID uint, req *ProductUpdateReq) error {
 	return db.Transaction(func(tx *gorm.DB) error {
-		affected, err := NewProductDaoByDB(tx).UpdateProduct(productID, bossID, product)
+		productDao := NewProductDaoByDB(tx)
+		p, err := productDao.GetProductForUpdate(productID, bossID)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrProductNotFoundOrForbidden
+		}
 		if err != nil {
 			return err
 		}
-		if affected == 0 {
-			return ErrProductNotFoundOrForbidden
+		updates := req.applyTo(p)
+		// 改了零售价、折后价或拼团价时，按合并后的新值校验拼团价，改价不会留下越界的拼团价
+		if req.Price != nil || req.DiscountPrice != nil || req.GroupbuyPriceCents != nil {
+			if err = p.checkGroupbuyPrice(); err != nil {
+				return err
+			}
+		}
+		if len(updates) == 0 {
+			return nil
+		}
+		if err = productDao.UpdateProduct(productID, bossID, updates); err != nil {
+			return err
 		}
 		return insertProductChanged(tx, productID, "update")
 	})
@@ -317,24 +331,12 @@ func (s *ProductSrv) ProductUpdate(ctx context.Context, req *ProductUpdateReq) (
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
-	product := &Product{
-		Name:               req.Name,
-		CategoryID:         req.CategoryID,
-		Title:              req.Title,
-		Info:               req.Info,
-		Price:              req.Price,
-		DiscountPrice:      req.DiscountPrice,
-		Num:                req.Num,
-		OnSale:             req.OnSale,
-		GroupbuyPriceCents: req.GroupbuyPriceCents,
-	}
-	// 拼团价按本次提交的新零售价校验，改价不会留下越界的拼团价
-	if err = product.checkGroupbuyPrice(); err != nil {
+	if err = req.checkPrices(); err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}
 	_ = cache.DelProductDetail(ctx, req.ID)
-	if err := updateProductAndEvent(NewProductDao(ctx).DB, req.ID, u.Id, product); err != nil {
+	if err := updateProductAndEvent(NewProductDao(ctx).DB, req.ID, u.Id, req); err != nil {
 		log.LogrusObj.Error(err)
 		return nil, err
 	}

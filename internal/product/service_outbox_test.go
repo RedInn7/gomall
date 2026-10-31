@@ -62,11 +62,8 @@ func TestCreateProductAndEventRollsBackWhenImageInsertFails(t *testing.T) {
 func TestUpdateProductAndEventCommitsTogether(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
-	updated := testProduct()
-	updated.Name = "升级款咖啡壶"
-	updated.OnSale = false
 
-	if err := updateProductAndEvent(db, p.ID, p.BossID, updated); err != nil {
+	if err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{Name: new("升级款咖啡壶"), OnSale: new(false)}); err != nil {
 		t.Fatalf("updateProductAndEvent() error = %v", err)
 	}
 	got := loadProduct(t, db, p.ID)
@@ -76,14 +73,28 @@ func TestUpdateProductAndEventCommitsTogether(t *testing.T) {
 	assertProductChangedEvent(t, db, p.ID, "update")
 }
 
+// 只传 on_sale=false：只下架，名称、价格、类目、库存等没传的字段保持原值。
+func TestUpdateProductAndEventOnlyWritesProvidedFields(t *testing.T) {
+	db := openProductOutboxTestDB(t, true)
+	p := seedProduct(t, db)
+
+	if err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{OnSale: new(false)}); err != nil {
+		t.Fatalf("updateProductAndEvent() error = %v", err)
+	}
+	got := loadProduct(t, db, p.ID)
+	if got.OnSale || got.Name != p.Name || got.CategoryID != p.CategoryID || got.Title != p.Title ||
+		got.Info != p.Info || got.Price != p.Price || got.Num != p.Num {
+		t.Fatalf("updated product = %+v, want only on_sale changed from %+v", got, p)
+	}
+	assertProductChangedEvent(t, db, p.ID, "update")
+}
+
 func TestUpdateProductAndEventRollsBackWhenOutboxInsertFails(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
 	injectProductOutboxFailure(t, db)
-	updated := testProduct()
-	updated.Name = "不应提交的新名称"
 
-	err := updateProductAndEvent(db, p.ID, p.BossID, updated)
+	err := updateProductAndEvent(db, p.ID, p.BossID, &ProductUpdateReq{Name: new("不应提交的新名称")})
 	if err == nil {
 		t.Fatal("updateProductAndEvent() error = nil, want injected outbox error")
 	}
@@ -97,7 +108,7 @@ func TestUpdateProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 	p := seedProduct(t, db)
 
-	err := updateProductAndEvent(db, p.ID, p.BossID+1, testProduct())
+	err := updateProductAndEvent(db, p.ID, p.BossID+1, &ProductUpdateReq{Name: new("越权改名")})
 	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
 		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
 	}
@@ -107,7 +118,7 @@ func TestUpdateProductAndEventRejectsWrongSellerWithoutEvent(t *testing.T) {
 func TestUpdateProductAndEventRejectsMissingProductWithoutEvent(t *testing.T) {
 	db := openProductOutboxTestDB(t, true)
 
-	err := updateProductAndEvent(db, 404, 22, testProduct())
+	err := updateProductAndEvent(db, 404, 22, &ProductUpdateReq{Name: new("不存在")})
 	if !errors.Is(err, ErrProductNotFoundOrForbidden) {
 		t.Fatalf("error = %v, want %v", err, ErrProductNotFoundOrForbidden)
 	}

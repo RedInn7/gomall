@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -74,6 +75,22 @@ func (d *ProductDao) ResolveBossID(id uint) (uint, error) {
 		return 0, fmt.Errorf("商品不存在或查询失败 product=%d: %w", id, err)
 	}
 	return p.BossID, nil
+}
+
+// pricePattern 商品价的格式：「元」，最多两位小数，如 "99"、"99.5"、"99.50"。
+var pricePattern = regexp.MustCompile(`^\d{1,9}(\.\d{1,2})?$`)
+
+// checkPrices 校验更新请求里传了的价格：零售价须大于 0；折后价可传空串表示取消折扣。
+func (req *ProductUpdateReq) checkPrices() error {
+	if req.Price != nil {
+		if c, _ := yuanToCents(*req.Price); !pricePattern.MatchString(*req.Price) || c == 0 {
+			return fmt.Errorf("价格 %q 格式不对，应为大于 0、最多两位小数的金额（元）", *req.Price)
+		}
+	}
+	if req.DiscountPrice != nil && *req.DiscountPrice != "" && !pricePattern.MatchString(*req.DiscountPrice) {
+		return fmt.Errorf("折后价 %q 格式不对，应为最多两位小数的金额（元），传空串表示取消折扣", *req.DiscountPrice)
+	}
+	return nil
 }
 
 // yuanToCents 把「元」字符串转成「分」。解析失败或为负返回 ok=false。

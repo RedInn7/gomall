@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/types"
@@ -72,28 +73,24 @@ func (d *ProductDao) DeleteProduct(pId, uId uint) (int64, error) {
 	return res.RowsAffected, res.Error
 }
 
-// UpdateProduct 更新商品。
-// 显式映射列名走 map 更新：gorm 对 struct 的 Updates 会跳过零值字段，
+// GetProductForUpdate 在事务内锁住归属于 uId 的商品行（SELECT ... FOR UPDATE）。
+// 商品不存在或不属于 uId 时返回 gorm.ErrRecordNotFound。
+func (d *ProductDao) GetProductForUpdate(pId, uId uint) (product *Product, err error) {
+	err = d.DB.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ? AND boss_id = ?", pId, uId).
+		First(&product).Error
+	return
+}
+
+// UpdateProduct 只更新 updates 里的列（列名 → 新值）。
+// 走 map 更新：gorm 对 struct 的 Updates 会跳过零值字段，
 // 导致下架（on_sale=false）、库存清零（num=0）这类零值写入静默丢失。
-// 字段集合与调用方组装的可更新字段一一对应，boss 维度与图片路径不在此处变更。
-// uId 为商品归属 boss，WHERE 同时过滤 boss_id 防止越权覆盖他人商品（IDOR）。
-// 返回受影响行数：0 表示商品不存在或调用方不是归属 boss，调用方据此拒绝请求。
-func (d *ProductDao) UpdateProduct(pId, uId uint, product *Product) (int64, error) {
-	res := d.DB.Model(&Product{}).
+// boss 维度与图片路径不在此处变更。归属由调用方先用 GetProductForUpdate 校验，
+// WHERE 仍带 boss_id，防止越权覆盖他人商品（IDOR）。
+func (d *ProductDao) UpdateProduct(pId, uId uint, updates map[string]interface{}) error {
+	return d.DB.Model(&Product{}).
 		Where("id=? AND boss_id=?", pId, uId).
-		Updates(map[string]interface{}{
-			"name":           product.Name,
-			"category_id":    product.CategoryID,
-			"title":          product.Title,
-			"info":           product.Info,
-			"price":          product.Price,
-			"discount_price": product.DiscountPrice,
-			"num":            product.Num,
-			"on_sale":        product.OnSale,
-			// 拼团价随整单更新一并写入，调用方已按新的零售价校验过
-			"groupbuy_price_cents": product.GroupbuyPriceCents,
-		})
-	return res.RowsAffected, res.Error
+		Updates(updates).Error
 }
 
 // SearchProduct 搜索商品
