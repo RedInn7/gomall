@@ -135,10 +135,19 @@ func (d *UserDao) LockTwoUsersForUpdate(idA, idB uint) (a, b *User, err error) {
 // Omit token_version：struct Updates 会把加载时的旧版本号写回，与并发 BumpTokenVersion
 // 相互覆盖——攻击者持被盗 token 挂慢速请求（如头像上传），受害者同时改密码，
 // 请求落库即把 bump 回滚、被盗 token 复活。版本号只允许 BumpTokenVersion 一条路径写。
+// Omit money：同理，不加锁读到的旧行整行回写，会把支付事务刚扣掉的余额覆盖回旧值。
+// 余额只允许 UpdateUserMoney 一条路径写。
 func (d *UserDao) UpdateUserById(uId uint, user *User) (err error) {
 	return d.DB.Model(&User{}).Where("id=?", uId).
-		Omit("token_version").
+		Omit("token_version", "money").
 		Updates(&user).Error
+}
+
+// UpdateUserMoney 只写 money 一列（余额密文）。调用方必须在同一事务内先用
+// GetUserByIdForUpdate 锁住该行再做读-改-写，杜绝丢失更新。
+func (d *UserDao) UpdateUserMoney(uId uint, money string) error {
+	return d.DB.Model(&User{}).Where("id=?", uId).
+		Update("money", money).Error
 }
 
 // BumpTokenVersion 版本号 +1：该用户所有已签发 JWT 立即作废（改密码/强制下线用）。

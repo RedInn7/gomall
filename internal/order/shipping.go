@@ -9,6 +9,7 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
+	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/service/events"
@@ -29,11 +30,34 @@ func GetShippingSrv() *ShippingSrv {
 	return ShippingSrvIns
 }
 
+// MerchantScope 商家写操作（发货 / 审批退款）的归属范围。路由的 merchant 墙只校验角色，
+// 不校验订单归属：admin 返回 bossID=0 表示可处理任意订单；其余角色只能处理 boss_id=自己 的订单。
+// 角色以 DB 为准，与 RBAC 中间件的角色查询同一口径。
+func MerchantScope(ctx context.Context) (bossID uint, err error) {
+	u, err := ctl.GetUserInfo(ctx)
+	if err != nil {
+		return 0, err
+	}
+	operator, err := user.NewUserDao(ctx).GetUserById(u.Id)
+	if err != nil {
+		return 0, err
+	}
+	if operator.Role == user.RoleAdmin {
+		return 0, nil
+	}
+	return u.Id, nil
+}
+
 // ShipOrder 商家发货。
+//   - 商家只能发自己的订单（MerchantScope），admin 不限
 //   - 仅允许从 WaitShip 推进到 WaitReceive；条件 UPDATE 兜底幂等
 //   - tracking / carrier 仅经 outbox 事件透传，下游消费者负责持久化或对接物流系统
 //   - 状态推进与 outbox 写入同事务，保证不会"已发货但下游收不到事件"
 func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64, trackingNo, carrier string) error {
+	bossID, err := MerchantScope(ctx)
+	if err != nil {
+		return err
+	}
 	baseDao := NewOrderDao(ctx)
 	order, err := baseDao.GetOrderByOrderNum(orderNum)
 	if err != nil {
@@ -42,11 +66,14 @@ func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64, trackingNo
 	if order == nil || order.ID == 0 {
 		return errors.New("订单不存在")
 	}
+	if bossID != 0 && order.BossID != bossID {
+		return ErrOrderForbidden
+	}
 	if order.Type != consts.OrderWaitShip {
 		return ErrInvalidOrderStateTransition
 	}
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := NewOrderDaoByDB(tx).ShipOrder(orderNum)
+		ok, err := NewOrderDaoByDB(tx).ShipOrder(orderNum, bossID)
 		if err != nil {
 			return err
 		}
@@ -85,7 +112,7 @@ func (s *ShippingSrv) ConfirmReceive(ctx context.Context, orderNum uint64) error
 		return errors.New("订单不存在")
 	}
 	if order.UserID != u.Id {
-		return errors.New("无权操作该订单")
+		return ErrOrderForbidden
 	}
 	if order.Type != consts.OrderWaitReceive {
 		return ErrInvalidOrderStateTransition

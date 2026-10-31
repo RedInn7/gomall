@@ -67,7 +67,8 @@ func HandleWeb3PaymentConfirmed(ctx context.Context, payload []byte) error {
 	if err := GetWeb3SettleSrv().SettleConfirmedOrder(ctx, orderID, ev.Buyer, ev.Amount, ev.TxHash); err != nil {
 		// 金额不足 / 喂价缺失 / buyer 不匹配：不可靠重投解决，标记毒消息进 DLQ 人工核查
 		//（防资损 / 配置问题 / 越权结算）。
-		if errors.Is(err, ErrWeb3AmountMismatch) || errors.Is(err, ErrWeb3PriceNotConfigured) || errors.Is(err, ErrWeb3BuyerMismatch) {
+		if errors.Is(err, ErrWeb3AmountMismatch) || errors.Is(err, ErrWeb3PriceNotConfigured) ||
+			errors.Is(err, ErrWeb3USDCRateNotConfigured) || errors.Is(err, ErrWeb3BuyerMismatch) {
 			return fmt.Errorf("%w: %v", errWeb3PoisonMessage, err)
 		}
 		return err // 其它（DB 抖动等）可重试

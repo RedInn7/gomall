@@ -222,18 +222,28 @@ func (d *OrderDao) ShowOrderById(id, uId uint) (r *OrderListRespItem, err error)
 	return
 }
 
-// DeleteOrderById 删除订单
-func (d *OrderDao) DeleteOrderById(id, uId uint) error {
+// DeleteOrderById 删除买家自己的订单，返回是否真的删掉了一行。
+// DeletedAt 是普通可空列不是 gorm.DeletedAt，这里是物理 DELETE：订单一删，托管款、清算单和
+// 结算消费者都找不到它，所以只删资金已闭环的终态单——
+//   - Closed：没收过款，或收的款已原路退回；
+//   - Completed / Refunded：清算单已 settled / refunded，或根本没有清算单（迁移前旧单、预售 / 拼团单）。
+//
+// 条件写进 DELETE 的 WHERE，与并发的状态推进 / 结算竞争时也不会误删。
+func (d *OrderDao) DeleteOrderById(id, uId uint) (bool, error) {
 	res := d.DB.Model(&Order{}).
 		Where("id=? AND user_id = ?", id, uId).
+		Where("(type=? OR (type IN ? AND NOT EXISTS (SELECT 1 FROM payment_clearing WHERE order_id=? AND status NOT IN ?)))",
+			consts.OrderClosed, []uint{consts.OrderCompleted, consts.OrderRefunded}, id,
+			// 即 clearing.StatusSettled / StatusRefunded；clearing 依赖 order，这里不能反向 import。
+			[]string{"settled", "refunded"}).
 		Delete(&Order{})
 	if res.Error != nil {
-		return res.Error
+		return false, res.Error
 	}
 	if res.RowsAffected > 0 {
 		invalidateUserOrderListCache(uId)
 	}
-	return nil
+	return res.RowsAffected > 0, nil
 }
 
 // UpdateOrderById 更新订单详情
@@ -249,13 +259,19 @@ func (d *OrderDao) UpdateOrderById(id, uId uint, order *Order) error {
 	return nil
 }
 
+// notPreorderSQL 普通订单条件。预售单付完定金后 type 仍是 WaitPay（preorder_stage=1），
+// 但它不是"未支付订单"：定金已经划给卖家，超时关单会把定金吞掉，普通支付入口会按全款再收一次。
+// 预售单只能走 preorder 包自己的尾款 / 取消 / 没收流程。
+const notPreorderSQL = "preorder_stage=0"
+
 // MarkOrderPaidWithCheck 条件推进订单状态 WaitPay -> WaitShip。
-// 把状态守卫塞进 WHERE：只有仍处于 WaitPay 的订单才会被改为 WaitShip。
+// 把状态守卫塞进 WHERE：只有仍处于 WaitPay 的普通订单才会被改为 WaitShip。
 // 并发支付 / 支付与取消竞争时，只有第一个事务影响 1 行，其余 RowsAffected=0，
 // 上层据此回滚，杜绝重复支付。返回 ok=true 表示本次推进成功。
 func (d *OrderDao) MarkOrderPaidWithCheck(orderID, userID uint) (bool, error) {
 	res := d.DB.Model(&Order{}).
 		Where("id=? AND user_id=? AND type=?", orderID, userID, consts.OrderWaitPay).
+		Where(notPreorderSQL).
 		Update("type", consts.OrderWaitShip)
 	if res.Error != nil {
 		return false, res.Error
@@ -266,10 +282,12 @@ func (d *OrderDao) MarkOrderPaidWithCheck(orderID, userID uint) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
+// GetTimeoutOrders 拉取超时未支付的普通订单，供 cron 兜底关单。预售单不在其列（见 notPreorderSQL）。
 func (d *OrderDao) GetTimeoutOrders(minutes int, limit int) (orders []*Order, err error) {
 	expireTime := time.Now().Add(-time.Duration(minutes) * time.Minute)
 	err = d.DB.Model(&Order{}).Where(
 		"type=? and created_at <=?", consts.OrderWaitPay, expireTime).
+		Where(notPreorderSQL).
 		Limit(limit).
 		Find(&orders).Error
 
@@ -303,9 +321,12 @@ func (d *OrderDao) GetOrderByOrderNumForUpdate(orderNum uint64) (*Order, error) 
 	return &o, nil
 }
 
+// CloseOrderWithCheck 关闭未支付订单：WaitPay -> Closed。cron 超时扫描与 MQ 延迟关单共用。
+// 已付定金的预售单不关（见 notPreorderSQL），RowsAffected=0 由上层按幂等 no-op 处理。
 func (d *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 	res := d.DB.Model(&Order{}).Where(
 		"order_num=? and type=?", orderNum, consts.OrderWaitPay).
+		Where(notPreorderSQL).
 		Update("type", consts.OrderClosed)
 
 	if res.Error != nil {
@@ -318,12 +339,21 @@ func (d *OrderDao) CloseOrderWithCheck(orderNum uint64) (bool, error) {
 
 }
 
+// whereBoss 商家写操作的归属条件：bossID=0 表示 admin，不限归属；否则只命中该商家自己的订单。
+func whereBoss(q *gorm.DB, bossID uint) *gorm.DB {
+	if bossID == 0 {
+		return q
+	}
+	return q.Where("boss_id=?", bossID)
+}
+
 // ShipOrder 商家发货：WaitShip -> WaitReceive。
 // 条件 UPDATE 保证幂等：仅当订单仍处于 WaitShip 时才会写入；
 // 已发货 / 已退款的订单 RowsAffected=0，上层据此判定非法转换。
+// bossID 见 whereBoss：商家只能发自己的货。
 // 物流单号本期不持久化（model 未引入字段），仅在事件层带出。
-func (d *OrderDao) ShipOrder(orderNum uint64) (bool, error) {
-	res := d.DB.Model(&Order{}).
+func (d *OrderDao) ShipOrder(orderNum uint64, bossID uint) (bool, error) {
+	res := whereBoss(d.DB.Model(&Order{}), bossID).
 		Where("order_num=? AND type=?", orderNum, consts.OrderWaitShip).
 		Update("type", consts.OrderWaitReceive)
 	if res.Error != nil {
@@ -365,9 +395,9 @@ func (d *OrderDao) RequestRefund(orderNum uint64, fromType uint) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
-// ApproveRefund 同意退款：Refunding -> Refunded。
-func (d *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
-	res := d.DB.Model(&Order{}).
+// ApproveRefund 同意退款：Refunding -> Refunded。bossID 见 whereBoss。
+func (d *OrderDao) ApproveRefund(orderNum uint64, bossID uint) (bool, error) {
+	res := whereBoss(d.DB.Model(&Order{}), bossID).
 		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
 		Update("type", consts.OrderRefunded)
 	if res.Error != nil {
@@ -381,8 +411,9 @@ func (d *OrderDao) ApproveRefund(orderNum uint64) (bool, error) {
 
 // RejectRefund 驳回退款：Refunding -> 申请前状态。
 // restoreType 来自进入退款时持久化的 RefundFromType，不能一律跳到 Completed 绕过履约。
-func (d *OrderDao) RejectRefund(orderNum uint64, restoreType uint) (bool, error) {
-	res := d.DB.Model(&Order{}).
+// bossID 见 whereBoss。
+func (d *OrderDao) RejectRefund(orderNum uint64, restoreType uint, bossID uint) (bool, error) {
+	res := whereBoss(d.DB.Model(&Order{}), bossID).
 		Where("order_num=? AND type=?", orderNum, consts.OrderRefunding).
 		Update("type", restoreType)
 	if res.Error != nil {
