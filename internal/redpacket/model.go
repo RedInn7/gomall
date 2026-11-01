@@ -24,8 +24,11 @@ type RedPacket struct {
 	Count     int       `gorm:"not null"`                     // 红包总份数
 	Remaining int       `gorm:"not null"`                     // 剩余份数，领取事务内递减
 	ExpireAt  time.Time `gorm:"not null;index:idx_rp_expire"` // 过期时间
-	Status    uint      `gorm:"not null;default:1;index"`     // 1 active / 2 expired / 3 finished / 4 refunded
+	Status    uint      `gorm:"not null;default:1;index"`     // 1 active / 3 finished / 4 refunded
 	Greeting  string    `gorm:"size:128"`                     // 祝福语
+	// ShareCode 领取口令：随机生成，只给发包人，由发包人分享出去。id 是自增主键可以扫号，
+	// 拿着口令才能领、才能看领取明细。迁移前的老红包为空串，按老规则放行。
+	ShareCode string `gorm:"size:16"`
 }
 
 func (RedPacket) TableName() string { return "red_packet" }

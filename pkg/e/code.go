@@ -81,4 +81,12 @@ const (
 	ErrSkillSoldOut       = 83004 // 秒杀库存已抢完
 	ErrSkillLimitExceeded = 83005 // 超出每人限购
 	ErrSkillConflict      = 83006 // 同一商品同一场次已存在配置不同的活动
+
+	// 红包
+	ErrRedPacketNotExist     = 84001 // 红包不存在
+	ErrRedPacketEnded        = 84002 // 红包已结束（抢完 / 已回收）
+	ErrRedPacketExpired      = 84003 // 红包已过期
+	ErrRedPacketDrained      = 84004 // 红包已抢完
+	ErrRedPacketAlreadyTaken = 84005 // 同一用户重复领取
+	ErrRedPacketForbidden    = 84006 // 口令不对 / 无权查看
 )

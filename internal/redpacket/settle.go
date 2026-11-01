@@ -97,69 +97,63 @@ func adjustClearing(tx *gorm.DB, refID uint, delta int64, bizType string) error 
 }
 
 // settleSendTx 发包扣款：发包人钱包 -total 进 escrow（清算账户 +total）。须在调用方事务内执行。
-// 幂等：同一红包重复结算因台账已存在而跳过。返回 err 由调用方回滚整笔发包。
-func settleSendTx(tx *gorm.DB, rpID, senderID uint, total int64) error {
+// 幂等：同一红包重复结算因台账已存在而跳过（wrote=false）。返回 err 由调用方回滚整笔发包。
+func settleSendTx(tx *gorm.DB, rpID, senderID uint, total int64) (wrote bool, err error) {
 	if total <= 0 {
-		return errors.New("redpacket settle: invalid total")
+		return false, errors.New("redpacket settle: invalid total")
 	}
 	skipped, _, err := adjustWallet(tx, senderID, rpID, -total, money.BizTypeRedPacketSend)
-	if err != nil {
-		return err
+	if err != nil || skipped {
+		return false, err
 	}
-	if skipped {
-		return nil
-	}
-	return adjustClearing(tx, rpID, total, money.BizTypeRedPacketSend)
+	return true, adjustClearing(tx, rpID, total, money.BizTypeRedPacketSend)
 }
 
 // settleClaimTx 领包入账：escrow -amount 进领取人钱包（领取人 +amount）。须在调用方事务内执行。
 // ref 用领取记录 id（每个领取人唯一一行），与发/退的红包 id 空间隔离，天然防同红包不同领取人撞唯一键。
-func settleClaimTx(tx *gorm.DB, claimID, receiverID uint, amount int64) error {
+func settleClaimTx(tx *gorm.DB, claimID, receiverID uint, amount int64) (wrote bool, err error) {
 	if amount <= 0 {
-		return errors.New("redpacket settle: invalid claim amount")
+		return false, errors.New("redpacket settle: invalid claim amount")
 	}
 	skipped, _, err := adjustWallet(tx, receiverID, claimID, amount, money.BizTypeRedPacketClaim)
-	if err != nil {
-		return err
+	if err != nil || skipped {
+		return false, err
 	}
-	if skipped {
-		return nil
-	}
-	return adjustClearing(tx, claimID, -amount, money.BizTypeRedPacketClaim)
+	return true, adjustClearing(tx, claimID, -amount, money.BizTypeRedPacketClaim)
 }
 
 // settleRefundTx 过期回收：escrow -left 退回发包人钱包（发包人 +left）。须在调用方事务内执行。
-func settleRefundTx(tx *gorm.DB, rpID, senderID uint, left int64) error {
+func settleRefundTx(tx *gorm.DB, rpID, senderID uint, left int64) (wrote bool, err error) {
 	if left <= 0 {
-		return nil
+		return false, nil
 	}
 	skipped, _, err := adjustWallet(tx, senderID, rpID, left, money.BizTypeRedPacketRefund)
-	if err != nil {
+	if err != nil || skipped {
+		return false, err
+	}
+	return true, adjustClearing(tx, rpID, -left, money.BizTypeRedPacketRefund)
+}
+
+// settleInTx 独立事务跑一段结算，返回这次是否真的补记了台账。供事件消费者对账使用。
+func settleInTx(ctx context.Context, fn func(tx *gorm.DB) (bool, error)) (wrote bool, err error) {
+	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+		wrote, err = fn(tx)
 		return err
-	}
-	if skipped {
-		return nil
-	}
-	return adjustClearing(tx, rpID, -left, money.BizTypeRedPacketRefund)
+	})
+	return wrote && err == nil, err
 }
 
 // SettleSend 独立事务结算一笔发包资金流，供事件消费者驱动（at-least-once + 台账幂等）。
-func (s *RedPacketSrv) SettleSend(ctx context.Context, rpID, senderID uint, total int64) error {
-	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		return settleSendTx(tx, rpID, senderID, total)
-	})
+func (s *RedPacketSrv) SettleSend(ctx context.Context, rpID, senderID uint, total int64) (bool, error) {
+	return settleInTx(ctx, func(tx *gorm.DB) (bool, error) { return settleSendTx(tx, rpID, senderID, total) })
 }
 
 // SettleClaim 独立事务结算一笔领包入账，供事件消费者驱动。claimID 必须为领取记录 id。
-func (s *RedPacketSrv) SettleClaim(ctx context.Context, claimID, receiverID uint, amount int64) error {
-	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		return settleClaimTx(tx, claimID, receiverID, amount)
-	})
+func (s *RedPacketSrv) SettleClaim(ctx context.Context, claimID, receiverID uint, amount int64) (bool, error) {
+	return settleInTx(ctx, func(tx *gorm.DB) (bool, error) { return settleClaimTx(tx, claimID, receiverID, amount) })
 }
 
 // SettleRefund 独立事务结算一笔过期回收，供事件消费者驱动。
-func (s *RedPacketSrv) SettleRefund(ctx context.Context, rpID, senderID uint, left int64) error {
-	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		return settleRefundTx(tx, rpID, senderID, left)
-	})
+func (s *RedPacketSrv) SettleRefund(ctx context.Context, rpID, senderID uint, left int64) (bool, error) {
+	return settleInTx(ctx, func(tx *gorm.DB) (bool, error) { return settleRefundTx(tx, rpID, senderID, left) })
 }

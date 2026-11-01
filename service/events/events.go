@@ -110,9 +110,10 @@ type Web3PaymentPending struct {
 }
 
 // 红包相关事件：
-//   red_packet.created  -> RedPacketCreated  (发包，便于风控/数据同步)
-//   red_packet.claimed  -> RedPacketClaimed  (领包，下游钱包消费此事件入账)
+//   red_packet.created  -> RedPacketCreated  (发包)
+//   red_packet.claimed  -> RedPacketClaimed  (领包)
 //   red_packet.expired  -> RedPacketExpired  (过期回收，退给发包人)
+// 资金都在发事件的同一事务里入账，redpacket.settle 消费者只做台账对账。
 
 type RedPacketCreated struct {
 	RedPacketID uint   `json:"red_packet_id"`

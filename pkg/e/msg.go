@@ -71,6 +71,13 @@ var MsgFlags = map[int]string{
 	ErrSkillSoldOut:       "秒杀商品已抢完",
 	ErrSkillLimitExceeded: "已达到每人限购数量",
 	ErrSkillConflict:      "该商品同一场次已存在不同配置的秒杀活动",
+
+	ErrRedPacketNotExist:     "红包不存在",
+	ErrRedPacketEnded:        "红包已结束",
+	ErrRedPacketExpired:      "红包已过期",
+	ErrRedPacketDrained:      "红包已抢完",
+	ErrRedPacketAlreadyTaken: "已领取过本红包",
+	ErrRedPacketForbidden:    "红包口令不正确或无权查看",
 }
 
 // GetMsg 获取状态码对应信息
