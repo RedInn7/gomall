@@ -407,3 +407,37 @@ func refundUserBalance(t *testing.T, db *gorm.DB, id uint) int64 {
 	}
 	return balance
 }
+
+// 结算后退款要从卖家余额扣回：卖家余额不够时整笔回滚，不能把卖家扣成负数，也不能只给买家入账。
+func TestSettleRefundRejectsNegativeSellerBalance(t *testing.T) {
+	db := openRefundTestDB(t)
+	stubRestockRedis(t)
+	seedRefundUser(t, db, 11, 100)
+	seedRefundUser(t, db, 22, 100)
+	p := &product.Product{Name: "book", CategoryID: 1, Num: 0, BossID: 22}
+	p.ID = 77
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("seed product: %v", err)
+	}
+	o := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: p.ID, AddressID: 1, Num: 1, Money: 300, Type: consts.OrderRefunded}
+	o.ID = 88
+	if err := db.Create(o).Error; err != nil {
+		t.Fatalf("seed order: %v", err)
+	}
+	if err := db.Create(&clearing.PaymentClearing{
+		OrderID: o.ID, BuyerID: 11, SellerID: 22, Channel: clearing.ChannelWallet,
+		GrossCents: 300, NetCents: 300, Currency: "CNY", Status: clearing.StatusSettled, ClearedAt: time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed clearing: %v", err)
+	}
+
+	if err := GetRefundSrv().SettleRefund(context.Background(), o.ID); !errors.Is(err, ErrSellerBalanceInsufficient) {
+		t.Fatalf("want ErrSellerBalanceInsufficient, got %v", err)
+	}
+	if got := refundUserBalance(t, db, 22); got != 100 {
+		t.Fatalf("seller balance = %d, must stay 100", got)
+	}
+	if got := refundUserBalance(t, db, 11); got != 100 {
+		t.Fatalf("buyer balance = %d, must stay 100 when refund rolls back", got)
+	}
+}
