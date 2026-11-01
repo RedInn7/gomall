@@ -7,6 +7,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/coupon"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -51,6 +53,10 @@ func CancelUnpaidOrder(orderNum uint64) error {
 			return nil
 		}
 		closed = true
+		// 券与关单同事务退回：还没过期回到未使用，已过期直接记已过期。
+		if err := coupon.NewCouponDaoByDB(tx).ReleaseForOrderInTx(order.UserCouponID, order.ID, time.Now()); err != nil {
+			return err
+		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderCancelled", "order.cancelled", order.ID,
 			events.OrderCancelled{
@@ -62,6 +68,7 @@ func CancelUnpaidOrder(orderNum uint64) error {
 				Reason:             "timeout",
 				PromoRuleID:        order.PromoRuleID,
 				PromoDiscountCents: order.PromoDiscountCents,
+				PromoBudgetDate:    promo.BudgetDay(order.CreatedAt),
 			},
 		)
 	})
