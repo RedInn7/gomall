@@ -13,6 +13,7 @@ func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 	// 商家 / 运营：同意 / 驳回退款。approve 会触发真实资金结算，必须挂 merchant 墙（admin 天然可过）
 	merchant.POST("orders/refund/approve", ApproveRefundHandler())
 	merchant.POST("orders/refund/reject", RejectRefundHandler())
-	// 商家：确认退货入库后回补库存
+	// 商家：待审批列表（带退款原因）/ 确认退货入库后回补库存
+	merchant.GET("orders/refund/list", ListRefundingHandler())
 	merchant.POST("orders/refund/return-received", ReturnReceivedHandler())
 }

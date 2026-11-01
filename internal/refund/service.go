@@ -16,6 +16,7 @@ import (
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -464,6 +465,27 @@ func (s *RefundSrv) ConfirmReturnReceived(ctx context.Context, orderNum uint64) 
 	return nil
 }
 
+// ListRefunding 商家查看待审批的退款单（含买家填的原因、申请次数），admin 看全部。按 id 倒序，last_id 翻页。
+func (s *RefundSrv) ListRefunding(ctx context.Context, lastID uint, pageSize int) ([]*orderpkg.Order, error) {
+	bossID, err := orderpkg.MerchantScope(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 20
+	}
+	q := dao.NewDBClient(ctx).Model(&orderpkg.Order{}).Where("type = ?", consts.OrderRefunding)
+	if bossID != 0 {
+		q = q.Where("boss_id = ?", bossID)
+	}
+	if lastID > 0 {
+		q = q.Where("id < ?", lastID)
+	}
+	var orders []*orderpkg.Order
+	err = q.Order("id DESC").Limit(pageSize).Find(&orders).Error
+	return orders, err
+}
+
 // settleCompensationDelay 补偿任务只碰这么久之前就该结算完的订单，给正常的事件链路留出时间。
 const settleCompensationDelay = 10 * time.Minute
 
@@ -498,6 +520,35 @@ func (s *RefundSrv) RunSettleCompensation() {
 	for _, id := range missed(consts.OrderRefunded, "status <> ?", clearing.StatusRefunded) {
 		if err := s.SettleRefund(ctx, id); err != nil {
 			util.LogrusObj.Errorf("SettleCompensation 补退款失败 order=%d err=%v", id, err)
+		}
+	}
+	s.compensatePromoRelease(ctx, db, before)
+}
+
+// promoReleaseLookback 满减预算补退只看这么久之内关单 / 退款的订单。
+const promoReleaseLookback = 24 * time.Hour
+
+// compensatePromoRelease 满减预算退还的兜底：promo.release 消费者重试用完进了 DLQ，预算就永久少退。
+// 扫"已关单 / 已退款、命中满减、却没有 promo_release 台账"的订单补退，ReleaseDiscount 按台账唯一键幂等，
+// 与正常消费者并发也只退一次。只回看 promoReleaseLookback：预算按天重置（consumed_today），
+// 隔天再退是往当天预算里加钱，也会把上线前没有台账的历史订单全部重退一遍。
+func (s *RefundSrv) compensatePromoRelease(ctx context.Context, db *gorm.DB, before time.Time) {
+	var orders []*orderpkg.Order
+	if err := db.Model(&orderpkg.Order{}).
+		Where("type IN ? AND promo_rule_id <> 0 AND promo_discount_cents > 0 AND updated_at <= ? AND updated_at >= ?",
+			[]uint{consts.OrderClosed, consts.OrderRefunded}, before, time.Now().Add(-promoReleaseLookback)).
+		Where("id NOT IN (?)", db.Model(&promo.PromoRelease{}).Select("order_id")).
+		Limit(100).Find(&orders).Error; err != nil {
+		util.LogrusObj.Errorf("SettleCompensation 扫满减待退还失败 err=%v", err)
+		return
+	}
+	for _, o := range orders {
+		reason := "refund"
+		if o.Type == consts.OrderClosed {
+			reason = "cancel"
+		}
+		if err := promo.GetPromoSrv().ReleaseDiscount(ctx, o.ID, o.PromoRuleID, o.PromoDiscountCents, reason); err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 补退满减预算失败 order=%d err=%v", o.ID, err)
 		}
 	}
 }
