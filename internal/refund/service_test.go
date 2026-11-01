@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -22,6 +24,7 @@ import (
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
@@ -328,6 +331,9 @@ func assertRefundOrderType(t *testing.T, db *gorm.DB, id uint, want uint) {
 func openRefundTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	conf.Config = &conf.Conf{EncryptSecret: &conf.EncryptSecret{MoneySecret: "refund-test-secret"}}
+	if util.LogrusObj == nil {
+		util.LogrusObj = logrus.New()
+	}
 	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:refund-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
@@ -342,7 +348,7 @@ func openRefundTestDB(t *testing.T) *gorm.DB {
 		dao.SetTestDB(previous)
 		_ = sqlDB.Close()
 	})
-	if err := db.AutoMigrate(&user.User{}, &orderpkg.Order{}, &product.Product{}, &money.AccountTransaction{}, &clearing.PaymentClearing{}, &outbox.OutboxEvent{}); err != nil {
+	if err := db.AutoMigrate(&user.User{}, &orderpkg.Order{}, &product.Product{}, &money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{}, &clearing.PaymentAnomalyTransition{}, &outbox.OutboxEvent{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
@@ -406,4 +412,107 @@ func refundUserBalance(t *testing.T, db *gorm.DB, id uint) int64 {
 		t.Fatalf("decrypt balance: %v", err)
 	}
 	return balance
+}
+
+// 结算后退款要从卖家余额扣回：卖家余额不够时整笔回滚，不能把卖家扣成负数，也不能只给买家入账。
+func TestSettleRefundRejectsNegativeSellerBalance(t *testing.T) {
+	db := openRefundTestDB(t)
+	stubRestockRedis(t)
+	seedRefundUser(t, db, 11, 100)
+	seedRefundUser(t, db, 22, 100)
+	p := &product.Product{Name: "book", CategoryID: 1, Num: 0, BossID: 22}
+	p.ID = 77
+	if err := db.Create(p).Error; err != nil {
+		t.Fatalf("seed product: %v", err)
+	}
+	o := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: p.ID, AddressID: 1, Num: 1, Money: 300, Type: consts.OrderRefunded}
+	o.ID, o.UpdatedAt = 88, time.Now().Add(-time.Hour)
+	if err := db.Create(o).Error; err != nil {
+		t.Fatalf("seed order: %v", err)
+	}
+	if err := db.Create(&clearing.PaymentClearing{
+		OrderID: o.ID, BuyerID: 11, SellerID: 22, Channel: clearing.ChannelWallet,
+		GrossCents: 300, NetCents: 300, Currency: "CNY", Status: clearing.StatusSettled, ClearedAt: time.Now(),
+	}).Error; err != nil {
+		t.Fatalf("seed clearing: %v", err)
+	}
+
+	if err := GetRefundSrv().SettleRefund(context.Background(), o.ID); !errors.Is(err, ErrSellerBalanceInsufficient) {
+		t.Fatalf("want ErrSellerBalanceInsufficient, got %v", err)
+	}
+	if got := refundUserBalance(t, db, 22); got != 100 {
+		t.Fatalf("seller balance = %d, must stay 100", got)
+	}
+	if got := refundUserBalance(t, db, 11); got != 100 {
+		t.Fatalf("buyer balance = %d, must stay 100 when refund rolls back", got)
+	}
+
+	// 消费者重投与补偿任务并发撞上同一单：异常单只落一张，进人工队列。
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = GetRefundSrv().SettleRefund(context.Background(), o.ID)
+		}()
+	}
+	wg.Wait()
+	anomaly := func() clearing.PaymentAnomaly {
+		var list []clearing.PaymentAnomaly
+		if err := db.Where("order_id = ?", o.ID).Find(&list).Error; err != nil {
+			t.Fatal(err)
+		}
+		if len(list) != 1 || list[0].Reason != clearing.AnomalyReasonRefundSellerShortfall || list[0].ProviderAmount != "300" {
+			t.Fatalf("want exactly one shortfall anomaly, got %+v", list)
+		}
+		return list[0]
+	}
+	if a := anomaly(); a.Status != clearing.AnomalyStatusPendingReview {
+		t.Fatalf("anomaly status = %s, want pending_review", a.Status)
+	}
+	setSeller := func(balance int64) {
+		u := &user.User{Money: strconv.FormatInt(balance, 10)}
+		cipher, err := u.EncryptMoney()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Model(&user.User{}).Where("id = ?", 22).Update("money", cipher).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolve := func() {
+		if err := db.Model(&clearing.PaymentAnomaly{}).Where("order_id = ?", o.ID).
+			Update("status", clearing.AnomalyStatusResolved).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 运营标 resolved 但卖家仍不够：补偿重放失败，异常单退回待审核并留系统流转记录。
+	resolve()
+	GetRefundSrv().RunSettleCompensation()
+	if a := anomaly(); a.Status != clearing.AnomalyStatusPendingReview {
+		t.Fatalf("retry still short: anomaly status = %s, want pending_review", a.Status)
+	}
+	var transitions int64
+	db.Model(&clearing.PaymentAnomalyTransition{}).Count(&transitions)
+	if transitions != 1 {
+		t.Fatalf("want one system transition, got %d", transitions)
+	}
+
+	// 卖家补足余额但异常单未处理完：补偿任务跳过，不能自己退。
+	setSeller(1000)
+	GetRefundSrv().RunSettleCompensation()
+	if got := refundUserBalance(t, db, 11); got != 100 {
+		t.Fatalf("pending anomaly must be skipped by compensation, buyer balance = %d", got)
+	}
+
+	// 运营标 resolved：补偿任务自动重放这笔退款。
+	resolve()
+	GetRefundSrv().RunSettleCompensation()
+	if got := refundUserBalance(t, db, 11); got != 400 {
+		t.Fatalf("buyer balance = %d, want 400 after resolved retry", got)
+	}
+	if got := refundUserBalance(t, db, 22); got != 700 {
+		t.Fatalf("seller balance = %d, want 700 after resolved retry", got)
+	}
 }

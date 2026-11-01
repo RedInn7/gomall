@@ -21,6 +21,7 @@ import (
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/clearing"
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
@@ -265,7 +266,7 @@ func openGroupbuyTestDB(t *testing.T) *gorm.DB {
 		_ = sqlDB.Close()
 	})
 	if err := db.AutoMigrate(&user.User{}, &product.Product{}, &orderpkg.Order{}, &GroupbuyGroup{}, &GroupbuyMember{},
-		&money.AccountTransaction{}, &outbox.OutboxEvent{}); err != nil {
+		&money.AccountTransaction{}, &outbox.OutboxEvent{}, &clearing.PaymentClearing{}, &GroupbuyNotice{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
