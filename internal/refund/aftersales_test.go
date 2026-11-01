@@ -174,6 +174,82 @@ func TestSettleRefundNeverDrivesSellerNegative(t *testing.T) {
 	}
 }
 
+// 没有清算单的旧订单：卖家余额不足时退款卡住，卖家补足后补偿任务要能扫到并退完（并发跑也只退一次）；
+// 上线前就已退款、refund_count=0 的历史单没有 credit 流水，不能被自动补钱。
+func TestSettleCompensationRetriesNoClearingRefundAfterSellerFunded(t *testing.T) {
+	db := openRefundTestDB(t)
+	stubRestockRedis(t)
+	seedRefundUser(t, db, 11, 0)
+	seedRefundUser(t, db, 22, 100)
+	seed := func(num uint64, refundCount int) *orderpkg.Order {
+		o := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1, Money: 300,
+			Type: consts.OrderRefunded, RefundFromType: consts.OrderCompleted, RefundCount: refundCount, OrderNum: num}
+		o.UpdatedAt = time.Now().Add(-time.Hour)
+		if err := db.Create(o).Error; err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	stuck := seed(9601, 1)
+	seed(9602, 0) // 历史退款单
+
+	if err := GetRefundSrv().SettleRefund(context.Background(), stuck.ID); !errors.Is(err, ErrSellerBalanceInsufficient) {
+		t.Fatalf("want ErrSellerBalanceInsufficient, got %v", err)
+	}
+	GetRefundSrv().RunSettleCompensation() // 余额仍不足：补偿也退不了，不能扣成负数
+	if got := refundUserBalance(t, db, 22); got != 100 {
+		t.Fatalf("seller balance %d, want untouched 100", got)
+	}
+
+	db.Delete(&user.User{}, 22)
+	seedRefundUser(t, db, 22, 500)
+	runConcurrently(3, func(int) error { GetRefundSrv().RunSettleCompensation(); return nil })
+	if got := refundUserBalance(t, db, 22); got != 200 {
+		t.Fatalf("seller balance %d, want 200 (exactly one refund)", got)
+	}
+	if got := refundUserBalance(t, db, 11); got != 300 {
+		t.Fatalf("buyer balance %d, want 300 (legacy refund_count=0 order must not be paid)", got)
+	}
+}
+
+// 长期失败的单（卖家余额不足）排在前面超过一页，也不能把后面正常待补的退款饿死。
+func TestSettleCompensationNotStarvedByPermanentFailures(t *testing.T) {
+	db := openRefundTestDB(t)
+	stubRestockRedis(t)
+	seedRefundUser(t, db, 11, 0)
+	seedRefundUser(t, db, 22, 1000)
+	seedRefundUser(t, db, 23, 0) // 没钱的卖家
+	seed := func(num uint64, boss uint) *orderpkg.Order {
+		o := &orderpkg.Order{UserID: 11, BossID: boss, ProductID: 1, AddressID: 1, Num: 1, Money: 300,
+			Type: consts.OrderRefunded, RefundFromType: consts.OrderCompleted, RefundCount: 1, OrderNum: num}
+		o.UpdatedAt = time.Now().Add(-time.Hour)
+		if err := db.Create(o).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Create(&clearing.PaymentClearing{OrderID: o.ID, BuyerID: 11, SellerID: boss, Channel: clearing.ChannelWallet,
+			GrossCents: 300, NetCents: 300, Currency: "CNY", Status: clearing.StatusSettled, ClearedAt: time.Now()}).Error; err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	for i := 0; i < compensationPageSize+5; i++ {
+		seed(uint64(9700+i), 23)
+	}
+	good := seed(9900, 22)
+
+	GetRefundSrv().RunSettleCompensation()
+	var c clearing.PaymentClearing
+	if err := db.Where("order_id = ?", good.ID).First(&c).Error; err != nil {
+		t.Fatal(err)
+	}
+	if c.Status != clearing.StatusRefunded {
+		t.Fatalf("order behind %d failing orders not compensated: clearing=%s", compensationPageSize+5, c.Status)
+	}
+	if got := refundUserBalance(t, db, 11); got != 300 {
+		t.Fatalf("buyer balance %d, want 300", got)
+	}
+}
+
 // 发货后才退的订单：结算不回补库存；商家确认退货入库才补，并发点多次只补一次；未发货的退款不能再走这条路。
 func TestReturnReceivedRestocksShippedRefundOnce(t *testing.T) {
 	db := openRefundTestDB(t)
@@ -244,12 +320,21 @@ func TestSettleCompensationReleasesMissedPromoBudget(t *testing.T) {
 	cancelled := seed(9502, consts.OrderClosed, ago)
 	db.Model(refunded).UpdateColumn("type", consts.OrderRefunded)
 	seed(9503, consts.OrderClosed, tooOld) // 超出回看窗口，不补
+	bulk := make([]uint, 0, compensationPageSize)
+	for i := 0; i < compensationPageSize; i++ { // 凑满一页以上，一轮要全部补完
+		bulk = append(bulk, seed(uint64(9600+i), consts.OrderClosed, ago).ID)
+	}
+	db.Model(rule).UpdateColumn("consumed_today", 100+50*compensationPageSize)
 
 	runConcurrently(3, func(int) error { GetRefundSrv().RunSettleCompensation(); return nil })
 
 	var releases []promo.PromoRelease
 	db.Order("order_id").Find(&releases)
-	if len(releases) != 2 || releases[0].OrderID != refunded.ID || releases[0].Reason != "refund" ||
+	if len(releases) != 2+len(bulk) {
+		t.Fatalf("released %d orders, want %d", len(releases), 2+len(bulk))
+	}
+	releases = releases[:2]
+	if releases[0].OrderID != refunded.ID || releases[0].Reason != "refund" ||
 		releases[1].OrderID != cancelled.ID || releases[1].Reason != "cancel" {
 		t.Fatalf("unexpected releases: %+v", releases)
 	}

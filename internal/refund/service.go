@@ -489,10 +489,33 @@ func (s *RefundSrv) ListRefunding(ctx context.Context, lastID uint, pageSize int
 // settleCompensationDelay 补偿任务只碰这么久之前就该结算完的订单，给正常的事件链路留出时间。
 const settleCompensationDelay = 10 * time.Minute
 
+// compensationPageSize 补偿任务每页扫多少单。
+const compensationPageSize = 100
+
+// eachPendingOrder 按 id 游标把命中的订单翻完。永久失败的单（卖家余额长期不足、满减规则被删）
+// 只会在本轮被跳过，不会占住固定名额把排在后面的正常单饿死。scope 每次返回新的查询链。
+func eachPendingOrder(scope func() *gorm.DB, fn func(o *orderpkg.Order)) {
+	var lastID uint
+	for {
+		var orders []*orderpkg.Order
+		if err := scope().Where("id > ?", lastID).Order("id").Limit(compensationPageSize).Find(&orders).Error; err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 扫表失败 err=%v", err)
+			return
+		}
+		for _, o := range orders {
+			fn(o)
+		}
+		if len(orders) < compensationPageSize {
+			return
+		}
+		lastID = orders[len(orders)-1].ID
+	}
+}
+
 // RunSettleCompensation cron 资金兜底：order.completed / order.refunded 事件丢了（outbox 死信、消费者进 DLQ），
 // 卖家就永远拿不到钱、买家永远退不到款。这里直接按订单与清算单状态补：已完成但清算单还是 cleared 的补结算，
-// 已退款但清算单还不是 refunded 的补退款。两边都按清算单状态幂等，与正常消费者并发也只生效一次。
-// ponytail: 每轮各补 100 单，永久失败的单会一直占名额；量大时改成按 id 游标翻页。
+// 已退款但清算单还不是 refunded 的补退款；没有清算单的旧订单按"有没有买家退款 credit 流水"判断。
+// 都按清算单状态 / 流水幂等，与正常消费者并发也只生效一次。
 func (s *RefundSrv) RunSettleCompensation() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -502,26 +525,33 @@ func (s *RefundSrv) RunSettleCompensation() {
 	ctx := context.Background()
 	db := dao.NewDBClient(ctx)
 	before := time.Now().Add(-settleCompensationDelay)
-	missed := func(orderType uint, clearingCond, clearingStatus string) []uint {
-		var ids []uint
-		if err := db.Model(&orderpkg.Order{}).
-			Where("type = ? AND updated_at <= ? AND id IN (?)", orderType, before,
-				db.Model(&clearing.PaymentClearing{}).Select("order_id").Where(clearingCond, clearingStatus)).
-			Limit(100).Pluck("id", &ids).Error; err != nil {
-			util.LogrusObj.Errorf("SettleCompensation 扫表失败 type=%d err=%v", orderType, err)
-		}
-		return ids
-	}
-	for _, id := range missed(consts.OrderCompleted, "status = ?", clearing.StatusCleared) {
-		if err := clearing.SettleCompletedOrder(ctx, id); err != nil {
-			util.LogrusObj.Errorf("SettleCompensation 补结算失败 order=%d err=%v", id, err)
+	withClearing := func(orderType uint, clearingCond, clearingStatus string) func() *gorm.DB {
+		return func() *gorm.DB {
+			return db.Model(&orderpkg.Order{}).
+				Where("type = ? AND updated_at <= ? AND id IN (?)", orderType, before,
+					db.Model(&clearing.PaymentClearing{}).Select("order_id").Where(clearingCond, clearingStatus))
 		}
 	}
-	for _, id := range missed(consts.OrderRefunded, "status <> ?", clearing.StatusRefunded) {
-		if err := s.SettleRefund(ctx, id); err != nil {
-			util.LogrusObj.Errorf("SettleCompensation 补退款失败 order=%d err=%v", id, err)
+	eachPendingOrder(withClearing(consts.OrderCompleted, "status = ?", clearing.StatusCleared), func(o *orderpkg.Order) {
+		if err := clearing.SettleCompletedOrder(ctx, o.ID); err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 补结算失败 order=%d err=%v", o.ID, err)
+		}
+	})
+	refund := func(o *orderpkg.Order) {
+		if err := s.SettleRefund(ctx, o.ID); err != nil {
+			util.LogrusObj.Errorf("SettleCompensation 补退款失败 order=%d err=%v", o.ID, err)
 		}
 	}
+	eachPendingOrder(withClearing(consts.OrderRefunded, "status <> ?", clearing.StatusRefunded), refund)
+	// 没有清算单的旧订单从卖家余额扣，余额不足时 SettleRefund 拒绝并进 DLQ，这里等卖家补足后再退。
+	// 只认 refund_count>0：本次上线前就已退款的历史单没有 credit 流水（早期退款不打款），不能自动补钱。
+	eachPendingOrder(func() *gorm.DB {
+		return db.Model(&orderpkg.Order{}).
+			Where("type = ? AND refund_count > 0 AND updated_at <= ?", consts.OrderRefunded, before).
+			Where("id NOT IN (?)", db.Model(&clearing.PaymentClearing{}).Select("order_id")).
+			Where("id NOT IN (?)", db.Model(&money.AccountTransaction{}).Select("ref_order_id").
+				Where("direction = ? AND biz_type = ?", money.DirectionCredit, money.BizTypeRefund))
+	}, refund)
 	s.compensatePromoRelease(ctx, db, before)
 }
 
@@ -533,16 +563,13 @@ const promoReleaseLookback = 24 * time.Hour
 // 与正常消费者并发也只退一次。只回看 promoReleaseLookback：预算按天重置（consumed_today），
 // 隔天再退是往当天预算里加钱，也会把上线前没有台账的历史订单全部重退一遍。
 func (s *RefundSrv) compensatePromoRelease(ctx context.Context, db *gorm.DB, before time.Time) {
-	var orders []*orderpkg.Order
-	if err := db.Model(&orderpkg.Order{}).
-		Where("type IN ? AND promo_rule_id <> 0 AND promo_discount_cents > 0 AND updated_at <= ? AND updated_at >= ?",
-			[]uint{consts.OrderClosed, consts.OrderRefunded}, before, time.Now().Add(-promoReleaseLookback)).
-		Where("id NOT IN (?)", db.Model(&promo.PromoRelease{}).Select("order_id")).
-		Limit(100).Find(&orders).Error; err != nil {
-		util.LogrusObj.Errorf("SettleCompensation 扫满减待退还失败 err=%v", err)
-		return
-	}
-	for _, o := range orders {
+	since := time.Now().Add(-promoReleaseLookback)
+	eachPendingOrder(func() *gorm.DB {
+		return db.Model(&orderpkg.Order{}).
+			Where("type IN ? AND promo_rule_id <> 0 AND promo_discount_cents > 0 AND updated_at <= ? AND updated_at >= ?",
+				[]uint{consts.OrderClosed, consts.OrderRefunded}, before, since).
+			Where("id NOT IN (?)", db.Model(&promo.PromoRelease{}).Select("order_id"))
+	}, func(o *orderpkg.Order) {
 		reason := "refund"
 		if o.Type == consts.OrderClosed {
 			reason = "cancel"
@@ -550,7 +577,7 @@ func (s *RefundSrv) compensatePromoRelease(ctx context.Context, db *gorm.DB, bef
 		if err := promo.GetPromoSrv().ReleaseDiscount(ctx, o.ID, o.PromoRuleID, o.PromoDiscountCents, reason); err != nil {
 			util.LogrusObj.Errorf("SettleCompensation 补退满减预算失败 order=%d err=%v", o.ID, err)
 		}
-	}
+	})
 }
 
 func inUintSlice(v uint, s []uint) bool {
