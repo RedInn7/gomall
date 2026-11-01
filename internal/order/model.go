@@ -39,6 +39,9 @@ type Order struct {
 	// 库存对账把这份预占当合法占用并补核销，不会当泄漏退回 available（那样会超卖）。
 	StockCommitPending bool `gorm:"not null;default:false;index"`
 
+	// SeckillID 秒杀活动 id（skill_product.id），0 = 非秒杀单。关单时据此归还秒杀名额。
+	SeckillID uint `gorm:"not null;default:0;index"`
+
 	// Ticket 异步下单的排队凭证，唯一索引保证一个 ticket 只建一张单；同步下单为 NULL。
 	Ticket *string `gorm:"size:32;uniqueIndex"`
 }

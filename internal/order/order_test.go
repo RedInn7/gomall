@@ -190,7 +190,8 @@ func TestAsyncOrderTaskCreatesOneOrderPerTicket(t *testing.T) {
 	order.SetAsyncOrderTicketStore(tickets)
 	t.Cleanup(func() { order.SetAsyncOrderTicketStore(prev) })
 
-	body, _ := json.Marshal(order.AsyncOrderTask{Ticket: "424242", UserID: 11, ProductID: p.ID, Num: 1})
+	ticket := order.NewTicket()
+	body, _ := json.Marshal(order.AsyncOrderTask{Ticket: ticket, UserID: 11, ProductID: p.ID, Num: 1})
 	for i := 0; i < 2; i++ {
 		if err := order.HandleAsyncOrderTask(context.Background(), body); err != nil {
 			t.Fatalf("delivery %d: %v", i+1, err)
@@ -204,7 +205,7 @@ func TestAsyncOrderTaskCreatesOneOrderPerTicket(t *testing.T) {
 	if len(orders) != 1 {
 		t.Fatalf("redelivered ticket created %d orders, want 1", len(orders))
 	}
-	if st := tickets["424242"]; st.Status != order.OrderTicketStatusOK || st.OrderID != orders[0].ID {
+	if st := tickets[ticket]; st.Status != order.OrderTicketStatusOK || st.OrderID != orders[0].ID {
 		t.Fatalf("ticket status = %+v, want ok for order %d", st, orders[0].ID)
 	}
 }
