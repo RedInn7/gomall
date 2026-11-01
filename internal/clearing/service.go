@@ -356,10 +356,7 @@ func settleCompletedOrder(db *gorm.DB, orderID uint) error {
 }
 
 func orderPayableCents(o *order.Order) int64 {
-	if o.PromoRuleID != 0 {
-		return o.FinalCents
-	}
-	return o.Money * int64(o.Num)
+	return o.PayableCents()
 }
 
 func validChannel(channel string) bool {

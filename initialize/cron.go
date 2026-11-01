@@ -7,6 +7,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/groupbuy"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/preorder"
@@ -118,6 +119,8 @@ func InitCron() *cron.Cron {
 	}
 	_, _ = c.AddFunc("@every 5m", groupbuy.GetGroupbuySrv().RunCompleteFullGroups) // 满员但成团失败的团补成团
 	_, _ = c.AddFunc("@every 10m", refund.GetRefundSrv().RunSettleCompensation)    // 资金事件丢失时按订单 / 清算单状态补结算、补退款
+	_, _ = c.AddFunc("@every 10m", coupon.GetCouponSrv().RunExpireCoupons)         // 过了有效期的未使用券翻成已过期
+	_, _ = c.AddFunc("@every 5m", coupon.GetCouponSrv().RunStockReconcile)         // 券 Redis 库存低于 DB 剩余量时抬回（key 丢失 / 回滚失败）
 
 	// 预售尾款没收兜底：每 1h 扫一次 FinalEndAt 已过但 stage 仍 DepositPaid 的订单，
 	// service 层内部已做"扫 + 逐条单事务 + 单条 ERROR log"，cron 层只兜 panic。

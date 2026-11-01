@@ -23,6 +23,10 @@ func NewCouponDao(ctx context.Context) *CouponDao {
 	return &CouponDao{dao.NewDBClient(ctx)}
 }
 
+func NewCouponDaoByDB(db *gorm.DB) *CouponDao {
+	return &CouponDao{db}
+}
+
 func (d *CouponDao) CreateBatch(b *CouponBatch) error {
 	return d.Create(b).Error
 }
@@ -68,7 +72,7 @@ func (d *CouponDao) ClaimWithDBLock(userId, batchId uint) (*UserCoupon, error) {
 			return err
 		}
 		if owned >= batch.PerUser {
-			return errors.New("超出单人领取上限")
+			return ErrPerUserLimitReached
 		}
 
 		if err := tx.Model(&CouponBatch{}).
@@ -140,14 +144,84 @@ func (d *CouponDao) PersistClaim(userId, batchId uint, validDays int) (*UserCoup
 	return uc, nil
 }
 
-func (d *CouponDao) ListUserCoupons(userId uint, status int) ([]*UserCoupon, error) {
+// ListUserCoupons 按展示状态过滤。过期任务是定时跑的，两次之间已过期但还没翻状态的券
+// 按 expire_at 归到"已过期"，不出现在"未使用"里。
+func (d *CouponDao) ListUserCoupons(userId uint, status int, now time.Time) ([]*UserCoupon, error) {
 	var out []*UserCoupon
 	q := d.Where("user_id = ?", userId).Order("id DESC")
-	if status > 0 {
-		q = q.Where("status = ?", status)
+	switch status {
+	case UserCouponStatusUnused:
+		q = q.Where("status = ? AND expire_at > ?", UserCouponStatusUnused, now)
+	case UserCouponStatusExpired:
+		q = q.Where("status = ? OR (status = ? AND expire_at <= ?)", UserCouponStatusExpired, UserCouponStatusUnused, now)
+	default:
+		if status > 0 {
+			q = q.Where("status = ?", status)
+		}
 	}
 	err := q.Find(&out).Error
 	return out, err
+}
+
+// GetUsable 下单前查券：必须属于该用户、未使用、未过期，连同批次一起返回。
+func (d *CouponDao) GetUsable(userId, userCouponId uint, now time.Time) (*UserCoupon, *CouponBatch, error) {
+	var uc UserCoupon
+	err := d.Where("id = ? AND user_id = ? AND status = ? AND expire_at > ?",
+		userCouponId, userId, UserCouponStatusUnused, now).First(&uc).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, ErrCouponUnavailable
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	b, err := d.GetBatch(uc.BatchId)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &uc, b, nil
+}
+
+// UseInTx 在下单事务里核销：条件 UPDATE 只对"本人、未使用、未过期"生效，
+// 同一张券被两笔并发订单同时选中时只有一笔能核销成功，另一笔整单回滚。
+func (d *CouponDao) UseInTx(userCouponId, userId, orderId uint, now time.Time) error {
+	res := d.DB.Model(&UserCoupon{}).
+		Where("id = ? AND user_id = ? AND status = ? AND expire_at > ?",
+			userCouponId, userId, UserCouponStatusUnused, now).
+		Updates(map[string]interface{}{
+			"status":        UserCouponStatusUsed,
+			"used_order_id": orderId,
+			"used_at":       now,
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrCouponUnavailable
+	}
+	return nil
+}
+
+// ReleaseForOrderInTx 关单 / 退款时把订单核销的券退回：还没过期回到未使用，已过期直接记为已过期。
+// 条件带 used_order_id + status=used，重复调用是 no-op。
+func (d *CouponDao) ReleaseForOrderInTx(userCouponId, orderId uint, now time.Time) error {
+	if userCouponId == 0 {
+		return nil
+	}
+	return d.DB.Model(&UserCoupon{}).
+		Where("id = ? AND used_order_id = ? AND status = ?", userCouponId, orderId, UserCouponStatusUsed).
+		Updates(map[string]interface{}{
+			"status":        gorm.Expr("CASE WHEN expire_at > ? THEN ? ELSE ? END", now, UserCouponStatusUnused, UserCouponStatusExpired),
+			"used_order_id": 0,
+			"used_at":       nil,
+		}).Error
+}
+
+// ExpireOverdue 把已过有效期的未使用券批量翻成已过期，返回翻转条数。
+func (d *CouponDao) ExpireOverdue(now time.Time) (int64, error) {
+	res := d.DB.Model(&UserCoupon{}).
+		Where("status = ? AND expire_at <= ?", UserCouponStatusUnused, now).
+		Update("status", UserCouponStatusExpired)
+	return res.RowsAffected, res.Error
 }
 
 // generateCouponCode 券码 = 时间戳 + 批次 + 用户 + 随机熵。

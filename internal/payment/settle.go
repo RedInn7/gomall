@@ -41,15 +41,9 @@ func ensureOrderPayable(o *order.Order) error {
 
 // orderPayableCents 订单应付金额（分）的统一口径，所有支付渠道共用。
 //
-//	命中促销（PromoRuleID != 0）以折后实付 FinalCents 为准；否则单价 Money * 件数 Num。
-//
-// 判据用 PromoRuleID 而非 FinalCents > 0：满减全额抵扣 / 100% 折扣时 FinalCents == 0 是
-// 合法实付，用 >0 判会误判为未命中、回退折前全价向买家多扣。与下单侧命中口径保持一致。
+//	命中满减或用了券以折后实付 FinalCents 为准；否则单价 Money * 件数 Num。口径收口在 order.Order.PayableCents。
 func orderPayableCents(o *order.Order) int64 {
-	if o.PromoRuleID != 0 {
-		return o.FinalCents
-	}
-	return o.Money * int64(o.Num)
+	return o.PayableCents()
 }
 
 // finishPaymentConfirmationTx 跑三条支付渠道共享的“支付确认”事务尾段（在调用方完成清算后、
