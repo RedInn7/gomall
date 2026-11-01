@@ -12,7 +12,7 @@
 - 解释为什么抢名额要用一条条件 `UPDATE`，以及 `RowsAffected=0` 之后为什么要重读快照；
 - 说清拼团资金的三段流水：加入进托管、成团给卖家、散团退成员，以及幂等落在哪；
 - 说清库存在开团、参团、成团、散团四个出口的 Reserve / Commit / Release；
-- 指出当前实现的几个真实缺口：开团没挂幂等、并发重复参团的错误码、成团即打款给卖家。
+- 说清成团与散团怎样靠团行条件更新互斥，以及补成团 cron 为什么不按截止时间判失败。
 
 ---
 
@@ -25,9 +25,9 @@
 1. “3 人团最后一个名额，我和另一个人同时点了参团，两个人都显示成功”；
 2. “明明凑齐了，页面却显示拼团失败”；
 3. “团散了，钱一直没退”；
-4. “开团按钮点了两下，扣了两次钱，开了两个团”。
+4. “拼团页显示有货，成团时会不会卖超”。
 
-前三条是本讲代码要守住的，第四条是当前实现确实存在的缺口（第六节展开）。
+四条分别落在名额、成团判定、退款和库存上：第一条看第二节的条件更新，第二条看第五节的补成团，第三条看第五节的同事务退款，第四条看第四节的 DB 条件扣减。
 
 普通订单的状态链是 `WaitPay → WaitShip → ...`（见第 09 讲）。拼团加入时就扣钱，但卖家还不能发货，所以 gomall 加了一个过渡态 `WaitGroup`，它只有两条出边：
 
@@ -62,7 +62,7 @@ stateDiagram-v2
     open --> open: JoinGroupAtomic（current_count + 1）
     open --> success: MarkGroupSuccessIfFull（current >= target）
     open --> expired: MarkGroupExpired（过期未满，或满员但库存不足且已过期）
-    open --> closed: 人工 / 风控关团（当前无代码写入）
+    open --> closed: 人工 / 风控关团（预留状态）
     success --> [*]: 成员订单 WaitGroup → WaitShip
     expired --> [*]: 成员订单 WaitGroup → Closed，托管款退回
 ```
@@ -88,7 +88,7 @@ if err != nil {
 }
 ```
 
-`ResolveGroupbuyPricing`（`internal/product/pricing.go:59-75`）拒绝三种商品：未配置拼团价、未上架、拼团价越界。参团时卖家再用 `ResolveBossID` 反查一次（`service.go:222`），价格直接用 `g.PriceCents`（`service.go:252`）。handler 的请求体里虽然还留着 `boss_id` 字段（`handler.go:23、30`），但 service 会覆盖它。
+`ResolveGroupbuyPricing`（`internal/product/pricing.go:59-75`）拒绝三种商品：未配置拼团价、未上架、拼团价越界。参团时卖家再用 `ResolveBossID` 反查一次（`service.go:222`），价格直接用 `g.PriceCents`（`service.go:252`）。即使请求体里带了 `boss_id`（`handler.go:23、30`），service 也以商品表反查的结果覆盖它（`service.go:247` 的注释“已由商品表反查覆盖”）：收款方和价格都不信客户端。
 
 ---
 
@@ -175,11 +175,18 @@ return nil, err
 
 这个模式值得记住：**用条件更新拿到“能不能做”的权威结论，再用一次普通读拿到“为什么不能做”的解释**。解释读到的可能已经是下一刻的状态，但它只影响提示文案，不影响资金和名额。
 
-### 2.4 当前缺口：并发重复参团拿不到 81003
+### 2.4 同一个人进两次：预检加唯一索引两道防线
 
-同一个用户在两个设备上同时点参团，两次请求都能通过 `HasUserJoined`，也都能抢到名额（如果名额够），第二次在 `Create(member)` 撞上 `uk_gb_group_user` 唯一索引。注释写着“唯一索引冲突 → 81003”，但代码直接返回了数据库原始错误（`repo.go:67-69`）。service 只对 `ErrGroupbuyFull` 做映射（`service.go:310`），其它错误走 `return nil, err`（`service.go:325`）。
+“一个用户在一个团里只能占一个名额”同样分成两层：
 
-结果是数据没错（事务整体回滚，钱没扣两次，名额也没多占），但这个错误不是带码 error，统一错误出口（`internal/shared/response/response.go:29-35`）落到 500 兜底码，还把数据库原始报错文本直接返回给前端，用户看不到 81003 的“您已加入过该团”。修复只需要在 `JoinGroupAtomic` 里识别唯一键冲突并返回 `ErrGroupbuyDuplicateJoin`。
+| 层 | 代码 | 作用 |
+|---|---|---|
+| 预检 | `HasUserJoined`（`repo.go:143-145`，`service.go:216`） | 顺序重复点击在开事务、扣库存之前就拿到 81003 |
+| 兜底 | `uk_gb_group_user(group_id, user_id)`（`model.go:46-47`） | 两个设备同时点参团、都通过了预检时，由数据库拒绝第二行 |
+
+并发场景下，两次请求都可能先抢到名额（`current_count+1`），第二次在 `Create(member)` 撞上唯一索引。关键在于抢名额、写成员行、扣钱进托管在同一个事务里（`service.go:260-303`）：成员行写不进去，前面那次 `+1` 和订单行一起回滚，后面的 `collectToEscrow` 根本不会执行；事务外再走 Saga 释放本次预扣的 1 份库存（`service.go:305-308`）。所以无论第二次请求拿到什么提示，名额、余额、库存三者都只被占了一份。
+
+这就是本节开头那句话的落地：**正确性交给条件更新和唯一索引，先查后判只负责体验**。预检可以有竞态，数据库约束不会有。
 
 ---
 
@@ -277,7 +284,7 @@ sequenceDiagram
         DB-->>Svc: error，ROLLBACK
         Svc->>Redis: ReleaseReservation（product_id, 1）
         Svc->>DB: 仅 RowsAffected = 0 时重读团快照（映射 81001/81002/81004）
-        Svc-->>Client: 业务错误码或原始错误
+        Svc-->>Client: 返回错误
     else 全部成功
         Svc->>DB: 重读 current_count，写 outbox(groupbuy.joined)，COMMIT
         DB-->>Svc: current_count
@@ -321,7 +328,14 @@ for _, m := range members {
 
 ### 3.4 和第 04 讲清算模型的差别
 
-第 04、05 讲的普通订单是：支付成功进 `merchant_escrow`，订单 `Completed` 后才结算给卖家。拼团的“托管”只覆盖了**等人**这一段，**成团那一刻钱就进了卖家钱包**，此时订单才刚到 `WaitShip`，还没发货。这一点放到第六节和其它缺口一起讨论。
+第 04、05 讲的普通订单是：支付成功进 `merchant_escrow`，订单 `Completed` 后才结算给卖家。拼团的托管解决的是另一个问题：**等人这段时间钱归谁**。它的生命周期和团绑定，团一结束（成团或散团），托管里属于这个团的钱就全部流出，托管余额回到零：
+
+| 团结局 | 托管款去向 | 订单去向 |
+|---|---|---|
+| 成团 | 每张订单一笔 `groupbuy_settle`，划给卖家钱包 | `WaitGroup → WaitShip` |
+| 散团 | 每张订单一笔 `groupbuy_refund`，退回成员钱包 | `WaitGroup → Closed` |
+
+这样设计的好处是对账口径简单：按 `ref_order_id` 看，每张拼团订单要么是 `pay + settle`，要么是 `pay + refund`，三段 `biz_type` 足以描述它在托管里的全部历史，不需要另建清算单。代价是成团之后的履约期资金不再经过托管；如果业务要求“确认收货后才给卖家”，可以在成团这一步把去向从卖家钱包换成 `merchant_escrow`，见课后练习 3。
 
 ---
 
@@ -353,7 +367,7 @@ func (d *ProductDao) DeductStock(productId uint, num int) (ok bool, err error) {
 }
 ```
 
-任何一个成员扣不动，`MarkGroupSuccess` 返回 `errGroupbuyStockShort`，整个成团事务回滚，团仍是 `open`。为什么 Redis 预扣过了 DB 还可能不够？因为 Redis 和 DB 是两套水位，商家改库存、缓存重建都可能让它们短暂不一致（第 12 讲讨论过）。DB 条件扣减是最后的防超卖闸门。
+任何一个成员扣不动，`MarkGroupSuccess` 返回 `errGroupbuyStockShort`，整个成团事务回滚，团仍是 `open`。为什么 Redis 预扣过了 DB 还可能不够？因为 Redis 和 DB 是两套水位，商家改库存、缓存重建都可能让它们短暂不一致（第 12 讲讨论过）。DB 条件扣减是最后的防超卖闸门，客诉 4 就落在这里：`num>=?` 和扣减是同一条 SQL，扣不动就整团不成，不会出现卖出比库存多的情况。
 
 事务提交后，再把每个成员的 reserved 提交为 sold：
 
@@ -484,7 +498,7 @@ if g.Status != GroupbuyStatusExpired {
 
 消费者遵守两条纪律：只处理已经是 `expired` 的团，不碰 `open` 的团，避免和成团结算抢同一笔托管款；不推进状态机，状态归 `ExpireGroup` 一家写。退款本身靠 `refundFromEscrow` 的预检和唯一索引去重。毒消息直接进 DLQ，业务错误按退避重试，这部分机制见第 05 讲 2.3 和第 16 讲。
 
-需要如实指出：退款和 outbox 在同一个事务里，事件存在就意味着退款已经落账，所以这个消费者在当前结构下几乎总是走“已退过”分支。它是防御代码，不是主路径。
+退款和 outbox 在同一个事务里，事件存在就意味着退款已经落账，所以这个消费者正常情况下走的是“已退过”分支。它的定位是重放兜底：消息重复投递、人工重放、或将来有人把退款挪出事务时，它保证结果仍然是“每张订单只退一次”。
 
 ```mermaid
 sequenceDiagram
@@ -532,80 +546,9 @@ sequenceDiagram
 
 ---
 
-## 六、当前实现的边界与缺口
+## 六、故障演练 / 课堂演示
 
-**判断：拼团的状态机、名额、库存和散团退款已经闭环；缺口集中在接入层幂等、成团后的资金归属、托管账户口径和运营能力四个地方。讲清这些缺口，比假装它们不存在更有价值。**
-
-### 6.1 开团 / 参团没挂幂等中间件
-
-路由注释写着“走幂等中间件”，代码里没有：
-
-```go
-// internal/groupbuy/routes.go:10-17
-//	authed 组：发起 / 加入需要鉴权 + 走幂等中间件，避免重复发团 / 重复点"加入"
-func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
-	_ = admin
-
-	public.GET("/groupbuy/:id", GroupbuyShowHandler())
-	authed.POST("/groupbuy/create", GroupbuyCreateHandler())
-	authed.POST("/groupbuy/:id/join", GroupbuyJoinHandler())
-}
-```
-
-对照普通下单：`authed.POST("orders/create", middleware.Idempotency(), ...)`（`internal/order/routes.go:12`）。
-
-客诉 4 的根因就在这里。团长连点两次开团，每次都生成新的团和新的订单 ID（`service.go:134` 用雪花算法生成订单号，订单主键也是新的），流水唯一索引的 `ref_order_id` 不同，拦不住，于是扣两次钱、开两个团。参团连点的影响小一些，因为第二次会被 `HasUserJoined` 或唯一索引拦下。修复是一行：两个 POST 路由挂上 `middleware.Idempotency()`，机制见第 15 讲。
-
-### 6.2 成团即打款，绕过了托管清算
-
-`settleToSeller` 在成团时直接把钱加到卖家钱包（`settle.go:107-124`），此时订单是 `WaitShip`，卖家还没发货就能动用这笔钱。这正是第 05 讲开头描述的风险：卖家不履约、提现，买家申请退款时卖家余额不够。
-
-拼团订单也没有 `payment_clearing` 记录。退款时 `SettleRefund` 找不到清算单，按“已结算给卖家”处理：
-
-```go
-// internal/refund/service.go:252-258（节选）
-if err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-	Where("order_id = ?", orderID).First(&clearingRecord).Error; err != nil {
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		// 兼容迁移前已经支付的旧订单：没有清算单时按“已结算给卖家”处理。
-		clearingFound = false
-	}
-	// ……
-}
-```
-
-随后从卖家余额扣款（`refund/service.go:331-350`），代码没有检查 `sellerAfter` 是否小于 0。卖家把钱提走之后再发生退款，卖家余额会变成负数。更稳的做法是成团时把托管款转入 `merchant_escrow` 并建清算单，订单 `Completed` 后再走第 05 讲的结算。
-
-### 6.3 托管账户的口径和注释不一致
-
-`settle.go:26-35` 的注释说托管“复用平台对外清算账户”。实际 `AppendTransaction` 对 `user_id=0` 记的是 `legacy_system`：
-
-```go
-// internal/money/ledger_repo.go:28-33
-func (d *LedgerDao) AppendTransaction(userID, refOrderID uint, direction string, amountCents, balanceAfterCents int64, bizType string) error {
-	accountCode := AccountCodeUserWallet
-	if userID == ExternalClearingUserID {
-		// 兼容红包/拼团等旧调用。新支付链路必须调用 AppendSystemTransaction 明确系统账户语义。
-		accountCode = AccountCodeLegacySystem
-	}
-```
-
-它既不是 `external_clearing`，也不是 `merchant_escrow`。对账时拼团在途资金要按 `account_code=legacy_system AND biz_type LIKE 'groupbuy_%'` 单独统计，而且和红包的在途资金混在同一个账户代码下。
-
-### 6.4 其它缺口
-
-| 缺口 | 证据 | 影响 |
-|---|---|---|
-| “关团”只有状态定义 | `GroupbuyStatusClosed`（`model.go:14`）没有任何代码写入；`_ = admin`（`routes.go:12`）丢弃了 admin 路由组 | 运营或风控无法手动关团退款，只能等 24h 散团 |
-| 三个事件没有消费者 | `groupbuy.created / joined / success` 只写 outbox（`service.go:161、294、430`），仓库里只绑定了 `groupbuy.expired`（`consumer.go:60`） | 成团、散团没有用户通知 |
-| 并发重复参团的错误码 | 第 2.4 节 | 用户看到兜底错误而不是 81003 |
-| 测试覆盖不足 | `service_test.go` 只有 5 个测试 | 散团退款、并发抢最后名额、重复参团、消费者重放都没有自动化验证 |
-
----
-
-## 七、故障演练 / 课堂演示
-
-### 7.1 先跑现有测试
+### 6.1 先跑现有测试
 
 测试用 SQLite 内存库，并 stub 了库存 Lua，不依赖 MySQL 和 Redis：
 
@@ -621,11 +564,11 @@ go test ./internal/groupbuy/ -v
 | `TestMarkGroupSuccessDeductsProductStock`（`service_test.go:110`） | 2 人团成团后 DB 库存从 5 变 3 |
 | `TestFullOpenGroupIsCompletedNotExpired`（`service_test.go:138`） | 满员且已过期的团不会被散团扫描捡到，补成团 cron 把它推进到 `success` |
 
-### 7.2 现场补三个演示
+### 6.2 现场补三个演示
 
 **演示 1：并发抢最后一个名额。** 种一个 `target_count=3, current_count=2` 的团，两个有余额的用户各开一个 goroutine 调 `JoinGroup`。预期：恰好一个成功，另一个拿到 `ErrGroupbuyFull` 或 `ErrGroupbuyClosed`（取决于成团是否已完成），失败者余额不变。注意 SQLite 的并发写行为和 InnoDB 不同，这个演示在 MySQL 上做更有说服力。
 
-**演示 2：连点开团。** 用同一个用户、同一个请求体对 `/api/v1/groupbuy/create` 连续发两次。预期：当前实现会建出两个团，余额被扣两次。给两个 POST 路由挂上 `middleware.Idempotency()` 并带同一个幂等 token 再发一次，第二次应返回第一次的结果。
+**演示 2：成团与散团抢同一个团。** 种一个已满员（`current_count=target_count=2`）、`expire_at` 已过、仍是 `open` 的团，两个 goroutine 同时调 `MarkGroupSuccess` 和 `ExpireGroup`。预期：团最终只会是 `success` 或 `expired` 之一；按 `ref_order_id` 查流水，每张订单要么只有 `groupbuy_settle`，要么只有 `groupbuy_refund`，不会两样都有；输的那一方返回 `nil`，没有任何写入。这验证的是 5.1 的结论：两个出口都以 `WHERE status=open` 的条件更新开头，团行就是互斥锁。
 
 **演示 3：重放 `groupbuy.expired`。** 先让一个未满的团过期并调用 `ExpireGroup`，记下成员余额；再连续调用三次 `SettleExpiredRefund(ctx, groupID)`。预期：余额不变，`groupbuy_refund` 方向 credit 的流水每张订单只有一条。再对一个 `open` 的团调用一次，预期直接放行，团状态不变。
 
@@ -633,10 +576,10 @@ go test ./internal/groupbuy/ -v
 
 ## 课后练习
 
-1. **修复 81003。** 在 `JoinGroupAtomic` 里识别 MySQL 唯一键冲突（错误码 1062），返回 `ErrGroupbuyDuplicateJoin`，并写一个两次插入同一 `(group_id, user_id)` 的测试。
-2. **补散团测试。** 构造一个 3 人团只有 2 人、已过期，调用 `runGroupbuyExpireSweep` 的等价逻辑，断言：两张订单变 `Closed`、两个成员余额恢复、托管账户 `groupbuy_pay` credit 合计等于 `groupbuy_refund` debit 合计、`ReleaseReservation` 被调用 2 次。
-3. **把成团接回清算模型。** 设计一个方案：成团时不给卖家钱包加钱，而是托管 debit、`merchant_escrow` credit，并为每个成员订单创建 `payment_clearing(status=cleared)`。写出分录，并说明之后的确认收货、退款分别复用第 05 讲哪段代码。
-4. **实现人工关团。** 给 admin 组挂一个关团接口，要求和散团、成团三者互斥。思考：关团应该复用 `ExpireGroup` 的哪一部分？满员但未成团的团能不能关？
+1. **验证重复参团。** 写两个测试：其一，同一用户顺序参团两次，断言第二次返回 `ErrGroupbuyDuplicateJoin`、余额只扣一次、`current_count` 只加 1；其二，绕过预检直接在事务里调两次 `JoinGroupAtomic` 写同一 `(group_id, user_id)`，断言第二次报错且事务回滚后 `current_count` 不变。思考：第二个测试证明的是 2.4 表里的哪一层？
+2. **散团测试。** 构造一个 3 人团只有 2 人、已过期，调用 `runGroupbuyExpireSweep` 的等价逻辑，断言：两张订单变 `Closed`、两个成员余额恢复、托管账户 `groupbuy_pay` credit 合计等于 `groupbuy_refund` debit 合计、`ReleaseReservation` 被调用 2 次。
+3. **设计扩展：成团后延迟结算。** 如果业务要求确认收货后才给卖家，设计一个方案：成团时不给卖家钱包加钱，而是托管 debit、`merchant_escrow` credit，并为每个成员订单创建 `payment_clearing(status=cleared)`。写出分录，并说明之后的确认收货、退款分别复用第 05 讲哪段代码。
+4. **设计扩展：人工关团。** `closed` 是为运营 / 风控预留的团状态。给 admin 组设计一个关团接口，要求和散团、成团三者互斥。思考：关团应该复用 `ExpireGroup` 的哪一部分？满员但未成团的团能不能关？
 5. **思考题。** `JoinGroup` 为什么把 `MarkGroupSuccess` 放在加入事务之外，而不是同一个事务里？如果放进去，最后一个成员会遇到什么体验？
 
 ---
@@ -646,7 +589,7 @@ go test ./internal/groupbuy/ -v
 | 主题 | 文件 | 入口 |
 |---|---|---|
 | 团 / 成员状态与表结构 | `internal/groupbuy/model.go` | `GroupbuyGroup`、`GroupbuyMember` |
-| 路由（缺幂等、丢弃 admin） | `internal/groupbuy/routes.go` | `RegisterRoutes` |
+| 路由 | `internal/groupbuy/routes.go` | `RegisterRoutes` |
 | 开团 / 参团 / 成团 / 散团 / 补成团 | `internal/groupbuy/service.go` | `CreateGroup`、`JoinGroup`、`MarkGroupSuccess`、`ExpireGroup`、`RunCompleteFullGroups` |
 | 抢名额与状态条件更新 | `internal/groupbuy/repo.go` | `JoinGroupAtomic`、`MarkGroupSuccessIfFull`、`MarkGroupExpired`、`ExpireOpenGroupsBefore` |
 | 三段资金流 | `internal/groupbuy/settle.go` | `collectToEscrow`、`settleToSeller`、`refundFromEscrow`、`SettleExpiredRefund` |
@@ -654,6 +597,5 @@ go test ./internal/groupbuy/ -v
 | 散团 / 补成团 cron | `initialize/cron.go` | `runGroupbuyExpireSweep`、`RunCompleteFullGroups` 注册 |
 | 拼团定价 | `internal/product/pricing.go` | `ResolveGroupbuyPricing` |
 | 订单状态迁移 | `internal/order/state.go` | `orderStateTransitions` |
-| 流水唯一索引与 legacy_system | `internal/money/ledger_model.go`、`internal/money/ledger_repo.go` | `AccountTransaction`、`AppendTransaction` |
-| 无清算单时的退款来源 | `internal/refund/service.go` | `SettleRefund` |
+| 流水唯一索引与记账 | `internal/money/ledger_model.go`、`internal/money/ledger_repo.go` | `AccountTransaction`、`AppendTransaction` |
 | 测试 | `internal/groupbuy/service_test.go` | 5 个 `Test*` |
