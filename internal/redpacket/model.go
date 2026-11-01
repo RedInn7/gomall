@@ -6,10 +6,9 @@ import (
 	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 )
 
-// 红包状态
+// 红包状态。2 曾是「已过期」，从没有代码写入过（过期判断看 expire_at，回收直接 active->refunded），已删除，值保留不复用。
 const (
 	RedPacketStatusActive   uint = 1 // 进行中
-	RedPacketStatusExpired  uint = 2 // 已过期 (cron 标记)
 	RedPacketStatusFinished uint = 3 // 已抢完
 	RedPacketStatusRefunded uint = 4 // 已退款给发包人 (过期回收)
 )
