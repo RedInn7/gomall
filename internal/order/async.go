@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/RedInn7/gomall/internal/address"
+	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -42,6 +43,8 @@ type AsyncOrderTask struct {
 	ProductID uint   `json:"product_id"`
 	Num       uint   `json:"num"`
 	AddressID uint   `json:"address_id"`
+	// UserCouponID 要核销的券；consumer 落库时在同一事务里核销，券已不可用则下单失败。
+	UserCouponID uint `json:"user_coupon_id,omitempty"`
 }
 
 // OrderTicketStatus 写到 Redis ticket key 的状态
@@ -133,6 +136,13 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (Order
 		return OrderEnqueueResp{}, err
 	}
 
+	// 券在入队前先查一次，明显不可用的快速拒绝；真正的核销在 consumer 事务里。
+	if req.UserCouponID != 0 {
+		if _, _, err = coupon.NewCouponDao(ctx).GetUsable(u.Id, req.UserCouponID, time.Now()); err != nil {
+			return OrderEnqueueResp{}, err
+		}
+	}
+
 	if err = product.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
 		util.LogrusObj.Errorf("async enqueue reserve stock failed product=%d num=%d err=%v", req.ProductID, req.Num, err)
 		return OrderEnqueueResp{}, err
@@ -154,6 +164,8 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (Order
 		ProductID: req.ProductID,
 		Num:       req.Num,
 		AddressID: req.AddressID,
+
+		UserCouponID: req.UserCouponID,
 	}
 	body, err := json.Marshal(task)
 	if err != nil {

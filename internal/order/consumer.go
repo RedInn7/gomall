@@ -19,16 +19,21 @@ import (
 )
 
 // asyncOrderWriter 真正写订单和 outbox 的抽象，测试时替换为内存实现
-type asyncOrderWriter func(ctx context.Context, task AsyncOrderTask, order *Order) error
+type asyncOrderWriter func(ctx context.Context, task AsyncOrderTask, order *Order, quote *orderQuote) error
 
 var defaultAsyncOrderWriter asyncOrderWriter = persistAsyncOrder
 
 // SetAsyncOrderWriter 注入自定义写订单实现（仅测试用）
 func SetAsyncOrderWriter(w asyncOrderWriter) { defaultAsyncOrderWriter = w }
 
-func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *Order) error {
+// persistAsyncOrder 与同步下单同一套事务：建单 + 扣满减预算 + 核销券 + outbox，
+// 同一件商品走排队下单和直接下单拿到的优惠一致。
+func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *Order, quote *orderQuote) error {
 	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
+			return e
+		}
+		if e := GetOrderSrv().applyDiscountsInTx(tx, order, quote); e != nil {
 			return e
 		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
@@ -70,9 +75,14 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 	}
 
 	// 单价与卖家都以商品表为准，不信投递消息里的金额 / boss——异步链路同样不能把定价权与
-	// 收款方交给客户端。反查失败属于不可落单的硬错误：释放预扣库存、写失败 ticket，与下方
-	// 写库失败同路处理。
-	unitCents, bossID, settleErr := resolveProductSettlement(ctx, task.ProductID)
+	// 收款方交给客户端。反查失败、要用的券已不可用，都属于不可落单的硬错误：释放预扣库存、
+	// 写失败 ticket，与下方写库失败同路处理。
+	unitCents, categoryID, bossID, settleErr := resolveProductPricing(ctx, task.ProductID)
+	var quote *orderQuote
+	if settleErr == nil {
+		quote, settleErr = GetOrderSrv().quoteOrder(ctx, task.UserID, task.ProductID, categoryID,
+			unitCents, int64(task.Num), task.UserCouponID)
+	}
 	if settleErr != nil {
 		util.LogrusObj.Errorf("async order resolve settlement failed ticket=%s product=%d err=%v",
 			task.Ticket, task.ProductID, settleErr)
@@ -96,9 +106,11 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 		AddressID: task.AddressID,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		Ticket:    &task.Ticket,
+		// 减免字段在事务内按扣预算 / 核销券的实际结果写回
+		FinalCents: quote.subtotal,
 	}
 
-	err = defaultAsyncOrderWriter(ctx, task, order)
+	err = defaultAsyncOrderWriter(ctx, task, order, quote)
 	if err != nil {
 		// 并发重投撞上 ticket 唯一索引：另一条投递已经建好单，按成功处理。
 		if existing, _ := NewOrderDao(ctx).GetOrderByTicket(task.Ticket); existing != nil {
