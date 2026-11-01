@@ -322,6 +322,12 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		if relErr := cache.ReleaseReservation(ctx, g.ProductID, 1); relErr != nil {
 			util.LogrusObj.Errorf("groupbuy release on join failure group=%d err=%v", groupID, relErr)
 		}
+		// 并发重复参团：两次请求都过了上面的 HasUserJoined 预检，后到的那次撞 uk_gb_group_user，
+		// 或者先到的那次正好拿走最后一个名额，后到的那次在 JoinGroupAtomic 影响 0 行报"满员"。
+		// 事务已整体回滚（名额、扣款都没生效），先重查一次成员表，用户已在团里就统一返回 81003。
+		if joined, e := gbDao.HasUserJoined(groupID, userID); e == nil && joined {
+			return nil, ErrGroupbuyDuplicateJoin
+		}
 		// JoinGroupAtomic 抛出 ErrGroupbuyFull 时，需要再读一次团状态决定真正业务码
 		if atomicErr != nil && errors.Is(atomicErr, ErrGroupbuyFull) {
 			latest, _ := gbDao.GetGroupByID(groupID)
@@ -337,11 +343,6 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 				}
 			}
 			return nil, ErrGroupbuyFull
-		}
-		// 并发重复参团：两次请求都过了上面的 HasUserJoined 预检，后到的那次撞 uk_gb_group_user。
-		// 事务已整体回滚（名额、扣款都没生效），这里重查一次把原始唯一索引错误翻译成 81003。
-		if joined, e := gbDao.HasUserJoined(groupID, userID); e == nil && joined {
-			return nil, ErrGroupbuyDuplicateJoin
 		}
 		return nil, err
 	}
