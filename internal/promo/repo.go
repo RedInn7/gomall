@@ -78,7 +78,9 @@ func (d *PromoDao) ListActiveForCart(now time.Time, categoryIDs, productIDs []in
 }
 
 // BudgetDay 预算日口径：服务器时区的自然日。
-func BudgetDay(t time.Time) string { return t.Format("2006-01-02") }
+// 先转到 time.Local：从 DB 读回的 CreatedAt 带的是驱动的时区（DSN 没设 loc 时是 UTC），
+// 直接 Format 会让北京时间 0–8 点的订单落到前一天，和扣预算时的 BudgetDay(time.Now()) 对不上。
+func BudgetDay(t time.Time) string { return t.In(time.Local).Format("2006-01-02") }
 
 // AtomicConsumeBudget 在调用方提供的 tx 中扣减当日预算。
 // DailyBudget = 0 视为不限，只累计不拦截。
