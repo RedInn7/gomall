@@ -8,7 +8,7 @@ import "github.com/RedInn7/gomall/types"
 type AddressServiceReq struct {
 	Id      uint   `form:"id" json:"id" binding:"required"`
 	Name    string `form:"name" json:"name" binding:"required,max=20"`
-	Phone   string `form:"phone" json:"phone" binding:"required,numeric,len=11"`
+	Phone   string `form:"phone" json:"phone" binding:"required,number,len=11"`
 	Address string `form:"address" json:"address" binding:"required,max=50"`
 }
 
@@ -22,7 +22,7 @@ type AddressDeleteReq struct {
 
 type AddressCreateReq struct {
 	Name    string `form:"name" json:"name" binding:"required,max=20"`
-	Phone   string `form:"phone" json:"phone" binding:"required,numeric,len=11"`
+	Phone   string `form:"phone" json:"phone" binding:"required,number,len=11"`
 	Address string `form:"address" json:"address" binding:"required,max=50"`
 }
 

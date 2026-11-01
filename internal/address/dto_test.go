@@ -16,6 +16,8 @@ func TestAddressReqValidation(t *testing.T) {
 		{Phone: "13800000000", Address: "a"},                                 // 缺姓名
 		{Name: "张三", Phone: "1380000000", Address: "a"},                      // 10 位
 		{Name: "张三", Phone: "1380000000x", Address: "a"},                     // 非数字
+		{Name: "张三", Phone: "+1380000000", Address: "a"},                     // 带符号
+		{Name: "张三", Phone: "123456789.0", Address: "a"},                     // 带小数点
 		{Name: strings.Repeat("张", 21), Phone: "13800000000", Address: "a"},  // 超列宽
 		{Name: "张三", Phone: "13800000000", Address: strings.Repeat("路", 51)}, // 超列宽
 		{Name: "张三", Phone: "13800000000"},                                   // 缺地址
