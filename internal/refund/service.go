@@ -229,6 +229,11 @@ func refundAmount(o *orderpkg.Order) int64 {
 // 删除副本不安全，需配套的副本溯源与人工/对账流程，本期不动。
 func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 	var restocked *orderpkg.Order
+	// 卖家余额不够时记下渠道与金额，事务回滚后落异常单转人工。
+	var (
+		shortfallChannel string
+		shortfallAmount  int64
+	)
 	db := dao.NewDBClient(ctx)
 	err := db.Transaction(func(tx *gorm.DB) error {
 		orderDao := orderpkg.NewOrderDaoByDB(tx)
@@ -343,7 +348,11 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 			sellerAfter := sellerBal - amount
 			if sellerAfter < 0 {
 				// 卖家已经把货款提走：不能扣成负余额，整笔回滚（买家也不先入账），
-				// 消费者重试到 DLQ / 补偿任务继续报错，由人工追款或平台垫付后再处理。
+				// 事务外落 refund_seller_shortfall 异常单转人工，补偿任务跳过这单，见 RecordRefundShortfall。
+				shortfallChannel, shortfallAmount = clearing.ChannelWallet, amount
+				if clearingFound {
+					shortfallChannel = clearingRecord.Channel
+				}
 				return fmt.Errorf("%w: order=%d seller=%d", ErrSellerBalanceInsufficient, o.ID, o.BossID)
 			}
 			if amount > 0 {
@@ -377,6 +386,12 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 		// 商品归属副本回退不做，原因见方法注释。
 		return nil
 	})
+	if errors.Is(err, ErrSellerBalanceInsufficient) {
+		if e := clearing.RecordRefundShortfall(ctx, orderID, shortfallChannel, shortfallAmount); e != nil {
+			util.LogrusObj.Errorf("refund shortfall anomaly record failed order=%d err=%v", orderID, e)
+		}
+		return err
+	}
 	if err != nil || restocked == nil {
 		return err
 	}
@@ -395,6 +410,7 @@ const settleCompensationDelay = 10 * time.Minute
 // RunSettleCompensation cron 资金兜底：order.completed / order.refunded 事件丢了（outbox 死信、消费者进 DLQ），
 // 卖家就永远拿不到钱、买家永远退不到款。这里直接按订单与清算单状态补：已完成但清算单还是 cleared 的补结算，
 // 已退款但清算单还不是 refunded 的补退款。两边都按清算单状态幂等，与正常消费者并发也只生效一次。
+// 卖家余额不够、已转人工的退款（refund_seller_shortfall 异常单未标 resolved）不扫，免得每轮报错挤占名额。
 // ponytail: 每轮各补 100 单，永久失败的单会一直占名额；量大时改成按 id 游标翻页。
 func (s *RefundSrv) RunSettleCompensation() {
 	defer func() {
@@ -410,6 +426,8 @@ func (s *RefundSrv) RunSettleCompensation() {
 		if err := db.Model(&orderpkg.Order{}).
 			Where("type = ? AND updated_at <= ? AND id IN (?)", orderType, before,
 				db.Model(&clearing.PaymentClearing{}).Select("order_id").Where(clearingCond, clearingStatus)).
+			Where("id NOT IN (?)", db.Model(&clearing.PaymentAnomaly{}).Select("order_id").
+				Where("reason = ? AND status <> ?", clearing.AnomalyReasonRefundSellerShortfall, clearing.AnomalyStatusResolved)).
 			Limit(100).Pluck("id", &ids).Error; err != nil {
 			util.LogrusObj.Errorf("SettleCompensation 扫表失败 type=%d err=%v", orderType, err)
 		}

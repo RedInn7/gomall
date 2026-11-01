@@ -45,7 +45,8 @@ const (
 	AnomalyReasonAmountMismatch         = "amount_currency_mismatch"
 	AnomalyReasonPaymentDetailsMismatch = "payment_details_mismatch"
 	AnomalyReasonHighRiskPayment        = "high_risk_payment"
-	AnomalyReasonFulfillmentFailed      = "fulfillment_failed" // 已实收但本地确定性无法履约：库存不足 / 商品已删 / 订单不存在
+	AnomalyReasonFulfillmentFailed      = "fulfillment_failed"      // 已实收但本地确定性无法履约：库存不足 / 商品已删 / 订单不存在
+	AnomalyReasonRefundSellerShortfall  = "refund_seller_shortfall" // 结算后退款要从卖家余额扣回，但卖家余额不够
 	AnomalyStatusPendingReview          = "pending_review"
 	AnomalyStatusReviewing              = "reviewing"
 	AnomalyStatusResolved               = "resolved"

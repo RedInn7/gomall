@@ -180,6 +180,52 @@ func RecordExternalAnomalyTx(tx *gorm.DB, o *order.Order, channel, providerRef, 
 	return nil
 }
 
+// RecordRefundShortfall 结算后退款因卖家余额不够整笔回滚时，在独立事务里落一张待人工处理的异常单。
+// 订单此时已是 Refunded、钱却没退：异常单进运营队列，补偿任务据此跳过这单，不再每轮重试、挤占名额。
+//   - 运营追回货款 / 平台垫付后把异常单标为 resolved，补偿任务会自动重放这笔退款；
+//   - 重放仍不够时异常单退回 pending_review，并留一条 operator_id=0 的系统流转记录；
+//   - 标 refunded / rejected 视为已在线下处理完，不再自动退款。
+//
+// provider_ref 按订单固定，重复调用由 (channel, provider_ref) 唯一索引吸收。
+func RecordRefundShortfall(ctx context.Context, orderID uint, channel string, amountCents int64) error {
+	ref := fmt.Sprintf("refund_shortfall:%d", orderID)
+	now := time.Now()
+	const note = "自动重放退款时卖家余额仍不足，重新进入待审核"
+	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&PaymentAnomaly{
+			OrderID:        orderID,
+			Channel:        channel,
+			ProviderRef:    ref,
+			ProviderAmount: strconv.FormatInt(amountCents, 10),
+			Currency:       "CNY",
+			Reason:         AnomalyReasonRefundSellerShortfall,
+			Status:         AnomalyStatusPendingReview,
+			OccurredAt:     now,
+		}).Error; err != nil {
+			return err
+		}
+		var anomaly PaymentAnomaly
+		if err := tx.Where("channel = ? AND provider_ref = ?", channel, ref).First(&anomaly).Error; err != nil {
+			return err
+		}
+		if anomaly.Status != AnomalyStatusResolved {
+			return nil
+		}
+		res := tx.Model(&PaymentAnomaly{}).Where("id = ? AND status = ?", anomaly.ID, AnomalyStatusResolved).
+			Updates(map[string]interface{}{
+				"status": AnomalyStatusPendingReview, "resolved_at": nil,
+				"last_operator_id": 0, "last_action_at": now, "last_note": note,
+			})
+		if res.Error != nil || res.RowsAffected == 0 {
+			return res.Error
+		}
+		return tx.Create(&PaymentAnomalyTransition{
+			AnomalyID: anomaly.ID, FromStatus: AnomalyStatusResolved, ToStatus: AnomalyStatusPendingReview,
+			Note: note, ActedAt: now,
+		}).Error
+	})
+}
+
 // IsProviderCleared 在依赖 Redis 等一次性校验状态前，先用持久化清算单识别同一外部支付的重放。
 // Web3 首次成功后会删除 pending；同 tx 重放仍应从 DB 幂等成功，不能因 pending 已删而无限重试。
 func IsProviderCleared(ctx context.Context, orderID uint, channel, providerRef string) (bool, error) {
@@ -452,7 +498,7 @@ func validOptionalAnomalyReason(reason string) bool {
 func validAnomalyReason(reason string) bool {
 	switch reason {
 	case AnomalyReasonDuplicatePayment, AnomalyReasonAmountMismatch, AnomalyReasonPaymentDetailsMismatch,
-		AnomalyReasonHighRiskPayment, AnomalyReasonFulfillmentFailed:
+		AnomalyReasonHighRiskPayment, AnomalyReasonFulfillmentFailed, AnomalyReasonRefundSellerShortfall:
 		return true
 	default:
 		return false
