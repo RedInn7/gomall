@@ -550,3 +550,27 @@ func TestReconcileDoesNotRefundWhenLastShareTakenDuringScan(t *testing.T) {
 	}
 }
 
+// 对账按 id 游标扫完全部进行中红包，不只看最早一批。
+func TestReconcileScansAllActiveInBatches(t *testing.T) {
+	db := openRedPacketTestDB(t)
+	seedSender(t, db, 1, 1000)
+	prev := reconcileBatch
+	reconcileBatch = 2
+	t.Cleanup(func() { reconcileBatch = prev })
+	ctx := context.Background()
+	var ids []uint
+	for i := 0; i < 5; i++ {
+		rp := createPacket(t, 1, 200, 2)
+		cache.RedisClient.Del(ctx, cache.RedPacketAmountsKey(rp.ID))
+		ids = append(ids, rp.ID)
+	}
+	db.Model(&RedPacket{}).Where("id IN ?", ids).Update("created_at", time.Now().Add(-time.Hour))
+
+	(&RedPacketTaskService{}).RunRedPacketClaimReconcile()
+
+	var active int64
+	db.Model(&RedPacket{}).Where("status = ?", RedPacketStatusActive).Count(&active)
+	if active != 0 || redPacketUserBalance(t, db, 1) != 1000 {
+		t.Fatalf("active left %d sender %d", active, redPacketUserBalance(t, db, 1))
+	}
+}
