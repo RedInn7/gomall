@@ -4,19 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
+	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
@@ -30,7 +36,8 @@ func TestSendRejectsInsufficientBalance(t *testing.T) {
 		if err := NewRedPacketDaoByDB(tx).Create(rp); err != nil {
 			return err
 		}
-		return settleSendTx(tx, rp.ID, 7, rp.Total)
+		_, err := settleSendTx(tx, rp.ID, 7, rp.Total)
+		return err
 	})
 	if !errors.Is(err, user.ErrInsufficientBalance) {
 		t.Fatalf("want ErrInsufficientBalance, got %v", err)
@@ -67,7 +74,7 @@ func TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty(t *testing.T) {
 		}
 	}
 	seed(1, 1000, RedPacketStatusActive, past, 300, 200) // 正常过期：退 500
-	seed(2, 800, RedPacketStatusExpired, past, 100)      // 已标过期：同样按 DB 退 700
+	seed(2, 800, RedPacketStatusActive, past, 100)       // 同样按 DB 退 700
 	seed(3, 500, RedPacketStatusFinished, past, 500)     // 真抢完：不退
 	seed(4, 600, RedPacketStatusActive, future)          // 未过期：不动
 
@@ -94,6 +101,16 @@ func TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty(t *testing.T) {
 	if refunds != 4 {
 		t.Fatalf("refund ledger entries got %d want 4 (sender credit + escrow debit per packet)", refunds)
 	}
+	// 托管腿落在独立的 redpacket_escrow，不再混进 legacy_system。
+	var escrow int64
+	if err := db.Model(&money.AccountTransaction{}).
+		Where("user_id = 0 AND account_code = ? AND biz_type = ?", money.AccountCodeRedPacketEscrow, money.BizTypeRedPacketRefund).
+		Count(&escrow).Error; err != nil {
+		t.Fatalf("count escrow ledger: %v", err)
+	}
+	if escrow != 2 {
+		t.Fatalf("redpacket_escrow refund legs got %d want 2", escrow)
+	}
 	if len(released) != 2 {
 		t.Fatalf("redis cleanup calls got %v want one per refunded packet", released)
 	}
@@ -102,21 +119,38 @@ func TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty(t *testing.T) {
 func openRedPacketTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	conf.Config = &conf.Conf{EncryptSecret: &conf.EncryptSecret{MoneySecret: "redpacket-test-secret"}}
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:redpacket-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	// 设了 REDPACKET_TEST_MYSQL_DSN 就跑真 MySQL（行锁 / 唯一索引 / 并发事务按 InnoDB 语义），否则用内存 SQLite。
+	dsn := os.Getenv("REDPACKET_TEST_MYSQL_DSN")
+	var db *gorm.DB
+	var err error
+	if dsn != "" {
+		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	} else {
+		db, err = gorm.Open(sqlite.Open(fmt.Sprintf("file:redpacket-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	}
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open db: %v", err)
 	}
 	sqlDB, err := db.DB()
 	if err != nil {
-		t.Fatalf("unwrap sqlite: %v", err)
+		t.Fatalf("unwrap db: %v", err)
 	}
-	sqlDB.SetMaxOpenConns(1)
+	if dsn == "" {
+		sqlDB.SetMaxOpenConns(1)
+	} else if err := db.Migrator().DropTable(&user.User{}, &RedPacket{}, &RedPacketClaim{}, &money.AccountTransaction{}, &outbox.OutboxEvent{}); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
 	previous := dao.SetTestDB(db)
 	previousLogger := util.LogrusObj
 	util.LogrusObj = logrus.New()
+	mr := miniredis.RunT(t)
+	previousRedis := cache.RedisClient
+	cache.RedisClient = redis.NewClient(&redis.Options{Addr: mr.Addr(), PoolSize: 64})
 	t.Cleanup(func() {
 		dao.SetTestDB(previous)
 		util.LogrusObj = previousLogger
+		_ = cache.RedisClient.Close()
+		cache.RedisClient = previousRedis
 		_ = sqlDB.Close()
 	})
 	if err := db.AutoMigrate(&user.User{}, &RedPacket{}, &RedPacketClaim{}, &money.AccountTransaction{}, &outbox.OutboxEvent{}); err != nil {

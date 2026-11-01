@@ -87,6 +87,15 @@ func InitCron() *cron.Cron {
 	if err != nil {
 		panic(fmt.Sprintf("RedPacket Cron 初始化失败: %v", err))
 	}
+	// 红包 claimed 对账：补领「Lua 抢到、DB 没落」的孤儿领取，份额池丢失的红包提前退款。
+	_, _ = c.AddFunc("@every 2m", func() {
+		defer func() {
+			if r := recover(); r != nil {
+				util.LogrusObj.Errorf("RedPacketReconcile Cron Panic: %v", r)
+			}
+		}()
+		redPacketService.RunRedPacketClaimReconcile()
+	})
 
 	// 自动确认收货兜底：每小时扫一次（翻页扫到空），把发货超过 7 天的 WaitReceive 订单推进到 Completed
 	_, err = c.AddFunc("0 0 * * * *", func() {

@@ -79,8 +79,15 @@ func backfillAccountCodes(db *gorm.DB) error {
 			money.ExternalClearingUserID, money.AccountCodeLegacySystem,
 			[]string{groupbuy.BizTypeGroupBuyPay, groupbuy.BizTypeGroupBuySettle, groupbuy.BizTypeGroupBuyRefund}).
 		Update("account_code", money.AccountCodeGroupbuyEscrow)
-	if res.Error == nil && res.RowsAffected > 0 {
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected > 0 {
 		util.LogrusObj.Infof("migrate: %d 条 groupbuy_* 流水从 legacy_system 回填到 groupbuy_escrow", res.RowsAffected)
 	}
-	return res.Error
+	// 红包托管历史流水从 legacy_system 拆到 redpacket_escrow，和拼团托管分开对账。幂等，可重复执行。
+	return db.Model(&money.AccountTransaction{}).
+		Where("user_id = ? AND account_code = ? AND biz_type IN ?", money.ExternalClearingUserID, money.AccountCodeLegacySystem,
+			[]string{money.BizTypeRedPacketSend, money.BizTypeRedPacketClaim, money.BizTypeRedPacketRefund}).
+		Update("account_code", money.AccountCodeRedPacketEscrow).Error
 }

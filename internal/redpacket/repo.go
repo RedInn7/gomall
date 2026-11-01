@@ -80,7 +80,7 @@ func (d *RedPacketDao) SumClaimed(id uint) (int64, error) {
 	return sum, err
 }
 
-// MarkStatus 状态切换 (active->finished/expired/refunded)
+// MarkStatus 状态切换 (active->refunded)
 func (d *RedPacketDao) MarkStatus(id uint, status uint) error {
 	return d.DB.Model(&RedPacket{}).
 		Where("id = ?", id).
@@ -125,15 +125,46 @@ func (d *RedPacketDao) GetClaim(redPacketID, userID uint) (*RedPacketClaim, erro
 	return &c, nil
 }
 
-// GetExpired 取出已过期、仍是 active / expired、且按 DB 计算仍有剩余金额（Total > 已领总额）的红包，限量。
+// GetExpired 取出已过期、仍是 active、且按 DB 计算仍有剩余金额（Total > 已领总额）的红包，限量。
 // finished 只在领取事务里 DB 剩余份数归零时才标（MarkFinishedIfDrained），一定没有余额，不扫：
 // 写成 status<>refunded 会让抢完的红包永远留在扫描范围里，每轮每行都要跑一次 SUM 子查询。
 // 发包后 Redis 准备失败的红包仍是 active，照样会被扫到退款。
 func (d *RedPacketDao) GetExpired(limit int) ([]*RedPacket, error) {
 	var out []*RedPacket
-	err := d.DB.Where("status IN ? AND expire_at <= ?", []uint{RedPacketStatusActive, RedPacketStatusExpired}, time.Now()).
+	err := d.DB.Where("status = ? AND expire_at <= ?", RedPacketStatusActive, time.Now()).
 		Where("total > (SELECT COALESCE(SUM(c.amount), 0) FROM red_packet_claim c WHERE c.red_packet_id = red_packet.id)").
 		Limit(limit).
 		Find(&out).Error
+	return out, err
+}
+
+// ListActive 进行中的红包，供 claimed 对账按 id 游标分批扫描：取 id > afterID 的前 limit 个。
+func (d *RedPacketDao) ListActive(afterID uint, limit int) ([]*RedPacket, error) {
+	var out []*RedPacket
+	err := d.DB.Where("status = ? AND id > ?", RedPacketStatusActive, afterID).Order("id ASC").Limit(limit).Find(&out).Error
+	return out, err
+}
+
+// ListReceived 我领到的红包，按领取记录 id desc 分页
+func (d *RedPacketDao) ListReceived(userID uint, lastID uint, pageSize int) ([]*RedPacketClaim, error) {
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 20
+	}
+	q := d.DB.Where("user_id = ?", userID)
+	if lastID > 0 {
+		q = q.Where("id < ?", lastID)
+	}
+	var out []*RedPacketClaim
+	err := q.Order("id DESC").Limit(pageSize).Find(&out).Error
+	return out, err
+}
+
+// ListByIDs 批量取红包
+func (d *RedPacketDao) ListByIDs(ids []uint) ([]*RedPacket, error) {
+	var out []*RedPacket
+	if len(ids) == 0 {
+		return out, nil
+	}
+	err := d.DB.Where("id IN ?", ids).Find(&out).Error
 	return out, err
 }
