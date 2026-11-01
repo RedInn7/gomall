@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/RedInn7/gomall/internal/address"
+	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -44,6 +45,10 @@ type AsyncOrderTask struct {
 	ProductID uint   `json:"product_id"`
 	Num       uint   `json:"num"`
 	AddressID uint   `json:"address_id"`
+	// ShipTo 入队时的收货地址快照
+	ShipTo address.Snapshot `json:"ship_to"`
+	// UserCouponID 要核销的券；consumer 落库时在同一事务里核销，券已不可用则下单失败。
+	UserCouponID uint `json:"user_coupon_id,omitempty"`
 	// SeckillID 非 0 表示秒杀单：单价 / 卖家取活动表，建单同事务扣活动 sold。
 	SeckillID uint `json:"seckill_id,omitempty"`
 }
@@ -189,9 +194,18 @@ func (s *OrderSrv) enqueue(ctx context.Context, req *OrderCreateReq, seckillID u
 	}
 
 	// 地址归属在入队前同步校验：失败快速拒绝，避免白白预扣库存 / 投递无效任务。
-	if err = address.NewAddressDao(ctx).EnsureOwned(req.AddressID, u.Id); err != nil {
+	// 快照在入队时取，随任务带到消费侧：排队期间改地址不影响这张单。
+	shipTo, err := address.NewAddressDao(ctx).OwnedSnapshot(req.AddressID, u.Id)
+	if err != nil {
 		util.LogrusObj.Errorf("async enqueue address ownership check failed addr=%d user=%d err=%v", req.AddressID, u.Id, err)
 		return OrderEnqueueResp{}, err
+	}
+
+	// 券在入队前先查一次，明显不可用的快速拒绝；真正的核销在 consumer 事务里。
+	if req.UserCouponID != 0 {
+		if _, _, err = coupon.NewCouponDao(ctx).GetUsable(u.Id, req.UserCouponID, time.Now()); err != nil {
+			return OrderEnqueueResp{}, err
+		}
 	}
 
 	if err = product.ReserveStock(ctx, req.ProductID, int64(req.Num)); err != nil {
@@ -219,7 +233,10 @@ func (s *OrderSrv) enqueue(ctx context.Context, req *OrderCreateReq, seckillID u
 		ProductID: req.ProductID,
 		Num:       req.Num,
 		AddressID: req.AddressID,
+		ShipTo:    shipTo,
 		SeckillID: seckillID,
+
+		UserCouponID: req.UserCouponID,
 	}
 	body, err := json.Marshal(task)
 	if err != nil {

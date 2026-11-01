@@ -14,7 +14,7 @@ import (
 //	WaitShip    → WaitReceive(发货) / Refunding(已付未发起退)
 //	WaitReceive → Completed(确认收货 / 7d 自动) / Refunding(发起退货)
 //	Completed   → Refunding(售后期内申请)
-//	Refunding   → Refunded(同意退款) / Completed(驳回回到完成)
+//	Refunding   → Refunded(同意退款) / WaitShip、WaitReceive、Completed(驳回，回到申请前的状态)
 //	WaitGroup   → WaitShip(凑齐 N 人成团) / Closed(24h 超时散团)
 //
 // Closed / Refunded 是终态，无出边。
@@ -23,7 +23,7 @@ var orderStateTransitions = map[uint][]uint{
 	consts.OrderWaitShip:    {consts.OrderWaitReceive, consts.OrderRefunding},
 	consts.OrderWaitReceive: {consts.OrderCompleted, consts.OrderRefunding},
 	consts.OrderCompleted:   {consts.OrderRefunding},
-	consts.OrderRefunding:   {consts.OrderRefunded, consts.OrderCompleted},
+	consts.OrderRefunding:   {consts.OrderRefunded, consts.OrderWaitShip, consts.OrderWaitReceive, consts.OrderCompleted},
 	consts.OrderWaitGroup:   {consts.OrderWaitShip, consts.OrderClosed},
 }
 

@@ -113,6 +113,54 @@ func GroupbuyShowHandler() gin.HandlerFunc {
 	}
 }
 
+// GroupbuyCloseReq 人工关团请求，reason 必填，落库审计。
+type GroupbuyCloseReq struct {
+	Reason string `json:"reason"`
+}
+
+// AdminCloseGroupHandler 运营 / 风控手动关团：仅进行中的团可关，关团即原路退款。
+func AdminCloseGroupHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		groupID, err := parseGroupID(c)
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		req, ok := response.BindJSON[GroupbuyCloseReq](c)
+		if !ok {
+			return
+		}
+		u, err := ctl.GetUserInfo(c.Request.Context())
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		if err = GetGroupbuySrv().CloseGroup(c.Request.Context(), groupID, u.Id, req.Reason); err != nil {
+			response.Fail(c, err)
+			return
+		}
+		response.OK(c, nil)
+	}
+}
+
+// GroupbuyNoticesHandler 我的拼团通知（参团 / 成团 / 散团）。
+func GroupbuyNoticesHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		u, err := ctl.GetUserInfo(c.Request.Context())
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		limit, _ := strconv.Atoi(c.Query("limit"))
+		rows, err := GetGroupbuySrv().ListMyNotices(c.Request.Context(), u.Id, limit)
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		response.OK(c, rows)
+	}
+}
+
 // parseGroupID 从 path 解析团 id；失败直接返参错误。
 func parseGroupID(c *gin.Context) (uint, error) {
 	raw := c.Param("id")

@@ -81,7 +81,8 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 	}
 
 	// 收货地址必须属于当前用户，不能信客户端传入的 address_id
-	if err = address.NewAddressDao(ctx).EnsureOwned(req.AddressID, u.Id); err != nil {
+	shipTo, err := address.NewAddressDao(ctx).OwnedSnapshot(req.AddressID, u.Id)
+	if err != nil {
 		util.LogrusObj.Errorf("preorder address ownership check failed addr=%d user=%d err=%v", req.AddressID, u.Id, err)
 		return nil, err
 	}
@@ -102,6 +103,7 @@ func (s *PreorderSrv) PayDeposit(ctx context.Context, req *PreorderDepositReq) (
 		ord.ProductID = req.ProductID
 		ord.BossID = bossID // 卖家以商品表为准，忽略 req.BossID
 		ord.AddressID = req.AddressID
+		ord.ShipTo = shipTo
 		ord.Num = 1
 		ord.Money = pp.DepositCents + pp.FinalCents // 累计金额；分两次扣
 		ord.Type = consts.OrderWaitPay

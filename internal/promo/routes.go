@@ -18,6 +18,8 @@ func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 	if admin != nil {
 		admin.GET("/promo/rules", AdminListPromoRulesHandler())
 		admin.POST("/promo/rules", AdminCreatePromoRuleHandler())
+		admin.PUT("/promo/rules/:id", AdminUpdatePromoRuleHandler())
+		admin.PATCH("/promo/rules/:id/activate", AdminActivatePromoRuleHandler())
 		admin.PATCH("/promo/rules/:id/stop", AdminStopPromoRuleHandler())
 	}
 }

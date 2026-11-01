@@ -20,19 +20,25 @@ import (
 )
 
 // asyncOrderWriter 真正写订单和 outbox 的抽象，测试时替换为内存实现
-type asyncOrderWriter func(ctx context.Context, task AsyncOrderTask, order *Order) error
+type asyncOrderWriter func(ctx context.Context, task AsyncOrderTask, order *Order, quote *orderQuote) error
 
 var defaultAsyncOrderWriter asyncOrderWriter = persistAsyncOrder
 
-// SetAsyncOrderWriter 注入自定义写订单实现（仅测试用），传 nil 恢复默认实现
-func SetAsyncOrderWriter(w asyncOrderWriter) {
+// SetAsyncOrderWriter 注入自定义写订单实现（仅测试用），传 nil 恢复默认实现。
+// 优惠方案是包内类型，包外替身拿不到，只看 task / order。
+func SetAsyncOrderWriter(w func(ctx context.Context, task AsyncOrderTask, order *Order) error) {
 	if w == nil {
-		w = persistAsyncOrder
+		defaultAsyncOrderWriter = persistAsyncOrder
+		return
 	}
-	defaultAsyncOrderWriter = w
+	defaultAsyncOrderWriter = func(ctx context.Context, task AsyncOrderTask, order *Order, _ *orderQuote) error {
+		return w(ctx, task, order)
+	}
 }
 
-func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *Order) error {
+// persistAsyncOrder 与同步下单同一套事务：建单 + 扣满减预算 + 核销券 + outbox，
+// 同一件商品走排队下单和直接下单拿到的优惠一致。
+func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *Order, quote *orderQuote) error {
 	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
 			return e
@@ -44,6 +50,9 @@ func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *Order) e
 			if e := seckillBinder.BindTx(tx, order); e != nil {
 				return e
 			}
+		}
+		if e := GetOrderSrv().applyDiscountsInTx(tx, order, quote); e != nil {
+			return e
 		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderCreated", "order.created", order.ID,
@@ -92,8 +101,9 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 	}
 
 	// 单价与卖家都以商品表（秒杀单以活动表）为准，不信投递消息里的金额 / boss——异步链路同样
-	// 不能把定价权与收款方交给客户端。反查失败属于不可落单的硬错误，与下方写库失败同路处理。
-	unitCents, bossID, settleErr := resolveTaskSettlement(ctx, task)
+	// 不能把定价权与收款方交给客户端。反查失败、要用的券已不可用，都属于不可落单的硬错误：
+	// 释放预扣库存、写失败 ticket，与下方写库失败同路处理。
+	unitCents, bossID, quote, settleErr := resolveTaskSettlement(ctx, task)
 	if settleErr != nil {
 		util.LogrusObj.Errorf("async order resolve settlement failed ticket=%s product=%d err=%v",
 			task.Ticket, task.ProductID, settleErr)
@@ -109,12 +119,15 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 		Money:     unitCents,
 		Type:      consts.OrderWaitPay,
 		AddressID: task.AddressID,
+		ShipTo:    task.ShipTo,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		Ticket:    &task.Ticket,
 		SeckillID: task.SeckillID,
+		// 减免字段在事务内按扣预算 / 核销券的实际结果写回
+		FinalCents: quote.subtotal,
 	}
 
-	err = defaultAsyncOrderWriter(ctx, task, order)
+	err = defaultAsyncOrderWriter(ctx, task, order, quote)
 	if err != nil {
 		// 并发重投撞上 ticket 唯一索引 / 提交成功但确认丢了：单已经在，按成功处理。
 		existing, lookErr := NewOrderDao(ctx).GetOrderByTicket(task.Ticket)
@@ -169,15 +182,29 @@ func putAsyncTicketOK(ctx context.Context, ticket string, o *Order) {
 	}
 }
 
-// resolveTaskSettlement 秒杀单取活动价与活动卖家，普通单取商品表。
-func resolveTaskSettlement(ctx context.Context, task AsyncOrderTask) (int64, uint, error) {
+// resolveTaskSettlement 秒杀单取活动价与活动卖家，普通单取商品表并试算满减 / 校验券。
+func resolveTaskSettlement(ctx context.Context, task AsyncOrderTask) (int64, uint, *orderQuote, error) {
 	if task.SeckillID == 0 {
-		return resolveProductSettlement(ctx, task.ProductID)
+		cents, categoryID, bossID, err := resolveProductPricing(ctx, task.ProductID)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		q, err := GetOrderSrv().quoteOrder(ctx, task.UserID, task.ProductID, categoryID,
+			cents, int64(task.Num), task.UserCouponID)
+		return cents, bossID, q, err
 	}
 	if seckillBinder == nil {
-		return 0, 0, errSeckillNotRegistered
+		return 0, 0, nil, errSeckillNotRegistered
 	}
-	return seckillBinder.Price(ctx, task.SeckillID, task.ProductID)
+	if task.UserCouponID != 0 {
+		return 0, 0, nil, errors.New("秒杀单不能用券")
+	}
+	// 秒杀价即成交价，不叠满减 / 券。
+	cents, bossID, err := seckillBinder.Price(ctx, task.SeckillID, task.ProductID)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return cents, bossID, &orderQuote{subtotal: cents * int64(task.Num)}, nil
 }
 
 // abortAsyncTask 任务确定落不了单：释放商品预占、归还秒杀名额、写失败 ticket。
