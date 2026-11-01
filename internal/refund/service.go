@@ -25,6 +25,9 @@ import (
 	"github.com/RedInn7/gomall/service/events"
 )
 
+// ErrSellerBalanceInsufficient 结算后退款需从卖家余额扣回，但卖家余额不够。
+var ErrSellerBalanceInsufficient = errors.New("卖家余额不足，退款需人工处理")
+
 var (
 	RefundSrvIns  *RefundSrv
 	RefundSrvOnce sync.Once
@@ -338,6 +341,11 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 				return err
 			}
 			sellerAfter := sellerBal - amount
+			if sellerAfter < 0 {
+				// 卖家已经把货款提走：不能扣成负余额，整笔回滚（买家也不先入账），
+				// 消费者重试到 DLQ / 补偿任务继续报错，由人工追款或平台垫付后再处理。
+				return fmt.Errorf("%w: order=%d seller=%d", ErrSellerBalanceInsufficient, o.ID, o.BossID)
+			}
 			if amount > 0 {
 				seller.Money = strconv.FormatInt(sellerAfter, 10)
 				if seller.Money, err = seller.EncryptMoney(); err != nil {
