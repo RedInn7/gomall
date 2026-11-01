@@ -518,3 +518,35 @@ func TestClaimRollbackYieldsToReconcileRepair(t *testing.T) {
 		t.Fatalf("claims %d escrow %d", sumClaims(t, db, rp.ID), escrowBalance(t, db))
 	}
 }
+
+// 对账判断份额池丢失时，有人正常抢走最后一份（LIST 被 Redis 自动删除）：不能当成丢失提前退款，
+// 这个人的领取事务必须成功。
+func TestReconcileDoesNotRefundWhenLastShareTakenDuringScan(t *testing.T) {
+	db := openRedPacketTestDB(t)
+	seedSender(t, db, 1, 500)
+	seedRedPacketUser(t, db, 100, 0)
+	rp := createPacket(t, 1, 500, 1)
+	db.Model(&RedPacket{}).Where("id = ?", rp.ID).Update("created_at", time.Now().Add(-time.Hour))
+
+	var amount int64
+	prev := poolExists
+	poolExists = func(ctx context.Context, id uint) (bool, error) {
+		var err error
+		if amount, err = cache.ClaimRedPacket(ctx, id, 100, time.Hour); err != nil { // 用户 Lua 抢走最后一份
+			t.Error(err)
+		}
+		return prev(ctx, id)
+	}
+	(&RedPacketTaskService{}).RunRedPacketClaimReconcile()
+	poolExists = prev
+
+	if _, err := claimTx(db, rp.ID, 100, amount); err != nil { // 用户的领取事务随后提交
+		t.Fatalf("legit claimer of the last share rejected: %v", err)
+	}
+	var row RedPacket
+	db.First(&row, rp.ID)
+	if row.Status != RedPacketStatusFinished || redPacketUserBalance(t, db, 100) != 500 || escrowBalance(t, db) != 0 {
+		t.Fatalf("status=%d receiver=%d escrow=%d", row.Status, redPacketUserBalance(t, db, 100), escrowBalance(t, db))
+	}
+}
+
