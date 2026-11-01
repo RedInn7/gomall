@@ -208,40 +208,56 @@ func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]
 	return leak, nil
 }
 
+// autoConfirmBatch 自动确认收货每页拉多少单。
+const autoConfirmBatch = 100
+
 // RunAutoConfirmReceive 对长时间未确认收货的订单兜底自动 Completed。
-// 行业惯例 7 天，gomall 默认沿用。一次拉一批，单批失败不影响其它订单。
+// 行业惯例 7 天，gomall 默认沿用。按 id 游标翻页扫到空为止：只扫一批的话，大促后积压的订单
+// 会被拖到远超 7 天才放款。单单失败不影响其它订单，游标照样前进，下一轮 cron 再试。
 // 同事务推进状态机 + 写 order.completed 事件，下游服务（点评 / 结算 / 数据）由事件驱动。
 func (s *OrderTaskService) RunAutoConfirmReceive() {
 	ctx := context.Background()
 	baseDao := NewOrderDao(ctx)
-	orders, err := baseDao.GetTimeoutWaitReceive(autoConfirmReceiveDays, 100)
+	var cursor uint
+	for {
+		orders, err := baseDao.GetTimeoutWaitReceive(autoConfirmReceiveDays, cursor, autoConfirmBatch)
+		if err != nil {
+			util.LogrusObj.Errorf("Cron Job Error: fetch wait-receive orders failed: %v", err)
+			return
+		}
+		for _, order := range orders {
+			s.autoConfirmOne(baseDao, order)
+		}
+		if len(orders) < autoConfirmBatch {
+			return
+		}
+		cursor = orders[len(orders)-1].ID
+	}
+}
+
+// autoConfirmOne 自动确认一单：推进 Completed 与写 order.completed 同事务。
+func (s *OrderTaskService) autoConfirmOne(baseDao *OrderDao, order *Order) {
+	err := baseDao.DB.Transaction(func(tx *gorm.DB) error {
+		ok, err := NewOrderDaoByDB(tx).ConfirmReceive(order.OrderNum)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("自动确认收货失败：订单状态已变更")
+		}
+		return outbox.NewOutboxDaoByDB(tx).Insert(
+			"order", "OrderCompleted", "order.completed", order.ID,
+			events.OrderCompletedEvent{
+				OrderID:  order.ID,
+				OrderNum: order.OrderNum,
+				UserID:   order.UserID,
+				Auto:     true,
+			},
+		)
+	})
 	if err != nil {
-		util.LogrusObj.Errorf("Cron Job Error: fetch wait-receive orders failed: %v", err)
+		util.LogrusObj.Errorf("自动确认收货失败 orderNum=%v err=%v", order.OrderNum, err)
 		return
 	}
-	for _, order := range orders {
-		err := baseDao.DB.Transaction(func(tx *gorm.DB) error {
-			ok, err := NewOrderDaoByDB(tx).ConfirmReceive(order.OrderNum)
-			if err != nil {
-				return err
-			}
-			if !ok {
-				return errors.New("自动确认收货失败：订单状态已变更")
-			}
-			return outbox.NewOutboxDaoByDB(tx).Insert(
-				"order", "OrderCompleted", "order.completed", order.ID,
-				events.OrderCompletedEvent{
-					OrderID:  order.ID,
-					OrderNum: order.OrderNum,
-					UserID:   order.UserID,
-					Auto:     true,
-				},
-			)
-		})
-		if err != nil {
-			util.LogrusObj.Errorf("自动确认收货失败 orderNum=%v err=%v", order.OrderNum, err)
-			continue
-		}
-		util.LogrusObj.Infof("orderNum:%v 自动确认收货成功", order.OrderNum)
-	}
+	util.LogrusObj.Infof("orderNum:%v 自动确认收货成功", order.OrderNum)
 }

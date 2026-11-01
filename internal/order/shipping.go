@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 
 	"gorm.io/gorm"
@@ -48,12 +49,19 @@ func MerchantScope(ctx context.Context) (bossID uint, err error) {
 	return u.Id, nil
 }
 
+// ErrTrackingRequired 发货必须带物流单号和承运商。
+var ErrTrackingRequired = errors.New("发货必须填写物流单号和承运商")
+
 // ShipOrder 商家发货。
 //   - 商家只能发自己的订单（MerchantScope），admin 不限
 //   - 仅允许从 WaitShip 推进到 WaitReceive；条件 UPDATE 兜底幂等
-//   - tracking / carrier 仅经 outbox 事件透传，下游消费者负责持久化或对接物流系统
+//   - tracking / carrier 必填，和 shipped_at 一起落订单表；order.shipped 事件只是通知，没人消费也不丢数据
 //   - 状态推进与 outbox 写入同事务，保证不会"已发货但下游收不到事件"
 func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64, trackingNo, carrier string) error {
+	trackingNo, carrier = strings.TrimSpace(trackingNo), strings.TrimSpace(carrier)
+	if trackingNo == "" || carrier == "" {
+		return ErrTrackingRequired
+	}
 	bossID, err := MerchantScope(ctx)
 	if err != nil {
 		return err
@@ -73,7 +81,7 @@ func (s *ShippingSrv) ShipOrder(ctx context.Context, orderNum uint64, trackingNo
 		return ErrInvalidOrderStateTransition
 	}
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
-		ok, err := NewOrderDaoByDB(tx).ShipOrder(orderNum, bossID)
+		ok, err := NewOrderDaoByDB(tx).ShipOrder(orderNum, bossID, trackingNo, carrier)
 		if err != nil {
 			return err
 		}

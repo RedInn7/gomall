@@ -42,7 +42,7 @@ type OrderCancelled struct {
 	PromoBudgetDate    string `json:"promo_budget_date,omitempty"` // 订单扣满减预算的那一天，退预算只回补同一天的额度
 }
 
-// OrderShipped 商家发货事件。tracking_no / carrier 仅在事件内透传，本期不入主表。
+// OrderShipped 商家发货事件。tracking_no / carrier 已落订单表，事件只做通知。
 type OrderShipped struct {
 	OrderID    uint   `json:"order_id"`
 	OrderNum   uint64 `json:"order_num"`

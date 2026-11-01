@@ -60,9 +60,13 @@ type OrderListRespItem struct {
 	ProductID     uint      `json:"product_id"`
 	BossID        uint      `json:"boss_id"`
 	Num           uint      `json:"num"`
+	AddressName   string    `json:"address_name"`
 	AddressPhone  string    `json:"address_phone"`
 	Address       string    `json:"address"`
 	Type          uint      `json:"type"`
+	TrackingNo    string    `json:"tracking_no"`
+	Carrier       string    `json:"carrier"`
+	RefundReason  string    `json:"refund_reason"`
 	Name          string    `json:"name"`
 	ImgPath       string    `json:"img_path"`
 	DiscountPrice string    `json:"discount_price"`
