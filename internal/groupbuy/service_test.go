@@ -266,7 +266,7 @@ func openGroupbuyTestDB(t *testing.T) *gorm.DB {
 		_ = sqlDB.Close()
 	})
 	if err := db.AutoMigrate(&user.User{}, &product.Product{}, &orderpkg.Order{}, &GroupbuyGroup{}, &GroupbuyMember{},
-		&money.AccountTransaction{}, &outbox.OutboxEvent{}, &clearing.PaymentClearing{}); err != nil {
+		&money.AccountTransaction{}, &outbox.OutboxEvent{}, &clearing.PaymentClearing{}, &GroupbuyNotice{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db

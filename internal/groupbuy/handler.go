@@ -143,6 +143,24 @@ func AdminCloseGroupHandler() gin.HandlerFunc {
 	}
 }
 
+// GroupbuyNoticesHandler 我的拼团通知（参团 / 成团 / 散团）。
+func GroupbuyNoticesHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		u, err := ctl.GetUserInfo(c.Request.Context())
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		limit, _ := strconv.Atoi(c.Query("limit"))
+		rows, err := GetGroupbuySrv().ListMyNotices(c.Request.Context(), u.Id, limit)
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		response.OK(c, rows)
+	}
+}
+
 // parseGroupID 从 path 解析团 id；失败直接返参错误。
 func parseGroupID(c *gin.Context) (uint, error) {
 	raw := c.Param("id")

@@ -15,6 +15,7 @@ func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 	public.GET("/groupbuy/:id", GroupbuyShowHandler())
 	authed.POST("/groupbuy/create", middleware.Idempotency(), GroupbuyCreateHandler())
 	authed.POST("/groupbuy/:id/join", middleware.Idempotency(), GroupbuyJoinHandler())
+	authed.GET("/groupbuy/notices", GroupbuyNoticesHandler())
 
 	admin.POST("groupbuy/:id/close", AdminCloseGroupHandler())
 }
