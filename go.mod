@@ -6,6 +6,7 @@ toolchain go1.26.10
 
 require (
 	github.com/CocaineCong/secret v1.0.4
+	github.com/alicebob/miniredis/v2 v2.33.0
 	github.com/apache/skywalking-go v0.0.0-20230511031014-a2c5f8e67468
 	github.com/bwmarrin/snowflake v0.3.0
 	github.com/elastic/go-elasticsearch v0.0.0
@@ -37,6 +38,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
+	github.com/alicebob/gopher-json v0.0.0-20200520072559-a9ecdc9d1d3a // indirect
 	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/bytedance/sonic v1.8.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -103,6 +105,7 @@ require (
 	github.com/tklauser/numcpus v0.6.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.9 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.44.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect

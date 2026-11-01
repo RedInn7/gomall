@@ -37,7 +37,7 @@ func Run() error {
 			&order.Order{}, &admin.Admin{}, &address.Address{},
 			&cart.Cart{}, &category.Category{}, &carousel.Carousel{},
 			&notice.Notice{}, &product.Product{},
-			&product.ProductImg{}, &skill.SkillProduct{},
+			&product.ProductImg{}, &skill.SkillProduct{}, &skill.SkillUser{},
 			&coupon.CouponBatch{}, &coupon.UserCoupon{},
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
 			&promo.PromoRule{}, &promo.PromoRelease{},

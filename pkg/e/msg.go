@@ -64,6 +64,13 @@ var MsgFlags = map[int]string{
 	ErrPreorderNotInFinalWindow:   "当前不在尾款支付窗口，无法支付尾款",
 	ErrPreorderDepositNotPaid:     "尚未支付定金，无法支付尾款",
 	ErrPreorderForfeitedDeposit:   "预售已结束，根据预售须知定金不予退还",
+
+	ErrSkillNotExist:      "秒杀活动不存在",
+	ErrSkillNotStarted:    "秒杀活动尚未开始",
+	ErrSkillEnded:         "秒杀活动已结束",
+	ErrSkillSoldOut:       "秒杀商品已抢完",
+	ErrSkillLimitExceeded: "已达到每人限购数量",
+	ErrSkillConflict:      "该商品同一场次已存在不同配置的秒杀活动",
 }
 
 // GetMsg 获取状态码对应信息
