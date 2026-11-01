@@ -159,4 +159,3 @@ func TestCloseGroupRacesWithLastJoin(t *testing.T) {
 		})
 	}
 }
-
