@@ -42,6 +42,8 @@ type AsyncOrderTask struct {
 	ProductID uint   `json:"product_id"`
 	Num       uint   `json:"num"`
 	AddressID uint   `json:"address_id"`
+	// ShipTo 入队时的收货地址快照
+	ShipTo address.Snapshot `json:"ship_to"`
 }
 
 // OrderTicketStatus 写到 Redis ticket key 的状态
@@ -128,7 +130,9 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (Order
 	}
 
 	// 地址归属在入队前同步校验：失败快速拒绝，避免白白预扣库存 / 投递无效任务。
-	if err = address.NewAddressDao(ctx).EnsureOwned(req.AddressID, u.Id); err != nil {
+	// 快照在入队时取，随任务带到消费侧：排队期间改地址不影响这张单。
+	shipTo, err := address.NewAddressDao(ctx).OwnedSnapshot(req.AddressID, u.Id)
+	if err != nil {
 		util.LogrusObj.Errorf("async enqueue address ownership check failed addr=%d user=%d err=%v", req.AddressID, u.Id, err)
 		return OrderEnqueueResp{}, err
 	}
@@ -154,6 +158,7 @@ func (s *OrderSrv) OrderEnqueue(ctx context.Context, req *OrderCreateReq) (Order
 		ProductID: req.ProductID,
 		Num:       req.Num,
 		AddressID: req.AddressID,
+		ShipTo:    shipTo,
 	}
 	body, err := json.Marshal(task)
 	if err != nil {

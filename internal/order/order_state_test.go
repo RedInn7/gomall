@@ -21,6 +21,8 @@ func TestOrderState_LegalTransitions(t *testing.T) {
 		{consts.OrderCompleted, consts.OrderRefunding, "completed -> refunding"},
 		{consts.OrderRefunding, consts.OrderRefunded, "refunding -> refunded"},
 		{consts.OrderRefunding, consts.OrderCompleted, "refunding -> completed (reject)"},
+		{consts.OrderRefunding, consts.OrderWaitShip, "refunding -> wait-ship (reject before ship)"},
+		{consts.OrderRefunding, consts.OrderWaitReceive, "refunding -> wait-receive (reject after ship)"},
 		{consts.OrderWaitGroup, consts.OrderWaitShip, "wait-group -> wait-ship"},
 		{consts.OrderWaitGroup, consts.OrderClosed, "wait-group -> closed"},
 	}

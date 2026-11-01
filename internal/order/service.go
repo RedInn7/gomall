@@ -82,7 +82,9 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 
 	// 收货地址必须属于当前登录用户：address_id 同样是客户端可篡改字段，信它等于允许
 	// 用别人的地址 id 下单（把货寄到他人地址 / 撞他人隐私）。
-	if err = address.NewAddressDao(ctx).EnsureOwned(req.AddressID, u.Id); err != nil {
+	// 同时拿到地址快照写进订单，之后改 / 删地址不影响这张单。
+	shipTo, err := address.NewAddressDao(ctx).OwnedSnapshot(req.AddressID, u.Id)
+	if err != nil {
 		util.LogrusObj.Errorf("address ownership check failed addr=%d user=%d err=%v", req.AddressID, u.Id, err)
 		return nil, err
 	}
@@ -125,6 +127,7 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 		Money:     unitCents, // 单价口径不变；满减结果记在 PromoDiscountCents / FinalCents
 		Type:      consts.OrderWaitPay,
 		AddressID: req.AddressID,
+		ShipTo:    shipTo,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		// 满减字段会在事务内根据 ApplyDiscountInTx 的结果再次确认 / 降级写回
 		PromoRuleID:        ruleID,

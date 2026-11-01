@@ -33,22 +33,22 @@ func (d *AddressDao) GetAddressByAid(aId, uId uint) (address *Address, err error
 	return
 }
 
-// EnsureOwned 校验收货地址归属：addressID 必须存在且属于 userID，否则返回 ErrAddressNotOwned。
+// OwnedSnapshot 校验收货地址归属并返回下单用的地址快照：addressID 必须存在且属于 userID，否则返回 ErrAddressNotOwned。
 // address_id 同样是客户端可篡改的字段，下单类入口不能只信请求体——否则用户可拿别人的地址 id
-// 下单，把货寄到他人地址或撞出他人隐私。addressID 为 0 视为"未选地址"，是否必填由各域自行决定，
-// 本校验只在非零时判定归属。
-func (d *AddressDao) EnsureOwned(addressID, userID uint) error {
+// 下单，把货寄到他人地址或撞出他人隐私。addressID 为 0 视为"未选地址"，返回空快照，是否必填由各域自行决定。
+// 订单必须存快照而不是只存 address_id：地址可改可删，只存 id 会让历史订单的收货地址跟着变。
+func (d *AddressDao) OwnedSnapshot(addressID, userID uint) (Snapshot, error) {
 	if addressID == 0 {
-		return nil
+		return Snapshot{}, nil
 	}
 	if d == nil || d.DB == nil {
-		return errors.New("address dao 不可用，无法校验地址归属")
+		return Snapshot{}, errors.New("address dao 不可用，无法校验地址归属")
 	}
 	addr, err := d.GetAddressByAid(addressID, userID)
 	if err != nil || addr == nil || addr.ID == 0 {
-		return ErrAddressNotOwned
+		return Snapshot{}, ErrAddressNotOwned
 	}
-	return nil
+	return Snapshot{Name: addr.Name, Phone: addr.Phone, Detail: addr.Address}, nil
 }
 
 func (d *AddressDao) GetAddressByuId(uId uint) (address []*Address, err error) {
@@ -75,13 +75,27 @@ func (d *AddressDao) CreateAddress(address *Address) (err error) {
 		Create(&address).Error
 }
 
-func (d *AddressDao) DeleteAddressById(aId, uId uint) (err error) {
-	return d.DB.Where("id = ? AND user_id = ?", aId, uId).
-		Delete(&Address{}).Error
+// DeleteAddressById 删除自己的地址。id 不存在或不属于 uId 时返回 ErrAddressNotOwned，不再静默成功。
+// 订单持有下单时的地址快照，删地址不影响历史订单。
+func (d *AddressDao) DeleteAddressById(aId, uId uint) error {
+	res := d.DB.Where("id = ? AND user_id = ?", aId, uId).Delete(&Address{})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrAddressNotOwned
+	}
+	return nil
 }
 
-func (d *AddressDao) UpdateAddressById(aId, uId uint, address *Address) (err error) {
+// UpdateAddressById 修改自己的地址。先查归属再改：MySQL 的 RowsAffected 只数真正变了的行，
+// 提交相同内容会是 0，不能拿它判归属。Select 显式列出字段，Updates(struct) 才不会跳过零值。
+func (d *AddressDao) UpdateAddressById(aId, uId uint, address *Address) error {
+	if a, err := d.GetAddressByAid(aId, uId); err != nil || a == nil || a.ID == 0 {
+		return ErrAddressNotOwned
+	}
 	return d.DB.Model(&Address{}).
 		Where("id = ? AND user_id = ?", aId, uId).
+		Select("name", "phone", "address").
 		Updates(address).Error
 }
