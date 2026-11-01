@@ -278,3 +278,42 @@ func openPromoTestDB(t *testing.T) *gorm.DB {
 	}
 	return db
 }
+
+// 关单 / 退款传进来的 CreatedAt 是从 DB 读出的 UTC 时间：北京时间 0–8 点下的单也必须算成扣预算的那一天并回补。
+func TestReleaseDiscountRestoresForUTCCreatedAtInEarlyLocalHours(t *testing.T) {
+	sh, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Skip("no tzdata:", err)
+	}
+	prev := time.Local
+	time.Local = sh
+	t.Cleanup(func() { time.Local = prev })
+
+	// 北京时间 2026-11-02 01:30 下单，DB 读回来是 UTC 的 2026-11-01 17:30。
+	createdUTC := time.Date(2026, 11, 1, 17, 30, 0, 0, time.UTC)
+	if got := BudgetDay(createdUTC); got != "2026-11-02" {
+		t.Fatalf("BudgetDay(utc) = %s, want 2026-11-02", got)
+	}
+
+	db := openPromoTestDB(t)
+	r := seedRule(t, db, &PromoRule{Name: "r", DiscountCents: 2000, DailyBudgetCents: 10000, ConsumedToday: 2000, BudgetDate: "2026-11-02"})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := GetPromoSrv().ReleaseDiscount(context.Background(), 201, r.ID, 2000, BudgetDay(createdUTC), "cancel"); err != nil {
+				t.Errorf("release: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := loadRule(t, db, r.ID); got.ConsumedToday != 0 {
+		t.Fatalf("budget not restored for early-hour order: consumed=%d", got.ConsumedToday)
+	}
+	var rec PromoRelease
+	if err := db.Where("order_id = ?", 201).First(&rec).Error; err != nil || !rec.Restored {
+		t.Fatalf("ledger restored = %+v, err=%v", rec, err)
+	}
+}
