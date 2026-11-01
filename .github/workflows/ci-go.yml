@@ -31,6 +31,20 @@ concurrency:
 jobs:
   go:
     runs-on: ubuntu-latest
+    # 红包领取 / 退款并发测试要真 InnoDB（行锁 + RR 快照）才能守住锁顺序，SQLite 测不出来
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: rptest
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h127.0.0.1"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # 按 go.mod 的 toolchain 指令安装 Go；默认缓存模块和编译产物（按 go.sum 区分）
@@ -41,5 +55,7 @@ jobs:
       # vet 要求每个包都能通过类型检查，已覆盖 go build 能发现的编译错误
       - run: go vet ./...
       - run: go test ./...
+        env:
+          REDPACKET_TEST_MYSQL_DSN: root@tcp(127.0.0.1:3306)/rptest?charset=utf8mb4&parseTime=True&loc=Local
       - name: 练习参考答案
         run: ./scripts/grade-exercises.sh solution

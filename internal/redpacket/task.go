@@ -62,7 +62,8 @@ func refundRedPacketLeft(ctx context.Context, rpID uint) (int64, error) {
 		txDao := NewRedPacketDaoByDB(tx)
 		// 必须是事务第一条语句：MySQL RR 下加锁读不建快照，下面的 SUM 才在拿到锁之后建快照、
 		// 看得到刚提交的领取。往前面插任何普通读，快照会提前建立，SUM 漏掉并发提交的领取，同一份钱退两次。
-		// TestClaimAndRefundRaceConservesMoney 守着这条。
+		// TestClaimAndRefundRaceConservesMoney 守着这条，但只在 REDPACKET_TEST_MYSQL_DSN 指向真 MySQL 时有效
+		// （CI 起了 mysql service）；默认 SQLite 没有行锁和 RR 快照，插错了也测不出来。
 		rp, err := txDao.GetForUpdate(rpID)
 		if err != nil {
 			return err
