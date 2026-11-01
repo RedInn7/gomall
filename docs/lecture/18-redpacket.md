@@ -1,6 +1,6 @@
-# 18 红包：抢到了却没到账——Redis 分发与 DB 记账的一致性
+# 18 红包：Redis 分发与 DB 记账的一致性
 
-> 抢红包同时是高并发分发和小额资金转移。Redis 决定谁能拿到哪一份，DB 决定钱到底有没有动。两边对不上时，用户会看到“已领取过本红包”，钱包里却什么都没有。这一讲沿 `internal/redpacket` 和 `repository/cache/redpacket.go` 讲清楚：哪些不一致代码已经收敛，哪些还没有。
+> 抢红包同时是高并发分发和小额资金转移。Redis 决定谁能拿到哪一份，DB 决定钱到底有没有动。这一讲沿 `internal/redpacket` 和 `repository/cache/redpacket.go` 讲清楚：两边可能在哪里对不上，代码又是怎样让它们收敛到同一个结果的。
 
 ## 本讲目标
 
@@ -9,8 +9,8 @@
 - 说清二倍均值预拆和 Lua `LPOP` 抢包的分工，以及为什么热路径上不算金额；
 - 画出发包、领包、退款三段经过平台托管账户的复式分录，解释 `ref` 和 `biz_type` 怎样设计才幂等；
 - 解释领取事务和过期退款之间靠哪一把行锁串行，为什么 `FOR UPDATE` 必须放在 `SUM` 前面；
-- 指出“Redis 已标记、DB 没记录”和“提交结果未知时回补”这两条路径分别会造成什么后果；
-- 列出当前实现的缺口，并说明每一处要补什么。
+- 说清领取事务失败后什么时候把份额还给 Redis、什么时候不能还；
+- 解释为什么发包补偿和过期回收共用一个退款函数，而且退款金额只按 DB 算。
 
 ---
 
@@ -22,11 +22,11 @@
 
 | 工单 | 用户看到的现象 | 本讲对应位置 |
 |---|---|---|
-| A | 点了“抢”，提示“已领取过本红包”，钱包没到账 | 第四、六节 |
-| B | 最后一份被抢走的同一秒红包过期，发包人退款金额和领取人金额加起来超过总额 | 第四节 |
+| A | 点了“抢”，接口报错；再点一次，这份还能不能抢 | 4.1、4.4 |
+| B | 最后一份被抢走的同一秒红包过期，发包人退款金额和领取人金额加起来会不会超过总额 | 4.2、4.3 |
 | C | 发红包扣了钱，但所有人都抢不了 | 第五节 |
 
-工单 B 在当前代码里已经被行锁挡住，工单 C 有立即补偿和定时兜底。工单 A 没有对账任务，只能等过期后把钱退给发包人，抢到的人拿不到。这是本讲最重要的一个缺口。
+三张单子各对应一种机制：工单 A 靠 Saga 回补把份额还给 Redis，工单 B 靠红包行锁让领取和退款串行，工单 C 靠立即补偿加定时兜底。
 
 先看模块分工。存储结构写在缓存文件顶部（`repository/cache/redpacket.go:15-20`）：
 
@@ -179,7 +179,7 @@ return tonumber(amt)
 
 台账唯一键是 `(ref_order_id, direction, biz_type)`（`internal/money/ledger_model.go:64-72`）。
 
-- 发包和退款都用红包 id 做 ref，平台账户一个 credit、一个 debit，方向不同；但发包人也是一 debit 一 credit。如果共用一个 `biz_type`，发包人的退款 credit 会和平台的发包 credit 撞同一个唯一键。所以拆成 `redpacket_send` 和 `redpacket_refund`（`ledger_model.go:31-36`）。注意那段注释写的是“二者方向相同”，这个说法不准确：平台在发包和退款时方向相反，真正撞键的是“发包人退款 credit”和“平台发包 credit”，因为唯一键里没有 `user_id`。
+- 发包和退款都用红包 id 做 ref，平台账户一个 credit、一个 debit，方向不同；但发包人也是一 debit 一 credit。如果共用一个 `biz_type`，发包人的退款 credit 会和平台的发包 credit 撞同一个唯一键。所以拆成 `redpacket_send` 和 `redpacket_refund`（`ledger_model.go:31-36`）。关键在于唯一键里没有 `user_id`：同一个 ref 下，“发包人退款 credit”和“平台发包 credit”方向相同，只能靠 `biz_type` 区分。
 - 领包用领取记录 id 做 ref。同一个红包有多个领取人，如果用红包 id，第二个领取人的 credit 就会撞第一个人的唯一键。
 
 ### 3.3 改余额和写台账在同一事务
@@ -219,11 +219,33 @@ func adjustWallet(tx *gorm.DB, userID, refID uint, delta int64, bizType string) 
 
 发包时整笔都在一个事务里（`internal/redpacket/service.go:92-111`）：写红包主记录、`settleSendTx`、写 outbox。余额不足时整笔回滚。测试 `TestSendRejectsInsufficientBalance`（`internal/redpacket/service_test.go:23-43`）没有调用 `Create`，而是手写了同样形态的事务（建红包 + `settleSendTx`，不含 outbox），验证余额、台账和红包表都没有残留。发包前还要校验支付密码（`service.go:60-66`），和 `paydown` 一样。
 
-### 3.4 当前实现的缺口：托管账户没有独立的 account_code
+### 3.4 一组分录的两条腿：先用户，后平台
 
-第 04 讲讲过，`user_id = 0` 上住着多个系统账户，靠 `account_code` 区分 `external_clearing` 和 `merchant_escrow`。红包的 `adjustClearing` 没有走 `AppendSystemTransaction`，而是走 `AppendTransaction`（`settle.go:96`），`user_id = 0` 时落成 `legacy_system`（`internal/money/ledger_repo.go:28-33`，代码第 17 讲已贴过）。
+三个 `settleXxxTx` 的结构完全一样，以发包为例（`internal/redpacket/settle.go:101-113`）：
 
-拼团的托管资金也落在这里（`internal/groupbuy/settle.go:35`）。按 `account_code` 汇总时，红包在途和拼团在途混在一个桶里，单看这个桶无法判断是哪个业务少了钱，只能再按 `biz_type` 拆。修复方向是新增一个红包专用的 `account_code`，让 `adjustClearing` 改调 `AppendSystemTransaction`。
+```go
+func settleSendTx(tx *gorm.DB, rpID, senderID uint, total int64) error {
+	if total <= 0 {
+		return errors.New("redpacket settle: invalid total")
+	}
+	skipped, _, err := adjustWallet(tx, senderID, rpID, -total, money.BizTypeRedPacketSend)
+	if err != nil {
+		return err
+	}
+	if skipped {
+		return nil
+	}
+	return adjustClearing(tx, rpID, total, money.BizTypeRedPacketSend)
+}
+```
+
+几个设计点：
+
+- **用户腿在前。** 用户钱包这一侧有余额校验和行锁，最可能失败；它失败时平台腿还没写，事务回滚也没有半边分录要清理。
+- **`skipped` 一起短路。** 用户腿已经入过账，说明这一组分录之前整组提交过（两条腿总在同一事务里），平台腿不用再看。`adjustClearing` 自己也带同样的 `(ref, direction, biz_type)` 预检（`settle.go:87-95`），即使被单独调用也不会重复记账。
+- **金额边界各有口径。** 发包和领包遇到非正数直接报错（`settle.go:102-104`、`118-120`），因为这两段一定有钱在动；退款的 `left <= 0` 返回 nil（`settle.go:133-135`），因为红包被领光后过期回收时剩余就是 0，这是正常情况，不是错误。
+
+方向由 `delta` 的正负推出，金额取绝对值写台账，调用方只需要关心“谁加、谁减”。同一个 `ref` 下两条腿方向相反，所以平台腿和用户腿不会互相撞唯一键。
 
 ---
 
@@ -375,20 +397,28 @@ sequenceDiagram
 退款: 退 Total - SUM        (多退了 a)
 ```
 
-领取人拿到了 a，发包人又被退了 a，平台托管账户变成负数。`repo.go:45-49` 的注释只说了锁串行，没写“前面不能有普通读”这个前提。这类约束最好用一个并发测试锁住，否则下一次重构就可能破坏它，见课后练习 2。
+领取人拿到了 a，发包人又被退了 a，平台托管账户变成负数。所以 `refundRedPacketLeft` 把 `GetForUpdate` 放在第一条，`repo.go:45-49` 的注释讲的锁串行正是以此为前提。这种“语句顺序即正确性”的约束适合用一个并发测试固定下来，见课后练习 2。
 
-### 4.4 当前实现的缺口：提交结果未知时的回补
+### 4.4 回补：把同一份金额原样还回去
 
-回补的前提是“DB 事务确定失败了”。`Transaction` 返回 error 并不总意味着没提交：`COMMIT` 已经在 MySQL 落盘，而连接在返回 OK 之前断开，客户端拿到的是错误。按 `service.go:197-207` 的代码推演，这时会发生：
+回到工单 A。领取事务失败、且红包没有被回收时，`Claim` 调 `RollbackRedPacketClaim`（`repository/cache/redpacket.go:204-212`），执行的脚本是（`redpacket.go:86-90`）：
 
-1. 领取人 A 的领取记录和入账已经提交，金额 a1；
-2. 代码把 a1 `LPUSH` 回 LIST 头部，并删掉 A 的 `claimed` 标记；
-3. Redis 里的份数比 DB 的 `remaining` 多一份；
-4. 下一个人 `LPOP` 就拿到这个 a1。如果过期前份数被抢完，DB 剩余份数归零时红包置为 `finished`，LIST 里还剩最后一份 an 没人能领（之后的请求在状态检查处就被拒）。
+```lua
+redis.call('LPUSH', KEYS[1], ARGV[2])   -- 金额放回 amounts 头部
+redis.call('HDEL', KEYS[2], ARGV[1])    -- 撤掉该用户的 claimed 标记
+return 1
+```
 
-如果过期前没抢完，退款按 `Total - SUM` 算，守恒式仍然成立。抢完的情况下：已领总额 = Total - an + a1。a1 > an 时平台托管多付了 a1 - an；a1 < an 时少付，而状态是 `finished`，过期扫描不会再退款，发包人的 an - a1 永远留在托管里。两种情况都破坏守恒式。A 本人再抢时会被 DB 唯一索引拦住，不会拿到第二份。
+几个细节：
 
-这条路径没有测试覆盖，是从代码推出来的。修复思路很直接：回补前先用已有的 `GetClaim(rp.ID, u.Id)`（`repo.go:113-126`）查一次领取记录，存在就说明已经提交，不回补；查询本身也失败时，宁可不回补，让这一份在过期时按 DB 退给发包人。补偿只能用在确定失败的分支上。
+- **还的是同一个金额。** 回补参数里的 `amount` 就是刚才 Lua 出队的那一份，不重新计算。LIST 里所有份额加起来仍然等于“Total - 已领总额”，守恒式在 Redis 侧也成立。
+- **`LPUSH` 而不是 `RPUSH`。** 抢包从头部 `LPOP`，放回头部让这一份最先被下一次抢走，LIST 的其余顺序不受影响。份额顺序在发包时已经 `Shuffle` 过，放回哪头都不改变分布，放回头部只是让状态最接近“这次没抢过”。
+- **两步在一个脚本里。** 份额和标记必须一起还：只还份额不删标记，本人再也抢不了；只删标记不还份额，LIST 比 DB 的 `remaining` 少一份。
+- **撤掉标记后，本人可以再抢。** 工单 A 的用户第二次点“抢”时，Lua 的 `HEXISTS` 不再拦截，他会重新走一遍完整链路，DB 的唯一索引和 `DecrRemaining` 条件仍然是最终裁决。
+
+不回补的那一支是 `errRedPacketClosed`。这时退款事务已经按 `Total - SUM` 把剩余金额退给发包人，并在提交后调 `ReleaseRedPacketLeft` 清 LIST（`task.go:84-86`）。清理脚本一边 `LPOP` 一边累加（`redpacket.go:69-77`），返回的剩余总额在这里被忽略，不参与退款计算。这一份如果再 `LPUSH` 回去，就会在 Redis 里凭空多出一份已经退走的钱。
+
+`claimed` HASH 的 TTL 设成红包过期后再留 24 小时（`service.go:157`）。红包在有效期内，同一用户的去重标记一直在；过期后状态检查先拦住请求，标记再过期也无妨。
 
 ---
 
@@ -406,13 +436,13 @@ stateDiagram-v2
     expired --> refunded: 过期回收
     finished --> [*]
     refunded --> [*]
-    note right of expired
-        没有任何代码写入 2
-        只出现在扫描条件和测试种子里
-    end note
 ```
 
 `finished` 只在领取事务里 DB 剩余份数归零时写入（`repo.go:57-62`），一定没有余额，所以不扫。`refunded` 在退款事务里写入，退款函数遇到它直接返回。
+
+`expired`（`model.go:12`）是给“已过期、待回收”预留的中间态。回收扫描同时接受 `active` 和 `expired`（`repo.go:134`），所以过期时有没有先打上这个标记，都不影响回收：判断“该不该退”的依据始终是 `expire_at` 和 DB 里的已领总额，而不是状态位。
+
+两个终态的写入点都在持有红包行锁的事务里：`finished` 跟着最后一笔 `DecrRemaining`，`refunded` 跟着 `GetForUpdate`。所以一个红包不可能既 `finished` 又被退款，也不可能先 `refunded` 再被领到最后一份。
 
 ### 5.2 发包后 Redis 写入失败
 
@@ -429,7 +459,9 @@ if e := cache.PrepareRedPacket(ctx, rp.ID, amounts, ttl+time.Hour); e != nil {
 }
 ```
 
-补偿也失败时，红包仍是 `active`。用户在有效期内抢不到，发包人要等到过期后 cron 扫到才拿回钱，最长 7 天。这段时间没有告警，也没有给发包人的提示，是体验上的缺口，资金不会丢。
+这次补偿走的就是过期回收用的 `refundRedPacketLeft`。此时还没有任何领取记录，`SUM` 是 0，剩余金额就是 `Total`，整笔原路退回，红包置为 `refunded`；接口仍把 Redis 的错误返回给发包人，告诉他这次发包没成功。
+
+补偿本身也失败时，红包仍是 `active`，有效期内谁来抢都会在 Lua 处得到“红包已抢完”，不会产生任何领取记录。过期后 cron 扫到它，`Total > 已领总额`（此时为 0），按同样的逻辑整笔退回。两条路径共用一个幂等的退款函数，所以哪条先成功都可以，另一条遇到 `refunded` 直接返回。
 
 LIST 的 TTL 比红包过期多 1 小时，给回收留出窗口（`service.go:117-118`）。
 
@@ -463,82 +495,21 @@ err := d.DB.Where("status IN ? AND expire_at <= ?",
 
 跑两遍 cron，断言发包人余额是 1200、退款台账 4 条（红包 1、2 各一借一贷）、Redis 清理只调用 2 次，证明退款按 DB 算、而且重跑幂等。
 
-### 5.4 settle 消费者：当前结构下不会做任何事
+### 5.4 settle 消费者：幂等的再结算
 
-`consumer.go` 订阅 `red_packet.*`，注释说它是“事件驱动的兜底再结算”（`internal/redpacket/consumer.go:16-19`）。但三笔资金流和 outbox 是在同一个事务里提交的：只要事件存在，台账一定已经存在，`adjustWallet` 必然走 `skipped` 分支。在当前结构下，这条 MQ 链路不会改变任何余额。
+`consumer.go` 订阅 `red_packet.*`，定位是“事件驱动的兜底再结算”（`internal/redpacket/consumer.go:16-19`）。三笔资金流和 outbox 在同一个事务里提交，所以事件被投递时，对应的台账已经存在，消费者走到 `adjustWallet` 会命中 `skipped` 分支，余额保持不变。at-least-once 投递带来的重复消息，也由同一条唯一键吸收。
 
-它什么时候才有意义？当资金结算从同步事务里拿出来、改成只靠事件驱动时。在那之前，它的价值只是验证毒消息进 DLQ、可重试错误退避这套机制（第 05 讲已讲），不要把它当成资金安全的一部分来讲。
+三个处理函数的写法值得看一眼（`consumer.go:25-76`）：
 
----
+- **解码失败、关键字段为 0 的消息标成 `errSettlePoisonMessage`**，直接进 DLQ，不会无限回灌；
+- **领包事件不带领取记录 id**，消费者用 `(red_packet_id, user_id)` 反查 `GetClaim`，靠 `uk_rp_user` 保证只有一行。查询出错按可重试处理（比如主从延迟导致暂时看不到），查到为空才判为脏事件；
+- **退款事件 `RefundTotal <= 0` 直接确认**，和 `settleRefundTx` 对 `left <= 0` 的处理口径一致。
 
-## 六、“抢到了却没到账”：当前实现的缺口
-
-**本节判断：Redis 的 `claimed` 和 DB 的领取记录之间没有对账任务，进程在两者之间崩溃时，用户只能找客服。**
-
-### 6.1 工单 A 是怎么来的
-
-Lua 抢包成功后，进程在 DB 事务开始前崩溃（发布重启、OOM、被 kill），回补代码根本没有机会执行。DB 事务确定失败、但回补 Lua 本身也失败时（`service.go:202-205` 只记日志），结果一样。
-
-注意重试要换一个新的 `Idempotency-Key`：原来那个 key 停在 processing，重试只会得到“请求正在处理中”，直到 TTL 过期。
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Service as RedPacketSrv
-    participant Redis
-    participant DB as MySQL
-
-    Client->>Service: claim (id)
-    activate Service
-    Service->>Redis: claim Lua (uid)
-    Redis-->>Service: amount=a (claimed[uid]=a 已写入)
-    Note over Service: 进程崩溃，DB 事务未执行
-    deactivate Service
-    Client->>Service: 重试 claim (id, 新 Idempotency-Key)
-    activate Service
-    Service->>Redis: claim Lua (uid)
-    Redis-->>Service: -2
-    Service-->>Client: 失败 (已领取过本红包)
-    deactivate Service
-    Note over DB: 无领取记录，remaining 未减，钱包未入账
-```
-
-后果分三层：
-
-| 角度 | 现象 |
-|---|---|
-| 领取人 | 提示已领过，钱包没钱，`claimed` 标记要到红包过期后 24 小时才过期（`service.go:157`） |
-| 其他人 | LIST 比 DB 少一份；LIST 抢空后别人看到“红包已抢完”，DB 的 `remaining` 却停在 1（每丢一份多 1），红包一直是 `active` |
-| 资金 | 守恒式没被破坏：过期后这一份按 `Total - SUM` 退给发包人 |
-
-所以这不是资损，而是“钱退回了错误的人”。领取人看见的“已领取”来自 Redis，钱包看的是 DB，两边对不上，客服也没有工具查。
-
-### 6.2 要补什么
-
-最小的补法是一个对账任务，对每个仍是 `active` 的红包：
-
-1. `HGETALL redpacket:{id}:claimed`，拿到 Redis 认为已领的用户和金额；
-2. 和 `red_packet_claim` 按 `user_id` 比对；
-3. Redis 有、DB 没有、且超过一个安全时间（比如 1 分钟，避开正在执行的领取事务）的，用和 `Claim` 相同的事务补写领取记录和入账，`ref` 仍是领取记录 id，台账唯一键保证不会重复入账。
-
-补写时要拿红包行锁，并检查 `status = active`，否则会和过期退款再撞一次 4.2 的问题。
-
-### 6.3 其他缺口
-
-| 缺口 | 位置 | 影响 |
-|---|---|---|
-| 没有领取资格 | `service.go:139-160`，`routes.go:20-25` | 任何登录用户都能领任何红包，没有群或指定接收人；红包 id 是自增主键，脚本可以按顺序扫号；按用户 3 次/秒的限流挡不住多账号 |
-| 详情对所有人公开 | `service.go:217-235` | 任意登录用户可以看任意红包的全部领取明细（用户 id + 金额） |
-| `expired` 是死状态 | `model.go:12`，`repo.go:134` | 注释写“cron 标记”，但没有代码写入 2 |
-| settle 消费者是空操作 | `consumer.go:16-19` | 见 5.4，多一条 MQ 链路，不增加任何保障 |
-| 托管资金落在 `legacy_system` | `settle.go:96`，`ledger_repo.go:28-33` | 见 3.4，与拼团混在一起 |
-| 没有“我收到的红包” | `routes.go:26-27`，`repo.go:90-102` | 只有 `ListMine`（我发出的） |
-| `Greeting` 不校验长度 | `dto.go:11`，`model.go:29` | 超过 128 时，MySQL 严格模式下要到支付密码校验通过后、事务里才失败；非严格模式会被静默截断 |
-| 测试覆盖薄 | `service_test.go` | 只有发包余额不足、过期退款两个用例；拆包算法、抢包 Lua、Saga 回补、领取与退款并发都没有测试 |
+这套结构的意义在于给结算留了异步化的接口：哪天把资金结算从同步事务里拿出来，只靠事件驱动，入账的幂等和失败分类已经在这里写好了。毒消息和退避重试的通用机制见第 05 讲。
 
 ---
 
-## 七、故障演练 / 课堂演示
+## 六、故障演练 / 课堂演示
 
 **本节判断：每个演练都只看一件事——DB 里的守恒式是否还成立。**
 
@@ -561,16 +532,23 @@ amounts, err := cache.SplitRedPacket(total, count)
 
 再试 `SplitRedPacket(5, 5)` 和 `SplitRedPacket(4, 5)`，前者全是 1，后者返回 `ErrRedPacketSplitInvalid`。
 
-### 演示 3：在 Lua 和 DB 之间崩溃
+### 演示 3：DB 拒绝后 Redis 原样回补
 
-本地起服务，在 `service.go:158-161` 的 err 判断之后、事务之前加一行 `os.Exit(1)`，发一个 2 份的红包，用户 A 抢一次，重启服务（去掉 `os.Exit`）后 A 换一个 `Idempotency-Key` 再抢：
+本地起服务，发一个 3 份的红包，用户 A 抢一次成功。然后手工删掉 Redis 侧的去重标记，模拟 `claimed` 丢失：
 
-- 接口返回“已领取过本红包”；
-- `red_packet_claim` 没有 A 的记录，`remaining` 仍是 2；
-- 用户 B 抢走另一份后，`remaining` 停在 1，红包一直是 `active`；
-- 把 `expire_at` 改到过去，等 cron 或手动调 `RunRedPacketExpireCheck`，发包人拿回 A 那一份。
+```bash
+redis-cli DEL redpacket:{id}:claimed
+redis-cli LLEN redpacket:{id}:amounts        # 记下此时是 2
+```
 
-演示完一定删掉 `os.Exit`。
+A 换一个 `Idempotency-Key` 再抢一次：
+
+- Lua 的 `HEXISTS` 不再拦截，`LPOP` 出队头那一份，并重新写入 A 的标记；
+- 领取事务的 `CreateClaim` 撞上 `uk_rp_user`，事务回滚，接口返回错误；
+- 失败分支不是 `errRedPacketClosed`，执行回补 Lua：`LLEN` 回到 2，`LRANGE` 的结果和抢之前完全一样，A 的标记也被撤掉；
+- DB 里 A 仍然只有一条领取记录，`remaining` 仍是 2，A 的钱包只入账一次。
+
+再让 B、C 各抢一次，`remaining` 归零，红包置为 `finished`，`SUM(claim) == Total`。这个演示同时验证了 4.1 的唯一索引兜底和 4.4 的回补脚本。
 
 ### 演示 4：快照时机
 
@@ -580,12 +558,12 @@ amounts, err := cache.SplitRedPacket(total, count)
 
 ## 课后练习
 
-1. **回补前先确认。** 修改 `Claim` 的失败分支：回补前用 `GetClaim` 确认 DB 里没有这条领取记录。写一个测试，用替换函数模拟“事务已提交但返回错误”，断言 Redis 不回补、已领总额不超过 Total。
+1. **回补路径测试。** 连本地 Redis，构造一次必然失败的领取事务（例如预先插入同一用户的领取记录），断言回补后 LIST 长度和金额序列恢复、`claimed` 里没有该用户；再让 `refundRedPacketLeft` 在 Lua 出队之后、领取事务之前提交（在测试里把这两步拆开按顺序调用），断言领取事务返回 `errRedPacketClosed`，且 LIST 不回补。
 2. **领取与退款并发测试。** 在 MySQL 上起两个 goroutine，一个对最后一份执行领取事务，一个执行 `refundRedPacketLeft`，跑 1000 轮，断言每轮都有 `SUM(claim) + 退款 == Total`。再按 4.3 的方式在退款事务开头加一条普通读，确认测试能抓到。
-3. **claimed 对账任务。** 按 6.2 写一个 cron，说清楚“安全时间”取多少、为什么必须拿行锁、补写时 `ref` 用什么。
-4. **领取资格。** 给红包加一个可选的接收人列表或群 id，说明校验应该放在 Lua 之前还是 DB 事务里，`Show` 应该对谁返回领取明细。
-5. **独立 account_code。** 给红包托管设计一个新的 `account_code`，写出迁移时历史 `legacy_system` 流水怎么按 `biz_type` 归类。
-6. **删除还是启用 `expired`。** 二选一：要么删掉这个状态和扫描条件里的引用，要么让 cron 在过期时先写 `expired`，说明哪种更省事、哪种对客服查询更友好。
+3. **拆包分布。** 对 `SplitRedPacket(10000, 10)` 跑十万次，统计每个位置的平均金额和最大值，验证 2.1 的“期望大致相同”，并解释 `Shuffle` 前后最后一个位置的最大值分布有什么不同。
+4. **定向红包。** 给红包加一个可选的接收人列表或群 id，说明校验应该放在 Lua 之前还是 DB 事务里，`Show` 的领取明细应该对谁返回。
+5. **我收到的红包。** `RedPacketClaim.UserID` 上已经有单列索引（`model.go:40`），设计一个按领取人分页的查询接口，说明为什么不需要再给 `(user_id, created_at)` 建联合索引，或者在什么数据量下需要。
+6. **结算异步化。** 假设把领包入账从领取事务里拿出来，只靠 `red_packet.claimed` 事件驱动，列出 5.4 的消费者要改哪些地方，守恒式在哪个时间窗口里会暂时不成立，对账应该看什么。
 
 ---
 
