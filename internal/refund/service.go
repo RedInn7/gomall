@@ -50,13 +50,30 @@ var refundAllowedFrom = []uint{
 	consts.OrderCompleted,
 }
 
-// RequestRefund 用户发起退款申请。
-//   - from 必须落在 refundAllowedFrom：WaitShip / WaitReceive / Completed
-//   - 校验 ctx 中的 userID 与订单归属一致
-//   - 通过 DAO 的 WHERE IN 一次拦截非法 from，避免读后写竞态
-// maxRefundRequests 同一订单最多申请几次退款。
+// afterSalesWindow 确认收货后多久内还能申请退款。超过之后卖家已经结算、货也用了很久，
+// 再从卖家余额扣钱不合理，走人工客服。
+const afterSalesWindow = 15 * 24 * time.Hour
+
+// maxRefundRequests 同一订单最多申请几次退款。每次驳回都回到原状态，不设上限买家就能反复申请骚扰商家。
 const maxRefundRequests = 3
 
+var (
+	// ErrAfterSalesExpired 已完成订单超过售后时效。
+	ErrAfterSalesExpired = errors.New("已超过售后期，请联系客服")
+	// ErrTooManyRefundRequests 同一订单退款申请次数到上限。
+	ErrTooManyRefundRequests = errors.New("该订单退款申请次数已达上限，请联系客服")
+	// ErrSellerBalanceInsufficient 结算后退款要从卖家余额扣，余额不够时不扣成负数，留给重试 / 补偿任务。
+	ErrSellerBalanceInsufficient = errors.New("卖家余额不足，退款待卖家补足后自动完成")
+	// ErrNotReturnable 不是"已发货后退款且未回补库存"的订单，不能确认退货入库。
+	ErrNotReturnable = errors.New("该订单没有待入库的退货")
+)
+
+// RequestRefund 用户发起退款申请。
+//   - from 必须落在 refundAllowedFrom：WaitShip / WaitReceive / Completed，且状态机允许 from -> Refunding
+//   - 已完成订单只能在 afterSalesWindow 内申请；同一订单最多申请 maxRefundRequests 次
+//   - 校验 ctx 中的 userID 与订单归属一致
+//   - FOR UPDATE 锁住订单后再判断、再条件 UPDATE，避免读后写竞态
+//   - reason 落订单表，商家审批时要看
 func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason string) error {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -77,8 +94,20 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 			return orderpkg.ErrOrderForbidden
 		}
 		fromType := order.Type
-		if !inUintSlice(fromType, refundAllowedFrom) {
+		if !inUintSlice(fromType, refundAllowedFrom) || !orderpkg.CanTransition(fromType, consts.OrderRefunding) {
 			return orderpkg.ErrInvalidOrderStateTransition
+		}
+		if fromType == consts.OrderCompleted {
+			completedAt := order.UpdatedAt
+			if order.CompletedAt != nil {
+				completedAt = *order.CompletedAt
+			}
+			if time.Since(completedAt) > afterSalesWindow {
+				return ErrAfterSalesExpired
+			}
+		}
+		if order.RefundCount >= maxRefundRequests {
+			return ErrTooManyRefundRequests
 		}
 		ok, err := orderDao.RequestRefund(orderNum, fromType, reason, maxRefundRequests)
 		if err != nil {
@@ -103,7 +132,7 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 // ApproveRefund 运营同意退款。
 //   - 商家只能审批自己的订单（MerchantScope），admin 不限
 //   - 仅允许 Refunding -> Refunded
-//   - 写 outbox(order.refunded)，amount 取实付口径 FinalCents（回退到 Money*Num）；tx_id 留空待下游回填
+//   - 写 outbox(order.refunded)，amount 与实际退款同一口径（refundAmount）；tx_id 留空待下游回填
 //
 // 真正的资金回退在下游 wallet 服务消费事件时执行；本服务仅做状态推进。
 func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
@@ -125,13 +154,8 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 	if order.Type != consts.OrderRefunding {
 		return orderpkg.ErrInvalidOrderStateTransition
 	}
-	// 退款额取实付口径，与 payment 侧保持一致：命中满减时以折后实付 FinalCents 为准，
-	// 仅当 FinalCents 未写入（<=0）时回退到折前价 Money*Num。
-	// 用折前价会把满减优惠重复退还（promo 已随事件退预算，钱包再按原价退钱即双重退还）。
-	amount := order.FinalCents
-	if amount <= 0 {
-		amount = order.Money * int64(order.Num)
-	}
+	// 事件金额与 SettleRefund 实际退的钱同一口径，满减抵扣到 0 的订单事件上也是 0，不是原价。
+	amount := refundAmount(order)
 	txErr := baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		ok, err := orderpkg.NewOrderDaoByDB(tx).ApproveRefund(orderNum, bossID)
 		if err != nil {
@@ -189,6 +213,9 @@ func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason st
 	if !inUintSlice(restoreType, refundAllowedFrom) {
 		// 兼容迁移前已经处于 Refunding、没有记录来源状态的旧订单，沿用旧行为恢复 Completed。
 		restoreType = consts.OrderCompleted
+	}
+	if !orderpkg.CanTransition(consts.OrderRefunding, restoreType) {
+		return orderpkg.ErrInvalidOrderStateTransition
 	}
 	return baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		ok, err := orderpkg.NewOrderDaoByDB(tx).RejectRefund(orderNum, restoreType, bossID)
@@ -341,6 +368,12 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 				return err
 			}
 			sellerAfter := sellerBal - amount
+			if sellerAfter < 0 {
+				// 不把卖家扣成负数（已提现时就成了平台坏账）。返回错误让消费者重试、进 DLQ 后由
+				// RunSettleCompensation 每轮再试，卖家余额补足后自动退给买家。
+				util.LogrusObj.Errorf("refund settle blocked: seller=%d balance=%d < refund=%d order=%d", o.BossID, sellerBal, amount, o.ID)
+				return ErrSellerBalanceInsufficient
+			}
 			if amount > 0 {
 				seller.Money = strconv.FormatInt(sellerAfter, 10)
 				if seller.Money, err = seller.EncryptMoney(); err != nil {
@@ -355,12 +388,19 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 			}
 		}
 
-		// 库存回补：把订单数量加回在售库存（支付时已扣减，退款是其逆操作）。
-		if _, err = product.NewProductDaoWithDB(tx).RollbackStock(o.ProductID, o.Num); err != nil {
-			util.LogrusObj.Error(err)
+		// 库存回补只给未发货就退款的订单：货还在仓库里。已发货的货在途或在买家手里，
+		// 这时回补会超卖，要等商家确认退货入库（ConfirmReturnReceived）再补。
+		ok, err := orderDao.MarkRestocked(o.ID, 0, true)
+		if err != nil {
 			return err
 		}
-		restocked = o
+		if ok {
+			if _, err = product.NewProductDaoWithDB(tx).RollbackStock(o.ProductID, o.Num); err != nil {
+				util.LogrusObj.Error(err)
+				return err
+			}
+			restocked = o
+		}
 		if clearingFound {
 			now := time.Now()
 			if err = tx.Model(&clearing.PaymentClearing{}).Where("id = ?", clearingRecord.ID).
@@ -375,12 +415,52 @@ func (s *RefundSrv) SettleRefund(ctx context.Context, orderID uint) error {
 	if err != nil || restocked == nil {
 		return err
 	}
-	// DB 提交后再把回补的件数加回 Redis available，否则缓存里这批库存卖不出去。
-	// 失败只记日志：DB 已是真相，交给库存对账。
-	if e := cache.RestockAvailable(ctx, restocked.ProductID, int64(restocked.Num)); e != nil {
+	restockRedis(ctx, restocked)
+	return nil
+}
+
+// restockRedis DB 提交后再把回补的件数加回 Redis available，否则缓存里这批库存卖不出去。
+// 失败只记日志：DB 已是真相，交给库存对账。
+func restockRedis(ctx context.Context, o *orderpkg.Order) {
+	if e := cache.RestockAvailable(ctx, o.ProductID, int64(o.Num)); e != nil {
 		util.LogrusObj.Errorf("refund restock redis failed order=%d product=%d num=%d err=%v",
-			restocked.ID, restocked.ProductID, restocked.Num, e)
+			o.ID, o.ProductID, o.Num, e)
 	}
+}
+
+// ConfirmReturnReceived 商家确认退货已入库，回补库存。只对已退款、发货后才退的订单有效：
+// 未发货的退款在结算时已经回补。MarkRestocked 条件抢占保证并发 / 重复点击只补一次。
+// 仅退款不退货的订单商家不点这个，库存也就不会凭空多出来。
+func (s *RefundSrv) ConfirmReturnReceived(ctx context.Context, orderNum uint64) error {
+	bossID, err := orderpkg.MerchantScope(ctx)
+	if err != nil {
+		return err
+	}
+	o, err := orderpkg.NewOrderDao(ctx).GetOrderByOrderNum(orderNum)
+	if err != nil {
+		return err
+	}
+	if o == nil || o.ID == 0 {
+		return errors.New("订单不存在")
+	}
+	if bossID != 0 && o.BossID != bossID {
+		return orderpkg.ErrOrderForbidden
+	}
+	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+		ok, err := orderpkg.NewOrderDaoByDB(tx).MarkRestocked(o.ID, bossID, false)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return ErrNotReturnable
+		}
+		_, err = product.NewProductDaoWithDB(tx).RollbackStock(o.ProductID, o.Num)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	restockRedis(ctx, o)
 	return nil
 }
 

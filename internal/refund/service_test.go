@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -19,9 +20,11 @@ import (
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
+	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 	"github.com/RedInn7/gomall/service/events"
@@ -36,6 +39,8 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 		wantBizType      string
 		wantDebitAccount string
 		wantDebitUserID  uint
+		fromType         uint
+		wantRestock      bool
 	}{
 		{
 			name:             "before settlement refund comes from escrow",
@@ -45,6 +50,8 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 			wantBizType:      money.BizTypeEscrowRefund,
 			wantDebitAccount: money.AccountCodeMerchantEscrow,
 			wantDebitUserID:  money.ExternalClearingUserID,
+			fromType:         consts.OrderWaitShip,
+			wantRestock:      true, // 没发货，货还在仓库
 		},
 		{
 			name:             "after settlement refund comes from seller",
@@ -54,6 +61,8 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 			wantBizType:      money.BizTypeRefund,
 			wantDebitAccount: money.AccountCodeUserWallet,
 			wantDebitUserID:  22,
+			fromType:         consts.OrderCompleted,
+			wantRestock:      false, // 货在买家手里，等确认退货入库再回补
 		},
 	}
 
@@ -68,7 +77,7 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 			if err := db.Create(p).Error; err != nil {
 				t.Fatalf("seed product: %v", err)
 			}
-			o := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: p.ID, AddressID: 1, Num: 1, Money: 300, Type: consts.OrderRefunded}
+			o := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: p.ID, AddressID: 1, Num: 1, Money: 300, Type: consts.OrderRefunded, RefundFromType: tt.fromType}
 			o.ID = 44
 			if err := db.Create(o).Error; err != nil {
 				t.Fatalf("seed order: %v", err)
@@ -106,11 +115,17 @@ func TestSettleRefundChoosesFundingSourceByClearingState(t *testing.T) {
 			if err := db.First(&gotProduct, p.ID).Error; err != nil {
 				t.Fatalf("load product: %v", err)
 			}
-			if gotProduct.Num != 1 {
-				t.Fatalf("duplicate refund must restore stock once, got %d", gotProduct.Num)
-			}
-			if len(*restocks) != 1 || (*restocks)[0] != "stock:available:33+1" {
-				t.Fatalf("redis available must be restocked once after commit, got %v", *restocks)
+			if !tt.wantRestock {
+				if gotProduct.Num != 0 || len(*restocks) != 0 {
+					t.Fatalf("shipped refund must not restock before return: num=%d redis=%v", gotProduct.Num, *restocks)
+				}
+			} else {
+				if gotProduct.Num != 1 {
+					t.Fatalf("duplicate refund must restore stock once, got %d", gotProduct.Num)
+				}
+				if len(*restocks) != 1 || (*restocks)[0] != "stock:available:33+1" {
+					t.Fatalf("redis available must be restocked once after commit, got %v", *restocks)
+				}
 			}
 			var gotClearing clearing.PaymentClearing
 			if err := db.First(&gotClearing, record.ID).Error; err != nil {
@@ -135,7 +150,7 @@ func TestZeroAmountLegacyRefundIsIdempotent(t *testing.T) {
 	}
 	o := &orderpkg.Order{
 		UserID: 11, BossID: 22, ProductID: p.ID, AddressID: 1, Num: 1,
-		Money: 300, PromoRuleID: 1, FinalCents: 0, Type: consts.OrderRefunded,
+		Money: 300, PromoRuleID: 1, FinalCents: 0, Type: consts.OrderRefunded, RefundFromType: consts.OrderWaitShip,
 	}
 	o.ID = 66
 	if err := db.Create(o).Error; err != nil {
@@ -338,11 +353,15 @@ func openRefundTestDB(t *testing.T) *gorm.DB {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	previous := dao.SetTestDB(db)
+	previousLogger := util.LogrusObj
+	util.LogrusObj = logrus.New()
 	t.Cleanup(func() {
 		dao.SetTestDB(previous)
+		util.LogrusObj = previousLogger
 		_ = sqlDB.Close()
 	})
-	if err := db.AutoMigrate(&user.User{}, &orderpkg.Order{}, &product.Product{}, &money.AccountTransaction{}, &clearing.PaymentClearing{}, &outbox.OutboxEvent{}); err != nil {
+	if err := db.AutoMigrate(&user.User{}, &orderpkg.Order{}, &product.Product{}, &money.AccountTransaction{}, &clearing.PaymentClearing{}, &outbox.OutboxEvent{},
+		&promo.PromoRule{}, &promo.PromoRelease{}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return db
