@@ -31,18 +31,21 @@ const (
 
 type PromoRule struct {
 	dbmodel.Model
-	Name             string    `gorm:"size:128;not null"`        // 业务可读名，会回传给前端 / 客服
-	RuleType         int       `gorm:"not null;default:1"`       // 1 满减 / 2 满折扣
-	Scope            int       `gorm:"not null;default:1;index"` // 1 全场 / 2 类目 / 3 商品
-	ScopeRefID       int64     `gorm:"not null;default:0;index"` // 类目 id 或商品 id；全场 = 0
-	ThresholdCents   int64     `gorm:"not null"`                 // 满 X 分
-	DiscountCents    int64     `gorm:"not null;default:0"`       // 减 Y 分（RuleType=1）
-	DiscountBps      int       `gorm:"not null;default:0"`       // 折扣 bps（RuleType=2），9 折 = 9000
-	DailyBudgetCents int64     `gorm:"not null;default:0"`       // 当日预算分；0 = 不限
-	ConsumedToday    int64     `gorm:"not null;default:0"`       // 当日已消耗分（每日 0 点重置 —— cron 路线图）
-	StartAt          time.Time `gorm:"not null;index:idx_promo_window"`
-	EndAt            time.Time `gorm:"not null;index:idx_promo_window"`
-	Status           int       `gorm:"not null;default:0;index"` // 0 draft / 1 active / 2 stopped
+	Name             string `gorm:"size:128;not null"`        // 业务可读名，会回传给前端 / 客服
+	RuleType         int    `gorm:"not null;default:1"`       // 1 满减 / 2 满折扣
+	Scope            int    `gorm:"not null;default:1;index"` // 1 全场 / 2 类目 / 3 商品
+	ScopeRefID       int64  `gorm:"not null;default:0;index"` // 类目 id 或商品 id；全场 = 0
+	ThresholdCents   int64  `gorm:"not null"`                 // 满 X 分
+	DiscountCents    int64  `gorm:"not null;default:0"`       // 减 Y 分（RuleType=1）
+	DiscountBps      int    `gorm:"not null;default:0"`       // 折扣 bps（RuleType=2），9 折 = 9000
+	DailyBudgetCents int64  `gorm:"not null;default:0"`       // 当日预算分；0 = 不限
+	ConsumedToday    int64  `gorm:"not null;default:0"`       // BudgetDate 那一天已消耗分
+	// BudgetDate ConsumedToday 所属的自然日（YYYY-MM-DD，服务器时区）。不靠 0 点 cron 清零：
+	// 扣预算时发现日期不是今天，就在同一条 UPDATE 里把计数从 0 重新起算（惰性重置）。
+	BudgetDate string    `gorm:"size:10;not null;default:''"`
+	StartAt    time.Time `gorm:"not null;index:idx_promo_window"`
+	EndAt      time.Time `gorm:"not null;index:idx_promo_window"`
+	Status     int       `gorm:"not null;default:0;index"` // 0 draft / 1 active / 2 stopped
 }
 
 func (PromoRule) TableName() string { return "promo_rule" }
@@ -57,6 +60,9 @@ type PromoRelease struct {
 	RuleID        uint   `gorm:"not null;index"`
 	DiscountCents int64  `gorm:"not null"`
 	Reason        string `gorm:"size:32"` // cancel / refund / manual
+	// Restored 预算是否真的回补了。订单不是在当前预算日扣的（跨天关单 / 退款），
+	// 那一天的预算已经作废，只记台账不回补，财务据此区分"已退还"与"过期作废"。
+	Restored bool `gorm:"not null;default:false"`
 }
 
 func (PromoRelease) TableName() string { return "promo_release" }

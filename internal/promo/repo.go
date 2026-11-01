@@ -36,7 +36,7 @@ func (d *PromoDao) CreateReleaseOnce(rec *PromoRelease) (created bool, err error
 	return res.RowsAffected > 0, nil
 }
 
-// Create 落规则。运营创建时调用，默认 Status=draft。
+// Create 落规则。运营创建时调用，Status 由 service 置为 draft，启用另走 Activate。
 func (d *PromoDao) Create(r *PromoRule) error {
 	return d.DB.Create(r).Error
 }
@@ -77,27 +77,37 @@ func (d *PromoDao) ListActiveForCart(now time.Time, categoryIDs, productIDs []in
 	return rows, err
 }
 
-// AtomicConsumeBudget 在调用方提供的 tx 中扣减预算。
-// DailyBudget = 0 视为不限，直接返回 nil。
+// BudgetDay 预算日口径：服务器时区的自然日。
+func BudgetDay(t time.Time) string { return t.Format("2006-01-02") }
+
+// AtomicConsumeBudget 在调用方提供的 tx 中扣减当日预算。
+// DailyBudget = 0 视为不限，只累计不拦截。
 //
-// 用单条 UPDATE + RowsAffected 兜底防超发：
+// 单条 UPDATE + RowsAffected 兜底防超发，同时完成按天惰性重置：
 //
 //	UPDATE promo_rule
-//	   SET consumed_today = consumed_today + ?
-//	 WHERE id = ?
-//	   AND status = active
-//	   AND (daily_budget_cents = 0 OR consumed_today + ? <= daily_budget_cents)
+//	   SET consumed_today = CASE WHEN budget_date = 今天 THEN consumed_today + ? ELSE ? END,
+//	       budget_date    = 今天
+//	 WHERE id = ? AND status = active AND start_at <= now AND end_at >= now
+//	   AND (daily_budget_cents = 0 OR (今天已用) + ? <= daily_budget_cents)
 //
-// 影响 0 行 = 预算被同事务并发挤光，返回 ErrPromoBudgetExhausted，
-// 业务层捕获后回滚整笔订单的 promo 应用并落 80003。
+// consumed_today 必须写在 budget_date 前面：MySQL 的多列 SET 从左到右求值，后面的表达式看到的是新值。
+// 影响 0 行 = 预算被并发挤光、规则已停用或已过期，返回 ErrPromoBudgetExhausted，
+// 下单侧捕获后降级到次优规则或无折扣，不拒单。
 func (d *PromoDao) AtomicConsumeBudget(tx *gorm.DB, ruleID uint, amount int64) error {
 	if amount <= 0 {
 		return nil
 	}
-	res := tx.Model(&PromoRule{}).
-		Where("id = ? AND status = ? AND (daily_budget_cents = 0 OR consumed_today + ? <= daily_budget_cents)",
-			ruleID, PromoStatusActive, amount).
-		UpdateColumn("consumed_today", gorm.Expr("consumed_today + ?", amount))
+	now := time.Now()
+	today := BudgetDay(now)
+	res := tx.Exec(`UPDATE promo_rule
+   SET consumed_today = CASE WHEN budget_date = ? THEN consumed_today + ? ELSE ? END,
+       budget_date = ?
+ WHERE id = ? AND status = ? AND start_at <= ? AND end_at >= ?
+   AND (daily_budget_cents = 0 OR (CASE WHEN budget_date = ? THEN consumed_today ELSE 0 END) + ? <= daily_budget_cents)`,
+		today, amount, amount, today,
+		ruleID, PromoStatusActive, now, now,
+		today, amount)
 	if res.Error != nil {
 		return res.Error
 	}
@@ -107,16 +117,35 @@ func (d *PromoDao) AtomicConsumeBudget(tx *gorm.DB, ruleID uint, amount int64) e
 	return nil
 }
 
-// RestoreBudget 关单 / 退款时退还预算。
-// 不允许减成负数，再叠一层 WHERE consumed_today >= ? 兜底。
-// 即便 ConsumedToday 已经因为 cron 重置归零，也只是 RowsAffected=0，不返回错误。
-func (d *PromoDao) RestoreBudget(tx *gorm.DB, ruleID uint, amount int64) error {
+// RestoreBudget 关单 / 退款时退还预算，返回是否真的回补了。
+// day 是这笔订单扣预算的那一天：只有它仍是规则当前的预算日才回补，
+// 跨天的订单退回来不能挤占今天的预算（那一天的额度已经作废）。
+// day 为空兼容升级前投递的旧事件，按旧口径直接回补。
+// 再叠一层 consumed_today >= amount，不允许减成负数。
+func (d *PromoDao) RestoreBudget(tx *gorm.DB, ruleID uint, amount int64, day string) (bool, error) {
 	if amount <= 0 {
-		return nil
+		return false, nil
 	}
-	return tx.Model(&PromoRule{}).
-		Where("id = ? AND consumed_today >= ?", ruleID, amount).
-		UpdateColumn("consumed_today", gorm.Expr("consumed_today - ?", amount)).Error
+	q := tx.Model(&PromoRule{}).Where("id = ? AND consumed_today >= ?", ruleID, amount)
+	if day != "" {
+		q = q.Where("budget_date = ?", day)
+	}
+	res := q.UpdateColumn("consumed_today", gorm.Expr("consumed_today - ?", amount))
+	return res.RowsAffected > 0, res.Error
+}
+
+// Update 只有草稿能改：已生效的规则可能已经有订单按它扣了预算，改金额会让补贴台账对不上。
+func (d *PromoDao) Update(id uint, fields map[string]interface{}) (bool, error) {
+	res := d.DB.Model(&PromoRule{}).Where("id = ? AND status = ?", id, PromoStatusDraft).Updates(fields)
+	return res.RowsAffected > 0, res.Error
+}
+
+// Activate 草稿 -> 生效。已经过了结束时间的草稿不让启用。
+func (d *PromoDao) Activate(id uint, now time.Time) (bool, error) {
+	res := d.DB.Model(&PromoRule{}).
+		Where("id = ? AND status = ? AND end_at > ?", id, PromoStatusDraft, now).
+		Update("status", PromoStatusActive)
+	return res.RowsAffected > 0, res.Error
 }
 
 // Stop 运营手动停用一条规则。Stop 后正在进行中的订单不影响，
