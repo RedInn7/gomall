@@ -28,6 +28,9 @@ import (
 // 拼团默认时效。业务承诺：截单线 24h，运营可在 routes 入口覆盖。
 const DefaultGroupbuyTTL = 24 * time.Hour
 
+// MaxGroupbuyTarget 成团人数上限：人数越多越难凑齐，钱和库存押在托管里的时间越长。
+const MaxGroupbuyTarget = 100
+
 // 业务错误：service 层向 handler / cron 返回。带码 error（e.New）走统一错误出口时
 // 自动透出 81001-81004 业务码与客服话术（pkg/e/msg.go），handler 无需再写映射。
 // 仍是包级 sentinel，errors.Is 判定照常。ErrGroupbuyNotFound 无对应业务码，走 500 兜底。
@@ -89,11 +92,15 @@ type JoinGroupResp struct {
 //  2. tx 内：写 group / 写 leader 订单 (WaitGroup) / 写 member / outbox(groupbuy.created)
 //  3. tx 失败 → 释放预扣
 func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint, targetCount int, ttl time.Duration, bossID, addressID uint, key string) (*CreateGroupResp, error) {
-	if targetCount < 2 {
-		return nil, errors.New("成团人数至少 2")
+	if targetCount < 2 || targetCount > MaxGroupbuyTarget {
+		return nil, fmt.Errorf("成团人数需在 2-%d 之间", MaxGroupbuyTarget)
 	}
 	if ttl <= 0 {
 		ttl = DefaultGroupbuyTTL
+	}
+	// 时效由客户端传入，必须封顶：否则一个长 TTL 的团会把成员的钱和预扣库存无限期押住
+	if ttl > DefaultGroupbuyTTL {
+		return nil, errors.New("拼团时效不能超过 24 小时")
 	}
 
 	// 卖家与拼团价都以商品表为准：boss_id 决定货款打给谁，拼团价由商家在商品上配置，
