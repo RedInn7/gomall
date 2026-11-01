@@ -54,6 +54,9 @@ var refundAllowedFrom = []uint{
 //   - from 必须落在 refundAllowedFrom：WaitShip / WaitReceive / Completed
 //   - 校验 ctx 中的 userID 与订单归属一致
 //   - 通过 DAO 的 WHERE IN 一次拦截非法 from，避免读后写竞态
+// maxRefundRequests 同一订单最多申请几次退款。
+const maxRefundRequests = 3
+
 func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason string) error {
 	u, err := ctl.GetUserInfo(ctx)
 	if err != nil {
@@ -77,7 +80,7 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 		if !inUintSlice(fromType, refundAllowedFrom) {
 			return orderpkg.ErrInvalidOrderStateTransition
 		}
-		ok, err := orderDao.RequestRefund(orderNum, fromType)
+		ok, err := orderDao.RequestRefund(orderNum, fromType, reason, maxRefundRequests)
 		if err != nil {
 			return err
 		}

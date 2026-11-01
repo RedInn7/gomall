@@ -50,6 +50,9 @@ func Run() error {
 		); err != nil {
 		return err
 	}
+	if err := order.BackfillFulfillmentColumns(db); err != nil {
+		return err
+	}
 	// account_code 是新增列：AutoMigrate 会把历史行填成默认 user_wallet。
 	// user_id=0 的历史流水实际属于旧系统账户，统一回填 legacy_system，避免与真实用户钱包混淆。
 	return db.Model(&money.AccountTransaction{}).

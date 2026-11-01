@@ -99,7 +99,8 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 	}
 
 	// 收货地址必须属于团长本人，不能信客户端传入的 address_id
-	if e := address.NewAddressDao(ctx).EnsureOwned(addressID, leaderID); e != nil {
+	shipTo, e := address.NewAddressDao(ctx).OwnedSnapshot(addressID, leaderID)
+	if e != nil {
 		util.LogrusObj.Errorf("groupbuy create address ownership check failed addr=%d leader=%d err=%v", addressID, leaderID, e)
 		return nil, e
 	}
@@ -130,6 +131,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 		ProductID: productID,
 		BossID:    bossID, // 卖家以商品表为准，忽略客户端传入的 bossID 参数
 		AddressID: addressID,
+		ShipTo:    shipTo,
 		Num:       1,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		Type:      consts.OrderWaitGroup,
@@ -226,7 +228,8 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 	}
 
 	// 收货地址必须属于参团用户本人，不能信客户端传入的 address_id
-	if err = address.NewAddressDao(ctx).EnsureOwned(addressID, userID); err != nil {
+	shipTo, err := address.NewAddressDao(ctx).OwnedSnapshot(addressID, userID)
+	if err != nil {
 		util.LogrusObj.Errorf("groupbuy join address ownership check failed addr=%d user=%d err=%v", addressID, userID, err)
 		return nil, err
 	}
@@ -246,6 +249,7 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		ProductID: g.ProductID,
 		BossID:    bossID, // 已由商品表反查覆盖
 		AddressID: addressID,
+		ShipTo:    shipTo,
 		Num:       1,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		Type:      consts.OrderWaitGroup,
