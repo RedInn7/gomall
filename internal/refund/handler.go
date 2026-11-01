@@ -37,7 +37,7 @@ func ApproveRefundHandler() gin.HandlerFunc {
 	}
 }
 
-// RejectRefundHandler 运营驳回退款：Refunding -> Completed。
+// RejectRefundHandler 运营驳回退款：Refunding -> 申请前的状态（WaitShip / WaitReceive / Completed）。
 func RejectRefundHandler() gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		req, ok := response.Bind[RejectRefundReq](ctx)
@@ -45,6 +45,21 @@ func RejectRefundHandler() gin.HandlerFunc {
 			return
 		}
 		if err := GetRefundSrv().RejectRefund(ctx.Request.Context(), req.OrderNum, req.Reason); err != nil {
+			response.Fail(ctx, err)
+			return
+		}
+		response.OK(ctx, gin.H{"order_num": req.OrderNum})
+	}
+}
+
+// ReturnReceivedHandler 商家确认退货入库，回补库存（仅发货后才退款的订单）。
+func ReturnReceivedHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		req, ok := response.Bind[ReturnReceivedReq](ctx)
+		if !ok {
+			return
+		}
+		if err := GetRefundSrv().ConfirmReturnReceived(ctx.Request.Context(), req.OrderNum); err != nil {
 			response.Fail(ctx, err)
 			return
 		}
