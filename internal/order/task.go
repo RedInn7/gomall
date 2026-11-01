@@ -56,6 +56,9 @@ const stockReconcileGrace = 5 * time.Second
 // 重试后仍没核销掉的订单另打 StockCommitPending 标记，不受这个窗口限制。
 const stockCommitGrace = 30 * time.Second
 
+// StockCommitGrace 供库存 available 对账使用的同一宽限期。
+const StockCommitGrace = stockCommitGrace
+
 // stockCommitRetries 支付成功后核销 Redis 预占的尝试次数，间隔 100ms、200ms。
 const stockCommitRetries = 3
 
@@ -161,8 +164,9 @@ func (s *OrderTaskService) retryPendingCommits(ctx context.Context) {
 // sampleReservationLeak 采一次样：对每个存在 reserved 桶的商品，算
 // reserved - Σ(WaitPay / WaitGroup Num) - Σ(已支付待核销的 Num)，正值即疑似泄漏。返回 map[productID]leak(>0)。
 //
-// 基准里减去两类合法占用：
+// 基准里减去三类合法占用：
 //   - WaitPay / WaitGroup 订单：reserved 的正常归属（拼团单成团时才核销）；
+//   - 已预占、还在 MQ 排队没落库的异步单（cache.OrderAsyncInflightKey）；
 //   - 已支付但 Redis 尚未 CommitReservation 的订单：刚推进到 WaitShip、仍在 stockCommitGrace 内的在途单，
 //     以及重试后仍没核销、打了 StockCommitPending 标记的订单。这一项是关键防线，
 //     避免把「支付成功但 commit 没完成」的预占误回收成泄漏。
@@ -190,8 +194,14 @@ func (s *OrderTaskService) sampleReservationLeak(ctx context.Context) (map[uint]
 			util.LogrusObj.Errorf("StockReconcile 读 reserved 失败 product=%d err=%v", pid, err)
 			continue
 		}
-		// 减去 WaitPay 与刚支付待 commit 两类合法占用，剩余才视为疑似泄漏。
-		if diff := reserved - waitPaySum[pid] - inflightSum[pid]; diff > 0 {
+		// 还在 MQ 里排队的异步单也是合法占用：MQ 积压（秒杀高峰）超过采样间隔时不能当泄漏回收。
+		queued, err := asyncInflightNum(ctx, pid)
+		if err != nil {
+			util.LogrusObj.Errorf("StockReconcile 读排队预占失败 product=%d err=%v", pid, err)
+			continue
+		}
+		// 减去 WaitPay、排队中、刚支付待 commit 三类合法占用，剩余才视为疑似泄漏。
+		if diff := reserved - waitPaySum[pid] - inflightSum[pid] - queued; diff > 0 {
 			leak[pid] = diff
 		}
 	}

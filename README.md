@@ -276,7 +276,7 @@ RMQ、ES、Web3 和 Milvus 分别由 `cmd/main.go` 中的 `tryInitX` 入口按�
 | 能力 | 关键代码 |
 |------|---------|
 | 优惠券（Lua 限领 + 防重复） | `repository/cache/coupon.go` · `internal/coupon/service.go` |
-| 秒杀（独立 skill_product + SlidingWindow 3/s/用户） | `internal/skill/service.go` |
+| 秒杀（Lua 原子抢名额 + 异步下单 + DB 条件 UPDATE 兜底 + 关单归还 + Cron 对账） | `internal/skill/service.go` · `internal/skill/task.go` |
 | 抢红包（二倍均值法 Lua + Saga 入账 + Cron 过期回收） | `repository/cache/redpacket.go` · `internal/redpacket/service.go` |
 
 ### 可观测性
