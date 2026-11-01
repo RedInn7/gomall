@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,7 +15,7 @@ import (
 
 // 红包在 Redis 的存储结构：
 //   redpacket:{id}:amounts   LIST  发包时一次性 RPUSH 预拆好的金额数组，LPOP 即抢
-//   redpacket:{id}:claimed   HASH  userID -> 抢到金额 (兜底单用户去重)
+//   redpacket:{id}:claimed   HASH  userID -> "抢到金额:抢到时间(unix 秒)" (兜底单用户去重 + 对账找孤儿)
 //
 // 抢红包 Lua 一次原子完成：HEXISTS 去重 -> LPOP -> HSET 标记，
 // 不依赖 WATCH/MULTI，多副本/重连场景下也不会超发或重复发放。
@@ -48,6 +49,7 @@ return n - 1
 //	KEYS[2] = claimed hash key
 //	ARGV[1] = userID (string)
 //	ARGV[2] = claimed hash TTL (秒)
+//	ARGV[3] = 当前 unix 秒，记进标记，供对账跳过还在途的领取
 //	返回 >0 抢到金额；-1 已抢完；-2 已领过
 var claimRedPacketScript = redis.NewScript(`
 if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then
@@ -57,7 +59,7 @@ local amt = redis.call('LPOP', KEYS[1])
 if not amt then
     return -1
 end
-redis.call('HSET', KEYS[2], ARGV[1], amt)
+redis.call('HSET', KEYS[2], ARGV[1], amt .. ':' .. ARGV[3])
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 return tonumber(amt)
 `)
@@ -173,6 +175,7 @@ func ClaimRedPacket(ctx context.Context, id, userID uint, claimedTTL time.Durati
 		[]string{RedPacketAmountsKey(id), RedPacketClaimedKey(id)},
 		strconv.FormatUint(uint64(userID), 10),
 		int(claimedTTL.Seconds()),
+		time.Now().Unix(),
 	).Result()
 	if err != nil {
 		return 0, err
@@ -209,4 +212,43 @@ func RollbackRedPacketClaim(ctx context.Context, id, userID uint, amount int64) 
 		strconv.FormatInt(amount, 10),
 	).Result()
 	return err
+}
+
+// RedPacketClaimMark Redis claimed HASH 里的一条领取标记
+type RedPacketClaimMark struct {
+	Amount int64
+	At     time.Time
+}
+
+// ListRedPacketClaimed 读出红包全部领取标记，供对账和 DB 领取记录比对。
+// 老格式（只有金额、没有时间）的 At 记为零值，视为早已过了在途窗口。
+func ListRedPacketClaimed(ctx context.Context, id uint) (map[uint]RedPacketClaimMark, error) {
+	raw, err := RedisClient.HGetAll(ctx, RedPacketClaimedKey(id)).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint]RedPacketClaimMark, len(raw))
+	for k, v := range raw {
+		uid, err := strconv.ParseUint(k, 10, 64)
+		if err != nil {
+			continue
+		}
+		amtStr, tsStr, _ := strings.Cut(v, ":")
+		amt, err := strconv.ParseInt(amtStr, 10, 64)
+		if err != nil || amt <= 0 {
+			continue
+		}
+		var at time.Time
+		if ts, err := strconv.ParseInt(tsStr, 10, 64); err == nil {
+			at = time.Unix(ts, 0)
+		}
+		out[uint(uid)] = RedPacketClaimMark{Amount: amt, At: at}
+	}
+	return out, nil
+}
+
+// RedPacketPoolExists 份额 LIST 是否还在（LIST 被抢空、过期、丢失或根本没写进去时都返回 false）
+func RedPacketPoolExists(ctx context.Context, id uint) (bool, error) {
+	n, err := RedisClient.Exists(ctx, RedPacketAmountsKey(id)).Result()
+	return n > 0, err
 }
