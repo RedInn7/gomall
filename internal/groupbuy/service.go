@@ -40,6 +40,9 @@ var (
 	errGroupbuyStockShort = errors.New("拼团成团库存不足")
 )
 
+// joinTxHook 仅测试使用：让并发参团的请求都越过预检后再一起进事务，稳定复现 DB 层竞争。
+var joinTxHook func()
+
 var (
 	GroupbuySrvIns  *GroupbuySrv
 	GroupbuySrvOnce sync.Once
@@ -240,6 +243,9 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		util.LogrusObj.Errorf("groupbuy join reserve stock user=%d product=%d err=%v", userID, g.ProductID, err)
 		return nil, err
 	}
+	if joinTxHook != nil {
+		joinTxHook()
+	}
 
 	order := &orderpkg.Order{
 		UserID:    userID,
@@ -321,6 +327,11 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 				}
 			}
 			return nil, ErrGroupbuyFull
+		}
+		// 并发重复参团：两次请求都过了上面的 HasUserJoined 预检，后到的那次撞 uk_gb_group_user。
+		// 事务已整体回滚（名额、扣款都没生效），这里重查一次把原始唯一索引错误翻译成 81003。
+		if joined, e := gbDao.HasUserJoined(groupID, userID); e == nil && joined {
+			return nil, ErrGroupbuyDuplicateJoin
 		}
 		return nil, err
 	}

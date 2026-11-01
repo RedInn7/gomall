@@ -2,6 +2,8 @@ package groupbuy
 
 import (
 	"github.com/gin-gonic/gin"
+
+	"github.com/RedInn7/gomall/middleware"
 )
 
 // RegisterRoutes 挂载本领域路由。public 不需登录；authed 已套登录中间件；merchant 已套 RequireRole("merchant"/"admin")；admin 已套 RequireRole("admin")。
@@ -12,6 +14,6 @@ func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 	_ = admin
 
 	public.GET("/groupbuy/:id", GroupbuyShowHandler())
-	authed.POST("/groupbuy/create", GroupbuyCreateHandler())
-	authed.POST("/groupbuy/:id/join", GroupbuyJoinHandler())
+	authed.POST("/groupbuy/create", middleware.Idempotency(), GroupbuyCreateHandler())
+	authed.POST("/groupbuy/:id/join", middleware.Idempotency(), GroupbuyJoinHandler())
 }
