@@ -94,6 +94,16 @@ func TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty(t *testing.T) {
 	if refunds != 4 {
 		t.Fatalf("refund ledger entries got %d want 4 (sender credit + escrow debit per packet)", refunds)
 	}
+	// 托管腿落在独立的 redpacket_escrow，不再混进 legacy_system。
+	var escrow int64
+	if err := db.Model(&money.AccountTransaction{}).
+		Where("user_id = 0 AND account_code = ? AND biz_type = ?", money.AccountCodeRedPacketEscrow, money.BizTypeRedPacketRefund).
+		Count(&escrow).Error; err != nil {
+		t.Fatalf("count escrow ledger: %v", err)
+	}
+	if escrow != 2 {
+		t.Fatalf("redpacket_escrow refund legs got %d want 2", escrow)
+	}
 	if len(released) != 2 {
 		t.Fatalf("redis cleanup calls got %v want one per refunded packet", released)
 	}

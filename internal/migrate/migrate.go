@@ -52,7 +52,14 @@ func Run() error {
 	}
 	// account_code 是新增列：AutoMigrate 会把历史行填成默认 user_wallet。
 	// user_id=0 的历史流水实际属于旧系统账户，统一回填 legacy_system，避免与真实用户钱包混淆。
-	return db.Model(&money.AccountTransaction{}).
+	if err := db.Model(&money.AccountTransaction{}).
 		Where("user_id = ? AND account_code = ?", money.ExternalClearingUserID, money.AccountCodeUserWallet).
-		Update("account_code", money.AccountCodeLegacySystem).Error
+		Update("account_code", money.AccountCodeLegacySystem).Error; err != nil {
+		return err
+	}
+	// 红包托管历史流水从 legacy_system 拆到 redpacket_escrow，和拼团托管分开对账。幂等，可重复执行。
+	return db.Model(&money.AccountTransaction{}).
+		Where("user_id = ? AND account_code = ? AND biz_type IN ?", money.ExternalClearingUserID, money.AccountCodeLegacySystem,
+			[]string{money.BizTypeRedPacketSend, money.BizTypeRedPacketClaim, money.BizTypeRedPacketRefund}).
+		Update("account_code", money.AccountCodeRedPacketEscrow).Error
 }
