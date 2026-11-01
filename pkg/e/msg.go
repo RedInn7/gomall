@@ -59,6 +59,7 @@ var MsgFlags = map[int]string{
 	ErrGroupbuyExpired:       "该团已超时未成团，款项将于 1-3 工作日原路退回",
 	ErrGroupbuyDuplicateJoin: "您已加入过该团，不能重复参团",
 	ErrGroupbuyClosed:        "该团已关闭",
+	ErrGroupbuyNotFound:      "该团不存在",
 
 	ErrPreorderNotInDepositWindow: "当前不在预售定金期，无法支付定金",
 	ErrPreorderNotInFinalWindow:   "当前不在尾款支付窗口，无法支付尾款",

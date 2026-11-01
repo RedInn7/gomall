@@ -33,6 +33,10 @@ type GroupbuyGroup struct {
 	PriceCents   int64     `gorm:"not null"`
 	Status       uint      `gorm:"not null;default:0;index:idx_gb_status_expire,priority:1"`
 	ExpireAt     time.Time `gorm:"not null;index:idx_gb_status_expire,priority:2"`
+	// 人工关团审计：谁关的、为什么关。超时散团不写。
+	// 不对外输出：分享落地页免登录，会把运营 id 和风控原因暴露给任何人。
+	ClosedBy    uint   `gorm:"not null;default:0" json:"-"`
+	CloseReason string `gorm:"size:255;not null;default:''" json:"-"`
 }
 
 func (GroupbuyGroup) TableName() string { return "groupbuy_group" }
@@ -45,8 +49,30 @@ type GroupbuyMember struct {
 	dbmodel.Model
 	GroupID uint  `gorm:"not null;uniqueIndex:uk_gb_group_user,priority:1"`
 	UserID  uint  `gorm:"not null;uniqueIndex:uk_gb_group_user,priority:2;index"`
-	OrderID int64 `gorm:"not null"`
+	OrderID int64 `gorm:"not null" json:"-"` // 落地页免登录可看，不对外暴露订单 id
 	Status  uint  `gorm:"not null;default:0"`
 }
 
 func (GroupbuyMember) TableName() string { return "groupbuy_member" }
+
+// 拼团站内通知类型。
+const (
+	NoticeKindJoined  = "joined"  // 团长：有新成员参团
+	NoticeKindSuccess = "success" // 全体成员：成团，等待发货
+	NoticeKindExpired = "expired" // 全体成员：超时散团 / 人工关团，款项已退回
+)
+
+// GroupbuyNotice 拼团站内通知，由 groupbuy.notify 消费者按事件写入。
+//
+//	uk_gb_notice(user_id, group_id, kind, ref_id) 吸收 at-least-once 重复投递；
+//	joined 的 ref_id 是新成员 user_id（团长每来一人收一条），其余为 0。
+type GroupbuyNotice struct {
+	dbmodel.Model
+	UserID  uint   `gorm:"not null;uniqueIndex:uk_gb_notice,priority:1"`
+	GroupID uint   `gorm:"not null;uniqueIndex:uk_gb_notice,priority:2"`
+	Kind    string `gorm:"size:16;not null;uniqueIndex:uk_gb_notice,priority:3"`
+	RefID   uint   `gorm:"not null;default:0;uniqueIndex:uk_gb_notice,priority:4"`
+	Content string `gorm:"size:255;not null"`
+}
+
+func (GroupbuyNotice) TableName() string { return "groupbuy_notice" }
