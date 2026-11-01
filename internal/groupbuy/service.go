@@ -32,15 +32,15 @@ const DefaultGroupbuyTTL = 24 * time.Hour
 const MaxGroupbuyTarget = 100
 
 // 业务错误：service 层向 handler / cron 返回。带码 error（e.New）走统一错误出口时
-// 自动透出 81001-81004 业务码与客服话术（pkg/e/msg.go），handler 无需再写映射。
-// 仍是包级 sentinel，errors.Is 判定照常。ErrGroupbuyNotFound 无对应业务码，走 500 兜底。
+// 自动透出 81001-81005 业务码与客服话术（pkg/e/msg.go），handler 无需再写映射。
+// 仍是包级 sentinel，errors.Is 判定照常。关团原因为空是参数错误，透出 400。
 var (
 	ErrGroupbuyFull          = e.New(e.ErrGroupbuyFull)
 	ErrGroupbuyExpired       = e.New(e.ErrGroupbuyExpired)
 	ErrGroupbuyClosed        = e.New(e.ErrGroupbuyClosed)
 	ErrGroupbuyDuplicateJoin = e.New(e.ErrGroupbuyDuplicateJoin)
-	ErrGroupbuyNotFound      = errors.New("拼团不存在")
-	ErrGroupbuyCloseReason   = errors.New("关团必须填写原因")
+	ErrGroupbuyNotFound      = e.New(e.ErrGroupbuyNotFound)
+	ErrGroupbuyCloseReason   = &e.Error{Code: e.InvalidParams, Msg: "关团必须填写原因"}
 
 	// errGroupbuyStockShort 成团时 DB 库存不够每个成员各扣 1 件。
 	errGroupbuyStockShort = errors.New("拼团成团库存不足")

@@ -67,6 +67,7 @@ const (
 	ErrGroupbuyExpired       = 81002 // 团已超时
 	ErrGroupbuyDuplicateJoin = 81003 // 同一用户重复加入
 	ErrGroupbuyClosed        = 81004 // 团已关闭 (成团 / 散团 / 人工关)
+	ErrGroupbuyNotFound      = 81005 // 团不存在
 
 	// 预售 / 两段式支付
 	ErrPreorderNotInDepositWindow = 82001 // 不在定金期，付定金 / 取消全退被拒

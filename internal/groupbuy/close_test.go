@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
+	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -49,8 +51,11 @@ func TestCloseGroupRefundsAndAudits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := GetGroupbuySrv().CloseGroup(ctx, created.GroupID, 99, "  "); !errors.Is(err, ErrGroupbuyCloseReason) {
-		t.Fatalf("不填原因应拒绝, got %v", err)
+	if err := GetGroupbuySrv().CloseGroup(ctx, created.GroupID, 99, "  "); !errors.Is(err, ErrGroupbuyCloseReason) || e.CodeOf(err) != e.InvalidParams {
+		t.Fatalf("不填原因应按参数错误拒绝, got %v code=%d", err, e.CodeOf(err))
+	}
+	if err := GetGroupbuySrv().CloseGroup(ctx, 999999, 99, "x"); e.CodeOf(err) != e.ErrGroupbuyNotFound {
+		t.Fatalf("团不存在应透出 81005, got %v code=%d", err, e.CodeOf(err))
 	}
 	if err := GetGroupbuySrv().CloseGroup(ctx, created.GroupID, 99, "疑似刷单"); err != nil {
 		t.Fatalf("close: %v", err)
@@ -63,6 +68,17 @@ func TestCloseGroupRefundsAndAudits(t *testing.T) {
 	db.First(&g, created.GroupID)
 	if g.Status != GroupbuyStatusClosed || g.ClosedBy != 99 || g.CloseReason != "疑似刷单" {
 		t.Fatalf("关团状态 / 审计不对: %+v", g)
+	}
+	// 免登录分享落地页不能带出关团操作人、风控原因和成员订单 id。
+	sg, sm, err := GetGroupbuySrv().ShowGroup(ctx, created.GroupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(GroupbuyShowResp{Group: sg, Members: sm})
+	for _, leak := range []string{"疑似刷单", "ClosedBy", "CloseReason", "OrderID"} {
+		if strings.Contains(string(body), leak) {
+			t.Fatalf("落地页泄露 %q: %s", leak, body)
+		}
 	}
 	for _, uid := range []uint{1, 3} {
 		if got := groupbuyUserBalance(t, db, uid); got != 100000 {

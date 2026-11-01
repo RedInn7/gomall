@@ -34,8 +34,9 @@ type GroupbuyGroup struct {
 	Status       uint      `gorm:"not null;default:0;index:idx_gb_status_expire,priority:1"`
 	ExpireAt     time.Time `gorm:"not null;index:idx_gb_status_expire,priority:2"`
 	// 人工关团审计：谁关的、为什么关。超时散团不写。
-	ClosedBy    uint   `gorm:"not null;default:0"`
-	CloseReason string `gorm:"size:255;not null;default:''"`
+	// 不对外输出：分享落地页免登录，会把运营 id 和风控原因暴露给任何人。
+	ClosedBy    uint   `gorm:"not null;default:0" json:"-"`
+	CloseReason string `gorm:"size:255;not null;default:''" json:"-"`
 }
 
 func (GroupbuyGroup) TableName() string { return "groupbuy_group" }
