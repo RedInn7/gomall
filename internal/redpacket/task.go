@@ -158,6 +158,17 @@ func reconcileRedPacket(ctx context.Context, rp *RedPacket) (reconcileResult, er
 			r.pending = true
 			continue
 		}
+		// 先把标记改成「补领中」再补：原请求的 Saga 回滚看到它就不会再把这份放回 Redis。
+		// 改不动说明原请求已回滚（份额已放回）或用户撤销后又重抢了，这一份不归对账管。
+		locked, err := cache.LockRedPacketClaimForRepair(ctx, rp.ID, uid, m.Raw)
+		if err != nil {
+			r.pending = true
+			util.LogrusObj.Errorf("redpacket 补领加锁失败 id=%d uid=%d err=%v", rp.ID, uid, err)
+			continue
+		}
+		if !locked {
+			continue
+		}
 		if _, err := claimTx(rpDao.DB, rp.ID, uid, m.Amount); err != nil {
 			if errors.Is(err, errRedPacketClosed) {
 				break // 已回收 / 抢完，剩下的标记补不了也不用补

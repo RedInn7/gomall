@@ -469,3 +469,52 @@ func ageMark(t *testing.T, rpID, uid uint, amount int64) {
 		t.Fatal(err)
 	}
 }
+
+// 领取事务拖过在途窗口后失败：Claim 查 DB 没记录 -> 对账按标记补领提交 -> Claim 才执行 Saga 回滚。
+// 回滚必须让路，否则 Redis 比 DB 多一份，最后一人被拒、实际发出的总额偏离托管。
+func TestClaimRollbackYieldsToReconcileRepair(t *testing.T) {
+	db := openRedPacketTestDB(t)
+	seedSender(t, db, 1, 900)
+	for uid := uint(100); uid < 103; uid++ {
+		seedRedPacketUser(t, db, uid, 0)
+	}
+	rp := createPacket(t, 1, 900, 3)
+	ctx := context.Background()
+	db.Model(&RedPacket{}).Where("id = ?", rp.ID).Update("created_at", time.Now().Add(-time.Hour))
+
+	prevTx, prevRb := doClaimTx, rollbackClaimCache
+	doClaimTx = func(db *gorm.DB, rpID, uid uint, amount int64) (*RedPacketClaim, error) {
+		ageMark(t, rpID, uid, amount) // 事务在锁上等了超过 claimOrphanGrace
+		return nil, errors.New("lock wait timeout")
+	}
+	rollbackClaimCache = func(ctx context.Context, id, userID uint, amount int64) error {
+		// 对账恰好在 Claim 查完 DB、回滚之前补领提交
+		var wg sync.WaitGroup
+		for i := 0; i < 3; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); (&RedPacketTaskService{}).RunRedPacketClaimReconcile() }()
+		}
+		wg.Wait()
+		return prevRb(ctx, id, userID, amount)
+	}
+	resp, err := GetRedPacketSrv().Claim(asUser(100), &RedPacketClaimReq{ID: rp.ID, Code: rp.ShareCode})
+	doClaimTx, rollbackClaimCache = prevTx, prevRb
+	if err != nil {
+		t.Fatalf("claim repaired by reconcile should report success: %v", err)
+	}
+	if bal := redPacketUserBalance(t, db, 100); bal != resp.(*RedPacketClaimResp).Amount {
+		t.Fatalf("balance %d resp %d", bal, resp.(*RedPacketClaimResp).Amount)
+	}
+	// 剩下两人都能领到，Redis 不多一份
+	for uid := uint(101); uid < 103; uid++ {
+		if _, err := GetRedPacketSrv().Claim(asUser(uid), &RedPacketClaimReq{ID: rp.ID, Code: rp.ShareCode}); err != nil {
+			t.Fatalf("uid %d: %v", uid, err)
+		}
+	}
+	if exists, _ := cache.RedPacketPoolExists(ctx, rp.ID); exists {
+		t.Fatal("redis has an extra share")
+	}
+	if sumClaims(t, db, rp.ID) != 900 || escrowBalance(t, db) != 0 {
+		t.Fatalf("claims %d escrow %d", sumClaims(t, db, rp.ID), escrowBalance(t, db))
+	}
+}
