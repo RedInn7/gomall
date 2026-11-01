@@ -3,6 +3,7 @@ package redpacket
 import (
 	"context"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -131,8 +132,12 @@ func TestConcurrentClaimsConserveMoney(t *testing.T) {
 }
 
 // 领取和过期退款并发：不管谁先拿到红包行锁，领走的 + 退回的 = 总额，托管清零，不会同一份钱发两次。
-// 设 REDPACKET_TEST_MYSQL_DSN 时按 InnoDB 真行锁 / RR 快照跑，守住 refundRedPacketLeft 里 FOR UPDATE 必须打头的前提。
+// 设 REDPACKET_TEST_MYSQL_DSN 时按 InnoDB 真行锁 / RR 快照跑，守住 refundRedPacketLeft 里 FOR UPDATE 必须打头的前提
+// （CI 的 mysql service 会注入）。不设时跑 SQLite 只验资金守恒，锁顺序写错也测不出来。
 func TestClaimAndRefundRaceConservesMoney(t *testing.T) {
+	if os.Getenv("REDPACKET_TEST_MYSQL_DSN") == "" {
+		t.Log("未设 REDPACKET_TEST_MYSQL_DSN：SQLite 下不校验 FOR UPDATE 锁顺序，只校验资金守恒")
+	}
 	db := openRedPacketTestDB(t)
 	seedSender(t, db, 1, 100000)
 	for uid := uint(100); uid < 120; uid++ {
