@@ -25,6 +25,7 @@
 | 17 | 拼团：状态机、托管资金与散团 Saga | [17-groupbuy.md](./17-groupbuy.md) | 约 45 min |
 | 18 | 红包：Redis 分发与 DB 记账的一致性 | [18-redpacket.md](./18-redpacket.md) | 约 45 min |
 | 19 | 履约与售后 | [19-fulfillment-aftersales.md](./19-fulfillment-aftersales.md) | 约 45 min |
+| 20 | 秒杀：不超卖、不重复购买 | [20-seckill.md](./20-seckill.md) | 约 45 min |
 
 ## 写作顺序
 
