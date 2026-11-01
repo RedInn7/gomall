@@ -33,6 +33,9 @@ type GroupbuyGroup struct {
 	PriceCents   int64     `gorm:"not null"`
 	Status       uint      `gorm:"not null;default:0;index:idx_gb_status_expire,priority:1"`
 	ExpireAt     time.Time `gorm:"not null;index:idx_gb_status_expire,priority:2"`
+	// 人工关团审计：谁关的、为什么关。超时散团不写。
+	ClosedBy    uint   `gorm:"not null;default:0"`
+	CloseReason string `gorm:"size:255;not null;default:''"`
 }
 
 func (GroupbuyGroup) TableName() string { return "groupbuy_group" }
@@ -45,7 +48,7 @@ type GroupbuyMember struct {
 	dbmodel.Model
 	GroupID uint  `gorm:"not null;uniqueIndex:uk_gb_group_user,priority:1"`
 	UserID  uint  `gorm:"not null;uniqueIndex:uk_gb_group_user,priority:2;index"`
-	OrderID int64 `gorm:"not null"`
+	OrderID int64 `gorm:"not null" json:"-"` // 落地页免登录可看，不对外暴露订单 id
 	Status  uint  `gorm:"not null;default:0"`
 }
 

@@ -140,11 +140,11 @@ func ledgerCount(tx *gorm.DB, refOrderID uint, direction, bizType string) (int64
 	return n, err
 }
 
-// SettleExpiredRefund 自愈兜底：对一个已散团（或仍 open 待散）的团，确保每个成员的托管款都已退回。
+// SettleExpiredRefund 自愈兜底：对一个已散团 / 已关团的团，确保每个成员的托管款都已退回。
 //
 // 同步散团路径（ExpireGroup）已在事务内退款，这里是消费者侧的 belt-and-suspenders：
 // 重放 groupbuy.expired 事件时，对每个成员订单做幂等退款，已退过的靠 refundFromEscrow 的
-// 存在性预检直接放行。只处理已确为散团（GroupbuyStatusExpired）的团，避免与成团结算抢账。
+// 存在性预检直接放行。只处理已确为散团 / 关团（Expired / Closed）的团，避免与成团结算抢账。
 func (s *GroupbuySrv) SettleExpiredRefund(ctx context.Context, groupID uint) error {
 	gbDao := NewGroupbuyDao(ctx)
 	g, err := gbDao.GetGroupByID(groupID)
@@ -155,8 +155,8 @@ func (s *GroupbuySrv) SettleExpiredRefund(ctx context.Context, groupID uint) err
 		util.LogrusObj.Warnf("groupbuy settle skip: group=%d not found", groupID)
 		return nil
 	}
-	if g.Status != GroupbuyStatusExpired {
-		// 仅对已散团做退款兜底；open（尚未散）/ success / closed 一律幂等放行，
+	if g.Status != GroupbuyStatusExpired && g.Status != GroupbuyStatusClosed {
+		// 仅对已散团 / 已关团做退款兜底；open（尚未散）/ success 一律幂等放行，
 		// 不在消费者里推进状态机——散团状态推进归 ExpireGroup，避免双写冲突。
 		util.LogrusObj.Infof("groupbuy settle skip: group=%d status=%d not expired", groupID, g.Status)
 		return nil
