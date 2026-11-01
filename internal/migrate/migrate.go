@@ -52,7 +52,16 @@ func Run() error {
 	}
 	// account_code 是新增列：AutoMigrate 会把历史行填成默认 user_wallet。
 	// user_id=0 的历史流水实际属于旧系统账户，统一回填 legacy_system，避免与真实用户钱包混淆。
-	return db.Model(&money.AccountTransaction{}).
+	if err := db.Model(&money.AccountTransaction{}).
 		Where("user_id = ? AND account_code = ?", money.ExternalClearingUserID, money.AccountCodeUserWallet).
-		Update("account_code", money.AccountCodeLegacySystem).Error
+		Update("account_code", money.AccountCodeLegacySystem).Error; err != nil {
+		return err
+	}
+	// 拼团托管从 legacy_system 拆到独立的 groupbuy_escrow：历史 groupbuy_* 系统侧流水一并改口径，
+	// 否则迁移前收进来的在途款在新账户上只有出账没有入账，对账对不平。
+	return db.Model(&money.AccountTransaction{}).
+		Where("user_id = ? AND account_code = ? AND biz_type IN ?",
+			money.ExternalClearingUserID, money.AccountCodeLegacySystem,
+			[]string{groupbuy.BizTypeGroupBuyPay, groupbuy.BizTypeGroupBuySettle, groupbuy.BizTypeGroupBuyRefund}).
+		Update("account_code", money.AccountCodeGroupbuyEscrow).Error
 }

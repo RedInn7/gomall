@@ -391,9 +391,9 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			return e
 		}
 
-		// 成员订单 WaitGroup → WaitShip，并在同事务内把该成员的托管款结算给卖家。
-		// 关键：先结算资金、再翻状态。只有钱真的从托管账户划到卖家，订单才允许进 WaitShip，
-		// 从源头堵住"没收钱就发货"。任一失败回滚整个成团操作，cron 重新拉起。
+		// 成员订单 WaitGroup → WaitShip，并在同事务内把该成员的托管款转进商户托管、建清算单。
+		// 关键：先清算资金、再翻状态。只有钱确实进了商户托管，订单才允许进 WaitShip，
+		// 从源头堵住"没收钱就发货"；卖家要等订单完成才拿到钱。任一失败回滚整个成团操作，cron 重新拉起。
 		orderDao := orderpkg.NewOrderDaoByDB(tx)
 		productDao := product.NewProductDaoWithDB(tx)
 		for _, m := range members {
@@ -412,8 +412,8 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			if !ok {
 				return errGroupbuyStockShort
 			}
-			// 结算托管款给卖家（o.Money 即加入时收的拼团价），(ref, credit, groupbuy_settle) 幂等。
-			if e = settleToSeller(tx, o.BossID, o.Money, o.ID); e != nil {
+			// 托管款转商户托管 + 建清算单（o.Money 即加入时收的拼团价），履约完成后才结算给卖家。
+			if e = clearToMerchantEscrow(tx, o); e != nil {
 				return e
 			}
 			res := tx.Model(&orderpkg.Order{}).
