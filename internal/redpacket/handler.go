@@ -69,3 +69,35 @@ func ListMyRedPacketsHandler() gin.HandlerFunc {
 		response.OK(c, resp)
 	}
 }
+
+// ListReceivedRedPacketsHandler 我领到的红包列表
+func ListReceivedRedPacketsHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		req, ok := response.Bind[RedPacketListReq](c)
+		if !ok {
+			return
+		}
+		resp, err := GetRedPacketSrv().ListReceived(c.Request.Context(), req)
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		response.OK(c, resp)
+	}
+}
+
+// AdminReconcileRedPacketHandler 管理端：对单个红包立即跑 claimed 对账（客诉「显示已领没到账」）
+func AdminReconcileRedPacketHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		req, ok := response.Bind[RedPacketReconcileReq](c)
+		if !ok {
+			return
+		}
+		resp, err := GetRedPacketSrv().AdminReconcile(c.Request.Context(), req)
+		if err != nil {
+			response.Fail(c, err)
+			return
+		}
+		response.OK(c, resp)
+	}
+}

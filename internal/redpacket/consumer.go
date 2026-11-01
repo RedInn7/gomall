@@ -13,9 +13,10 @@ import (
 	"github.com/RedInn7/gomall/service/events"
 )
 
-// settleQueue 红包钱包结算队列，独立绑定 red_packet.*。
-// 发/抢/退的资金已在各自同步事务内原子落地，本消费者为事件驱动的兜底再结算：
-// at-least-once 投递 + 台账唯一索引幂等，使重复结算安全收敛，绝不二次扣/二次入账。
+// settleQueue 红包资金对账队列，独立绑定 red_packet.*。
+// 发/抢/退的资金和 outbox 在同一事务提交，事件能被投递时台账必然已在，正常情况下这里每条都走幂等跳过。
+// 所以本消费者的职责是对账：事件到了却发现台账缺腿（有人改坏了同事务结构、手工改库等），
+// 就按事件补记并打 Error 告警。at-least-once 投递 + 台账唯一索引幂等，绝不二次扣/二次入账。
 const settleQueue = "redpacket.settle"
 
 // errSettlePoisonMessage 标记不可重试的消息（解码失败 / 未知 routing key / 关键字段缺失）。
@@ -33,7 +34,7 @@ func HandleRedPacketCreatedEvent(ctx context.Context, payload []byte) error {
 	if evt.RedPacketID == 0 || evt.UserID == 0 || evt.Total <= 0 {
 		return fmt.Errorf("%w: invalid created event", errSettlePoisonMessage)
 	}
-	return GetRedPacketSrv().SettleSend(ctx, evt.RedPacketID, evt.UserID, evt.Total)
+	return reportRepair("red_packet.created", evt.RedPacketID)(GetRedPacketSrv().SettleSend(ctx, evt.RedPacketID, evt.UserID, evt.Total))
 }
 
 // HandleRedPacketClaimedEvent 领包资金兜底结算：领取人 credit / 平台清算 debit。
@@ -56,7 +57,7 @@ func HandleRedPacketClaimedEvent(ctx context.Context, payload []byte) error {
 		// 无对应领取记录，无法定位 ref，判脏事件进 DLQ。
 		return fmt.Errorf("%w: claim not found rp=%d uid=%d", errSettlePoisonMessage, evt.RedPacketID, evt.UserID)
 	}
-	return GetRedPacketSrv().SettleClaim(ctx, claim.ID, evt.UserID, claim.Amount)
+	return reportRepair("red_packet.claimed", evt.RedPacketID)(GetRedPacketSrv().SettleClaim(ctx, claim.ID, evt.UserID, claim.Amount))
 }
 
 // HandleRedPacketExpiredEvent 过期回收资金兜底结算：剩余金额从 escrow 退回发包人。
@@ -72,7 +73,17 @@ func HandleRedPacketExpiredEvent(ctx context.Context, payload []byte) error {
 	if evt.RefundTotal <= 0 {
 		return nil
 	}
-	return GetRedPacketSrv().SettleRefund(ctx, evt.RedPacketID, evt.UserID, evt.RefundTotal)
+	return reportRepair("red_packet.expired", evt.RedPacketID)(GetRedPacketSrv().SettleRefund(ctx, evt.RedPacketID, evt.UserID, evt.RefundTotal))
+}
+
+// reportRepair 结算真的补记了台账说明同步事务那边漏了腿，这是不该发生的对账异常，打 Error 告警。
+func reportRepair(key string, rpID uint) func(bool, error) error {
+	return func(wrote bool, err error) error {
+		if wrote {
+			util.LogrusObj.Errorf("redpacket 对账异常 key=%s rp=%d：事件到达时台账缺失，已按事件补记", key, rpID)
+		}
+		return err
+	}
 }
 
 // DispatchSettleEvent 按 routing key 分发。独立成纯函数便于不连 RMQ 直接验证分发逻辑。

@@ -28,7 +28,7 @@ func NewLedgerDaoByDB(db *gorm.DB) *LedgerDao {
 func (d *LedgerDao) AppendTransaction(userID, refOrderID uint, direction string, amountCents, balanceAfterCents int64, bizType string) error {
 	accountCode := AccountCodeUserWallet
 	if userID == ExternalClearingUserID {
-		// 兼容红包/拼团等旧调用。新支付链路必须调用 AppendSystemTransaction 明确系统账户语义。
+		// 兼容拼团等旧调用。新支付链路必须调用 AppendSystemTransaction 明确系统账户语义。
 		accountCode = AccountCodeLegacySystem
 	}
 	tx := &AccountTransaction{
@@ -47,7 +47,7 @@ func (d *LedgerDao) AppendTransaction(userID, refOrderID uint, direction string,
 // 外部清算与商户托管虽然都没有 users 表余额行，但必须通过 account_code 分开对账。
 func (d *LedgerDao) AppendSystemTransaction(accountCode string, refOrderID uint, direction string, amountCents int64, bizType string) error {
 	switch accountCode {
-	case AccountCodeExternalClearing, AccountCodeMerchantEscrow, AccountCodeGroupbuyEscrow:
+	case AccountCodeExternalClearing, AccountCodeMerchantEscrow, AccountCodeGroupbuyEscrow, AccountCodeRedPacketEscrow:
 	default:
 		return gorm.ErrInvalidData
 	}

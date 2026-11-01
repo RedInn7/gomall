@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,7 +15,8 @@ import (
 
 // 红包在 Redis 的存储结构：
 //   redpacket:{id}:amounts   LIST  发包时一次性 RPUSH 预拆好的金额数组，LPOP 即抢
-//   redpacket:{id}:claimed   HASH  userID -> 抢到金额 (兜底单用户去重)
+//   redpacket:{id}:claimed   HASH  userID -> "抢到金额:抢到时间(unix 秒)[:r]" (兜底单用户去重 + 对账找孤儿；
+//                                  :r 表示对账任务已接手补领，Saga 回滚不再放回这一份)
 //
 // 抢红包 Lua 一次原子完成：HEXISTS 去重 -> LPOP -> HSET 标记，
 // 不依赖 WATCH/MULTI，多副本/重连场景下也不会超发或重复发放。
@@ -48,6 +50,7 @@ return n - 1
 //	KEYS[2] = claimed hash key
 //	ARGV[1] = userID (string)
 //	ARGV[2] = claimed hash TTL (秒)
+//	ARGV[3] = 当前 unix 秒，记进标记，供对账跳过还在途的领取
 //	返回 >0 抢到金额；-1 已抢完；-2 已领过
 var claimRedPacketScript = redis.NewScript(`
 if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then
@@ -57,7 +60,7 @@ local amt = redis.call('LPOP', KEYS[1])
 if not amt then
     return -1
 end
-redis.call('HSET', KEYS[2], ARGV[1], amt)
+redis.call('HSET', KEYS[2], ARGV[1], amt .. ':' .. ARGV[3])
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 return tonumber(amt)
 `)
@@ -77,15 +80,37 @@ return sum
 `)
 
 // rollbackRedPacketClaimScript Saga 回滚：DB 写失败时把这一份金额 LPUSH 回 list、
-// 并从 claimed hash 删除用户标记 (允许其下次再抢)
+// 并从 claimed hash 删除用户标记 (允许其下次再抢)。
+// 先比较再删：标记已被对账任务改成「补领中」(后缀 :r) 时不动，否则对账补领入账后这里再放回一份，
+// Redis 比 DB 多一份，最后有人被拒、发出的总额偏离托管。标记已不存在（已回补过）也不放回。
 //
 //	KEYS[1] = amounts list key
 //	KEYS[2] = claimed hash key
 //	ARGV[1] = userID
 //	ARGV[2] = amount
+//	返回 1 已回补；0 标记不存在；-1 对账补领中
 var rollbackRedPacketClaimScript = redis.NewScript(`
+local v = redis.call('HGET', KEYS[2], ARGV[1])
+if not v then return 0 end
+if string.sub(v, -2) == ':r' then return -1 end
 redis.call('LPUSH', KEYS[1], ARGV[2])
 redis.call('HDEL', KEYS[2], ARGV[1])
+return 1
+`)
+
+// lockRedPacketClaimForRepairScript 对账补领前把标记 CAS 成「补领中」，和 Saga 回滚互斥：
+// 谁先改到标记谁处理这一份，另一方让路。
+//
+//	KEYS[1] = claimed hash key
+//	ARGV[1] = userID
+//	ARGV[2] = 对账读到的原标记值
+//	返回 1 拿到；0 标记已变（被回补 / 重抢）
+var lockRedPacketClaimForRepairScript = redis.NewScript(`
+local v = redis.call('HGET', KEYS[1], ARGV[1])
+if v ~= ARGV[2] then return 0 end
+if string.sub(v, -2) ~= ':r' then
+    redis.call('HSET', KEYS[1], ARGV[1], v .. ':r')
+end
 return 1
 `)
 
@@ -173,6 +198,7 @@ func ClaimRedPacket(ctx context.Context, id, userID uint, claimedTTL time.Durati
 		[]string{RedPacketAmountsKey(id), RedPacketClaimedKey(id)},
 		strconv.FormatUint(uint64(userID), 10),
 		int(claimedTTL.Seconds()),
+		time.Now().Unix(),
 	).Result()
 	if err != nil {
 		return 0, err
@@ -201,12 +227,74 @@ func ReleaseRedPacketLeft(ctx context.Context, id uint) (int64, error) {
 	return sum, nil
 }
 
-// RollbackRedPacketClaim Saga 回滚：把一份已被 LPOP 的金额放回，并撤销 claimed 标记
+// ErrRedPacketClaimRepairing 回滚时发现对账任务已接手这一份，份额没放回。
+var ErrRedPacketClaimRepairing = errors.New("红包领取正由对账补领")
+
+// RollbackRedPacketClaim Saga 回滚：把一份已被 LPOP 的金额放回，并撤销 claimed 标记。
+// 对账已接手时返回 ErrRedPacketClaimRepairing，调用方应回 DB 确认结果。
 func RollbackRedPacketClaim(ctx context.Context, id, userID uint, amount int64) error {
-	_, err := rollbackRedPacketClaimScript.Run(ctx, RedisClient,
+	res, err := rollbackRedPacketClaimScript.Run(ctx, RedisClient,
 		[]string{RedPacketAmountsKey(id), RedPacketClaimedKey(id)},
 		strconv.FormatUint(uint64(userID), 10),
 		strconv.FormatInt(amount, 10),
-	).Result()
-	return err
+	).Int64()
+	if err != nil {
+		return err
+	}
+	if res == -1 {
+		return ErrRedPacketClaimRepairing
+	}
+	return nil
+}
+
+// LockRedPacketClaimForRepair 对账补领前抢占标记；raw 是 ListRedPacketClaimed 读到的原值。
+// 返回 false 表示标记已被 Saga 回滚撤掉或换成了新的领取，这一份不该再补。
+func LockRedPacketClaimForRepair(ctx context.Context, id, userID uint, raw string) (bool, error) {
+	n, err := lockRedPacketClaimForRepairScript.Run(ctx, RedisClient,
+		[]string{RedPacketClaimedKey(id)},
+		strconv.FormatUint(uint64(userID), 10),
+		raw,
+	).Int64()
+	return n == 1, err
+}
+
+// RedPacketClaimMark Redis claimed HASH 里的一条领取标记
+type RedPacketClaimMark struct {
+	Amount int64
+	At     time.Time
+	Raw    string // 原始标记值，LockRedPacketClaimForRepair 比较用
+}
+
+// ListRedPacketClaimed 读出红包全部领取标记，供对账和 DB 领取记录比对。
+// 老格式（只有金额、没有时间）的 At 记为零值，视为早已过了在途窗口。
+func ListRedPacketClaimed(ctx context.Context, id uint) (map[uint]RedPacketClaimMark, error) {
+	raw, err := RedisClient.HGetAll(ctx, RedPacketClaimedKey(id)).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uint]RedPacketClaimMark, len(raw))
+	for k, v := range raw {
+		uid, err := strconv.ParseUint(k, 10, 64)
+		if err != nil {
+			continue
+		}
+		amtStr, rest, _ := strings.Cut(v, ":")
+		tsStr, _, _ := strings.Cut(rest, ":")
+		amt, err := strconv.ParseInt(amtStr, 10, 64)
+		if err != nil || amt <= 0 {
+			continue
+		}
+		var at time.Time
+		if ts, err := strconv.ParseInt(tsStr, 10, 64); err == nil {
+			at = time.Unix(ts, 0)
+		}
+		out[uint(uid)] = RedPacketClaimMark{Amount: amt, At: at, Raw: v}
+	}
+	return out, nil
+}
+
+// RedPacketPoolExists 份额 LIST 是否还在（LIST 被抢空、过期、丢失或根本没写进去时都返回 false）
+func RedPacketPoolExists(ctx context.Context, id uint) (bool, error) {
+	n, err := RedisClient.Exists(ctx, RedPacketAmountsKey(id)).Result()
+	return n > 0, err
 }

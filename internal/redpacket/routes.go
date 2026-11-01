@@ -11,7 +11,6 @@ import (
 // RegisterRoutes 挂载本领域路由。public 不需登录；authed 已套登录中间件；merchant 已套 RequireRole("merchant"/"admin")；admin 已套 RequireRole("admin")。
 func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 	_ = public
-	_ = admin
 
 	// 红包：发包幂等；抢包按用户做滑动窗口 + 幂等
 	authed.POST("redpacket/create",
@@ -25,4 +24,7 @@ func RegisterRoutes(public, authed, merchant, admin *gin.RouterGroup) {
 		ClaimRedPacketHandler())
 	authed.GET("redpacket/show", ShowRedPacketHandler())
 	authed.GET("redpacket/list", ListMyRedPacketsHandler())
+	authed.GET("redpacket/received", ListReceivedRedPacketsHandler())
+
+	admin.POST("redpacket/reconcile", AdminReconcileRedPacketHandler())
 }

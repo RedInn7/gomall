@@ -29,8 +29,8 @@ const (
 	BizTypeRedPacket       = "redpacket"        // 红包域汇总语义（保留兼容引用）
 	BizTypeGroupBuy        = "groupbuy"         // 拼团支付 / 散团退款
 	// 红包资金链拆三个子业务，避免共用 (ref_order_id,direction) 时跨阶段/跨领取人冲突：
-	// 发包 ref=红包 id，退回 ref=红包 id，二者方向相同（escrow credit / debit）若同 biz_type 会撞唯一键，
-	// 故分开；领包 ref=领取记录 id（每个领取人一行，天然唯一），与发/退的红包 id 空间隔离。
+	// 发包与退回都用 ref=红包 id：唯一键不含 user_id，同 biz_type 时「托管 credit（发包）」与
+	// 「发包人 credit（退回）」会撞键，故分开；领包 ref=领取记录 id（每个领取人一行，天然唯一），与发/退的红包 id 空间隔离。
 	BizTypeRedPacketSend   = "redpacket_send"   // 发包：发包人 debit / 平台清算 credit，ref=红包 id
 	BizTypeRedPacketClaim  = "redpacket_claim"  // 领包：领取人 credit / 平台清算 debit，ref=领取记录 id
 	BizTypeRedPacketRefund = "redpacket_refund" // 过期回收：发包人 credit / 平台清算 debit，ref=红包 id
@@ -42,11 +42,13 @@ const (
 const ExternalClearingUserID uint = 0
 
 // 系统账户共用 user_id=0，但资金语义不能混在一起。account_code 用来区分：
-// external_clearing 表示 Stripe/Web3 等外部已收资金；merchant_escrow 表示支付后、履约前暂不归卖家的托管款。
+// external_clearing 表示 Stripe/Web3 等外部已收资金；merchant_escrow 表示支付后、履约前暂不归卖家的托管款；
+// redpacket_escrow 表示发包后、被领走或退回前的红包在途资金。
 const (
 	AccountCodeUserWallet       = "user_wallet"
 	AccountCodeExternalClearing = "external_clearing"
 	AccountCodeMerchantEscrow   = "merchant_escrow"
+	AccountCodeRedPacketEscrow  = "redpacket_escrow"
 	AccountCodeLegacySystem     = "legacy_system"
 	// groupbuy_escrow 拼团在途款：参团已扣买家钱包、尚未成团的钱。成团转入 merchant_escrow，散团原路退回。
 	AccountCodeGroupbuyEscrow = "groupbuy_escrow"
