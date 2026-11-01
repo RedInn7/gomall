@@ -123,17 +123,28 @@ type reconcileResult struct {
 //     不必等到过期，立即按 DB 退回发包人。
 func (s *RedPacketTaskService) RunRedPacketClaimReconcile() {
 	ctx := context.Background()
-	rows, err := NewRedPacketDao(ctx).ListActive(500)
-	if err != nil {
-		util.LogrusObj.Errorf("redpacket reconcile scan failed: %v", err)
-		return
-	}
-	for _, rp := range rows {
-		if _, err := reconcileRedPacket(ctx, rp); err != nil {
-			util.LogrusObj.Errorf("redpacket reconcile failed id=%d err=%v", rp.ID, err)
+	rpDao := NewRedPacketDao(ctx)
+	// 按 id 游标分批扫完全部进行中红包，不能只看最早一批：新红包的孤儿 / 份额池丢失要等到过期才处理
+	for afterID := uint(0); ; {
+		rows, err := rpDao.ListActive(afterID, reconcileBatch)
+		if err != nil {
+			util.LogrusObj.Errorf("redpacket reconcile scan failed after=%d: %v", afterID, err)
+			return
 		}
+		for _, rp := range rows {
+			if _, err := reconcileRedPacket(ctx, rp); err != nil {
+				util.LogrusObj.Errorf("redpacket reconcile failed id=%d err=%v", rp.ID, err)
+			}
+		}
+		if len(rows) < reconcileBatch {
+			return
+		}
+		afterID = rows[len(rows)-1].ID
 	}
 }
+
+// reconcileBatch 对账每批扫的红包数。变量是为了单测把它调小。
+var reconcileBatch = 500
 
 // poolExists 留成函数变量，单测在 EXISTS 和读标记之间插入一次抢包。
 var poolExists = cache.RedPacketPoolExists
