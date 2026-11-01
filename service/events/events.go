@@ -39,6 +39,7 @@ type OrderCancelled struct {
 	Reason             string `json:"reason"`
 	PromoRuleID        uint   `json:"promo_rule_id"`
 	PromoDiscountCents int64  `json:"promo_discount_cents"`
+	PromoBudgetDate    string `json:"promo_budget_date,omitempty"` // 订单扣满减预算的那一天，退预算只回补同一天的额度
 }
 
 // OrderShipped 商家发货事件。tracking_no / carrier 仅在事件内透传，本期不入主表。
@@ -79,6 +80,7 @@ type OrderRefundedEvent struct {
 	TxID               string `json:"tx_id"`
 	PromoRuleID        uint   `json:"promo_rule_id"`
 	PromoDiscountCents int64  `json:"promo_discount_cents"`
+	PromoBudgetDate    string `json:"promo_budget_date,omitempty"` // 订单扣满减预算的那一天，退预算只回补同一天的额度
 }
 
 // OrderRefundRejected 退款被运营驳回，订单恢复到 RefundFromType；RestoredType 供结算消费者判断是否应放款。
@@ -150,6 +152,8 @@ type PromoReleased struct {
 	RuleID        uint   `json:"rule_id"`
 	DiscountCents int64  `json:"discount_cents"`
 	Reason        string `json:"reason"` // cancel / refund / manual
+	// Restored=false：订单跨了预算日，那天的额度已作废，只记台账没有回补。
+	Restored bool `json:"restored"`
 }
 
 // 拼团事件：

@@ -33,7 +33,7 @@ func HandleOrderCancelledEvent(ctx context.Context, payload []byte) error {
 	if evt.PromoRuleID == 0 || evt.PromoDiscountCents <= 0 {
 		return nil
 	}
-	return GetPromoSrv().ReleaseDiscount(ctx, evt.OrderID, evt.PromoRuleID, evt.PromoDiscountCents, "cancel")
+	return GetPromoSrv().ReleaseDiscount(ctx, evt.OrderID, evt.PromoRuleID, evt.PromoDiscountCents, evt.PromoBudgetDate, "cancel")
 }
 
 // HandleOrderRefundedEvent 消费 order.refunded，退款获批的订单退还满减预算。
@@ -46,7 +46,7 @@ func HandleOrderRefundedEvent(ctx context.Context, payload []byte) error {
 	if evt.PromoRuleID == 0 || evt.PromoDiscountCents <= 0 {
 		return nil
 	}
-	return GetPromoSrv().ReleaseDiscount(ctx, evt.OrderID, evt.PromoRuleID, evt.PromoDiscountCents, "refund")
+	return GetPromoSrv().ReleaseDiscount(ctx, evt.OrderID, evt.PromoRuleID, evt.PromoDiscountCents, evt.PromoBudgetDate, "refund")
 }
 
 // DispatchReleaseEvent 按 routing key 分发到对应 handler。
