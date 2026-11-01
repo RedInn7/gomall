@@ -37,11 +37,17 @@ type Order struct {
 	// ---- 满减引擎落点 ----
 	// PromoRuleID    本次下单命中的 promo_rule.id；0 = 没有命中 / 预算耗尽降级
 	// PromoDiscountCents 命中规则减免的金额（分）；下游可对 final_cents 校验
-	// FinalCents     满减结算后用户实付金额（分）= Money*Num - PromoDiscountCents，clamp >= 0；
+	// FinalCents     用户实付金额（分）= Money*Num - PromoDiscountCents - CouponDiscountCents，clamp >= 0；
 	//                老客户端不读这个字段时，仍可由 Money*Num 兜底
 	PromoRuleID        uint  `gorm:"not null;default:0;index"`
 	PromoDiscountCents int64 `gorm:"not null;default:0"`
 	FinalCents         int64 `gorm:"not null;default:0"`
+
+	// ---- 优惠券落点（先满减、后券）----
+	// UserCouponID        本单核销的 user_coupon.id；0 = 没用券
+	// CouponDiscountCents 券在满减后金额上减掉的分
+	UserCouponID        uint  `gorm:"not null;default:0;index"`
+	CouponDiscountCents int64 `gorm:"not null;default:0"`
 
 	// StockCommitPending 支付已落库，但 Redis 预占核销（CommitReservation）重试后仍失败。
 	// 库存对账把这份预占当合法占用并补核销，不会当泄漏退回 available（那样会超卖）。
@@ -65,6 +71,9 @@ type Order struct {
 	// RestockedAt 退款后回补库存的时间，nil = 还没回补。未发货的退款在结算时回补；
 	// 已发货的要等商家确认退货入库才回补，货还在买家手里就回补会超卖。
 	RestockedAt *time.Time
+
+	// SeckillID 秒杀活动 id（skill_product.id），0 = 非秒杀单。关单时据此归还秒杀名额。
+	SeckillID uint `gorm:"not null;default:0;index"`
 
 	// Ticket 异步下单的排队凭证，唯一索引保证一个 ticket 只建一张单；同步下单为 NULL。
 	Ticket *string `gorm:"size:32;uniqueIndex"`
@@ -132,4 +141,14 @@ func BackfillFulfillmentColumns(db *gorm.DB, missing map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+// PayableCents 订单应付 / 应退金额（分）的唯一口径，支付、清算、退款共用。
+// 命中满减或用了券以折后 FinalCents 为准，否则 Money*Num（兼容没写 FinalCents 的老订单）。
+// 判据不用 FinalCents > 0：全额抵扣时 FinalCents == 0 是合法实付，按 >0 判会回退到折前全价多收 / 多退。
+func (o *Order) PayableCents() int64 {
+	if o.PromoRuleID != 0 || o.UserCouponID != 0 {
+		return o.FinalCents
+	}
+	return o.Money * int64(o.Num)
 }

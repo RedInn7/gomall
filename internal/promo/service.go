@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/internal/shared/outbox"
-	"github.com/RedInn7/gomall/pkg/e"
 	"github.com/RedInn7/gomall/service/events"
 )
 
@@ -61,23 +61,47 @@ func SubtotalCents(items []CartItem) int64 {
 // 取舍：在所有"达到门槛"的候选里取"折扣金额最大"。这是给消费者侧的"最优"，
 // 平台侧成本反而最高 —— 但这是行业普遍做法，不偷偷给用户用较小那条。
 func PickBestPromoRule(items []CartItem, rules []*PromoRule) (*PromoRule, int64) {
-	var best *PromoRule
-	var bestDiscount int64
+	ranked := RankPromoRules(items, rules)
+	if len(ranked) == 0 {
+		return nil, 0
+	}
+	return ranked[0].Rule, ranked[0].DiscountCents
+}
+
+// PromoCandidate 一条达到门槛的规则及其可减金额。
+type PromoCandidate struct {
+	Rule          *PromoRule
+	DiscountCents int64
+}
+
+// RankPromoRules 所有达到门槛的规则按减免从大到小排；减免相同保持入参顺序（id 小的在前）。
+// 下单时第一名预算被挤光，就按这个顺序往下试次优，而不是直接降成无折扣。
+func RankPromoRules(items []CartItem, rules []*PromoRule) []PromoCandidate {
+	var out []PromoCandidate
 	for _, r := range rules {
 		base := applicableSubtotal(items, r)
 		if base < r.ThresholdCents {
 			continue
 		}
-		d := computeDiscountOnBase(base, r)
-		if d <= 0 {
-			continue
-		}
-		if d > bestDiscount {
-			best = r
-			bestDiscount = d
+		if d := computeDiscountOnBase(base, r); d > 0 {
+			out = append(out, PromoCandidate{Rule: r, DiscountCents: d})
 		}
 	}
-	return best, bestDiscount
+	sort.SliceStable(out, func(i, j int) bool { return out[i].DiscountCents > out[j].DiscountCents })
+	return out
+}
+
+// budgetAllows 按规则行快照判断今天的剩余预算还够不够减 discount。
+// 只是试算口径，真正的防超发在 AtomicConsumeBudget 的条件 UPDATE。
+func budgetAllows(r *PromoRule, discount int64, today string) bool {
+	if r.DailyBudgetCents == 0 {
+		return true
+	}
+	used := int64(0)
+	if r.BudgetDate == today {
+		used = r.ConsumedToday
+	}
+	return used+discount <= r.DailyBudgetCents
 }
 
 // applicableSubtotal 计算规则作用范围内的子集合计金额。
@@ -154,8 +178,9 @@ func centsToYuan(c int64) string {
 // 业务编排（拉规则 / 算最优 / 落库 / 写 outbox）
 // ----------------------------------------------------------------------
 
-// CalculateBestDiscount 给前端展示用。不写预算、不落库，纯只读。
-// 调用方：结算页加载、购物车实时悬浮提示。
+// CalculateBestDiscount 给前端展示、也给下单链路选规则用。不写预算、不落库，纯只读。
+// 今天剩余预算已经不够的规则直接剔除，展示口径与下单时能拿到的折扣一致；
+// Candidates 带上全部可用规则（含最优），下单事务里最优那条被并发挤光时按序降级。
 //
 // SLO：calculate p99 < 50ms（实际 DB 一次查询 + 内存循环）。
 func (s *PromoSrv) CalculateBestDiscount(ctx context.Context, items []CartItem) (*PromoApplyResp, error) {
@@ -170,16 +195,23 @@ func (s *PromoSrv) CalculateBestDiscount(ctx context.Context, items []CartItem) 
 	categoryIDs := uniqueCategoryIDs(items)
 	productIDs := uniqueProductIDs(items)
 
+	now := time.Now()
 	rules, err := NewPromoDao(ctx).
-		ListActiveForCart(time.Now(), categoryIDs, productIDs)
+		ListActiveForCart(now, categoryIDs, productIDs)
 	if err != nil {
 		return nil, err
 	}
 
-	best, discount := PickBestPromoRule(items, rules)
-	if best == nil || discount <= 0 {
+	today := BudgetDay(now)
+	for _, c := range RankPromoRules(items, rules) {
+		if budgetAllows(c.Rule, c.DiscountCents, today) {
+			resp.Candidates = append(resp.Candidates, c)
+		}
+	}
+	if len(resp.Candidates) == 0 {
 		return resp, nil
 	}
+	best, discount := resp.Candidates[0].Rule, resp.Candidates[0].DiscountCents
 	resp.RuleID = best.ID
 	resp.RuleName = best.Name
 	resp.ThresholdCents = best.ThresholdCents
@@ -224,7 +256,7 @@ func uniqueProductIDs(items []CartItem) []int64 {
 // ApplyDiscountInTx 在下单事务内调。
 //
 //	入参 tx：业务方持有的 *gorm.DB 事务句柄
-//	返回 ErrPromoBudgetExhausted 时上层应回滚整笔事务并落 80003。
+//	返回 ErrPromoBudgetExhausted 时预算没扣、事件没写，下单侧换次优规则重试或降级为无折扣，不拒单。
 //
 // 同时写 outbox promo.applied 事件，便于：
 //   - 财务系统统计每条规则的真实补贴成本（DB 与 outbox 双写校验）
@@ -248,6 +280,7 @@ func (s *PromoSrv) ApplyDiscountInTx(tx *gorm.DB, orderID, ruleID uint, discount
 }
 
 // ReleaseDiscount 关单 / 退款时调，把预算退还、并落 promo.released 事件。
+// 入参 budgetDay：订单扣预算的那一天（BudgetDay(order.CreatedAt)），跨天的订单只记台账不回补；
 // 入参 reason：cancel / refund / manual，便于下游统计补贴回收来源。
 //
 // 业务约束：不要求 ruleID 当前仍在 active —— 即使规则已 stop，也允许退还，
@@ -257,19 +290,21 @@ func (s *PromoSrv) ApplyDiscountInTx(tx *gorm.DB, orderID, ruleID uint, discount
 // 同一订单可能重复进来。事务内先写 promo_release 台账（order_id 唯一索引 +
 // ON CONFLICT DO NOTHING / ON DUPLICATE KEY），冲突即说明已释放过，
 // 直接返回 nil —— 不重复回补预算、不重复发 promo.released 事件。
-func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, discountCents int64, reason string) error {
+// 台账与事件里的 Restored 如实记录预算是否真的回补，不把"作废"记成"已退还"。
+func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, discountCents int64, budgetDay, reason string) error {
 	if ruleID == 0 || discountCents <= 0 {
 		return nil
 	}
 	db := NewPromoDao(ctx).DB
 	return db.Transaction(func(tx *gorm.DB) error {
 		txDao := NewPromoDaoByDB(tx)
-		created, err := txDao.CreateReleaseOnce(&PromoRelease{
+		rec := &PromoRelease{
 			OrderID:       orderID,
 			RuleID:        ruleID,
 			DiscountCents: discountCents,
 			Reason:        reason,
-		})
+		}
+		created, err := txDao.CreateReleaseOnce(rec)
 		if err != nil {
 			return err
 		}
@@ -277,8 +312,14 @@ func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, di
 			// 台账已存在：本次是重复投递，预算与事件均已落，幂等返回。
 			return nil
 		}
-		if err := txDao.RestoreBudget(tx, ruleID, discountCents); err != nil {
+		restored, err := txDao.RestoreBudget(tx, ruleID, discountCents, budgetDay)
+		if err != nil {
 			return err
+		}
+		if restored {
+			if err := tx.Model(rec).UpdateColumn("restored", true).Error; err != nil {
+				return err
+			}
 		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"promo", "PromoReleased", "promo.released", orderID,
@@ -287,6 +328,7 @@ func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, di
 				RuleID:        ruleID,
 				DiscountCents: discountCents,
 				Reason:        reason,
+				Restored:      restored,
 			},
 		)
 	})
@@ -296,17 +338,44 @@ func (s *PromoSrv) ReleaseDiscount(ctx context.Context, orderID, ruleID uint, di
 // admin 后台
 // ----------------------------------------------------------------------
 
-func (s *PromoSrv) CreateRule(ctx context.Context, req *PromoRuleCreateReq) (*PromoRule, error) {
+// ErrPromoRuleNotDraft 规则不存在或已不是草稿（改 / 启用只对草稿生效）。
+var ErrPromoRuleNotDraft = errors.New("规则不存在或已不是草稿")
+
+// validateRule 建 / 改规则共用的配置校验。
+func validateRule(req *PromoRuleCreateReq) error {
 	if !req.EndAt.After(req.StartAt) {
-		return nil, errors.New("end_at 必须晚于 start_at")
+		return errors.New("end_at 必须晚于 start_at")
 	}
-	if req.RuleType == PromoRuleTypeAmount && req.DiscountCents <= 0 {
-		return nil, errors.New("满减规则必须设置 discount_cents")
+	if req.Scope == PromoScopeAll && req.ScopeRefID != 0 {
+		return errors.New("全场规则的 scope_ref_id 必须为 0")
 	}
-	if req.RuleType == PromoRuleTypeDiscount {
-		if req.DiscountBps <= 0 || req.DiscountBps >= PromoDiscountBpsBase {
-			return nil, errors.New("折扣 bps 必须落在 (0, 10000) 内")
+	if req.Scope != PromoScopeAll && req.ScopeRefID <= 0 {
+		return errors.New("类目 / 商品规则必须设置 scope_ref_id")
+	}
+	if req.DailyBudgetCents < 0 {
+		return errors.New("daily_budget_cents 不能为负")
+	}
+	switch req.RuleType {
+	case PromoRuleTypeAmount:
+		if req.DiscountCents <= 0 {
+			return errors.New("满减规则必须设置 discount_cents")
 		}
+		// 减额必须小于门槛：否则"满 1 分减 100 元"这类配置会让命中订单实付变 0。
+		if req.DiscountCents >= req.ThresholdCents {
+			return errors.New("满减金额必须小于门槛金额")
+		}
+	case PromoRuleTypeDiscount:
+		if req.DiscountBps <= 0 || req.DiscountBps >= PromoDiscountBpsBase {
+			return errors.New("折扣 bps 必须落在 (0, 10000) 内")
+		}
+	}
+	return nil
+}
+
+// CreateRule 新建规则一律是草稿，运营核对后再调 ActivateRule 生效。
+func (s *PromoSrv) CreateRule(ctx context.Context, req *PromoRuleCreateReq) (*PromoRule, error) {
+	if err := validateRule(req); err != nil {
+		return nil, err
 	}
 	r := &PromoRule{
 		Name:             req.Name,
@@ -319,12 +388,51 @@ func (s *PromoSrv) CreateRule(ctx context.Context, req *PromoRuleCreateReq) (*Pr
 		DailyBudgetCents: req.DailyBudgetCents,
 		StartAt:          req.StartAt,
 		EndAt:            req.EndAt,
-		Status:           PromoStatusActive,
+		Status:           PromoStatusDraft,
 	}
 	if err := NewPromoDao(ctx).Create(r); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+// UpdateRule 修改草稿。已生效的规则不能改，配错了停掉重建。
+func (s *PromoSrv) UpdateRule(ctx context.Context, id uint, req *PromoRuleCreateReq) (*PromoRule, error) {
+	if err := validateRule(req); err != nil {
+		return nil, err
+	}
+	d := NewPromoDao(ctx)
+	ok, err := d.Update(id, map[string]interface{}{
+		"name":               req.Name,
+		"rule_type":          req.RuleType,
+		"scope":              req.Scope,
+		"scope_ref_id":       req.ScopeRefID,
+		"threshold_cents":    req.ThresholdCents,
+		"discount_cents":     req.DiscountCents,
+		"discount_bps":       req.DiscountBps,
+		"daily_budget_cents": req.DailyBudgetCents,
+		"start_at":           req.StartAt,
+		"end_at":             req.EndAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrPromoRuleNotDraft
+	}
+	return d.Get(id)
+}
+
+// ActivateRule 草稿 -> 生效。
+func (s *PromoSrv) ActivateRule(ctx context.Context, id uint) error {
+	ok, err := NewPromoDao(ctx).Activate(id, time.Now())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrPromoRuleNotDraft
+	}
+	return nil
 }
 
 func (s *PromoSrv) ListRules(ctx context.Context) ([]*PromoRule, error) {
@@ -334,6 +442,3 @@ func (s *PromoSrv) ListRules(ctx context.Context) ([]*PromoRule, error) {
 func (s *PromoSrv) StopRule(ctx context.Context, id uint) error {
 	return NewPromoDao(ctx).Stop(id)
 }
-
-// 让 e 包能被 import：占位避免 unused import 报错
-var _ = e.PromoBudgetExhausted

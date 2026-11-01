@@ -23,4 +23,10 @@ func InitGroupbuySettleConsumer(ctx context.Context) {
 		return
 	}
 	util.LogrusObj.Infoln("Groupbuy settle consumer started")
+	// 站内通知消费者：参团 / 成团 / 散团通知，失败不影响退款兜底
+	if err := groupbuy.StartNotifyConsumer(ctx); err != nil {
+		util.LogrusObj.Errorf("groupbuy StartNotifyConsumer failed: %v", err)
+		return
+	}
+	util.LogrusObj.Infoln("Groupbuy notify consumer started")
 }

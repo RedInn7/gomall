@@ -80,16 +80,18 @@ func (d *OrderDao) CreateOrder(order *Order) error {
 	return d.DB.Create(&order).Error
 }
 
-// UpdatePromoFields 满减预算耗尽降级时，把订单上的满减字段改回无折扣。
+// UpdateDiscountFields 把下单事务里最终确认的满减 / 券结果写回订单。
 // 仅在下单事务里使用：调用方已持有 tx；不要在事务外调用，否则违反 FinalCents 与
-// PromoDiscountCents 必须同进同退的约束。
-func (d *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, finalCents int64) error {
+// 两项减免必须同进同退的约束。
+func (d *OrderDao) UpdateDiscountFields(o *Order) error {
 	return d.DB.Model(&Order{}).
-		Where("id = ?", orderID).
+		Where("id = ?", o.ID).
 		Updates(map[string]interface{}{
-			"promo_rule_id":        ruleID,
-			"promo_discount_cents": discountCents,
-			"final_cents":          finalCents,
+			"promo_rule_id":         o.PromoRuleID,
+			"promo_discount_cents":  o.PromoDiscountCents,
+			"user_coupon_id":        o.UserCouponID,
+			"coupon_discount_cents": o.CouponDiscountCents,
+			"final_cents":           o.FinalCents,
 		}).Error
 }
 
@@ -109,6 +111,12 @@ func (d *OrderDao) SumReservedNumByProduct() (map[uint]int64, error) {
 func (d *OrderDao) SumCommitPendingNumByProduct(since time.Time) (map[uint]int64, error) {
 	return d.sumNumByProduct("(type = ? AND updated_at >= ?) OR stock_commit_pending = ?",
 		consts.OrderWaitShip, since, true)
+}
+
+// SumStockCommitPendingNumByProduct 汇总打了 StockCommitPending 的订单数量：DB 已扣库存、reserved 还没核销。
+// available 对账据此修正不变式，不把这部分当成 available 多出来的量扣掉。
+func (d *OrderDao) SumStockCommitPendingNumByProduct() (map[uint]int64, error) {
+	return d.sumNumByProduct("stock_commit_pending = ?", true)
 }
 
 func (d *OrderDao) sumNumByProduct(query string, args ...interface{}) (map[uint]int64, error) {

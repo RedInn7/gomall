@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/clearing"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
@@ -132,7 +134,8 @@ func TestApproveRefundEventAmountMatchesSettlement(t *testing.T) {
 	}
 }
 
-// 已结算给卖家的订单退款时卖家余额不够：不扣成负数、买家也先不入账；卖家补足后补偿任务自动退完。
+// 已结算给卖家的订单退款时卖家余额不够：不扣成负数、买家也先不入账，落异常单转人工；
+// 卖家补足、运营把异常单标 resolved 后补偿任务自动退完。
 func TestSettleRefundNeverDrivesSellerNegative(t *testing.T) {
 	db := openRefundTestDB(t)
 	stubRestockRedis(t)
@@ -162,9 +165,10 @@ func TestSettleRefundNeverDrivesSellerNegative(t *testing.T) {
 		t.Fatalf("buyer credited %d before seller funded", got)
 	}
 
-	// 卖家补足余额后，补偿任务把这笔退完
+	// 卖家补足余额、运营标 resolved 后，补偿任务把这笔退完
 	db.Delete(&user.User{}, 22)
 	seedRefundUser(t, db, 22, 500)
+	resolveShortfall(t, db, o.ID)
 	GetRefundSrv().RunSettleCompensation()
 	if got := refundUserBalance(t, db, 22); got != 200 {
 		t.Fatalf("seller balance %d, want 200", got)
@@ -174,7 +178,7 @@ func TestSettleRefundNeverDrivesSellerNegative(t *testing.T) {
 	}
 }
 
-// 没有清算单的旧订单：卖家余额不足时退款卡住，卖家补足后补偿任务要能扫到并退完（并发跑也只退一次）；
+// 没有清算单的旧订单：卖家余额不足时退款卡住转人工，标 resolved 后补偿任务要能扫到并退完（并发跑也只退一次）；
 // 上线前就已退款、refund_count=0 的历史单没有 credit 流水，不能被自动补钱。
 func TestSettleCompensationRetriesNoClearingRefundAfterSellerFunded(t *testing.T) {
 	db := openRefundTestDB(t)
@@ -203,6 +207,7 @@ func TestSettleCompensationRetriesNoClearingRefundAfterSellerFunded(t *testing.T
 
 	db.Delete(&user.User{}, 22)
 	seedRefundUser(t, db, 22, 500)
+	resolveShortfall(t, db, stuck.ID)
 	runConcurrently(3, func(int) error { GetRefundSrv().RunSettleCompensation(); return nil })
 	if got := refundUserBalance(t, db, 22); got != 200 {
 		t.Fatalf("seller balance %d, want 200 (exactly one refund)", got)
@@ -300,7 +305,7 @@ func TestReturnReceivedRestocksShippedRefundOnce(t *testing.T) {
 func TestSettleCompensationReleasesMissedPromoBudget(t *testing.T) {
 	db := openRefundTestDB(t)
 	stubRestockRedis(t)
-	rule := &promo.PromoRule{Name: "满300减50", ThresholdCents: 300, DiscountCents: 50, ConsumedToday: 100,
+	rule := &promo.PromoRule{Name: "满300减50", ThresholdCents: 300, DiscountCents: 50, ConsumedToday: 100, BudgetDate: promo.BudgetDay(time.Now()),
 		StartAt: time.Now().Add(-time.Hour), EndAt: time.Now().Add(time.Hour)}
 	if err := db.Create(rule).Error; err != nil {
 		t.Fatal(err)
@@ -366,5 +371,16 @@ func TestListRefundingScopedToMerchant(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != mine.ID || list[0].RefundReason != "不想要了" {
 		t.Fatalf("unexpected list: %+v", list)
+	}
+}
+
+// resolveShortfall 模拟运营处理完卖家余额不足的退款异常单。
+func resolveShortfall(t *testing.T, db *gorm.DB, orderID uint) {
+	t.Helper()
+	res := db.Model(&clearing.PaymentAnomaly{}).
+		Where("order_id = ? AND reason = ?", orderID, clearing.AnomalyReasonRefundSellerShortfall).
+		Update("status", clearing.AnomalyStatusResolved)
+	if res.Error != nil || res.RowsAffected != 1 {
+		t.Fatalf("resolve shortfall order=%d: rows=%d err=%v", orderID, res.RowsAffected, res.Error)
 	}
 }

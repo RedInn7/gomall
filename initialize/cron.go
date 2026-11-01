@@ -7,13 +7,16 @@ import (
 
 	"github.com/robfig/cron/v3"
 
+	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/groupbuy"
 	"github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/preorder"
 	"github.com/RedInn7/gomall/internal/redpacket"
 	"github.com/RedInn7/gomall/internal/refund"
+	"github.com/RedInn7/gomall/internal/skill"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/rabbitmq"
+	"github.com/RedInn7/gomall/service/inventory"
 )
 
 // InitCron 注册并启动定时任务，返回 cron 实例：退出时 <-c.Stop().Done() 等在跑的任务结束。
@@ -48,6 +51,29 @@ func InitCron() *cron.Cron {
 	if err != nil {
 		panic(fmt.Sprintf("StockReconcile Cron 初始化失败: %v", err))
 	}
+
+	// available 桶对账：按 DB product.Num 纠正 Redis 丢键重建、退款回补 / 改库存写 Redis 失败留下的漂移。
+	// 与上面的 reserved 对账互补（那边只回收多占的预占）。
+	_, _ = c.AddFunc("@every 10m", func() {
+		defer func() {
+			if r := recover(); r != nil {
+				util.LogrusObj.Errorf("AvailableReconcile Cron Panic: %v", r)
+			}
+		}()
+		if err := inventory.ReconcileAvailable(context.Background(), 500); err != nil {
+			util.LogrusObj.Errorf("AvailableReconcile 执行失败: %v", err)
+		}
+	})
+
+	// 秒杀名额对账：按 DB sold / 成单记录补回漏掉的 Redis 归还（崩溃在抢名额与投递之间、归还写 Redis 失败）。
+	_, _ = c.AddFunc("@every 5m", func() {
+		defer func() {
+			if r := recover(); r != nil {
+				util.LogrusObj.Errorf("SeckillReconcile Cron Panic: %v", r)
+			}
+		}()
+		skill.RunSeckillReconcile()
+	})
 
 	redPacketService := new(redpacket.RedPacketTaskService)
 	_, err = c.AddFunc("0 */5 * * * *", func() {
@@ -93,6 +119,8 @@ func InitCron() *cron.Cron {
 	}
 	_, _ = c.AddFunc("@every 5m", groupbuy.GetGroupbuySrv().RunCompleteFullGroups) // 满员但成团失败的团补成团
 	_, _ = c.AddFunc("@every 10m", refund.GetRefundSrv().RunSettleCompensation)    // 资金事件丢失时按订单 / 清算单状态补结算、补退款
+	_, _ = c.AddFunc("@every 10m", coupon.GetCouponSrv().RunExpireCoupons)         // 过了有效期的未使用券翻成已过期
+	_, _ = c.AddFunc("@every 5m", coupon.GetCouponSrv().RunStockReconcile)         // 券 Redis 库存低于 DB 剩余量时抬回（key 丢失 / 回滚失败）
 
 	// 预售尾款没收兜底：每 1h 扫一次 FinalEndAt 已过但 stage 仍 DepositPaid 的订单，
 	// service 层内部已做"扫 + 逐条单事务 + 单条 ERROR log"，cron 层只兜 panic。

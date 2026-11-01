@@ -67,10 +67,19 @@ const (
 	ErrGroupbuyExpired       = 81002 // 团已超时
 	ErrGroupbuyDuplicateJoin = 81003 // 同一用户重复加入
 	ErrGroupbuyClosed        = 81004 // 团已关闭 (成团 / 散团 / 人工关)
+	ErrGroupbuyNotFound      = 81005 // 团不存在
 
 	// 预售 / 两段式支付
 	ErrPreorderNotInDepositWindow = 82001 // 不在定金期，付定金 / 取消全退被拒
 	ErrPreorderNotInFinalWindow   = 82002 // 不在尾款期，付尾款被拒
 	ErrPreorderDepositNotPaid     = 82003 // 尾款必须先付定金
 	ErrPreorderForfeitedDeposit   = 82004 // 定金已扣（业务承诺：预售结束后不退）
+
+	// 秒杀
+	ErrSkillNotExist      = 83001 // 秒杀活动不存在
+	ErrSkillNotStarted    = 83002 // 活动未开始
+	ErrSkillEnded         = 83003 // 活动已结束
+	ErrSkillSoldOut       = 83004 // 秒杀库存已抢完
+	ErrSkillLimitExceeded = 83005 // 超出每人限购
+	ErrSkillConflict      = 83006 // 同一商品同一场次已存在配置不同的活动
 )
