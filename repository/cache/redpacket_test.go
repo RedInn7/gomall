@@ -157,3 +157,84 @@ func TestListRedPacketClaimedLegacyFormat(t *testing.T) {
 		t.Fatalf("legacy mark parsed as %+v", m)
 	}
 }
+
+// Saga 回滚和对账补领并发抢同一个标记：每一轮恰好一方处理这一份——要么份额放回 LIST，
+// 要么标记被对账接手（回滚让路），不会既放回又补领。
+func TestRollbackAndRepairLockAreExclusive(t *testing.T) {
+	useMiniredis(t)
+	ctx := context.Background()
+	var pushed, repaired int
+	for i := uint(1); i <= 200; i++ {
+		if err := PrepareRedPacket(ctx, i, []int64{10}, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ClaimRedPacket(ctx, i, 9, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+		marks, err := ListRedPacketClaimed(ctx, i)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var (
+			wg     sync.WaitGroup
+			rbErr  error
+			locked bool
+			lkErr  error
+			start  = make(chan struct{})
+		)
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; rbErr = RollbackRedPacketClaim(ctx, i, 9, 10) }()
+		go func() { defer wg.Done(); <-start; locked, lkErr = LockRedPacketClaimForRepair(ctx, i, 9, marks[9].Raw) }()
+		close(start)
+		wg.Wait()
+		if lkErr != nil || (rbErr != nil && !errors.Is(rbErr, ErrRedPacketClaimRepairing)) {
+			t.Fatalf("round %d: rollback=%v lock=%v", i, rbErr, lkErr)
+		}
+		n, _ := RedisClient.LLen(ctx, RedPacketAmountsKey(i)).Result()
+		if locked == (n == 1) {
+			t.Fatalf("round %d: locked=%v pushed=%v, want exactly one", i, locked, n == 1)
+		}
+		if locked != errors.Is(rbErr, ErrRedPacketClaimRepairing) {
+			t.Fatalf("round %d: locked=%v but rollback err=%v", i, locked, rbErr)
+		}
+		if locked {
+			repaired++
+		} else {
+			pushed++
+		}
+	}
+	t.Logf("pushed=%d repaired=%d", pushed, repaired)
+}
+
+// 对账只认读到的原标记：标记已被回滚撤掉、或撤掉后本人又重抢出新标记，都不能接手。
+func TestRepairLockRequiresOriginalMark(t *testing.T) {
+	useMiniredis(t)
+	ctx := context.Background()
+	if err := PrepareRedPacket(ctx, 5, []int64{10, 20}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClaimRedPacket(ctx, 5, 9, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	marks, _ := ListRedPacketClaimed(ctx, 5)
+	stale := marks[9].Raw
+	_ = RollbackRedPacketClaim(ctx, 5, 9, marks[9].Amount)
+	if ok, _ := LockRedPacketClaimForRepair(ctx, 5, 9, stale); ok {
+		t.Fatal("lock must fail after rollback removed the mark")
+	}
+	RedisClient.HSet(ctx, RedPacketClaimedKey(5), "9", "20:1")
+	if ok, _ := LockRedPacketClaimForRepair(ctx, 5, 9, stale); ok {
+		t.Fatal("lock must fail on a different mark")
+	}
+	if ok, _ := LockRedPacketClaimForRepair(ctx, 5, 9, "20:1"); !ok {
+		t.Fatal("lock should succeed on the current mark")
+	}
+	// 已在补领中：重入成功；解析仍拿到金额和时间
+	if ok, _ := LockRedPacketClaimForRepair(ctx, 5, 9, "20:1:r"); !ok {
+		t.Fatal("re-lock of repairing mark should succeed")
+	}
+	marks, _ = ListRedPacketClaimed(ctx, 5)
+	if m := marks[9]; m.Amount != 20 || m.At.Unix() != 1 || m.Raw != "20:1:r" {
+		t.Fatalf("repairing mark parsed as %+v", m)
+	}
+}

@@ -170,7 +170,8 @@ func codeMatches(rp *RedPacket, code string, legacyOK bool) bool {
 //  1. Lua 原子 LPOP + 标记 claimed -> "amount:时间"
 //  2. DB 事务（claimTx）：写 RedPacketClaim + remaining--（DB 剩余份额为准，归零即置 finished）+ 领取人钱包入账 amount
 //     (同事务写台账，escrow 出账) + outbox(red_packet.claimed)
-//  3. DB 事务失败 -> 先查 DB 确认这笔领取确实没落库，再 Saga 回滚 Lua (LPUSH 金额回 list, 撤销 claimed 标记)
+//  3. DB 事务失败 -> 先查 DB 确认这笔领取确实没落库，再 Saga 回滚 Lua (LPUSH 金额回 list, 撤销 claimed 标记)；
+//     回滚 Lua 先比较标记，对账已接手补领（事务拖过 claimOrphanGrace）时不放回，避免 Redis 多出一份
 //
 // 在第 1、2 步之间崩溃 / 回滚 Lua 也失败时，claimed 标记成了孤儿：由 RunRedPacketClaimReconcile 按标记补领。
 func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (interface{}, error) {
@@ -223,7 +224,13 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (inter
 		case errors.Is(txErr, errRedPacketClosed):
 			// 红包已结束时剩余金额已按 DB 退回，这份不能再塞回 Redis 给别人抢。
 		default:
-			if rbErr := rollbackClaimCache(ctx, rp.ID, u.Id, amount); rbErr != nil {
+			rbErr := rollbackClaimCache(ctx, rp.ID, u.Id, amount)
+			if errors.Is(rbErr, cache.ErrRedPacketClaimRepairing) {
+				// 事务拖过了在途窗口，对账已按标记接手补领（份额没放回）：再问一次 DB，补上了就按成功返回。
+				if c, e := rpDao.GetClaim(rp.ID, u.Id); e == nil && c != nil {
+					return &RedPacketClaimResp{RedPacketID: rp.ID, Amount: c.Amount}, nil
+				}
+			} else if rbErr != nil {
 				util.LogrusObj.Errorf("redpacket claim rollback failed id=%d uid=%d err=%v", rp.ID, u.Id, rbErr)
 			}
 		}
