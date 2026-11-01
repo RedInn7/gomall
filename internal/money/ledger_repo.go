@@ -46,7 +46,9 @@ func (d *LedgerDao) AppendTransaction(userID, refOrderID uint, direction string,
 // AppendSystemTransaction 为 user_id=0 的系统账户追加流水。
 // 外部清算与商户托管虽然都没有 users 表余额行，但必须通过 account_code 分开对账。
 func (d *LedgerDao) AppendSystemTransaction(accountCode string, refOrderID uint, direction string, amountCents int64, bizType string) error {
-	if accountCode != AccountCodeExternalClearing && accountCode != AccountCodeMerchantEscrow {
+	switch accountCode {
+	case AccountCodeExternalClearing, AccountCodeMerchantEscrow, AccountCodeGroupbuyEscrow:
+	default:
 		return gorm.ErrInvalidData
 	}
 	tx := &AccountTransaction{

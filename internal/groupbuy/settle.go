@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/RedInn7/gomall/internal/clearing"
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/user"
@@ -19,22 +20,22 @@ import (
 // 三段用不同的 biz_type，使同一订单（ref_order_id）上三段互不冲突，
 // 又能各自命中 (ref_order_id, direction, biz_type) 唯一索引做幂等兜底：
 //
-//	加入 → 成员钱包 debit、平台托管账户 credit（钱先托管在平台，不直接进卖家）
-//	成团 → 平台托管账户 debit、卖家钱包 credit（凑齐人数才把托管款结算给卖家）
-//	散团 → 平台托管账户 debit、成员钱包 credit（超时未成团，托管款原路退回成员）
+//	加入 → 成员钱包 debit、groupbuy_escrow credit（钱先托管在平台，不直接进卖家）
+//	成团 → groupbuy_escrow debit、merchant_escrow credit + 清算单（凑齐人数才算成交，但仍要等履约完成才结算给卖家）
+//	散团 / 关团 → groupbuy_escrow debit、成员钱包 credit（没成团，托管款原路退回成员）
 //
-// 托管账户用平台清算账户（money.ExternalClearingUserID = 0，系统虚拟账户，不维护真实
-// 钱包行），与 Stripe / Web3 入金的清算口径一致，其流水 balance_after 记 0。
+// 托管账户是 user_id=0 的系统账户，用独立的 account_code=groupbuy_escrow，与外部清算、商户托管、红包分开对账；
+// 系统账户不维护钱包行，流水 balance_after 记 0。
 const (
-	BizTypeGroupBuyPay    = "groupbuy_pay"    // 加入收款：成员 debit / 托管 credit
-	BizTypeGroupBuySettle = "groupbuy_settle" // 成团结算：托管 debit / 卖家 credit
-	BizTypeGroupBuyRefund = "groupbuy_refund" // 散团退款：托管 debit / 成员 credit
+	BizTypeGroupBuyPay    = "groupbuy_pay"    // 加入收款：成员 debit / 拼团托管 credit
+	BizTypeGroupBuySettle = "groupbuy_settle" // 成团转清算：拼团托管 debit / 商户托管 credit
+	BizTypeGroupBuyRefund = "groupbuy_refund" // 散团退款：拼团托管 debit / 成员 credit
 )
 
-// escrowUserID 拼团托管 / 清算账户。复用平台对外清算账户，避免再开一类系统账户。
-const escrowUserID = money.ExternalClearingUserID
+// escrowAccount 拼团在途托管账户。
+const escrowAccount = money.AccountCodeGroupbuyEscrow
 
-// collectToEscrow 加入拼团时收款：成员钱包扣 amount，钱进平台托管账户。
+// collectToEscrow 加入拼团时收款：成员钱包扣 amount，钱进拼团托管账户。
 //
 // 必须由调用方在 join 的同一事务内调用：与 member / 订单写入同生共死，
 // 任一失败整体回滚，杜绝"加入成功但没扣到钱"。
@@ -73,58 +74,19 @@ func collectToEscrow(tx *gorm.DB, memberID uint, amountCents int64, refOrderID u
 	if err = ledgerDao.AppendTransaction(memberID, refOrderID, money.DirectionDebit, amountCents, after, BizTypeGroupBuyPay); err != nil {
 		return err
 	}
-	// 托管入账：系统清算账户不维护真实钱包行，balance_after 记 0，仅保账本守恒。
-	return ledgerDao.AppendTransaction(escrowUserID, refOrderID, money.DirectionCredit, amountCents, 0, BizTypeGroupBuyPay)
+	return ledgerDao.AppendSystemTransaction(escrowAccount, refOrderID, money.DirectionCredit, amountCents, BizTypeGroupBuyPay)
 }
 
-// settleToSeller 成团结算：把托管款从平台托管账户划给卖家。
+// clearToMerchantEscrow 成团：把该成员订单的托管款从拼团托管转进商户托管，并建清算单。
 //
-// 由 MarkGroupSuccess 在推进订单 WaitGroup→WaitShip 的同一事务内调用——只有这一对流水
-// 落库成功，订单才允许进 WaitShip，从源头堵住"没收钱就发货"。
-//   - 托管 debit：仅追加 debit 流水(groupbuy_settle)
-//   - 卖家 credit：行锁读余额 +amount 加密写回 + 追加 credit 流水(groupbuy_settle)
-//
-// 幂等：(refOrderID, credit, groupbuy_settle) 唯一索引 + 入账前存在性预检，重复成团不重复结算。
-func settleToSeller(tx *gorm.DB, sellerID uint, amountCents int64, refOrderID uint) error {
-	if amountCents <= 0 {
-		return nil
-	}
-	ledgerDao := money.NewLedgerDaoByDB(tx)
-	// 幂等预检：卖家 credit 流水已存在即视为已结算，避免重复加余额。
-	settled, err := ledgerCount(tx, refOrderID, money.DirectionCredit, BizTypeGroupBuySettle)
-	if err != nil {
-		return err
-	}
-	if settled > 0 {
-		return nil
-	}
-
-	// 托管出账：与卖家入账配对，保持 SUM(debit)=SUM(credit)。
-	if err = ledgerDao.AppendTransaction(escrowUserID, refOrderID, money.DirectionDebit, amountCents, 0, BizTypeGroupBuySettle); err != nil {
-		return err
-	}
-
-	userDao := user.NewUserDaoByDB(tx)
-	seller, err := userDao.GetUserByIdForUpdate(sellerID)
-	if err != nil {
-		return err
-	}
-	bal, err := seller.DecryptMoney()
-	if err != nil {
-		return err
-	}
-	after := bal + amountCents
-	seller.Money = strconv.FormatInt(after, 10)
-	if seller.Money, err = seller.EncryptMoney(); err != nil {
-		return err
-	}
-	if err = userDao.UpdateUserMoney(sellerID, seller.Money); err != nil {
-		return err
-	}
-	return ledgerDao.AppendTransaction(sellerID, refOrderID, money.DirectionCredit, amountCents, after, BizTypeGroupBuySettle)
+// 由 MarkGroupSuccess 在推进订单 WaitGroup→WaitShip 的同一事务内调用。卖家此时拿不到钱：
+// 订单 Completed 后由 clearing 结算消费者放款，发货前退款走 merchant_escrow 原路退回，不会扣成卖家负余额。
+// 幂等：清算单 order_id 唯一 + (ref, direction, groupbuy_settle) 唯一索引；成团本身由 status=open 条件更新保证只跑一次。
+func clearToMerchantEscrow(tx *gorm.DB, o *orderpkg.Order) error {
+	return clearing.RecordClearedFromSystemTx(tx, o, escrowAccount, BizTypeGroupBuySettle)
 }
 
-// refundFromEscrow 散团退款：把托管款从平台托管账户原路退回成员钱包。
+// refundFromEscrow 散团 / 关团退款：把托管款从拼团托管账户原路退回成员钱包。
 //
 // 由 ExpireGroup 在关单（WaitGroup→Closed）的同一事务内调用，与库存归还、状态翻转同生共死。
 //   - 托管 debit：仅追加 debit 流水(groupbuy_refund)
@@ -145,7 +107,7 @@ func refundFromEscrow(tx *gorm.DB, memberID uint, amountCents int64, refOrderID 
 		return nil
 	}
 
-	if err = ledgerDao.AppendTransaction(escrowUserID, refOrderID, money.DirectionDebit, amountCents, 0, BizTypeGroupBuyRefund); err != nil {
+	if err = ledgerDao.AppendSystemTransaction(escrowAccount, refOrderID, money.DirectionDebit, amountCents, BizTypeGroupBuyRefund); err != nil {
 		return err
 	}
 
