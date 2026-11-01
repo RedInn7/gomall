@@ -7,9 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
+	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
@@ -66,8 +68,11 @@ func openCouponTestDB(t *testing.T) *gorm.DB {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	previous := dao.SetTestDB(db)
+	previousLogger := util.LogrusObj
+	util.LogrusObj = logrus.New()
 	t.Cleanup(func() {
 		dao.SetTestDB(previous)
+		util.LogrusObj = previousLogger
 		_ = sqlDB.Close()
 	})
 	if err := db.AutoMigrate(&CouponBatch{}, &UserCoupon{}); err != nil {

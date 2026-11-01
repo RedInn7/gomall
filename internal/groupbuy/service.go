@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -26,19 +28,26 @@ import (
 // 拼团默认时效。业务承诺：截单线 24h，运营可在 routes 入口覆盖。
 const DefaultGroupbuyTTL = 24 * time.Hour
 
+// MaxGroupbuyTarget 成团人数上限：人数越多越难凑齐，钱和库存押在托管里的时间越长。
+const MaxGroupbuyTarget = 100
+
 // 业务错误：service 层向 handler / cron 返回。带码 error（e.New）走统一错误出口时
-// 自动透出 81001-81004 业务码与客服话术（pkg/e/msg.go），handler 无需再写映射。
-// 仍是包级 sentinel，errors.Is 判定照常。ErrGroupbuyNotFound 无对应业务码，走 500 兜底。
+// 自动透出 81001-81005 业务码与客服话术（pkg/e/msg.go），handler 无需再写映射。
+// 仍是包级 sentinel，errors.Is 判定照常。关团原因为空是参数错误，透出 400。
 var (
 	ErrGroupbuyFull          = e.New(e.ErrGroupbuyFull)
 	ErrGroupbuyExpired       = e.New(e.ErrGroupbuyExpired)
 	ErrGroupbuyClosed        = e.New(e.ErrGroupbuyClosed)
 	ErrGroupbuyDuplicateJoin = e.New(e.ErrGroupbuyDuplicateJoin)
-	ErrGroupbuyNotFound      = errors.New("拼团不存在")
+	ErrGroupbuyNotFound      = e.New(e.ErrGroupbuyNotFound)
+	ErrGroupbuyCloseReason   = &e.Error{Code: e.InvalidParams, Msg: "关团必须填写原因"}
 
 	// errGroupbuyStockShort 成团时 DB 库存不够每个成员各扣 1 件。
 	errGroupbuyStockShort = errors.New("拼团成团库存不足")
 )
+
+// joinTxHook 仅测试使用：让并发参团的请求都越过预检后再一起进事务，稳定复现 DB 层竞争。
+var joinTxHook func()
 
 var (
 	GroupbuySrvIns  *GroupbuySrv
@@ -83,11 +92,15 @@ type JoinGroupResp struct {
 //  2. tx 内：写 group / 写 leader 订单 (WaitGroup) / 写 member / outbox(groupbuy.created)
 //  3. tx 失败 → 释放预扣
 func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint, targetCount int, ttl time.Duration, bossID, addressID uint, key string) (*CreateGroupResp, error) {
-	if targetCount < 2 {
-		return nil, errors.New("成团人数至少 2")
+	if targetCount < 2 || targetCount > MaxGroupbuyTarget {
+		return nil, fmt.Errorf("成团人数需在 2-%d 之间", MaxGroupbuyTarget)
 	}
 	if ttl <= 0 {
 		ttl = DefaultGroupbuyTTL
+	}
+	// 时效由客户端传入，必须封顶：否则一个长 TTL 的团会把成员的钱和预扣库存无限期押住
+	if ttl > DefaultGroupbuyTTL {
+		return nil, errors.New("拼团时效不能超过 24 小时")
 	}
 
 	// 卖家与拼团价都以商品表为准：boss_id 决定货款打给谁，拼团价由商家在商品上配置，
@@ -99,7 +112,8 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 	}
 
 	// 收货地址必须属于团长本人，不能信客户端传入的 address_id
-	if e := address.NewAddressDao(ctx).EnsureOwned(addressID, leaderID); e != nil {
+	shipTo, e := address.NewAddressDao(ctx).OwnedSnapshot(addressID, leaderID)
+	if e != nil {
 		util.LogrusObj.Errorf("groupbuy create address ownership check failed addr=%d leader=%d err=%v", addressID, leaderID, e)
 		return nil, e
 	}
@@ -130,6 +144,7 @@ func (s *GroupbuySrv) CreateGroup(ctx context.Context, leaderID, productID uint,
 		ProductID: productID,
 		BossID:    bossID, // 卖家以商品表为准，忽略客户端传入的 bossID 参数
 		AddressID: addressID,
+		ShipTo:    shipTo,
 		Num:       1,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		Type:      consts.OrderWaitGroup,
@@ -226,7 +241,8 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 	}
 
 	// 收货地址必须属于参团用户本人，不能信客户端传入的 address_id
-	if err = address.NewAddressDao(ctx).EnsureOwned(addressID, userID); err != nil {
+	shipTo, err := address.NewAddressDao(ctx).OwnedSnapshot(addressID, userID)
+	if err != nil {
 		util.LogrusObj.Errorf("groupbuy join address ownership check failed addr=%d user=%d err=%v", addressID, userID, err)
 		return nil, err
 	}
@@ -240,12 +256,16 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		util.LogrusObj.Errorf("groupbuy join reserve stock user=%d product=%d err=%v", userID, g.ProductID, err)
 		return nil, err
 	}
+	if joinTxHook != nil {
+		joinTxHook()
+	}
 
 	order := &orderpkg.Order{
 		UserID:    userID,
 		ProductID: g.ProductID,
 		BossID:    bossID, // 已由商品表反查覆盖
 		AddressID: addressID,
+		ShipTo:    shipTo,
 		Num:       1,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		Type:      consts.OrderWaitGroup,
@@ -306,6 +326,12 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		if relErr := cache.ReleaseReservation(ctx, g.ProductID, 1); relErr != nil {
 			util.LogrusObj.Errorf("groupbuy release on join failure group=%d err=%v", groupID, relErr)
 		}
+		// 并发重复参团：两次请求都过了上面的 HasUserJoined 预检，后到的那次撞 uk_gb_group_user，
+		// 或者先到的那次正好拿走最后一个名额，后到的那次在 JoinGroupAtomic 影响 0 行报"满员"。
+		// 事务已整体回滚（名额、扣款都没生效），先重查一次成员表，用户已在团里就统一返回 81003。
+		if joined, e := gbDao.HasUserJoined(groupID, userID); e == nil && joined {
+			return nil, ErrGroupbuyDuplicateJoin
+		}
 		// JoinGroupAtomic 抛出 ErrGroupbuyFull 时，需要再读一次团状态决定真正业务码
 		if atomicErr != nil && errors.Is(atomicErr, ErrGroupbuyFull) {
 			latest, _ := gbDao.GetGroupByID(groupID)
@@ -330,8 +356,9 @@ func (s *GroupbuySrv) JoinGroup(ctx context.Context, userID, groupID, bossID, ad
 		if mkErr := s.MarkGroupSuccess(ctx, groupID); mkErr != nil {
 			// 成团失败只记录日志，cron 仍会兜底
 			util.LogrusObj.Errorf("mark group success group=%d err=%v", groupID, mkErr)
-		} else {
-			isSuccess = true
+		} else if latest, e := gbDao.GetGroupByID(groupID); e == nil && latest != nil {
+			// MarkGroupSuccess 没抢到状态也返回 nil（可能已被 cron 成团，也可能刚被人工关团），以落库状态为准
+			isSuccess = latest.Status == GroupbuyStatusSuccess
 		}
 	}
 
@@ -380,9 +407,9 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			return e
 		}
 
-		// 成员订单 WaitGroup → WaitShip，并在同事务内把该成员的托管款结算给卖家。
-		// 关键：先结算资金、再翻状态。只有钱真的从托管账户划到卖家，订单才允许进 WaitShip，
-		// 从源头堵住"没收钱就发货"。任一失败回滚整个成团操作，cron 重新拉起。
+		// 成员订单 WaitGroup → WaitShip，并在同事务内把该成员的托管款转进商户托管、建清算单。
+		// 关键：先清算资金、再翻状态。只有钱确实进了商户托管，订单才允许进 WaitShip，
+		// 从源头堵住"没收钱就发货"；卖家要等订单完成才拿到钱。任一失败回滚整个成团操作，cron 重新拉起。
 		orderDao := orderpkg.NewOrderDaoByDB(tx)
 		productDao := product.NewProductDaoWithDB(tx)
 		for _, m := range members {
@@ -401,8 +428,8 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 			if !ok {
 				return errGroupbuyStockShort
 			}
-			// 结算托管款给卖家（o.Money 即加入时收的拼团价），(ref, credit, groupbuy_settle) 幂等。
-			if e = settleToSeller(tx, o.BossID, o.Money, o.ID); e != nil {
+			// 托管款转商户托管 + 建清算单（o.Money 即加入时收的拼团价），履约完成后才结算给卖家。
+			if e = clearToMerchantEscrow(tx, o); e != nil {
 				return e
 			}
 			res := tx.Model(&orderpkg.Order{}).
@@ -450,32 +477,64 @@ func (s *GroupbuySrv) MarkGroupSuccess(ctx context.Context, groupID uint) error 
 	return nil
 }
 
-// ExpireGroup 24h 散团（cron 或人工触发）：
-//
-//	tx 内：MarkGroupExpired + 成员订单 WaitGroup → Closed + member.status=refunded
-//	+ outbox(groupbuy.expired)；tx 外：库存 reserved→available
-//
-// 散团是协同式 Saga 的一个标准应用，下游钱包按 outbox 退款。
+// ExpireGroup 24h 散团（cron 触发）。已成团 / 已散团 / 已关闭的团直接 no-op。
 func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
-	gbDao := NewGroupbuyDao(ctx)
-	g, err := gbDao.GetGroupByID(groupID)
+	_, err := s.dissolveGroup(ctx, groupID, GroupbuyStatusExpired, 0, "", dissolveReasonTimeout)
+	return err
+}
+
+// CloseGroup 运营 / 风控手动关团：只能关仍在进行中的团，关团即原路退款、归还库存，并记下操作人和原因。
+// 与成团 / 超时散团靠 status=open 条件更新互斥；没抢到（团已成团或已散）返回 81004。
+func (s *GroupbuySrv) CloseGroup(ctx context.Context, groupID, operatorID uint, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ErrGroupbuyCloseReason
+	}
+	if utf8.RuneCountInString(reason) > 255 {
+		reason = string([]rune(reason)[:255])
+	}
+	switched, err := s.dissolveGroup(ctx, groupID, GroupbuyStatusClosed, operatorID, reason, dissolveReasonManual)
 	if err != nil {
 		return err
 	}
+	if !switched {
+		return ErrGroupbuyClosed
+	}
+	return nil
+}
+
+// groupbuy.expired 事件的 reason：超时散团 / 人工关团。两者资金动作一样，下游按 reason 区分话术。
+const (
+	dissolveReasonTimeout = "timeout"
+	dissolveReasonManual  = "manual"
+)
+
+// dissolveGroup 散团 / 关团的公共流程：
+//
+//	tx 内：open → toStatus + 成员订单 WaitGroup → Closed + 托管款原路退回 + member.status=refunded
+//	+ outbox(groupbuy.expired)；tx 外：库存 reserved→available
+//
+// 协同式 Saga：资金在事务内同步退回，groupbuy.settle 消费者按事件幂等补退兜底。返回是否由本次调用切了状态。
+func (s *GroupbuySrv) dissolveGroup(ctx context.Context, groupID, toStatus, operatorID uint, closeReason, eventReason string) (bool, error) {
+	gbDao := NewGroupbuyDao(ctx)
+	g, err := gbDao.GetGroupByID(groupID)
+	if err != nil {
+		return false, err
+	}
 	if g == nil {
-		return ErrGroupbuyNotFound
+		return false, ErrGroupbuyNotFound
 	}
 	if g.Status != GroupbuyStatusOpen {
-		return nil // 已成团 / 已散团 / 已关闭 —— no-op
+		return false, nil // 已成团 / 已散团 / 已关闭 —— no-op
 	}
 
 	var (
-		switched     bool
-		members      []*GroupbuyMember
-		closedCount  int // 本次 UPDATE 实际关掉的订单数
+		switched    bool
+		members     []*GroupbuyMember
+		closedCount int // 本次 UPDATE 实际关掉的订单数
 	)
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
-		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupExpired(groupID)
+		ok, e := NewGroupbuyDaoByDB(tx).MarkGroupDissolved(groupID, toStatus, operatorID, closeReason)
 		if e != nil {
 			return e
 		}
@@ -528,16 +587,16 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 			events.GroupbuyExpired{
 				GroupID:   groupID,
 				ProductID: g.ProductID,
-				Reason:    "timeout",
+				Reason:    eventReason,
 				OrderIDs:  orderIDs,
 			},
 		)
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !switched {
-		return nil
+		return false, nil
 	}
 
 	// Saga：仅归还本次 UPDATE 实际关闭的订单所持有的库存预扣。
@@ -548,7 +607,7 @@ func (s *GroupbuySrv) ExpireGroup(ctx context.Context, groupID uint) error {
 				groupID, g.ProductID, relErr)
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // RunCompleteFullGroups cron 补成团：满员但仍 open 的团（加入时 MarkGroupSuccess 失败留下的）逐个重试，

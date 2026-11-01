@@ -50,6 +50,8 @@ const (
 	AccountCodeMerchantEscrow   = "merchant_escrow"
 	AccountCodeRedPacketEscrow  = "redpacket_escrow"
 	AccountCodeLegacySystem     = "legacy_system"
+	// groupbuy_escrow 拼团在途款：参团已扣买家钱包、尚未成团的钱。成团转入 merchant_escrow，散团原路退回。
+	AccountCodeGroupbuyEscrow = "groupbuy_escrow"
 )
 
 // StripeClearingUserID 保留兼容旧引用，语义同 ExternalClearingUserID。

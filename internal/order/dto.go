@@ -29,6 +29,8 @@ type OrderCreateReq struct {
 	UserID    uint `form:"user_id" json:"user_id"`
 	OrderNum  uint `form:"order_num" json:"order_num"`
 	Type      int  `form:"type" json:"type"`
+	// UserCouponID 要核销的优惠券（我的优惠券里的 id），0 = 不用券。满减之后再用券。
+	UserCouponID uint `form:"user_coupon_id" json:"user_coupon_id"`
 }
 
 type OrderListReq struct {
@@ -58,9 +60,13 @@ type OrderListRespItem struct {
 	ProductID     uint      `json:"product_id"`
 	BossID        uint      `json:"boss_id"`
 	Num           uint      `json:"num"`
+	AddressName   string    `json:"address_name"`
 	AddressPhone  string    `json:"address_phone"`
 	Address       string    `json:"address"`
 	Type          uint      `json:"type"`
+	TrackingNo    string    `json:"tracking_no"`
+	Carrier       string    `json:"carrier"`
+	RefundReason  string    `json:"refund_reason"`
 	Name          string    `json:"name"`
 	ImgPath       string    `json:"img_path"`
 	DiscountPrice string    `json:"discount_price"`

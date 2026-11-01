@@ -80,16 +80,18 @@ func (d *OrderDao) CreateOrder(order *Order) error {
 	return d.DB.Create(&order).Error
 }
 
-// UpdatePromoFields 满减预算耗尽降级时，把订单上的满减字段改回无折扣。
+// UpdateDiscountFields 把下单事务里最终确认的满减 / 券结果写回订单。
 // 仅在下单事务里使用：调用方已持有 tx；不要在事务外调用，否则违反 FinalCents 与
-// PromoDiscountCents 必须同进同退的约束。
-func (d *OrderDao) UpdatePromoFields(orderID, ruleID uint, discountCents, finalCents int64) error {
+// 两项减免必须同进同退的约束。
+func (d *OrderDao) UpdateDiscountFields(o *Order) error {
 	return d.DB.Model(&Order{}).
-		Where("id = ?", orderID).
+		Where("id = ?", o.ID).
 		Updates(map[string]interface{}{
-			"promo_rule_id":        ruleID,
-			"promo_discount_cents": discountCents,
-			"final_cents":          finalCents,
+			"promo_rule_id":         o.PromoRuleID,
+			"promo_discount_cents":  o.PromoDiscountCents,
+			"user_coupon_id":        o.UserCouponID,
+			"coupon_discount_cents": o.CouponDiscountCents,
+			"final_cents":           o.FinalCents,
 		}).Error
 }
 
@@ -175,9 +177,9 @@ func (d *OrderDao) ListOrderByCondition(uId uint, req *OrderListReq) (r *OrderLi
 	}
 	baseQuery = baseQuery.Order("o.id desc").Limit(req.PageSize)
 
+	// 收货地址读订单上的快照，不 JOIN 实时地址表：改 / 删地址不能改写历史订单。
 	err = baseQuery.Joins("left join product as p on p.id=o.product_id").
-		Joins("left join address as a on a.id=o.address_id").
-		Select("o.*,a.phone address_phone,a.address address,p.discount_price discount_price,p.img_path img_path").
+		Select("o.*,o.address_detail address,p.discount_price discount_price,p.img_path img_path").
 		Find(&r.List).Error
 
 	if err != nil {
@@ -216,7 +218,6 @@ func (d *OrderDao) GetOrderByIdOnly(id uint) (r *Order, err error) {
 func (d *OrderDao) ShowOrderById(id, uId uint) (r *OrderListRespItem, err error) {
 	err = d.DB.Model(&Order{}).
 		Joins("AS o LEFT JOIN product AS p ON p.id = o.product_id").
-		Joins("LEFT JOIN address AS a ON a.id = o.address_id").
 		Where("o.id = ? AND o.user_id = ?", id, uId).
 		Select("o.id AS id," +
 			"o.order_num AS order_num," +
@@ -230,9 +231,12 @@ func (d *OrderDao) ShowOrderById(id, uId uint) (r *OrderListRespItem, err error)
 			"p.name AS name," +
 			"p.discount_price AS discount_price," +
 			"p.img_path AS img_path," +
-			"a.name AS address_name," +
-			"a.phone AS address_phone," +
-			"a.address AS address").
+			"o.address_name AS address_name," +
+			"o.address_phone AS address_phone," +
+			"o.address_detail AS address," +
+			"o.tracking_no AS tracking_no," +
+			"o.carrier AS carrier," +
+			"o.refund_reason AS refund_reason").
 		Find(&r).Error
 
 	return
@@ -393,11 +397,16 @@ func whereBoss(q *gorm.DB, bossID uint) *gorm.DB {
 // 条件 UPDATE 保证幂等：仅当订单仍处于 WaitShip 时才会写入；
 // 已发货 / 已退款的订单 RowsAffected=0，上层据此判定非法转换。
 // bossID 见 whereBoss：商家只能发自己的货。
-// 物流单号本期不持久化（model 未引入字段），仅在事件层带出。
-func (d *OrderDao) ShipOrder(orderNum uint64, bossID uint) (bool, error) {
+// 物流单号、承运商和发货时间同一条 UPDATE 落库；shipped_at 是自动确认收货的计时起点。
+func (d *OrderDao) ShipOrder(orderNum uint64, bossID uint, trackingNo, carrier string) (bool, error) {
 	res := whereBoss(d.DB.Model(&Order{}), bossID).
 		Where("order_num=? AND type=?", orderNum, consts.OrderWaitShip).
-		Update("type", consts.OrderWaitReceive)
+		Updates(map[string]interface{}{
+			"type":        consts.OrderWaitReceive,
+			"tracking_no": trackingNo,
+			"carrier":     carrier,
+			"shipped_at":  time.Now(),
+		})
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -409,10 +418,11 @@ func (d *OrderDao) ShipOrder(orderNum uint64, bossID uint) (bool, error) {
 
 // ConfirmReceive 确认收货：WaitReceive -> Completed。
 // 用户主动确认与 7d 兜底 cron 共用同一条 SQL，依靠 WHERE 兜底幂等。
+// completed_at 是售后时效的计时起点。
 func (d *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
 	res := d.DB.Model(&Order{}).
 		Where("order_num=? AND type=?", orderNum, consts.OrderWaitReceive).
-		Update("type", consts.OrderCompleted)
+		Updates(map[string]interface{}{"type": consts.OrderCompleted, "completed_at": time.Now()})
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -422,12 +432,18 @@ func (d *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
-// RequestRefund 申请退款：from 必须落在 allowedFrom 集合内（WaitShip / WaitReceive / Completed）。
-// 通过 WHERE type IN (...) 一次拦截非法 from，避免读后写竞态。
-func (d *OrderDao) RequestRefund(orderNum uint64, fromType uint) (bool, error) {
+// RequestRefund 申请退款：fromType -> Refunding，同时记下来源状态、原因，申请次数 +1。
+// 来源是否合法、次数是否超限由 service 在 FOR UPDATE 锁住订单后判断；
+// 这里的 WHERE type=? 和 refund_count<? 是兜底，锁外调用也不会越过上限。
+func (d *OrderDao) RequestRefund(orderNum uint64, fromType uint, reason string, maxCount int) (bool, error) {
 	res := d.DB.Model(&Order{}).
-		Where("order_num=? AND type=?", orderNum, fromType).
-		Updates(map[string]interface{}{"type": consts.OrderRefunding, "refund_from_type": fromType})
+		Where("order_num=? AND type=? AND refund_count<?", orderNum, fromType, maxCount).
+		Updates(map[string]interface{}{
+			"type":             consts.OrderRefunding,
+			"refund_from_type": fromType,
+			"refund_reason":    reason,
+			"refund_count":     gorm.Expr("refund_count + 1"),
+		})
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -467,9 +483,10 @@ func (d *OrderDao) RejectRefund(orderNum uint64, restoreType uint, bossID uint) 
 	return res.RowsAffected > 0, nil
 }
 
-// GetTimeoutWaitReceive 拉取已发货超过 days 天仍未确认收货的订单，由 cron 兜底确认收货。
-// 仅扫 WaitReceive 状态，避免误碰退款流程。
-func (d *OrderDao) GetTimeoutWaitReceive(days int, limit int) (orders []*Order, err error) {
+// GetTimeoutWaitReceive 拉取发货超过 days 天仍未确认收货的订单（id > afterID，按 id 升序），由 cron 兜底确认收货。
+// 仅扫 WaitReceive 状态，避免误碰退款流程。计时看 shipped_at：退款申请 / 驳回会刷新 updated_at，
+// 用它计时买家就能靠反复申请退款无限推迟放款。afterID 是游标，调用方翻页扫到空为止。
+func (d *OrderDao) GetTimeoutWaitReceive(days int, afterID uint, limit int) (orders []*Order, err error) {
 	if days <= 0 {
 		days = 7
 	}
@@ -478,8 +495,24 @@ func (d *OrderDao) GetTimeoutWaitReceive(days int, limit int) (orders []*Order, 
 	}
 	expireTime := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
 	err = d.DB.Model(&Order{}).
-		Where("type=? AND updated_at <=?", consts.OrderWaitReceive, expireTime).
+		Where("type=? AND shipped_at <=? AND id>?", consts.OrderWaitReceive, expireTime, afterID).
+		Order("id").
 		Limit(limit).
 		Find(&orders).Error
 	return
+}
+
+// MarkRestocked 条件抢占"回补库存"：只有 Refunded 且还没回补过的订单能翻成功，返回是否抢到。
+// fromWaitShip=true 给结算用（未发货退款，结算时回补）；false 给商家确认退货入库用（已发货退款）。
+// 两条路互斥，同一订单最多回补一次。bossID 见 whereBoss。
+func (d *OrderDao) MarkRestocked(orderID, bossID uint, fromWaitShip bool) (bool, error) {
+	q := whereBoss(d.DB.Model(&Order{}), bossID).
+		Where("id=? AND type=? AND restocked_at IS NULL", orderID, consts.OrderRefunded)
+	if fromWaitShip {
+		q = q.Where("refund_from_type=?", consts.OrderWaitShip)
+	} else {
+		q = q.Where("refund_from_type<>?", consts.OrderWaitShip)
+	}
+	res := q.UpdateColumn("restocked_at", time.Now())
+	return res.RowsAffected > 0, res.Error
 }
