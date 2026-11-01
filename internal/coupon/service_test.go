@@ -56,6 +56,59 @@ func TestConcurrentClaimNeverExceedsTotal(t *testing.T) {
 	}
 }
 
+// 对账把在途领取算重、Redis 比 DB 剩余多 3：30 人并发抢 10 张，被 DB 守卫拒掉的那几次把 Redis 清零，
+// 而不是 INCR 归还让库存一直偏多；DB 发满后领取在进 Redis 前就被拒。
+func TestOverRaisedStockCollapsesToZeroOnDBSoldOut(t *testing.T) {
+	db := openCouponTestDB(t)
+	mr := openCouponTestRedis(t)
+	b := seedBatch(t, db, &CouponBatch{Total: 10, PerUser: 1})
+	if err := cache.InitCouponStock(context.Background(), b.ID, 13, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	var ok, soldOut int64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for uid := uint(1); uid <= 30; uid++ {
+		wg.Add(1)
+		go func(uid uint) {
+			defer wg.Done()
+			<-start
+			_, err := GetCouponSrv().Claim(asUser(uid), "", b.ID)
+			switch {
+			case err == nil:
+				atomic.AddInt64(&ok, 1)
+			case errors.Is(err, cache.ErrCouponSoldOut):
+				atomic.AddInt64(&soldOut, 1)
+			default:
+				t.Errorf("user %d: %v", uid, err)
+			}
+		}(uid)
+	}
+	close(start)
+	wg.Wait()
+
+	if ok != 10 || soldOut != 20 {
+		t.Fatalf("ok=%d soldOut=%d, want 10/20", ok, soldOut)
+	}
+	assertIssued(t, db, b.ID, 10)
+	if v, _ := mr.Get(cache.CouponStockKey(b.ID)); v != "0" {
+		t.Fatalf("redis stock = %s, want 0 after DB sold out", v)
+	}
+	if ttl := mr.TTL(cache.CouponStockKey(b.ID)); ttl <= 0 {
+		t.Fatalf("stock key lost its TTL: %v", ttl)
+	}
+
+	// DB 已发满时短路：Redis 即便还有虚库存也不进 Lua。
+	mr.Set(cache.CouponStockKey(b.ID), "5")
+	if _, err := GetCouponSrv().Claim(asUser(99), "", b.ID); !errors.Is(err, cache.ErrCouponSoldOut) {
+		t.Fatalf("claim after DB sold out: %v", err)
+	}
+	if v, _ := mr.Get(cache.CouponStockKey(b.ID)); v != "5" {
+		t.Fatalf("short-circuit must not touch redis, stock = %s", v)
+	}
+}
+
 // Redis 丢了库存 key：领券按 DB 剩余量重新装载，而不是对所有人报"已抢光"。
 func TestClaimReloadsMissingStockKeyFromDB(t *testing.T) {
 	db := openCouponTestDB(t)
