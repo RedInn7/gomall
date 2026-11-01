@@ -1,18 +1,5 @@
 # 14 接入层护栏（上）：请求怎样安全进入业务
 
-> 这一讲只回答一个问题：请求到达 handler 以前，系统怎样限制流量、确认身份、检查权限，并避免把不该缓存的内容交给浏览器。
-
-## 本讲目标
-
-讲完后，学生应该能：
-
-- 用洋葱模型解释 `c.Next()`、`c.Abort()` 和响应后处理；
-- 根据业务范围选择全局、路由组或单路由挂载；
-- 说清 TokenBucket、Auth、RBAC 和 HTTP cache 各挡什么；
-- 为一个新接口排出基本中间件顺序，并指出项目的 HTTP 200 业务失败缺口。
-
----
-
 ## 一、先从一次越权请求看问题
 
 假设商家修改商品的 handler 只做参数绑定和数据库更新。请求体里若带 `boss_id`，handler 能否直接相信？不能。攻击者可以换一个 id；即使 token 合法，也不代表他能修改别人的商品。
@@ -183,7 +170,7 @@ c.Next()
 
 角色查询带 30 秒进程内缓存，查询函数未注入或数据库失败时同样拒绝。`middleware` 包通过 `SetRoleLookup` 和 `SetTokenVersionLookup` 接收组合根注入的函数，没有反向 import `internal/user`；否则领域路由依赖 middleware，而 middleware 又依赖领域包，Go 会形成 import 环。
 
-商家修改商品的完整防线因此有两面：路由组的 `RequireRole` 挡住普通用户，DAO 的资源归属条件挡住商家互改。只做任何一面都不够。
+商家修改商品的完整防线因此有两面：路由组的 `RequireRole` 挡住普通用户，DAO 的资源归属条件挡住商家互改。只做其中一面不够。
 
 ---
 
@@ -213,7 +200,7 @@ if c.GetHeader("If-None-Match") == etag {
 
 客户端再次携带相同 `If-None-Match` 时会收到 304，不再下载 body；可是 `c.Next()` 已经跑完，所以数据库和序列化开销仍在。若目标是减少回源计算，还需 CDN、反向代理缓存或服务端结果缓存。
 
-### 当前项目必须明说的缺口
+### 当前项目的缺口
 
 `HTTPCache` 只看 HTTP 状态是否为 200。统一错误出口 `response.Fail` 也始终返回 HTTP 200，把业务错误放在 JSON 的 `status` 字段里。因此，一个“HTTP 200 + 业务失败”的 GET 响应也可能收到 ETag 和公开缓存头。
 
@@ -223,7 +210,7 @@ if c.GetHeader("If-None-Match") == etag {
 
 ## 七、接口评审
 
-给出一个“商家修改商品价格”的新接口，学生现场决定：
+新增一个“商家修改商品价格”的接口，链路应是：
 
 ```text
 TokenBucket → Auth → RequireRole(merchant, admin) → Handler

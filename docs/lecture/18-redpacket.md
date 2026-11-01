@@ -1,26 +1,14 @@
 # 18 红包：Redis 分发与 DB 记账的一致性
 
-> 抢红包同时是高并发分发和小额资金转移。Redis 决定谁能拿到哪一份，DB 决定钱到底有没有动。这一讲沿 `internal/redpacket` 和 `repository/cache/redpacket.go` 讲清楚：两边可能在哪里对不上，代码又是怎样让它们收敛到同一个结果的。
-
-## 本讲目标
-
-讲完后，学生应该能：
-
-- 说清二倍均值预拆和 Lua `LPOP` 抢包的分工，以及为什么热路径上不算金额；
-- 画出发包、领包、退款三段经过 `redpacket_escrow` 托管账户的复式分录，解释 `ref` 和 `biz_type` 怎样设计才幂等；
-- 解释领取事务和退款事务靠哪一把行锁串行，为什么 `FOR UPDATE` 必须是退款事务的第一条语句；
-- 说清领取事务失败后什么时候把份额还给 Redis、什么时候不能还，以及回补和对账补领怎样互斥；
-- 解释 claimed 对账任务怎样补领孤儿领取、怎样识别份额池丢失并提前退款。
-
----
+> 抢红包同时是高并发分发和小额资金转移。Redis 决定谁能拿到哪一份，DB 决定钱到底有没有动。两边可能在哪里对不上、代码又怎样让它们收敛到同一个结果，都在 `internal/redpacket` 和 `repository/cache/redpacket.go` 里。
 
 ## 一、先看四张客诉单
 
-**本节判断：红包的资金以 DB 为准，Redis 只负责发份额；所有事故都出在这两边的交界处。**
+**红包的资金以 DB 为准，Redis 只负责发份额；所有事故都出在这两边的交界处。**
 
 上线后客服可能收到四类工单：
 
-| 工单 | 用户看到的现象 | 本讲对应位置 |
+| 工单 | 用户看到的现象 | 对应章节 |
 |---|---|---|
 | A | 点了“抢”，接口报错；再点一次，这份还能不能抢 | 4.1、4.4 |
 | B | 最后一份被抢走的同一秒红包过期，发包人退款和领取人金额加起来会不会超过总额 | 4.2、4.3 |
@@ -76,7 +64,7 @@ Total = SUM(red_packet_claim.amount) + 退回发包人的金额
 
 ### 1.1 接入层：护栏和口令
 
-接入层的护栏一句话带过：发包挂 `Idempotency`，抢包挂按用户的 `SlidingWindow`（3 次/秒）和 `Idempotency`（`internal/redpacket/routes.go:16-24`），原理见第 15 讲。同一文件还挂了“我收到的红包” `GET redpacket/received` 和管理端 `POST redpacket/reconcile`（`routes.go:27-29`）。前者按领取记录 id 倒序游标分页，再用 `ListByIDs` 一次批量取回发包人和祝福语（`service.go:346-380`），`last_id` 是领取记录 id。
+接入层的护栏：发包挂 `Idempotency`，抢包挂按用户的 `SlidingWindow`（3 次/秒）和 `Idempotency`（`internal/redpacket/routes.go:16-24`），原理见第 15 讲。同一文件还挂了“我收到的红包” `GET redpacket/received` 和管理端 `POST redpacket/reconcile`（`routes.go:27-29`）。前者按领取记录 id 倒序游标分页，再用 `ListByIDs` 一次批量取回发包人和祝福语（`service.go:346-380`），`last_id` 是领取记录 id。
 
 红包 id 是自增主键，可以扫号。所以发包时生成一个 16 位十六进制口令（`internal/redpacket/service.go:152-158`），只在发包人的响应里返回（`toRedPacketResp(rp, true)`），由发包人随分享链接发出去。领取和查看明细都要比对口令（`service.go:161-166`）：
 
@@ -100,7 +88,7 @@ func codeMatches(rp *RedPacket, code string, legacyOK bool) bool {
 
 ## 二、分发模型：发包时拆好，抢包时只 LPOP
 
-**本节判断：金额在发包时一次算完，抢包的热路径只做一次原子出队，不做任何计算和加锁。**
+**金额在发包时一次算完，抢包的热路径只做一次原子出队，不做任何计算和加锁。**
 
 ### 2.1 二倍均值预拆
 
@@ -139,7 +127,7 @@ func SplitRedPacket(total int64, count int) ([]int64, error) {
 }
 ```
 
-三条规则要讲清楚：
+三条规则：
 
 1. **每份至少 1 分。** 入口先校验 `total >= count`（`internal/redpacket/service.go:68-70`），每轮的上界不超过 `remain - 后面份数`。
 2. **总和严格等于 total。** 前 `count-1` 份随机，最后一份直接取余数，不存在舍入误差。
@@ -180,7 +168,7 @@ return tonumber(amt)
 
 ## 三、资金模型：钱先进托管，再分给领取人
 
-**本节判断：发包时钱不直接进任何领取人的钱包，而是先进 `redpacket_escrow` 托管账户；三段资金流各自是一组复式分录，各自幂等。**
+**发包时钱不直接进任何领取人的钱包，而是先进 `redpacket_escrow` 托管账户；三段资金流各自是一组复式分录，各自幂等。**
 
 ### 3.1 三段分录
 
@@ -249,7 +237,7 @@ func settleSendTx(tx *gorm.DB, rpID, senderID uint, total int64) (wrote bool, er
 
 ## 四、一致性边界：Redis 先扣，DB 说了算
 
-**本节判断：Redis 出队成功只代表“拿到了一份的资格”，钱是否到账由领取事务决定；失败后先问 DB，再决定要不要把份额还回去。**
+**Redis 出队成功只代表“拿到了一份的资格”，钱是否到账由领取事务决定；失败后先问 DB，再决定要不要把份额还回去。**
 
 ### 4.1 领取主链路
 
@@ -463,7 +451,7 @@ return 1
 
 ## 五、兜底：对账、补偿和过期回收
 
-**本节判断：退款金额永远按 DB 算，不读 Redis；孤儿领取先补给领取人，剩下的才退给发包人。**
+**退款金额永远按 DB 算，不读 Redis；孤儿领取先补给领取人，剩下的才退给发包人。**
 
 ### 5.1 状态机
 
@@ -653,7 +641,7 @@ for _, rp := range rows {
 
 ## 六、故障演练 / 课堂演示
 
-**本节判断：每个演练都只看一件事——DB 里的守恒式和托管余额是否还成立。**
+**每个演练都只看一件事——DB 里的守恒式和托管余额是否还成立。**
 
 ### 演示 1：Redis 清空后照样按 DB 退款
 
