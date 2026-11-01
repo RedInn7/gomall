@@ -88,8 +88,8 @@ func InitCron() *cron.Cron {
 		panic(fmt.Sprintf("RedPacket Cron 初始化失败: %v", err))
 	}
 
-	// 自动确认收货兜底：每 6 小时扫一次，把 WaitReceive 超过 7 天的订单推进到 Completed
-	_, err = c.AddFunc("0 0 */6 * * *", func() {
+	// 自动确认收货兜底：每小时扫一次（翻页扫到空），把发货超过 7 天的 WaitReceive 订单推进到 Completed
+	_, err = c.AddFunc("0 0 * * * *", func() {
 		defer func() {
 			if r := recover(); r != nil {
 				util.LogrusObj.Errorf("AutoConfirmReceive Cron Panic: %v", r)

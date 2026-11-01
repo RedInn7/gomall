@@ -119,6 +119,7 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 		Money:     unitCents,
 		Type:      consts.OrderWaitPay,
 		AddressID: task.AddressID,
+		ShipTo:    task.ShipTo,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		Ticket:    &task.Ticket,
 		SeckillID: task.SeckillID,

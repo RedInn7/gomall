@@ -45,6 +45,8 @@ type AsyncOrderTask struct {
 	ProductID uint   `json:"product_id"`
 	Num       uint   `json:"num"`
 	AddressID uint   `json:"address_id"`
+	// ShipTo 入队时的收货地址快照
+	ShipTo address.Snapshot `json:"ship_to"`
 	// UserCouponID 要核销的券；consumer 落库时在同一事务里核销，券已不可用则下单失败。
 	UserCouponID uint `json:"user_coupon_id,omitempty"`
 	// SeckillID 非 0 表示秒杀单：单价 / 卖家取活动表，建单同事务扣活动 sold。
@@ -192,7 +194,9 @@ func (s *OrderSrv) enqueue(ctx context.Context, req *OrderCreateReq, seckillID u
 	}
 
 	// 地址归属在入队前同步校验：失败快速拒绝，避免白白预扣库存 / 投递无效任务。
-	if err = address.NewAddressDao(ctx).EnsureOwned(req.AddressID, u.Id); err != nil {
+	// 快照在入队时取，随任务带到消费侧：排队期间改地址不影响这张单。
+	shipTo, err := address.NewAddressDao(ctx).OwnedSnapshot(req.AddressID, u.Id)
+	if err != nil {
 		util.LogrusObj.Errorf("async enqueue address ownership check failed addr=%d user=%d err=%v", req.AddressID, u.Id, err)
 		return OrderEnqueueResp{}, err
 	}
@@ -229,6 +233,7 @@ func (s *OrderSrv) enqueue(ctx context.Context, req *OrderCreateReq, seckillID u
 		ProductID: req.ProductID,
 		Num:       req.Num,
 		AddressID: req.AddressID,
+		ShipTo:    shipTo,
 		SeckillID: seckillID,
 
 		UserCouponID: req.UserCouponID,
