@@ -21,6 +21,10 @@
 | 13 | 预售定金 | [13-preorder.md](./13-preorder.md) | 约 40 min |
 | 14 | 接入层护栏（上） | [14-middleware.md](./14-middleware.md) | 约 40 min |
 | 15 | 接入层护栏（下） | [15-middleware-transaction.md](./15-middleware-transaction.md) | 约 40 min |
+| 16 | 营销补贴：满减预算与优惠券 | [16-promo-coupon.md](./16-promo-coupon.md) | 约 45 min |
+| 17 | 拼团：状态机、托管资金与散团 Saga | [17-groupbuy.md](./17-groupbuy.md) | 约 45 min |
+| 18 | 红包：Redis 分发与 DB 记账的一致性 | [18-redpacket.md](./18-redpacket.md) | 约 45 min |
+| 19 | 履约与售后 | [19-fulfillment-aftersales.md](./19-fulfillment-aftersales.md) | 约 45 min |
 
 ## 写作顺序
 
