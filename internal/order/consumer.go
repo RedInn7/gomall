@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -23,8 +24,17 @@ type asyncOrderWriter func(ctx context.Context, task AsyncOrderTask, order *Orde
 
 var defaultAsyncOrderWriter asyncOrderWriter = persistAsyncOrder
 
-// SetAsyncOrderWriter 注入自定义写订单实现（仅测试用）
-func SetAsyncOrderWriter(w asyncOrderWriter) { defaultAsyncOrderWriter = w }
+// SetAsyncOrderWriter 注入自定义写订单实现（仅测试用），传 nil 恢复默认实现。
+// 优惠方案是包内类型，包外替身拿不到，只看 task / order。
+func SetAsyncOrderWriter(w func(ctx context.Context, task AsyncOrderTask, order *Order) error) {
+	if w == nil {
+		defaultAsyncOrderWriter = persistAsyncOrder
+		return
+	}
+	defaultAsyncOrderWriter = func(ctx context.Context, task AsyncOrderTask, order *Order, _ *orderQuote) error {
+		return w(ctx, task, order)
+	}
+}
 
 // persistAsyncOrder 与同步下单同一套事务：建单 + 扣满减预算 + 核销券 + outbox，
 // 同一件商品走排队下单和直接下单拿到的优惠一致。
@@ -32,6 +42,14 @@ func persistAsyncOrder(ctx context.Context, task AsyncOrderTask, order *Order, q
 	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
 			return e
+		}
+		if order.SeckillID != 0 {
+			if seckillBinder == nil {
+				return errSeckillNotRegistered
+			}
+			if e := seckillBinder.BindTx(tx, order); e != nil {
+				return e
+			}
 		}
 		if e := GetOrderSrv().applyDiscountsInTx(tx, order, quote); e != nil {
 			return e
@@ -70,29 +88,26 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 		return err
 	}
 	if existing != nil {
-		putAsyncTicketOK(ctx, task.Ticket, existing)
+		finishAsyncTask(ctx, task, existing)
 		return nil
 	}
 
-	// 单价与卖家都以商品表为准，不信投递消息里的金额 / boss——异步链路同样不能把定价权与
-	// 收款方交给客户端。反查失败、要用的券已不可用，都属于不可落单的硬错误：释放预扣库存、
-	// 写失败 ticket，与下方写库失败同路处理。
-	unitCents, categoryID, bossID, settleErr := resolveProductPricing(ctx, task.ProductID)
-	var quote *orderQuote
-	if settleErr == nil {
-		quote, settleErr = GetOrderSrv().quoteOrder(ctx, task.UserID, task.ProductID, categoryID,
-			unitCents, int64(task.Num), task.UserCouponID)
+	// 排队太久：ticket 快过期，对账随后会按「没人处理」回收在途标记；这里先按失败收尾，两边不会都处理同一张单。
+	if at, err := snowflake.TimeOf(task.Ticket); err == nil && time.Since(at) > AsyncTaskMaxAge {
+		staleErr := errors.New("排队超时，请重新下单")
+		util.LogrusObj.Errorf("async order task stale ticket=%s age=%v", task.Ticket, time.Since(at))
+		abortAsyncTask(ctx, task, staleErr)
+		return staleErr
 	}
+
+	// 单价与卖家都以商品表（秒杀单以活动表）为准，不信投递消息里的金额 / boss——异步链路同样
+	// 不能把定价权与收款方交给客户端。反查失败、要用的券已不可用，都属于不可落单的硬错误：
+	// 释放预扣库存、写失败 ticket，与下方写库失败同路处理。
+	unitCents, bossID, quote, settleErr := resolveTaskSettlement(ctx, task)
 	if settleErr != nil {
 		util.LogrusObj.Errorf("async order resolve settlement failed ticket=%s product=%d err=%v",
 			task.Ticket, task.ProductID, settleErr)
-		if relErr := cache.ReleaseReservation(ctx, task.ProductID, int64(task.Num)); relErr != nil {
-			util.LogrusObj.Errorf("release reservation on settlement resolve failure failed: %v", relErr)
-		}
-		_ = defaultTicketStore.Put(ctx, task.Ticket, OrderTicketStatus{
-			Status: OrderTicketStatusFailed,
-			Reason: settleErr.Error(),
-		}, OrderTicketTTL)
+		abortAsyncTask(ctx, task, settleErr)
 		return settleErr
 	}
 
@@ -106,25 +121,27 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 		AddressID: task.AddressID,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
 		Ticket:    &task.Ticket,
+		SeckillID: task.SeckillID,
 		// 减免字段在事务内按扣预算 / 核销券的实际结果写回
 		FinalCents: quote.subtotal,
 	}
 
 	err = defaultAsyncOrderWriter(ctx, task, order, quote)
 	if err != nil {
-		// 并发重投撞上 ticket 唯一索引：另一条投递已经建好单，按成功处理。
-		if existing, _ := NewOrderDao(ctx).GetOrderByTicket(task.Ticket); existing != nil {
-			putAsyncTicketOK(ctx, task.Ticket, existing)
+		// 并发重投撞上 ticket 唯一索引 / 提交成功但确认丢了：单已经在，按成功处理。
+		existing, lookErr := NewOrderDao(ctx).GetOrderByTicket(task.Ticket)
+		if lookErr != nil {
+			// 查不清单在不在就不补偿：补偿了而单其实已提交，会把还占着的预占 / 秒杀名额放出去超卖。
+			// 预占和在途标记留给对账（按 ticket 查 DB 决定转正还是归还）。
+			util.LogrusObj.Errorf("async order recheck ticket failed ticket=%s txErr=%v err=%v", task.Ticket, err, lookErr)
+			return err
+		}
+		if existing != nil {
+			finishAsyncTask(ctx, task, existing)
 			return nil
 		}
 		util.LogrusObj.Errorf("async order task tx failed ticket=%s err=%v", task.Ticket, err)
-		if relErr := cache.ReleaseReservation(ctx, task.ProductID, int64(task.Num)); relErr != nil {
-			util.LogrusObj.Errorf("release reservation on async tx failure failed: %v", relErr)
-		}
-		_ = defaultTicketStore.Put(ctx, task.Ticket, OrderTicketStatus{
-			Status: OrderTicketStatusFailed,
-			Reason: err.Error(),
-		}, OrderTicketTTL)
+		abortAsyncTask(ctx, task, err)
 		return err
 	}
 
@@ -140,8 +157,17 @@ func HandleAsyncOrderTask(ctx context.Context, body []byte) error {
 		}
 	}
 
-	putAsyncTicketOK(ctx, task.Ticket, order)
+	finishAsyncTask(ctx, task, order)
 	return nil
+}
+
+// finishAsyncTask 单已落库：去掉排队标记、秒杀 ticket 转正、回写 ticket 成功。
+func finishAsyncTask(ctx context.Context, task AsyncOrderTask, o *Order) {
+	unmarkAsyncInflight(ctx, task.ProductID, task.Ticket, task.Num)
+	if task.SeckillID != 0 && seckillBinder != nil {
+		seckillBinder.Settle(ctx, task.SeckillID, task.UserID, task.Ticket)
+	}
+	putAsyncTicketOK(ctx, task.Ticket, o)
 }
 
 // putAsyncTicketOK 回写 ticket 成功态；写失败只记日志，订单已落库。
@@ -153,4 +179,44 @@ func putAsyncTicketOK(ctx context.Context, ticket string, o *Order) {
 	}, OrderTicketTTL); err != nil {
 		util.LogrusObj.Errorf("async order task write ticket ok failed ticket=%s err=%v", ticket, err)
 	}
+}
+
+// resolveTaskSettlement 秒杀单取活动价与活动卖家，普通单取商品表并试算满减 / 校验券。
+func resolveTaskSettlement(ctx context.Context, task AsyncOrderTask) (int64, uint, *orderQuote, error) {
+	if task.SeckillID == 0 {
+		cents, categoryID, bossID, err := resolveProductPricing(ctx, task.ProductID)
+		if err != nil {
+			return 0, 0, nil, err
+		}
+		q, err := GetOrderSrv().quoteOrder(ctx, task.UserID, task.ProductID, categoryID,
+			cents, int64(task.Num), task.UserCouponID)
+		return cents, bossID, q, err
+	}
+	if seckillBinder == nil {
+		return 0, 0, nil, errSeckillNotRegistered
+	}
+	if task.UserCouponID != 0 {
+		return 0, 0, nil, errors.New("秒杀单不能用券")
+	}
+	// 秒杀价即成交价，不叠满减 / 券。
+	cents, bossID, err := seckillBinder.Price(ctx, task.SeckillID, task.ProductID)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return cents, bossID, &orderQuote{subtotal: cents * int64(task.Num)}, nil
+}
+
+// abortAsyncTask 任务确定落不了单：释放商品预占、归还秒杀名额、写失败 ticket。
+func abortAsyncTask(ctx context.Context, task AsyncOrderTask, cause error) {
+	if relErr := cache.ReleaseReservation(ctx, task.ProductID, int64(task.Num)); relErr != nil {
+		util.LogrusObj.Errorf("release reservation on async order failure failed ticket=%s err=%v", task.Ticket, relErr)
+	}
+	unmarkAsyncInflight(ctx, task.ProductID, task.Ticket, task.Num)
+	if task.SeckillID != 0 && seckillBinder != nil {
+		seckillBinder.Abort(ctx, task.SeckillID, task.UserID, task.Ticket, cause)
+	}
+	_ = defaultTicketStore.Put(ctx, task.Ticket, OrderTicketStatus{
+		Status: OrderTicketStatusFailed,
+		Reason: cause.Error(),
+	}, OrderTicketTTL)
 }

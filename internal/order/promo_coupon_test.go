@@ -50,13 +50,14 @@ func TestAsyncOrderTaskAppliesPromoAndCoupon(t *testing.T) {
 	order.SetAsyncOrderTicketStore(tickets)
 	t.Cleanup(func() { order.SetAsyncOrderTicketStore(prev) })
 
-	body, _ := json.Marshal(order.AsyncOrderTask{Ticket: "777", UserID: 11, ProductID: p.ID, Num: 1, UserCouponID: uc.ID})
+	ticket := order.NewTicket() // 必须是新鲜 snowflake，否则被 consumer 判成排队超时
+	body, _ := json.Marshal(order.AsyncOrderTask{Ticket: ticket, UserID: 11, ProductID: p.ID, Num: 1, UserCouponID: uc.ID})
 	if err := order.HandleAsyncOrderTask(context.Background(), body); err != nil {
 		t.Fatal(err)
 	}
 
 	var o order.Order
-	if err := db.Where("ticket = ?", "777").First(&o).Error; err != nil {
+	if err := db.Where("ticket = ?", ticket).First(&o).Error; err != nil {
 		t.Fatal(err)
 	}
 	// 10000 先减 2000 = 8000，再打 9 折减 800 = 7200。

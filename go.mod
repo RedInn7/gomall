@@ -6,6 +6,7 @@ toolchain go1.26.10
 
 require (
 	github.com/CocaineCong/secret v1.0.4
+	github.com/alicebob/miniredis/v2 v2.33.0
 	github.com/apache/skywalking-go v0.0.0-20230511031014-a2c5f8e67468
 	github.com/bwmarrin/snowflake v0.3.0
 	github.com/elastic/go-elasticsearch v0.0.0
@@ -38,7 +39,6 @@ require (
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
 	github.com/alicebob/gopher-json v0.0.0-20200520072559-a9ecdc9d1d3a // indirect
-	github.com/alicebob/miniredis/v2 v2.33.0 // indirect
 	github.com/bits-and-blooms/bitset v1.20.0 // indirect
 	github.com/bytedance/sonic v1.8.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

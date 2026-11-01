@@ -113,6 +113,12 @@ func (d *OrderDao) SumCommitPendingNumByProduct(since time.Time) (map[uint]int64
 		consts.OrderWaitShip, since, true)
 }
 
+// SumStockCommitPendingNumByProduct 汇总打了 StockCommitPending 的订单数量：DB 已扣库存、reserved 还没核销。
+// available 对账据此修正不变式，不把这部分当成 available 多出来的量扣掉。
+func (d *OrderDao) SumStockCommitPendingNumByProduct() (map[uint]int64, error) {
+	return d.sumNumByProduct("stock_commit_pending = ?", true)
+}
+
 func (d *OrderDao) sumNumByProduct(query string, args ...interface{}) (map[uint]int64, error) {
 	var rows []struct {
 		ProductID uint
