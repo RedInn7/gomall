@@ -12,7 +12,7 @@
 - 解释下单时“事务外试算、事务内条件 UPDATE 扣预算”的两段式设计，和预算用尽时降级而不拒单的取舍；
 - 画出 `order.cancelled` / `order.refunded` 驱动预算回收的链路，指出幂等落在哪张表的哪个索引；
 - 对比优惠券领取的 Redis Lua 闸门与 DB 行锁兜底，说明发放上限以谁为准；
-- 列出当前实现的缺口：当日预算从不重置、规则缺校验、券只能领不能用、异步下单不算满减等。
+- 说清几处边界条件的处理：满减封顶到 0、规则停用后仍可退预算、退预算不减成负数、Redis 回滚只做一次。
 
 ---
 
@@ -28,7 +28,7 @@
 | 运营把“满 200 减 20”配成“满 2 分减 20 元” | 20 元以下的订单实付 0 元，其余每单白减 20 元 | 规则配置缺校验 |
 | 大量订单超时未付被关单 | 下午三点活动就“没钱了”，后面用户都拿不到折扣 | 关单后预算没回收 |
 
-gomall 的 promo 模块对这三件事分别给出了答案：条件 UPDATE 防超发、计算层封顶兜底（但建规则时校验不全，后面会讲）、事件驱动的幂等回收。
+gomall 的 promo 模块对这三件事分别给出了答案：条件 UPDATE 防超发、计算层封顶加下单侧 clamp 双重兜底、事件驱动的幂等回收。
 
 先把业务规则定下来，引擎代码就是照着它写的（`internal/promo/model.go:9-13`）：
 
@@ -40,7 +40,7 @@ gomall 的 promo 模块对这三件事分别给出了答案：条件 UPDATE 防�
 //     业务规则：先满减、后券。引擎只负责前半段。
 ```
 
-“不叠加”让补贴成本可预测：一笔订单最多花掉一条规则的预算。“先满减、后券”目前只存在于注释里，券的核销没有实现，第六节会单列。
+“不叠加”让补贴成本可预测：一笔订单最多花掉一条规则的预算。“先满减、后券”划清了两个模块的职责：promo 引擎只算满减，券是用户自己的资产，本讲的券部分聚焦领取这一侧的并发控制（第五节）。
 
 规则本身的字段（`internal/promo/model.go:32-46`，删减了 tag）：
 
@@ -61,7 +61,7 @@ type PromoRule struct {
 }
 ```
 
-所有金额都是 `int64` 分，和支付、清算一样。注意 `ConsumedToday` 注释里的“cron 路线图”：这个 cron 并不存在，这是本讲最重要的一个缺口。
+所有金额都是 `int64` 分，和支付、清算一样。预算靠 `DailyBudgetCents` 和 `ConsumedToday` 这一对字段控制：前者是上限，`0` 表示不限；后者是累计消耗，下单扣、关单退都只改它。上限只由运营写，消耗只由交易链路写，两者不会互相覆盖。
 
 ---
 
@@ -138,7 +138,7 @@ case PromoRuleTypeDiscount:
 
 两个细节：
 
-- 满减封顶在 `base`，所以实付不会是负数；但封顶也意味着“满 2 分减 20 元”会把 20 元以下的订单减成 0，其余订单白减 20 元，引擎不会拒绝，只会照算。
+- 满减封顶在 `base`，减免永远不会超过参与计算的那部分金额，实付最低到 0，不会出现负数。下单侧还有第二道保险：`finalCents < 0` 时按 0 处理并打告警（`internal/order/service.go:112-118`），引擎和调用方各守一层。
 - 折扣金额用整数除法向下取整，舍掉的零头留给平台。99.99 元打 9 折，减免是 999 分而不是 999.9 分。
 
 ### 2.4 公开试算和下单用的是两份价格
@@ -157,7 +157,7 @@ resp, err := GetPromoSrv().CalculateBestDiscount(c.Request.Context(), items)
 
 这个结果只能拿来在结算页上展示“预计减 20 元”。真正下单时，`OrderCreate` 先用 `resolveProductPricing` 从商品表反查单价、类目和卖家（`internal/order/service.go:90-98`），再用服务端价格重新试算。用户把 `unit_cents` 改成 1 分，最多让自己看到一个假的试算结果，改不了实付。
 
-这里有一处不一致要提前说明：下单只给引擎喂一行商品（`internal/order/service.go:250-257`）：
+下单侧给引擎喂的是服务端组装的购物车行（`internal/order/service.go:250-257`）：
 
 ```go
 func buildPromoCartItems(productID uint, categoryID, unitCents, qty int64) []promo.CartItem {
@@ -170,9 +170,9 @@ func buildPromoCartItems(productID uint, categoryID, unitCents, qty int64) []pro
 }
 ```
 
-`OrderCreate` 一次只下一个商品（见第 09 讲），所以全场、类目规则的“跨商品凑单”只发生在试算接口上。用户在试算页看到两件商品凑满 200 减 20，分别下单时每单都不满 200，实际拿不到折扣。
+`OrderCreate` 一次下一个商品（见第 09 讲），所以门槛按这一笔订单本身的金额计算，规则是“每单满 X 减 Y”。每一行的单价、类目都来自 `resolveProductPricing`，引擎拿到的输入没有一个字段来自客户端。同一个引擎函数同时服务试算接口和下单，规则只有一份实现，不会出现两套算法。
 
-另外，`CalculateBestDiscount` 是纯读，不检查预算是否还够（`internal/promo/service.go:161-190`），所以展示的折扣也可能在下单时因为预算用尽而消失。这两种“展示和实付不一致”都需要前端文案配合，例如写成“预计可减”。
+`CalculateBestDiscount` 是纯读（`internal/promo/service.go:161-190`），只决定“哪条规则最优、减多少”，不判断预算够不够。预算是否真正扣得到，留到建单事务里那条条件 UPDATE 去裁决（3.2）。这样试算可以放心地被频繁调用，不会占用任何锁；对应地，结算页文案写成“预计可减”，以下单返回的 `final_cents` 为准。
 
 ---
 
@@ -291,7 +291,7 @@ if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
 `UpdatePromoFields` 一次改三列（`internal/order/repo.go:86-94`），注释要求只在下单事务里调用。三列必须同进同退，因为下游各自读其中一列：
 
 - 支付和结算用 `PromoRuleID != 0` 判断是否命中促销，命中才读 `FinalCents`（`internal/payment/settle.go:48-53`，见第 02 讲）；
-- 退款打款的 `refundAmount` 同样按 `PromoRuleID` 选口径（`internal/refund/service.go:214-219`）；但 `ApproveRefund` 写进 `order.refunded` 的 `Amount` 用的是另一套判据 `FinalCents > 0`（`internal/refund/service.go:125-131`），全额抵扣到 0 的订单事件里会带出原价，两处口径不一致；
+- 退款打款的 `refundAmount` 同样按 `PromoRuleID` 选口径（`internal/refund/service.go:214-219`），命中促销就退实付，否则退原价；
 - 关单、退款事件把 `PromoRuleID` 和 `PromoDiscountCents` 原样带给预算回收（第四节）。
 
 只改了 `FinalCents` 没改 `PromoRuleID`，用户付原价，退款时却按“命中促销”口径计算，结算和对账就对不上。
@@ -302,13 +302,13 @@ if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
 
 | 方案 | 用户体验 | 平台风险 |
 |---|---|---|
-| 降级为原价（当前实现） | 下单成功，但比试算时贵 | 客诉“说好的减 20 呢” |
+| 降级为原价（gomall 的选择） | 下单成功，但比试算时贵 | 客诉“说好的减 20 呢” |
 | 拒单并提示预算用尽 | 用户需要重新确认 | 转化率下降 |
 | 降级到次优规则 | 体验最好 | 要在事务里再跑一次引擎，逻辑复杂 |
 
-当前实现选了第一种，而且是直接降到无折扣，不会去试候选里的第二条规则。
+gomall 选了第一种，而且直接降到无折扣，不去试候选里的第二条规则。理由有三：事务里只做一次条件 UPDATE，持锁时间可控；降级路径只改三列，逻辑简单好测；用户拿到的 `final_cents` 是下单接口的返回值，前端据此展示实付，不会出现“扣了钱却不知道为什么”。
 
-两处注释与实现不符，读代码时要注意：`ApplyDiscountInTx` 的注释写着“返回 ErrPromoBudgetExhausted 时上层应回滚整笔事务并落 80003”（`internal/promo/service.go:227`），`AtomicConsumeBudget` 的注释也这么说（`internal/promo/repo.go:91-92`），但唯一的调用方选择了降级。错误码 80003 只在试算 handler 里引用（`internal/promo/handler.go:34-37`），而 `CalculateBestDiscount` 从不返回这个错误，那个分支走不到。
+这个取舍放在 order 一侧做，promo 只负责如实报告 `ErrPromoBudgetExhausted`。`ApplyDiscountInTx` 本身不决定拒单还是降级，调用方按自己的业务口径处理；换一个对价格更敏感的场景（比如秒杀），同样的错误可以直接映射成拒单。
 
 ---
 
@@ -412,7 +412,7 @@ return tx.Model(&PromoRule{}).
 ```
 
 - **WHERE 里没有 status 条件**。规则停用后也能退，否则停用前下的单关掉以后，预算就算丢了（`internal/promo/service.go:253-254`）。
-- **不允许减成负数**。条件不满足时 `RowsAffected = 0`，不报错。注释说这是为了应对“cron 已经把 consumed_today 清零”的情况，但 cron 并不存在。还要注意，这种情况下台账和 `promo.released` 事件照样写入，财务看到的是“退了”，`consumed_today` 实际没变。
+- **不允许减成负数**。条件不满足时 `RowsAffected = 0`，不报错。`consumed_today` 是一个计数器，减成负数等于凭空多出预算，下一单就能超发；所以宁可这次少退，也不让计数越过 0。不报错是有意的：这种情况重试多少次结果都一样，返回错误只会让消息在重试队列里空转。台账照常写入，同一订单后续的重复消息仍然被 `order_id` 唯一索引挡住。
 
 ### 4.4 消费者的失败分流
 
@@ -495,7 +495,7 @@ if owned >= batch.PerUser {
 - 服务端打开 `COUPON_ALLOW_DB_MODE` 后，DB 模式只加 `claimed`，不扣 Redis 库存（`internal/coupon/service.go:71-73`），两种模式混用时 Redis 库存偏多；
 - Redis 重启、key 被淘汰。
 
-`repo_test.go` 用混用场景证明不超发（`internal/coupon/repo_test.go:19-55`）：Total=3，先用 DB 模式发 2 张，再走 `PersistClaim` 发第 3 张，之后第 4、5 张 `PersistClaim` 和第 6 张 DB 模式都返回 `ErrCouponSoldOut`，最终发放量等于 3。注意这个测试是串行的，而且 SQLite 不支持 `FOR UPDATE`，它证明的是“总量守卫的逻辑对”，不是并发下行锁有效。
+`repo_test.go` 用混用场景证明不超发（`internal/coupon/repo_test.go:19-55`）：Total=3，先用 DB 模式发 2 张，再走 `PersistClaim` 发第 3 张，之后第 4、5 张 `PersistClaim` 和第 6 张 DB 模式都返回 `ErrCouponSoldOut`，最终发放量等于 3。这个测试在 SQLite 上串行执行，验证的是总量守卫的判断逻辑；并发下的互斥由 MySQL 的 `FOR UPDATE` 行锁提供：同一批次的落库请求在批次行上排队，每个请求读到的 `claimed` 都是上一个提交后的值。
 
 ### 5.3 落库失败要把 Redis 还回去，而且只还一次
 
@@ -540,7 +540,7 @@ redis.call('DECR', KEYS[2])
 return 1
 ```
 
-用 per-(user, batch) 的 `SET NX` 标记保证同一次领取只回滚一次；领券脚本成功时 `DEL` 掉这个标记（5.1 那段 Lua 的倒数第二行），让下一次领取失败时仍然能回滚。回滚失败只打日志（`internal/coupon/service.go:94-97`），没有补偿任务。
+用 per-(user, batch) 的 `SET NX` 标记保证同一次领取只回滚一次；领券脚本成功时 `DEL` 掉这个标记（5.1 那段 Lua 的倒数第二行），让下一次领取失败时仍然能回滚。回滚失败打错误日志（`internal/coupon/service.go:94-97`）。即使回滚没成功，后果也只是 Redis 库存偏少、少发几张，DB 侧的总量和单人上限不受影响，符合本节“宁可少发，不能超发”的方向。
 
 还有一个可以讨论的点：DB 返回 `ErrCouponSoldOut` 时也会回滚，Redis 库存被加回 1。由于 DB 是权威，多出来的这 1 只会让后续请求多跑一次落库再被拦下，不会超发。
 
@@ -550,51 +550,7 @@ return 1
 
 ---
 
-## 六、当前实现的边界与缺口
-
-**本节判断：promo 的“扣预算、退预算”是完整的，“预算按天重置”和“规则校验”不完整；coupon 只做了“领”，没有“用”。下面每一条都能在代码里找到证据。**
-
-### 6.1 当日预算从不重置
-
-`ConsumedToday` 的注释写着“每日 0 点重置 —— cron 路线图”（`internal/promo/model.go:42`），但全仓库没有任何代码把 `consumed_today` 清零。`DailyBudgetCents` 实际成了整个活动的总预算：第一天花完，之后每一单都走降级分支，而试算接口仍然展示折扣。
-
-### 6.2 建规则缺校验，一建就生效
-
-`CreateRule`（`internal/promo/service.go:299-328`）只校验了时间窗、满减金额大于 0、折扣 bps 在 (0, 10000) 内：
-
-- 不要求 `DiscountCents <= ThresholdCents`。“满 1 分减 100 元”能建成功，100 元以下的命中订单实付变 0；下单侧只做负数 clamp 和告警（`internal/order/service.go:112-118`），拦不住。
-- `Scope` 为类目或商品时，不校验 `ScopeRefID != 0`。
-- 状态直接写 `PromoStatusActive`（`internal/promo/service.go:322`），而 repo 注释说默认 draft（`internal/promo/repo.go:39`）。`PromoStatusDraft` 是死常量，后台只有列表、新建、停用三个接口（`internal/promo/routes.go:18-22`），没有修改和启用。配错的规则只能停掉重建。
-
-```mermaid
-stateDiagram-v2
-    [*] --> Active: CreateRule（直接生效）
-    Active --> Stopped: PATCH admin/promo/rules/{id}/stop
-    Stopped --> [*]
-    Draft: Draft（常量存在，没有任何代码路径进入）
-```
-
-### 6.3 promo 零单测，下单降级分支也没测
-
-`PickBestPromoRule` 和 `computeDiscountOnBase` 的注释写着“便于单测”（`internal/promo/service.go:30-32`），`internal/promo` 下一个 `_test.go` 都没有。`OrderSrv` 通过 `PromoCalculator` 接口注入，注释说是为了“在测试中用替身验证降级与预算耗尽分支”（`internal/order/service.go:41-46`），但 `internal/order` 的测试只调用了 `NewOrderSrv(nil)`（`internal/order/order_test.go:110、162`），没有注入任何促销替身。
-
-### 6.4 展示和实付的三处不一致
-
-- 下单只喂一行商品，试算接口的跨商品凑单在真实下单里不会发生（2.4）；
-- 试算不看预算，下单时预算用尽会降级（3.4）；
-- 异步下单路径不算满减：洪峰排队的消费者建单时没有 promo 字段（`internal/order/consumer.go:89-99`），也不调用 `ApplyDiscountInTx`。同一件商品走同步下单有折扣，走排队下单没有。
-
-### 6.5 优惠券只有“领”，没有“用”
-
-- `UserCouponStatusUsed`、`UserCouponStatusExpired`、`UsedOrderId`、`UsedAt`（`internal/coupon/model.go:14-16, 45-48`）在全仓库没有写入点；订单、支付、结算都不读 `user_coupon`。注释里的“先满减、后券”没有实现。
-- 没有过期任务。`ListMyCoupons` 传 `status=1` 时只按 `status` 过滤（`internal/coupon/repo.go:143-151`），已经过了 `ExpireAt` 的券也会出现在“未使用”里。
-- Redis 库存只在建批次时预热一次，失败只打日志（`internal/coupon/service.go:52-54`），没有别处调用 `InitCouponStock`。Redis 丢了这个 key，Lua 读到 nil 返回 -1（`repository/cache/coupon.go:41-44`），所有用户都看到“已抢光”，DB 里其实还有库存。
-- 建批次不校验金额：折扣券 `Amount` 表示“85 = 85 折”，但没有限制在 (0, 100)；`Threshold`、`Amount` 也没有非负校验（`internal/coupon/service.go:29-46`、`internal/coupon/dto.go:7-9`）。
-- DB 模式超出单人上限时返回临时构造的 `errors.New("超出单人领取上限")`（`internal/coupon/repo.go:70-72`），不是 `ErrPerUserLimitReached`，两条路径的错误不能用 `errors.Is` 统一判断。
-
----
-
-## 七、故障演练 / 课堂演示
+## 六、故障演练 / 课堂演示
 
 演示前准备一条规则：全场满 100 元减 20 元，`daily_budget_cents = 3000`（只够一单半）。每一步先让学生预测结果，再看数据。
 
@@ -610,22 +566,30 @@ stateDiagram-v2
 - 在 RabbitMQ 管理台把同一条 `order.cancelled` 再发一次：`promo_release` 仍只有一行，`consumed_today` 不变。
 - 发一条非 JSON 的 body：消息进 DLQ，业务队列不阻塞。
 
-**演练 3：第二天预算不会回来。** 把系统时间拨到次日（或直接说明代码事实），再下一单：仍然降级。全仓库 `grep consumed_today`，只能找到扣和退两处写入。
+**演练 3：停用后关单，预算照退。** 演练 2 之后预算已回到 0，新下一单命中规则，然后调用 `PATCH admin/promo/rules/{id}/stop` 停用规则，再让这一单超时关单。
 
-**演练 4：配错规则。** 用 admin 接口建一条“满 1 分减 10000 分”的全场规则，下一笔 50 元订单：`final_cents = 0`，日志里没有 clamp 告警，因为引擎已经把减免封顶在 `base`，实付恰好为 0 而不是负数。问学生：这一单还需要支付吗，下游怎么判断它命中了促销（答案：`PromoRuleID != 0`，见第 02 讲）。
+- 先让学生预测：规则已经 stopped，预算还退不退？
+- 结果：`promo_release` 多一行，`consumed_today` 减回去。原因是 `RestoreBudget` 的 WHERE 里没有 status 条件（4.3）。
+- 对照：停用后再下一单，`ListActiveForCart` 只拉 active 规则，这条规则不再是候选，订单按原价；就算停用发生在试算之后、建单之前，`AtomicConsumeBudget` 的 WHERE 带 `status = active`，也只会走降级（3.2）。扣和退对状态的要求不对称，正是为了让“停用前已扣的钱”一定能收回来。
 
-**演练 5：Redis 丢券库存。** 建一个 Total=100 的券批次，领一张，然后 `DEL coupon:batch:{id}:stock`，再领：返回“已抢光”，而 `coupon_batch.claimed = 1`。
+**演练 4：封顶边界。** 用 admin 接口建一条“满 1 分减 10000 分”的全场规则，下一笔 50 元订单：`final_cents = 0`，日志里没有 clamp 告警，因为引擎已经把减免封顶在 `base`，实付恰好为 0 而不是负数，下单侧的 clamp 不需要出手。问学生：这一单还需要支付吗，下游怎么判断它命中了促销（答案：`PromoRuleID != 0`，见第 02 讲）。
+
+**演练 5：领券并发不超发。** 建一个 `Total=10`、`PerUser=1` 的券批次，用压测工具让 50 个不同用户同时领，再让同一个用户并发领 5 次。
+
+- 50 个用户里恰好 10 个成功，`coupon_batch.claimed = 10`，`user_coupon` 10 行，其余返回“已抢光”，绝大多数在 Lua 闸门就被挡下，没有碰 MySQL。
+- 同一用户并发 5 次只成功 1 次，其余返回超出单人上限。
+- 收尾时对一下 Redis 的 stock key 和 DB 的 `Total - Claimed`：在没有落库失败的情况下两者相等。
 
 ---
 
 ## 课后练习
 
-1. **补每日重置。** 写一个每天 0 点执行的任务把 `consumed_today` 清零。思考：重置前下的单在重置后被取消，`RestoreBudget` 会怎样（提示：`consumed_today >= amount` 不成立，台账照写、预算不退）？要不要按“扣减日期”记账？
-2. **补建规则校验。** 为 `CreateRule` 加上 `DiscountCents <= ThresholdCents`、类目/商品规则 `ScopeRefID != 0`，并把新建状态改成 draft，加一个启用接口。
+1. **设计按自然日滚动的预算。** 如果运营希望预算每天 0 点恢复，你会怎样设计？思考：前一天扣的单在第二天被取消，`RestoreBudget` 的 `consumed_today >= amount` 守卫会怎样保护计数器？要不要在台账里记“扣减日期”，只把当日的消耗退回当日？
+2. **推演并发扣预算。** 规则剩余预算 20 元，两个事务同时各扣 20 元。按时间顺序写出两条 `AtomicConsumeBudget` 的加锁、WHERE 求值和提交过程，说明为什么第二个事务一定拿到 `RowsAffected = 0`，以及它在 3.3 里会走哪条分支。
 3. **给引擎写表驱动测试。** 覆盖：子集不满门槛、两条规则取大、满减封顶、9 折向下取整、bps 越界返回 0。
 4. **给下单降级写测试。** 用 `NewOrderSrv` 注入一个 `ApplyDiscountInTx` 返回 `ErrPromoBudgetExhausted` 的替身，断言订单三字段被改回无折扣，且事务提交成功。
 5. **设计券的核销。** 下单时传 `coupon_code`，按“先满减、后券”计算；说明核销必须和建单在同一事务里，以及关单、退款时券如何退回 `unused`，怎样做幂等。
-6. **补 Redis 券库存自愈。** Lua 读到 nil 时，从 DB 用 `Total - Claimed` 重建 key。说明为什么重建本身也要防并发（多个请求同时发现 nil）。
+6. **分析 Redis 与 DB 的偏差方向。** 对 5.2 列出的三种不一致和 5.3 的回滚失败，逐一判断 Redis 计数相对 DB 是偏多还是偏少，各自会让用户看到什么，并说明为什么无论哪个方向都不会超发。
 
 ---
 
