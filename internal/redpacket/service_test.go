@@ -4,19 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
+	"gorm.io/driver/mysql"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/internal/money"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
+	"github.com/RedInn7/gomall/repository/cache"
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
@@ -30,7 +36,8 @@ func TestSendRejectsInsufficientBalance(t *testing.T) {
 		if err := NewRedPacketDaoByDB(tx).Create(rp); err != nil {
 			return err
 		}
-		return settleSendTx(tx, rp.ID, 7, rp.Total)
+		_, err := settleSendTx(tx, rp.ID, 7, rp.Total)
+		return err
 	})
 	if !errors.Is(err, user.ErrInsufficientBalance) {
 		t.Fatalf("want ErrInsufficientBalance, got %v", err)
@@ -112,21 +119,38 @@ func TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty(t *testing.T) {
 func openRedPacketTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	conf.Config = &conf.Conf{EncryptSecret: &conf.EncryptSecret{MoneySecret: "redpacket-test-secret"}}
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:redpacket-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{})
+	// 设了 REDPACKET_TEST_MYSQL_DSN 就跑真 MySQL（行锁 / 唯一索引 / 并发事务按 InnoDB 语义），否则用内存 SQLite。
+	dsn := os.Getenv("REDPACKET_TEST_MYSQL_DSN")
+	var db *gorm.DB
+	var err error
+	if dsn != "" {
+		db, err = gorm.Open(mysql.Open(dsn), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	} else {
+		db, err = gorm.Open(sqlite.Open(fmt.Sprintf("file:redpacket-%s?mode=memory&cache=shared", t.Name())), &gorm.Config{Logger: gormlogger.Default.LogMode(gormlogger.Silent)})
+	}
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("open db: %v", err)
 	}
 	sqlDB, err := db.DB()
 	if err != nil {
-		t.Fatalf("unwrap sqlite: %v", err)
+		t.Fatalf("unwrap db: %v", err)
 	}
-	sqlDB.SetMaxOpenConns(1)
+	if dsn == "" {
+		sqlDB.SetMaxOpenConns(1)
+	} else if err := db.Migrator().DropTable(&user.User{}, &RedPacket{}, &RedPacketClaim{}, &money.AccountTransaction{}, &outbox.OutboxEvent{}); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
 	previous := dao.SetTestDB(db)
 	previousLogger := util.LogrusObj
 	util.LogrusObj = logrus.New()
+	mr := miniredis.RunT(t)
+	previousRedis := cache.RedisClient
+	cache.RedisClient = redis.NewClient(&redis.Options{Addr: mr.Addr(), PoolSize: 64})
 	t.Cleanup(func() {
 		dao.SetTestDB(previous)
 		util.LogrusObj = previousLogger
+		_ = cache.RedisClient.Close()
+		cache.RedisClient = previousRedis
 		_ = sqlDB.Close()
 	})
 	if err := db.AutoMigrate(&user.User{}, &RedPacket{}, &RedPacketClaim{}, &money.AccountTransaction{}, &outbox.OutboxEvent{}); err != nil {

@@ -137,3 +137,35 @@ func (d *RedPacketDao) GetExpired(limit int) ([]*RedPacket, error) {
 		Find(&out).Error
 	return out, err
 }
+
+// ListActive 进行中的红包，供 claimed 对账扫描。按 id 升序取前 limit 个。
+// ponytail: 单轮固定上限，进行中红包多到扫不完时改成按 id 游标分批
+func (d *RedPacketDao) ListActive(limit int) ([]*RedPacket, error) {
+	var out []*RedPacket
+	err := d.DB.Where("status = ?", RedPacketStatusActive).Order("id ASC").Limit(limit).Find(&out).Error
+	return out, err
+}
+
+// ListReceived 我领到的红包，按领取记录 id desc 分页
+func (d *RedPacketDao) ListReceived(userID uint, lastID uint, pageSize int) ([]*RedPacketClaim, error) {
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 20
+	}
+	q := d.DB.Where("user_id = ?", userID)
+	if lastID > 0 {
+		q = q.Where("id < ?", lastID)
+	}
+	var out []*RedPacketClaim
+	err := q.Order("id DESC").Limit(pageSize).Find(&out).Error
+	return out, err
+}
+
+// ListByIDs 批量取红包
+func (d *RedPacketDao) ListByIDs(ids []uint) ([]*RedPacket, error) {
+	var out []*RedPacket
+	if len(ids) == 0 {
+		return out, nil
+	}
+	err := d.DB.Where("id IN ?", ids).Find(&out).Error
+	return out, err
+}
