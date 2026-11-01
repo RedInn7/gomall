@@ -135,8 +135,22 @@ func (s *RedPacketTaskService) RunRedPacketClaimReconcile() {
 	}
 }
 
+// poolExists 留成函数变量，单测在 EXISTS 和读标记之间插入一次抢包。
+var poolExists = cache.RedPacketPoolExists
+
 func reconcileRedPacket(ctx context.Context, rp *RedPacket) (reconcileResult, error) {
 	var r reconcileResult
+	// 份额池是否丢失必须在读 claimed 标记之前判断：抢包 Lua 的 LPOP 和 HSET 原子完成，
+	// EXISTS 为 false 之后读到的标记一定包含抢走最后一份的人，他还在途就会 pending，不会被提前退款判成「已结束」。
+	// 反过来先读标记再 EXISTS，中间有人正常抢走最后一份，LIST 被 Redis 删掉，就会误判份额池丢失。
+	poolGone := false
+	if time.Since(rp.CreatedAt) >= claimOrphanGrace {
+		exists, err := poolExists(ctx, rp.ID)
+		if err != nil {
+			return r, err
+		}
+		poolGone = !exists
+	}
 	marks, err := cache.ListRedPacketClaimed(ctx, rp.ID)
 	if err != nil {
 		return r, err
@@ -183,14 +197,10 @@ func reconcileRedPacket(ctx context.Context, rp *RedPacket) (reconcileResult, er
 		r.repaired++
 		util.LogrusObj.Warnf("redpacket 补领孤儿领取 id=%d uid=%d amount=%d", rp.ID, uid, m.Amount)
 	}
-	if r.pending || time.Since(rp.CreatedAt) < claimOrphanGrace {
+	if r.pending || !poolGone {
 		return r, nil
 	}
 
-	exists, err := cache.RedPacketPoolExists(ctx, rp.ID)
-	if err != nil || exists {
-		return r, err
-	}
 	fresh, err := rpDao.Get(rp.ID)
 	if err != nil {
 		return r, err
