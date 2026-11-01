@@ -66,3 +66,27 @@ func ReturnReceivedHandler() gin.HandlerFunc {
 		response.OK(ctx, gin.H{"order_num": req.OrderNum})
 	}
 }
+
+// ListRefundingHandler 商家查看待审批退款单，带买家填的退款原因。
+func ListRefundingHandler() gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		req, ok := response.BindQuery[RefundListReq](ctx)
+		if !ok {
+			return
+		}
+		orders, err := GetRefundSrv().ListRefunding(ctx.Request.Context(), req.LastID, req.PageSize)
+		if err != nil {
+			response.Fail(ctx, err)
+			return
+		}
+		list := make([]RefundListItem, 0, len(orders))
+		for _, o := range orders {
+			list = append(list, RefundListItem{
+				ID: o.ID, OrderNum: o.OrderNum, UserID: o.UserID, ProductID: o.ProductID, Num: o.Num,
+				Amount: refundAmount(o), FromType: o.RefundFromType, Reason: o.RefundReason,
+				RefundCount: o.RefundCount, TrackingNo: o.TrackingNo, UpdatedAt: o.UpdatedAt,
+			})
+		}
+		response.OK(ctx, gin.H{"list": list})
+	}
+}

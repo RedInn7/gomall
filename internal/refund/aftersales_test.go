@@ -12,6 +12,7 @@ import (
 	"github.com/RedInn7/gomall/internal/clearing"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -216,5 +217,69 @@ func TestReturnReceivedRestocksShippedRefundOnce(t *testing.T) {
 	db.First(&got, p.ID)
 	if got.Num != 2 || len(*restocks) != 1 {
 		t.Fatalf("stock=%d redis=%v, want restocked once by 2", got.Num, *restocks)
+	}
+}
+
+// promo.release 消费者进了 DLQ：补偿任务按台账补退满减预算，重复跑只退一次。
+func TestSettleCompensationReleasesMissedPromoBudget(t *testing.T) {
+	db := openRefundTestDB(t)
+	stubRestockRedis(t)
+	rule := &promo.PromoRule{Name: "满300减50", ThresholdCents: 300, DiscountCents: 50, ConsumedToday: 100,
+		StartAt: time.Now().Add(-time.Hour), EndAt: time.Now().Add(time.Hour)}
+	if err := db.Create(rule).Error; err != nil {
+		t.Fatal(err)
+	}
+	ago := time.Now().Add(-time.Hour)
+	tooOld := time.Now().Add(-promoReleaseLookback - time.Hour)
+	seed := func(num uint64, typ uint, updated time.Time) *orderpkg.Order {
+		o := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1, Money: 300, Type: typ, OrderNum: num,
+			PromoRuleID: rule.ID, PromoDiscountCents: 50, FinalCents: 250}
+		if err := db.Create(o).Error; err != nil {
+			t.Fatal(err)
+		}
+		db.Model(o).UpdateColumn("updated_at", updated)
+		return o
+	}
+	refunded := seed(9501, consts.OrderClosed, ago)
+	cancelled := seed(9502, consts.OrderClosed, ago)
+	db.Model(refunded).UpdateColumn("type", consts.OrderRefunded)
+	seed(9503, consts.OrderClosed, tooOld) // 超出回看窗口，不补
+
+	runConcurrently(3, func(int) error { GetRefundSrv().RunSettleCompensation(); return nil })
+
+	var releases []promo.PromoRelease
+	db.Order("order_id").Find(&releases)
+	if len(releases) != 2 || releases[0].OrderID != refunded.ID || releases[0].Reason != "refund" ||
+		releases[1].OrderID != cancelled.ID || releases[1].Reason != "cancel" {
+		t.Fatalf("unexpected releases: %+v", releases)
+	}
+	var gotRule promo.PromoRule
+	db.First(&gotRule, rule.ID)
+	if gotRule.ConsumedToday != 0 {
+		t.Fatalf("consumed_today=%d, want 0 (released exactly once per order)", gotRule.ConsumedToday)
+	}
+}
+
+// 商家能看到自己待审批的退款和买家填的原因，看不到别家的。
+func TestListRefundingScopedToMerchant(t *testing.T) {
+	db := openRefundTestDB(t)
+	seedRoleUser(t, db, 21, user.RoleMerchant)
+	seedRoleUser(t, db, 22, user.RoleMerchant)
+	mine := &orderpkg.Order{UserID: 11, BossID: 22, ProductID: 1, AddressID: 1, Num: 1, Money: 300, Type: consts.OrderWaitShip, OrderNum: 9601}
+	other := &orderpkg.Order{UserID: 11, BossID: 21, ProductID: 1, AddressID: 1, Num: 1, Money: 300, Type: consts.OrderWaitShip, OrderNum: 9602}
+	for _, x := range []*orderpkg.Order{mine, other} {
+		if err := db.Create(x).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := GetRefundSrv().RequestRefund(ctxAs(11), x.OrderNum, "不想要了"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	list, err := GetRefundSrv().ListRefunding(ctxAs(22), 0, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].ID != mine.ID || list[0].RefundReason != "不想要了" {
+		t.Fatalf("unexpected list: %+v", list)
 	}
 }
