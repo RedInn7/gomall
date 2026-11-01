@@ -111,6 +111,42 @@ func TestConcurrentDuplicateJoinReturnsDuplicateCode(t *testing.T) {
 	}
 }
 
+// 同一用户连点、抢的正好是最后一个名额：后到的那次在 JoinGroupAtomic 影响 0 行，
+// 也要返回 81003 而不是"满员 / 已成团"。
+func TestConcurrentDuplicateJoinOnLastSlotReturnsDuplicateCode(t *testing.T) {
+	db := openGroupbuyTestDB(t)
+	stubInventoryLua(t)
+	seedGroupbuyUser(t, db, 1, 100000)
+	seedGroupbuyUser(t, db, 2, 0)
+	seedGroupbuyUser(t, db, 3, 100000)
+	p := seedGroupbuyProduct(t, db, 8000)
+	created, err := GetGroupbuySrv().CreateGroup(context.Background(), 1, p.ID, 2, 0, 0, 0, testPayKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	barrierHook(t, 2)
+	errs := concurrentJoin(created.GroupID, 3, 3)
+
+	ok, dup := 0, 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrGroupbuyDuplicateJoin):
+			dup++
+		default:
+			t.Fatalf("连点抢最后名额应返回 81003, got %v", err)
+		}
+	}
+	if ok != 1 || dup != 1 {
+		t.Fatalf("ok=%d dup=%d, want 1/1", ok, dup)
+	}
+	if got := groupbuyUserBalance(t, db, 3); got != 100000-8000 {
+		t.Fatalf("只能扣一次钱, balance=%d", got)
+	}
+}
+
 // 两人并发抢最后一个名额：只有一人成功，另一人拿到满员 / 已关闭业务码且不扣钱。
 func TestConcurrentLastSlotOnlyOneWins(t *testing.T) {
 	db := openGroupbuyTestDB(t)
