@@ -12,8 +12,8 @@ import (
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
 
-// 红包资金链：复式记账，发包人 / 领取人为内部钱包，对手方统一记在平台清算账户
-// money.ExternalClearingUserID（红包在途资金的 escrow），保证 SUM(debit)=SUM(credit) 守恒。
+// 红包资金链：复式记账，发包人 / 领取人为内部钱包，对手方统一记在系统账户 user_id=0 的
+// account_code=redpacket_escrow（红包在途资金托管），与拼团 / 外部清算分开对账，保证 SUM(debit)=SUM(credit) 守恒。
 //
 // 三笔资金流均"改余额 + 写台账"落在同一事务，幂等由台账唯一索引
 // (ref_order_id, direction, biz_type) + 入账前存在性预检共同兜底：
@@ -72,7 +72,7 @@ func adjustWallet(tx *gorm.DB, userID, refID uint, delta int64, bizType string) 
 	return false, balanceAfter, nil
 }
 
-// adjustClearing 对平台清算账户（user_id=0，无加密钱包，仅记台账）追加对手方流水，守恒账。
+// adjustClearing 对红包托管账户（user_id=0 + redpacket_escrow，无加密钱包，仅记台账）追加对手方流水，守恒账。
 // 清算账户不持有 users.money 行，故只 append 流水、balance_after 记 0（清算账户余额由台账自身聚合得出）。
 func adjustClearing(tx *gorm.DB, refID uint, delta int64, bizType string) error {
 	direction := money.DirectionCredit
@@ -93,7 +93,7 @@ func adjustClearing(tx *gorm.DB, refID uint, delta int64, bizType string) error 
 	if existing > 0 {
 		return nil
 	}
-	return money.NewLedgerDaoByDB(tx).AppendTransaction(money.ExternalClearingUserID, refID, direction, amount, 0, bizType)
+	return money.NewLedgerDaoByDB(tx).AppendSystemTransaction(money.AccountCodeRedPacketEscrow, refID, direction, amount, bizType)
 }
 
 // settleSendTx 发包扣款：发包人钱包 -total 进 escrow（清算账户 +total）。须在调用方事务内执行。
