@@ -111,6 +111,10 @@ func (s *CouponSrv) Claim(ctx context.Context, mode string, batchId uint) (inter
 	if now.Before(batch.StartAt) || now.After(batch.EndAt) {
 		return nil, errors.New("活动未开始或已结束")
 	}
+	if batch.Claimed >= batch.Total {
+		// DB 已发满直接拒，不再进 Redis，避免 Redis 库存偏多时压力落到批次热行上。
+		return nil, cache.ErrCouponSoldOut
+	}
 
 	ok, err := cache.ClaimCouponAtomic(ctx, u.Id, batchId, batch.PerUser)
 	if errors.Is(err, cache.ErrCouponStockMissing) {
@@ -130,8 +134,13 @@ func (s *CouponSrv) Claim(ctx context.Context, mode string, batchId uint) (inter
 
 	uc, err := NewCouponDao(ctx).PersistClaim(u.Id, batchId, batch.ValidDays)
 	if err != nil {
-		// 落库失败回滚 redis，避免库存幽灵消耗；回滚失败需告警补偿
-		if rbErr := cache.RollbackCouponStock(ctx, u.Id, batchId); rbErr != nil {
+		// DB 已发满说明 Redis 库存偏多（对账 / 重新装载算重了在途领取），清零而不是归还。
+		// 其他落库失败回滚 redis，避免库存幽灵消耗；回滚失败需告警补偿
+		rollback := cache.RollbackCouponStock
+		if errors.Is(err, cache.ErrCouponSoldOut) {
+			rollback = cache.MarkCouponSoldOut
+		}
+		if rbErr := rollback(ctx, u.Id, batchId); rbErr != nil {
 			log.LogrusObj.Errorf("rollback coupon stock failed, userId=%d batchId=%d: %v", u.Id, batchId, rbErr)
 		}
 		return nil, err
