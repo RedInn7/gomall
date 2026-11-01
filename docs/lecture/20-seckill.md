@@ -55,7 +55,7 @@ type SkillUser struct {
 }
 ```
 
-订单表多了 `SeckillID`（`internal/order/model.go:42-43`），非 0 表示秒杀单，关单时据此归还名额。
+订单表多了 `SeckillID`（`internal/order/model.go:75-76`），非 0 表示秒杀单，关单时据此归还名额。
 
 几个设计点：
 
@@ -224,6 +224,22 @@ func (d *SkillGoodsDao) Occupy(sp *SkillProduct, userId uint, n int) error {
 
 `Price` 每次都从活动表和商品表重新取（`service.go:487-510`）。活动进行中商品被下架，排队中的单到了消费端也成交不了，名额按失败归还（`TestSeckillRejectsOffSaleProduct`，`service_test.go:436-456`）。
 
+### 2.5 秒杀价就是成交价
+
+普通异步单在消费端会试算满减、校验要用的券，建单事务里扣满减预算、核销券（第 16 讲）。秒杀单走同一个入口 `resolveTaskSettlement`，但在这里分了岔（`internal/order/consumer.go:199-207`）：
+
+```go
+if task.UserCouponID != 0 {
+	return 0, 0, nil, errors.New("秒杀单不能用券")
+}
+// 秒杀价即成交价，不叠满减 / 券。
+cents, bossID, err := seckillBinder.Price(ctx, task.SeckillID, task.ProductID)
+// （省略 err 判断）
+return cents, bossID, &orderQuote{subtotal: cents * int64(task.Num)}, nil
+```
+
+秒杀单的优惠方案只有小计。建单事务照常调 `applyDiscountsInTx`（`consumer.go:54-56`），对秒杀单它只把 `FinalCents` 写成秒杀价，不碰满减预算和券。秒杀下单请求本身没有券字段（`internal/skill/dto.go:15-21`），消息里带券只可能是伪造的，按失败收尾、名额两样都还。秒杀价已是让利后的底价，再叠满减会低于运营预期；满减预算是按天的共享计数，也不该被秒杀尖峰拖进来。
+
 ---
 
 ## 三、名额记账：五个 key 和在途集合
@@ -256,9 +272,7 @@ local function touch()
 end
 ```
 
-（`internal/skill/service.go:60-73`）
-
-两件事：
+（`internal/skill/service.go:60-73`）两件事：
 
 - **版本号 +1。** 任何改动名额的脚本都会推动版本，对账靠它判断“我读快照期间有没有人动过”（第六节）。
 - **TTL 跟着库存 key 走。** `HINCRBY`、`ZADD`、`SADD` 第一次写入时创建的 key 没有过期时间。`touch` 每次都把其余 4 个 key 的 TTL 对齐到库存 key，库存 key 的 TTL 是活动结束后再留 24 小时（`service.go:36`、`242-246`）。活动结束一天后，整场活动在 Redis 里一起消失。测试 `TestSeckillInitOverridesNullCacheAndKeysExpire`（`service_test.go:496-517`）断言用户哈希和在途集合都带 TTL。
@@ -349,10 +363,10 @@ sequenceDiagram
         C->>Redis: finishAsyncTask (去排队标记 settle 写 ok)
     else 排队超过 AsyncTaskMaxAge
         C->>Redis: abortAsyncTask (释放预占 Abort 写 failed)
-    else Price 失败 (活动不存在 商品下架 卖家变更)
+    else 定价失败 (活动不存在 商品下架 卖家变更 带券)
         C->>Redis: abortAsyncTask (两样都还 写 failed)
     else 正常
-        C->>DB: BEGIN CreateOrder + Occupy + outbox COMMIT
+        C->>DB: BEGIN CreateOrder + Occupy + 写回实付 + outbox COMMIT
         activate DB
         alt 提交成功
             DB-->>C: OK
@@ -373,7 +387,7 @@ sequenceDiagram
     deactivate C
 ```
 
-对应 `HandleAsyncOrderTask`（`internal/order/consumer.go:68-150`）。普通异步单的幂等、按 ticket 去重在第 09 讲讲过，这里只看秒杀多出来的部分：`persistAsyncOrder` 在建单事务里调 `BindTx`（`consumer.go:40-47`），提交后 `finishAsyncTask` 调 `Settle`（`consumer.go:153-159`），失败时 `abortAsyncTask` 调 `Abort`（`consumer.go:184-196`）。
+对应 `HandleAsyncOrderTask`（`internal/order/consumer.go:77-163`）。普通异步单的幂等、按 ticket 去重在第 09 讲讲过，这里只看秒杀多出来的部分：`persistAsyncOrder` 在建单事务里调 `BindTx`（`consumer.go:46-53`），提交后 `finishAsyncTask` 调 `Settle`（`consumer.go:166-172`），失败时 `abortAsyncTask` 调 `Abort`（`consumer.go:211-223`）。订单上的收货地址用的是入队时取的快照 `task.ShipTo`（`consumer.go:122`），用户在排队期间改地址不影响这张单。
 
 ### 4.2 三种失败，三种还法
 
@@ -402,7 +416,7 @@ func (binder) Abort(ctx context.Context, seckillID, userID uint, ticket string, 
 
 ### 4.3 投 MQ 失败
 
-`enqueue` 内部先释放商品预占、再去掉排队标记、写 ticket 失败（`internal/order/async.go:201-239`），然后返回错误。秒杀入口拿到错误，按 ticket 把库存和用户名额都还回去（`internal/skill/service.go:434-438`）：
+`enqueue` 依次做：未支付单数上限、取收货地址快照（同时校验归属）、商品两桶预占、记排队标记、写 pending、投 MQ（`internal/order/async.go:186-259`）。预占之后任何一步失败，都先释放商品预占、再去掉排队标记，投递失败还会写 ticket 失败（`async.go:216-256`），然后返回错误。秒杀入口拿到错误，按 ticket 把库存和用户名额都还回去（`internal/skill/service.go:434-438`）：
 
 ```go
 if err != nil {
@@ -416,10 +430,10 @@ if err != nil {
 
 ### 4.4 查不清就不补偿
 
-建单事务报错后，代码会再查一次订单（`internal/order/consumer.go:117-134`）：
+建单事务报错后，代码会再查一次订单（`internal/order/consumer.go:130-147`）：
 
 ```go
-err = defaultAsyncOrderWriter(ctx, task, order)
+err = defaultAsyncOrderWriter(ctx, task, order, quote)
 if err != nil {
 	existing, lookErr := NewOrderDao(ctx).GetOrderByTicket(task.Ticket)
 	if lookErr != nil {
@@ -440,7 +454,7 @@ if err != nil {
 
 ticket 的 TTL 是 1 小时（`internal/order/async.go:27`）。ticket 过期后，对账会把在途集合里“没有 ticket 状态”的成员当作没人处理的单归还。如果此时 MQ 里那条消息才被消费，消费端建单成功、对账又归还了名额，同一件货就算了两次。
 
-`AsyncTaskMaxAge` 比 ticket TTL 短 10 分钟（`async.go:139`），消费端拿 snowflake ticket 解析出生成时刻，排队超过它就直接按失败收尾（`consumer.go:86-92`）：
+`AsyncTaskMaxAge` 比 ticket TTL 短 10 分钟（`async.go:144`），消费端拿 snowflake ticket 解析出生成时刻，排队超过它就直接按失败收尾（`consumer.go:96-101`）：
 
 ```go
 if at, err := snowflake.TimeOf(task.Ticket); err == nil && time.Since(at) > AsyncTaskMaxAge {
@@ -451,9 +465,7 @@ if at, err := snowflake.TimeOf(task.Ticket); err == nil && time.Since(at) > Asyn
 }
 ```
 
-这样就切出了一条清楚的时间线：50 分钟以内，只有消费端会处理这张单；50 分钟以后消费端不再建单；60 分钟以后对账才会接手。两者之间留了 10 分钟，没有重叠。`TestSeckillStaleTaskAborts`（`service_test.go:384-401`）手工构造一个 51 分钟前的 ticket，断言不建单、名额全部归还。
-
-`TimeOf` 是这次在 `pkg/utils/snowflake/snowflake.go:23-30` 加的，ticket 用 snowflake 生成，本身就带时间戳，不需要在消息体里再放一个入队时间。
+这样就切出了一条清楚的时间线：50 分钟以内，只有消费端会处理这张单；50 分钟以后消费端不再建单；60 分钟以后对账才会接手。两者之间留了 10 分钟，没有重叠。`TestSeckillStaleTaskAborts`（`service_test.go:384-401`）手工构造一个 51 分钟前的 ticket，断言不建单、名额全部归还。ticket 是 snowflake，`TimeOf`（`pkg/utils/snowflake/snowflake.go:23-30`）直接解析出时间戳，消息体里不用再放入队时间。
 
 ---
 
@@ -463,10 +475,10 @@ if at, err := snowflake.TimeOf(task.Ticket); err == nil && time.Since(at) > Asyn
 
 ### 5.1 关单
 
-`CancelUnpaidOrder` 的通用逻辑见第 12 讲。秒杀多出两步（`internal/order/cancel.go:44-85`）：
+`CancelUnpaidOrder` 的通用逻辑见第 12 讲：关单事务里条件关单、退回用过的券、写 `order.cancelled`，提交后释放商品预占。秒杀单没有券，退券那一步对它是空操作；秒杀多出两步（`internal/order/cancel.go:47-92`）：
 
-- 关单事务里调 `UnbindTx`，执行 `Release` 条件归还 `sold` 和 `bought`（`internal/skill/repo.go:155-164`），条件里带 `sold >= n`，不会减成负数；
-- 事务提交后调 `Return`，跑 `returnScript`，用订单 id 做幂等闸门。
+- 关单事务里调 `UnbindTx`（`cancel.go:60-64`），执行 `Release` 条件归还 `sold` 和 `bought`（`internal/skill/repo.go:155-164`），条件里带 `sold >= n`，不会减成负数；
+- 事务提交后调 `Return`（`cancel.go:90-92`），跑 `returnScript`，用订单 id 做幂等闸门。
 
 关单事务本身由 `CloseOrderWithCheck` 保证只生效一次，重复关单在 DB 这一层就是 no-op，不会走到 `Return`。`TestSeckillTimeoutCloseReturnsQuota`（`service_test.go:223-270`）关两次单，断言 `sold`、`bought`、Redis 名额都只还一次，同一用户可以再抢。
 
@@ -535,7 +547,7 @@ for _, t := range snap.inflight {
 | 没有 | 不存在且超过 1 分钟 | 归还 | 抢名额后、写 pending 前崩溃，或 ticket 已过期 |
 | 没有 | pending | 不动 | 还在 MQ 里排队 |
 
-工单 C 的答案在最后一行。旧的做法是“采两次样，Redis 和 DB 差值稳定就当泄漏补回”，MQ 积压超过采样间隔时，排队中的单会被当成泄漏，名额被放出去，排在后面的人抢到了，前面的单落库时又被 DB 判售罄，用户看到的就是“抢到了又没了”。现在判断依据是 ticket 本身的状态：只要还是 pending，积压多久都不动。
+工单 C 的答案在最后一行。如果按“采两次样、差值稳定就补回”来判泄漏，MQ 积压超过采样间隔时排队中的单会被当成泄漏，名额放给后来者，前面的单落库时又被 DB 判售罄，用户看到“抢到了又没了”。判断依据是 ticket 本身的状态：只要还是 pending，积压多久都不动。
 
 `orphanTicketGrace` 是 1 分钟（`task.go:19`）。抢名额之后紧接着就写 pending，正常情况下两步相隔远小于 1 分钟；ticket 过期（超过 1 小时）同样没有状态，那时消费端已经按 4.5 不会再建单。
 
@@ -618,7 +630,7 @@ stockDelta := int64(v.sp.Num-v.sp.Sold) - held - snap.stock
 
 ### 6.4 商品两桶的对账也认识排队中的单
 
-商品预占对账（第 12 讲）在秒杀高峰会遇到同样的问题：MQ 积压超过采样间隔，排队中的预占会被当成泄漏回收。`enqueue` 预占成功后把 ticket 记进 `order:async:inflight:{pid}`（`internal/order/async.go:141-157`、`201`），落库或放弃时去掉；预占对账把这部分件数算作合法占用（`internal/order/task.go:197-206`）：
+商品预占对账（第 12 讲）在秒杀高峰会遇到同样的问题：MQ 积压超过采样间隔，排队中的预占会被当成泄漏回收。`enqueue` 预占成功后把 ticket 记进 `order:async:inflight:{pid}`（`internal/order/async.go:148-160`、`215`），落库或放弃时去掉；预占对账把这部分件数算作合法占用（`internal/order/task.go:197-206`）：
 
 ```go
 queued, err := asyncInflightNum(ctx, pid)
@@ -628,7 +640,7 @@ if diff := reserved - waitPaySum[pid] - inflightSum[pid] - queued; diff > 0 {
 }
 ```
 
-`asyncInflightNum` 顺手清掉分数超过 ticket TTL 的成员（`async.go:160-179`）。`enqueue` 失败时先释放预占、再去标记（`async.go:202-208`），中间被对账看到只会少回收，不会多回收。
+`asyncInflightNum` 顺手清掉分数超过 ticket TTL 的成员（`async.go:165-184`）。`enqueue` 失败时先释放预占、再去标记（`async.go:216-222`），中间被对账看到只会少回收，不会多回收。
 
 ---
 
@@ -638,15 +650,9 @@ if diff := reserved - waitPaySum[pid] - inflightSum[pid] - queued; diff > 0 {
 
 ### 7.1 退款不归还秒杀名额
 
-已付款的秒杀单发生售后退款，`sold` 和 `bought` 不减，秒杀名额不回到 Redis。要分清两本账：退款结算会把这件货加回商品的在售库存（第 19 讲 5.2），货回到了普通售卖；但它不再回到秒杀价的那 `num` 件里。
+已付款的秒杀单发生售后退款，`sold` 和 `bought` 不减，秒杀名额不回到 Redis。要分清两本账：商品库存照常回补（第 19 讲 5.2），未发货就退的单在退款结算时回补，已发货的单要等商家确认退货入库才回补，靠 `restocked_at` 保证只补一次；货回到了普通售卖，但它不再回到秒杀价的那 `num` 件里。退给用户的金额按订单实付 `PayableCents()` 算，秒杀单没有满减和券，就是秒杀价。
 
-理由有三：
-
-- 售后退款大多发生在活动结束之后，那时 Redis 的 key 已经随 TTL 消失，归还的名额也没人能抢；
-- 按“卖出过”计限购是常见的业务口径，防止同一用户“买了退、退了再买”反复占用低价名额；
-- 退款链路涉及资金和履约，再让它反向改秒杀计数，会把一个本来只在活动期间活跃的模块拉进售后的长尾里。
-
-关单（未付款）和退款（已付款）是两件事，前者一定归还，后者不归还。
+理由有三：售后退款大多发生在活动结束之后，Redis 的 key 已随 TTL 消失，归还的名额也没人能抢；按“卖出过”计限购是常见口径，防止同一用户“买了退、退了再买”反复占用低价名额；退款链路涉及资金和履约，再让它反向改秒杀计数，会把只在活动期间活跃的模块拉进售后长尾。关单（未付款）一定归还，退款（已付款）不归还。
 
 ### 7.2 DB 故障时名额延后释放
 
@@ -699,13 +705,7 @@ go test ./internal/skill -run TestSeckillDBGuardWhenRedisDrifts -v
 
 ### 演示 4：手工制造工单 D
 
-本地起服务，创建一场 1 件的活动，用户 A 抢到并建单。然后：
-
-```bash
-redis-cli SMEMBERS 'skill:{1}:returned'     # 空
-```
-
-在 `CancelUnpaidOrder` 里临时注释掉 `seckillBinder.Return(ctx, order)`，触发关单：
+本地起服务，创建一场 1 件的活动，用户 A 抢到并建单，`redis-cli SMEMBERS 'skill:{1}:returned'` 为空。在 `CancelUnpaidOrder` 里临时注释掉 `seckillBinder.Return(ctx, order)`，触发关单：
 
 - DB 里订单是已关闭，`sold` 回到 0；
 - Redis 库存仍是 0，用户 B 抢会得到“已抢完”；
@@ -739,7 +739,7 @@ redis-cli SMEMBERS 'skill:{1}:returned'     # 空
 | 订单链路扩展点 | `internal/order/seckill.go`、`internal/skill/service.go` | `SeckillBinder`、`binder` |
 | DB 兜底与快照 | `internal/skill/repo.go` | `Occupy`、`Release`、`loadDBView` |
 | 异步投递与排队标记 | `internal/order/async.go` | `SeckillEnqueue`、`enqueue`、`AsyncTaskMaxAge`、`asyncInflightNum` |
-| 消费端建单与补偿 | `internal/order/consumer.go` | `HandleAsyncOrderTask`、`finishAsyncTask`、`abortAsyncTask` |
+| 消费端建单与补偿 | `internal/order/consumer.go` | `HandleAsyncOrderTask`、`persistAsyncOrder`、`resolveTaskSettlement`、`finishAsyncTask`、`abortAsyncTask` |
 | 关单 | `internal/order/cancel.go` | `CancelUnpaidOrder` |
 | 秒杀对账 | `internal/skill/task.go` | `RunSeckillReconcile`、`reconcileSkill`、`fixDrift`、`snapshotScript`、`fixScript` |
 | 商品预占对账 | `internal/order/task.go` | `sampleReservationLeak` |
