@@ -85,12 +85,12 @@ func (d *GroupbuyDao) MarkGroupSuccessIfFull(groupID uint) (bool, error) {
 	return res.RowsAffected > 0, nil
 }
 
-// MarkGroupExpired 把仍 open 的团切到 expired。返回是否真的切了状态。
-// 仅当当前 status=open 时生效，幂等。
-func (d *GroupbuyDao) MarkGroupExpired(groupID uint) (bool, error) {
+// MarkGroupDissolved 把仍 open 的团切到 expired（超时散团）或 closed（人工关团）。返回是否真的切了状态。
+// 仅当当前 status=open 时生效，幂等；与 MarkGroupSuccessIfFull 靠同一个 status=open 条件互斥。
+func (d *GroupbuyDao) MarkGroupDissolved(groupID, toStatus, operatorID uint, reason string) (bool, error) {
 	res := d.DB.Model(&GroupbuyGroup{}).
 		Where("id=? AND status=?", groupID, GroupbuyStatusOpen).
-		Update("status", GroupbuyStatusExpired)
+		Updates(map[string]interface{}{"status": toStatus, "closed_by": operatorID, "close_reason": reason})
 	if res.Error != nil {
 		return false, res.Error
 	}

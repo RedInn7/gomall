@@ -96,6 +96,38 @@ func RecordClearedTx(tx *gorm.DB, o *order.Order, channel, providerRef, currency
 	)
 }
 
+// RecordClearedFromSystemTx 买家的钱已经在另一个平台系统账户里（如拼团在途托管 groupbuy_escrow），
+// 成交时把整笔从 fromAccountCode 转进 merchant_escrow 并建清算单。买家钱包在入那个账户时已扣过，这里不再碰；
+// 之后与普通订单一样：order.completed 才结算给卖家，履约前退款从 merchant_escrow 退。
+func RecordClearedFromSystemTx(tx *gorm.DB, o *order.Order, fromAccountCode, bizType string) error {
+	if tx == nil || o == nil || o.ID == 0 || o.UserID == 0 || o.BossID == 0 || o.Num <= 0 || bizType == "" {
+		return ErrInvalidClearingInput
+	}
+	gross := orderPayableCents(o)
+	if gross < 0 {
+		return ErrInvalidClearingInput
+	}
+	record := &PaymentClearing{
+		OrderID:    o.ID,
+		BuyerID:    o.UserID,
+		SellerID:   o.BossID,
+		Channel:    ChannelWallet,
+		GrossCents: gross,
+		NetCents:   gross,
+		Currency:   "CNY",
+		Status:     StatusCleared,
+		ClearedAt:  time.Now(),
+	}
+	if err := tx.Create(record).Error; err != nil {
+		return err
+	}
+	ledger := money.NewLedgerDaoByDB(tx)
+	if err := ledger.AppendSystemTransaction(fromAccountCode, o.ID, money.DirectionDebit, gross, bizType); err != nil {
+		return err
+	}
+	return ledger.AppendSystemTransaction(money.AccountCodeMerchantEscrow, o.ID, money.DirectionCredit, gross, bizType)
+}
+
 // RecordExternalDuplicateTx 区分外部事件的“同一笔重放”和“确实重复收款”。
 // 返回 matched=true 表示 provider_ref 与原清算单一致，可按幂等重放处理；否则持久化待人工退款异常。
 func RecordExternalDuplicateTx(tx *gorm.DB, o *order.Order, channel, providerRef, providerAmount, currency string) (matched bool, err error) {
@@ -146,6 +178,52 @@ func RecordExternalAnomalyTx(tx *gorm.DB, o *order.Order, channel, providerRef, 
 		return err
 	}
 	return nil
+}
+
+// RecordRefundShortfall 结算后退款因卖家余额不够整笔回滚时，在独立事务里落一张待人工处理的异常单。
+// 订单此时已是 Refunded、钱却没退：异常单进运营队列，补偿任务据此跳过这单，不再每轮重试、挤占名额。
+//   - 运营追回货款 / 平台垫付后把异常单标为 resolved，补偿任务会自动重放这笔退款；
+//   - 重放仍不够时异常单退回 pending_review，并留一条 operator_id=0 的系统流转记录；
+//   - 标 refunded / rejected 视为已在线下处理完，不再自动退款。
+//
+// provider_ref 按订单固定，重复调用由 (channel, provider_ref) 唯一索引吸收。
+func RecordRefundShortfall(ctx context.Context, orderID uint, channel string, amountCents int64) error {
+	ref := fmt.Sprintf("refund_shortfall:%d", orderID)
+	now := time.Now()
+	const note = "自动重放退款时卖家余额仍不足，重新进入待审核"
+	return dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&PaymentAnomaly{
+			OrderID:        orderID,
+			Channel:        channel,
+			ProviderRef:    ref,
+			ProviderAmount: strconv.FormatInt(amountCents, 10),
+			Currency:       "CNY",
+			Reason:         AnomalyReasonRefundSellerShortfall,
+			Status:         AnomalyStatusPendingReview,
+			OccurredAt:     now,
+		}).Error; err != nil {
+			return err
+		}
+		var anomaly PaymentAnomaly
+		if err := tx.Where("channel = ? AND provider_ref = ?", channel, ref).First(&anomaly).Error; err != nil {
+			return err
+		}
+		if anomaly.Status != AnomalyStatusResolved {
+			return nil
+		}
+		res := tx.Model(&PaymentAnomaly{}).Where("id = ? AND status = ?", anomaly.ID, AnomalyStatusResolved).
+			Updates(map[string]interface{}{
+				"status": AnomalyStatusPendingReview, "resolved_at": nil,
+				"last_operator_id": 0, "last_action_at": now, "last_note": note,
+			})
+		if res.Error != nil || res.RowsAffected == 0 {
+			return res.Error
+		}
+		return tx.Create(&PaymentAnomalyTransition{
+			AnomalyID: anomaly.ID, FromStatus: AnomalyStatusResolved, ToStatus: AnomalyStatusPendingReview,
+			Note: note, ActedAt: now,
+		}).Error
+	})
 }
 
 // IsProviderCleared 在依赖 Redis 等一次性校验状态前，先用持久化清算单识别同一外部支付的重放。
@@ -278,10 +356,7 @@ func settleCompletedOrder(db *gorm.DB, orderID uint) error {
 }
 
 func orderPayableCents(o *order.Order) int64 {
-	if o.PromoRuleID != 0 {
-		return o.FinalCents
-	}
-	return o.Money * int64(o.Num)
+	return o.PayableCents()
 }
 
 func validChannel(channel string) bool {
@@ -420,7 +495,7 @@ func validOptionalAnomalyReason(reason string) bool {
 func validAnomalyReason(reason string) bool {
 	switch reason {
 	case AnomalyReasonDuplicatePayment, AnomalyReasonAmountMismatch, AnomalyReasonPaymentDetailsMismatch,
-		AnomalyReasonHighRiskPayment, AnomalyReasonFulfillmentFailed:
+		AnomalyReasonHighRiskPayment, AnomalyReasonFulfillmentFailed, AnomalyReasonRefundSellerShortfall:
 		return true
 	default:
 		return false

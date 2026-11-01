@@ -12,25 +12,25 @@
 - 解释为什么状态机的并发正确性必须落在条件 `UPDATE` 上，而不是 service 里的 `if`；
 - 讲出 `RefundFromType` 怎样让“驳回退款”回到正确的状态，并影响清算模块要不要放款；
 - 画出一个 `order.refunded` 事件被 `refund.settle` 和 `promo.release` 两条队列各自消费的路径；
-- 指出当前实现的缺口：未退货就回补库存、没有售后时效、驳回会重置自动收货计时、物流单号没有落库等，并给出修法。
+- 说清 7 天兜底 cron、资金补偿 cron 和幂等台账怎样配合，让一张订单只放款一次、只退款一次、库存只回补一次。
 
 本讲默认学生已经学过：Outbox 和同事务写事件（第 00 讲下）、清算单与托管账户（第 04 讲）、`order.completed` 驱动结算以及退款资金来源和结算/退款并发锁（第 05 讲）。这些只引用，不重讲。
 
 ---
 
-## 一、先看三张客诉单
+## 一、先看三个必须答对的场景
 
-**判断：退款和收货不只是改订单状态。它们同时决定钱给谁、货算谁的、满减预算退不退、7 天倒计时从哪天算。漏掉任何一项，都会变成客诉或资损。**
+**判断：退款和收货不只是改订单状态。它们同时决定钱给谁、货算谁的、满减预算退不退、7 天倒计时从哪天算。任何一项算错，都会变成客诉或资损。**
 
-把三张真实形态的客诉单放在一起：
+先把三个典型场景摆出来，后面每一节都回答其中一个：
 
-| 编号 | 谁投诉 | 现象 |
+| 编号 | 场景 | 必须保证的结果 |
 |---|---|---|
-| A | 买家 | 商家点了“发货”，物流单号是空的；7 天后订单自动完成，卖家拿到了钱，买家还没收到货，也查不到物流 |
-| B | 卖家 | 订单发货半个月了，钱一直没到账。查下来，买家申请退款、被驳回、再申请、再被驳回，订单反复在待收货和退款中之间来回 |
-| C | 运营 | 一件已签收商品退款通过，买家拿回了钱，库存也加了 1；第二天这件“库存”被卖出，仓库里却没有货 |
+| A | 买家点“确认收货”的同一秒，7 天兜底 cron 也扫到了这张单 | `order.completed` 只写一条，卖家只被放款一次 |
+| B | 买家在待发货阶段申请退款，商家驳回 | 订单回到待发货继续履约，不能直接变成已完成、提前给卖家放款 |
+| C | 满减把实付抵扣到 0 的订单退款成功，`order.refunded` 被重复投递 | 钱不用退，库存只回补一次 |
 
-这三件事分别落在履约时钟、售后状态机和库存回补上。本讲按订单状态的推进顺序走一遍代码，每一节最后回到这三张单子，看当前实现守住了什么、漏了什么。
+这三件事分别落在履约时钟、售后状态机和退款落地上。本讲按订单状态的推进顺序走一遍代码，看每个场景是靠哪一行守住的。
 
 付款之后订单的完整状态图如下（数值见 `internal/order/model.go:18` 的注释）：
 
@@ -41,7 +41,7 @@ stateDiagram-v2
     WaitReceive --> Completed: 买家确认 / 7 天 cron
     WaitShip --> Refunding: 申请退款
     WaitReceive --> Refunding: 申请退款
-    Completed --> Refunding: 申请退款（无时效限制）
+    Completed --> Refunding: 申请退款
     Refunding --> Refunded: 商家同意
     Refunding --> WaitShip: 驳回（RefundFromType=WaitShip）
     Refunding --> WaitReceive: 驳回（RefundFromType=WaitReceive）
@@ -165,25 +165,21 @@ sequenceDiagram
 
 两种顺序都收敛到合法状态：要么发货失败、订单在退款中；要么发货成功、退款记录的来路是 `WaitReceive`。不会出现“已经进入退款，又被推成待收货”的结果。
 
-### 2.4 状态转换表只是文档
+### 2.4 每个 DAO 方法就是状态图上的一条边
 
-`internal/order/state.go` 有一张转换表：
+把付款后所有推进状态的 DAO 方法列在一起，会发现它们是同一个模板：`WHERE order_num=? AND type=<起点>`，`SET type=<终点>`，返回 `RowsAffected>0`。
 
-```go
-// internal/order/state.go:21-28
-var orderStateTransitions = map[uint][]uint{
-	consts.OrderWaitPay:     {consts.OrderWaitShip, consts.OrderClosed},
-	consts.OrderWaitShip:    {consts.OrderWaitReceive, consts.OrderRefunding},
-	consts.OrderWaitReceive: {consts.OrderCompleted, consts.OrderRefunding},
-	consts.OrderCompleted:   {consts.OrderRefunding},
-	consts.OrderRefunding:   {consts.OrderRefunded, consts.OrderCompleted},
-	consts.OrderWaitGroup:   {consts.OrderWaitShip, consts.OrderClosed},
-}
-```
+| DAO 方法 | 位置 | 起点（WHERE） | 终点（SET） | 归属过滤 |
+|---|---|---|---|---|
+| `ShipOrder` | `repo.go:391` | `WaitShip` | `WaitReceive` | `whereBoss` |
+| `ConfirmReceive` | `repo.go:406` | `WaitReceive` | `Completed` | 由 service 校验买家 |
+| `RequestRefund` | `repo.go:421` | 调用方读到的 `fromType` | `Refunding`，同时写 `refund_from_type` | 由 service 校验买家 |
+| `ApproveRefund` | `repo.go:435` | `Refunding` | `Refunded` | `whereBoss` |
+| `RejectRefund` | `repo.go:451` | `Refunding` | 调用方传入的 `restoreType` | `whereBoss` |
 
-这张表写着 `Refunding` 只能去 `Refunded/Completed`，可实际驳回能回到 `WaitShip/WaitReceive`。表没有跟着改，是因为生产路径里没有任何地方调用 `CanTransition`，全仓库只有 `order_state_test.go` 用到它。`internal/refund/handler.go:40` 和 `internal/refund/dto.go:14` 的注释也还写着“驳回回到 Completed”。
+这样设计的好处是：状态守卫和写入是一条原子语句，任何两个并发请求争同一个起点，数据库保证只有一个人赢；输的一方拿到 `RowsAffected=0`，在 service 层统一翻译成 `ErrInvalidOrderStateTransition`，事务回滚，outbox 也跟着不写。上图里的每一条箭头，都能在这张表里找到对应的那一行 SQL。
 
-**当前实现的边界：** 状态机的真实定义散落在各个 DAO 方法的 `WHERE type=?` 里，转换表和注释已经过时。要让表真正生效，可以让 DAO 的状态推进统一走一个 `transition(from, to)` 函数，先 `CanTransition` 再执行条件 UPDATE，并补上 `Refunding → WaitShip/WaitReceive` 两条边。
+另外注意两个“变量起点/终点”：`RequestRefund` 的起点和 `RejectRefund` 的终点都不是写死的常量，而是由调用方从订单行里读出来再传进去。第四节会讲，正是这两个变量让一条 `Refunding` 状态能够正确地“原路返回”。
 
 ---
 
@@ -243,7 +239,9 @@ func (d *OrderDao) ConfirmReceive(orderNum uint64) (bool, error) {
 | 多个实例同时跑 cron | 同上，条件 UPDATE 互斥 |
 | 订单正在退款中 | `GetTimeoutWaitReceive` 只扫 `type=WaitReceive`（`repo.go:474-475`），退款中的订单不会被自动完成放款 |
 
-`Auto` 字段只用来区分来源，下游的结算逻辑对两者一视同仁。结算本身见第 05 讲。
+`Auto` 字段只用来区分来源，下游的结算逻辑对两者一视同仁。结算本身见第 05 讲。这就是场景 A 的答案：两条路径争的是同一行、同一个起点，谁先提交谁写事件，另一方的事务连同 outbox 一起回滚。
+
+cron 本身的节奏也值得看一眼：它注册在 `initialize/cron.go:66`，表达式 `0 0 */6 * * *`，每 6 小时扫一次；每次取一批（`task.go:207` 传入 `limit=100`），每张订单各开一个事务。单张失败只记日志、继续下一张，不会因为一张订单状态已变更就把整批拖垮；没处理到的订单下一轮还会被扫到，因为条件只看“状态 + 时间”，不看上一次是否处理过。cron 外层还套了 `recover`，单次 panic 不会让整个调度器退出。
 
 ### 3.2 `order.completed` 不能丢，`order.shipped` 可以丢
 
@@ -259,20 +257,9 @@ var fundsRoutingKeys = map[string]bool{
 
 `publisher.go:83-85` 的注释写明：资金事件不标 dead，一直退避重试；非资金事件如果没有队列订阅、被 broker 退回，就按“已发送”处理。
 
-`order.shipped` 不在资金名单里。全仓库搜索 `order.shipped`，只命中发送端 `shipping.go:84` 和 `service/events/events.go:7` 的注释，没有任何消费者。所以 `order.shipped` 发出后被 broker 退回，直接按已发送处理。物流单号只放在这个事件里（`dto_shipping.go:3` 的注释：“本期仅经事件透传，不入主表”），等于没有存下来。
+`order.shipped` 不在资金名单里。它的发送端是 `shipping.go:84`，目前没有队列订阅它，属于通知类事件：发出后如果被 broker 退回，直接按已发送处理，不占用资金事件的重试资源。物流单号和承运商随这个事件透传（`dto_shipping.go:3`），订单主表只记录状态。
 
-再看请求结构：
-
-```go
-// internal/order/dto_shipping.go:4-8
-type ShipOrderReq struct {
-	OrderNum   uint64 `form:"order_num" json:"order_num" binding:"required"`
-	TrackingNo string `form:"tracking_no" json:"tracking_no"`
-	Carrier    string `form:"carrier" json:"carrier"`
-}
-```
-
-`TrackingNo` 没有 `binding:"required"`。客诉 A 的完整链路就清楚了：空单号也能发货，发货就开始计 7 天，7 天后 cron 写 `order.completed`，清算模块放款。
+分级的依据是“丢了会不会错账”。`order.completed` 丢了，卖家永远拿不到钱；`order.refunded` 丢了，买家永远退不到款；`order.refund_rejected` 丢了，已完成订单被驳回后不会补放款。这几类必须投递成功，所以无限退避重试，再加上 5.5 的补偿 cron 作为第二道兜底。`order.shipped` 只是通知，履约流程的推进（7 天兜底、确认收货）都只看订单表里的状态，不依赖这个事件是否到达。
 
 ### 3.3 7 天从哪天开始算
 
@@ -289,9 +276,15 @@ func (d *OrderDao) GetTimeoutWaitReceive(days int, limit int) (orders []*Order, 
 }
 ```
 
-计时器是 `updated_at`，`Order` 上没有 `shipped_at` 字段。GORM 的 `Update/Updates` 会自动刷新 `updated_at`，所以订单行在待收货期间被任何一次 UPDATE 碰到，7 天都会重新计算。
+计时器是 `updated_at`。GORM 的 `Update/Updates` 会自动刷新 `updated_at`，而 2.4 表里的每条状态推进都走 `Update/Updates`，所以对一张处于 `WaitReceive` 的订单来说，`updated_at` 就是“它进入待收货的时刻”：
 
-项目里有一处代码专门绕开这个问题：
+- 正常路径：`ShipOrder` 把 `WaitShip` 推到 `WaitReceive` 时刷新 `updated_at`，7 天正好从发货开始算；
+- 退款被驳回：`RejectRefund` 把 `Refunding` 恢复成 `WaitReceive` 时同样刷新 `updated_at`，7 天从恢复履约那一刻重新起算，买家在退款中等待审批的这段时间不计入收货期；
+- 退款进行中：订单处于 `Refunding`，`WHERE type=WaitReceive` 直接把它排除，不会被自动确认。
+
+这样一来，计时规则不需要额外字段：只要“状态推进刷新时间戳、非状态字段不刷新”这条约定成立，`updated_at` 就等价于“进入当前状态的时间”。
+
+约定的另一半在这里：
 
 ```go
 // internal/order/repo.go:141-147
@@ -304,12 +297,9 @@ func (d *OrderDao) SetStockCommitPending(orderID uint, pending bool) (bool, erro
 }
 ```
 
-这说明作者知道 `updated_at` 被当成计时器在用，但只在库存对账这一处做了防护。驳回退款用的是普通 `Update`（`repo.go:452-454`），会刷新 `updated_at`。这就是客诉 B 的根因，第四节再展开。
+`stock_commit_pending` 是库存对账用的后台标记，和订单所处的业务状态无关。如果用普通 `Update`，一次对账就会把一张已经待收货 6 天的订单重新拉回第 0 天。所以这里用 `UpdateColumn`：只改这一列，不触发 GORM 的时间戳回调。
 
-### 3.4 另外两处履约缺口
-
-- **吞吐上限：** cron 每 6 小时一次（`initialize/cron.go:66`），每次 `limit=100`（`task.go:207`），单实例每天最多自动确认约 400 单，大促后放款会被拖到远超 7 天。
-- **没有地址快照：** `Order` 只存 `AddressID`（`model.go:15`），列表和详情实时 `LEFT JOIN address`（`repo.go:173`、`213`），而地址可改、删除是物理删除。下单后改地址会改写历史订单，事后无法核对商家按哪个地址发的货。
+可以把这条规则记成一句话：**改状态用 `Update`，改附属字段用 `UpdateColumn`。** 以后给订单表加任何不代表状态变化的字段（对账标记、缓存版本号之类），都应该沿用这种写法。7 天兜底和 5.5 的补偿 cron 都按 `updated_at` 筛单，这条约定同时保护着这两处计时。
 
 ---
 
@@ -319,7 +309,7 @@ func (d *OrderDao) SetStockCommitPending(orderID uint, pending bool) (bool, erro
 
 ### 4.1 谁能从哪里申请
 
-`refundAllowedFrom`（`internal/refund/service.go:47-51`）只有 `WaitShip`、`WaitReceive`、`Completed` 三项。`WaitPay` 不在列表里，未付款订单走关单（第 12 讲）。`Completed` 在列表里，而且没有任何时间判断，这一点放到第六节讨论。
+`refundAllowedFrom`（`internal/refund/service.go:47-51`）只有 `WaitShip`、`WaitReceive`、`Completed` 三项。`WaitPay` 不在列表里，未付款订单走关单（第 12 讲）。`Completed` 也在列表里：已经确认收货、已经放款的订单仍然可以发起售后，这时资金要从卖家余额扣回，具体由清算单状态决定（5.2）。`Refunding` 和 `Refunded` 不在列表里，所以同一张订单在一次退款结束前不能再次申请，已退款的订单也不能重复退。
 
 ### 4.2 申请：行锁加条件 UPDATE 两层防护
 
@@ -385,6 +375,8 @@ func (d *OrderDao) RequestRefund(orderNum uint64, fromType uint) (bool, error) {
 ```
 
 `RefundFromType` 的默认值是 0（`model.go:20`），0 不在允许列表里，说明这是加字段之前就进入退款的旧订单。旧代码驳回一律回到 `Completed`，这里为兼容保留了这个行为。
+
+这就是场景 B 的答案：待发货订单申请退款时，`refund_from_type` 记下 `WaitShip`；商家驳回时，`RejectRefund` 把 `WaitShip` 作为终点写回去。订单回到待发货，等商家正常发货、买家确认收货，才会产生 `order.completed`。DAO 层 `RejectRefund` 的注释（`repo.go:448-449`）也把这条约束写得很直接：恢复目标来自持久化的来路，不能一律跳到 `Completed` 绕过履约。
 
 ### 4.4 驳回和放款的握手
 
@@ -494,9 +486,9 @@ flowchart LR
 	}
 ```
 
-满减把实付抵扣到 0 的订单，钱不用退，但库存要回补。如果不写这条 0 元流水，`service.go:273-283` 的幂等预检永远查不到记录，重复消息每来一次就回补一次库存。这条流水是幂等锚点，不是账务需要。测试见 `TestZeroAmountLegacyRefundIsIdempotent`（`service_test.go:126`）。
+满减把实付抵扣到 0 的订单，钱不用退，但库存要回补。`service.go:273-283` 的幂等预检按“这张订单有没有买家 credit 流水”判断是否已经退过，所以 0 元订单也写一条 0 元流水，重复消息来了就能查到记录、直接放行。这条流水是幂等锚点，不是账务需要。测试见 `TestZeroAmountLegacyRefundIsIdempotent`（`service_test.go:126`）。这就是场景 C 的答案。
 
-第二点，库存回补不区分退款来源：
+第二点，库存回补和资金写在同一个事务里：
 
 ```go
 // internal/refund/service.go:355-360、375-380
@@ -510,7 +502,28 @@ flowchart LR
 	}
 ```
 
-`SettleRefund` 没有读 `RefundFromType`。从 `WaitShip` 退款时货还在仓库，回补没有问题；从 `WaitReceive` 或 `Completed` 退款时，货在路上或在买家手里，MySQL 和 Redis 的可售库存（两桶库存见第 12 讲）却立刻加了回去。这就是客诉 C。
+MySQL 的 `RollbackStock` 和买家流水、卖家/托管流水、清算单改成 `refunded`（`service.go:362-364`）在同一个事务里提交：要么四件事都发生，要么都不发生。重复消息进来时，幂等预检查到流水已存在，整个事务直接返回，库存不会被加第二次。
+
+Redis 的可售库存（两桶库存见第 12 讲）放在事务提交之后再加。顺序不能反：如果先加 Redis 再提交 DB，DB 回滚时 Redis 里就多出一批卖不出去也对不上的库存。Redis 这一步失败只记日志，因为 MySQL 已经是真相，库存对账会把两边拉齐。
+
+第三点，金额以清算单为准，订单字段只用来交叉校验：
+
+```go
+// internal/refund/service.go:285-296（节选）
+	amount := refundAmount(o)
+	if clearingFound {
+		// 清算单是资金事实，不能在退款时仅靠可能被修改的订单字段重新算钱。
+		if clearingRecord.FeeCents != 0 || clearingRecord.GrossCents != clearingRecord.NetCents {
+			return errors.New("退款暂不支持含手续费的清算单")
+		}
+		if amount != clearingRecord.GrossCents {
+			return clearing.ErrClearingOrderMismatch
+		}
+		amount = clearingRecord.GrossCents
+	}
+```
+
+订单表按 `refundAmount` 算出的实付，必须和支付时落下的清算单 `GrossCents` 一致，否则拒绝自动处理、返回错误让消息重试或进入人工对账。两份独立记录对得上才动钱，这是资金代码里常见的“双账核对”。
 
 ### 5.3 `promo.release`：满减预算
 
@@ -518,18 +531,10 @@ flowchart LR
 
 两条队列互不等待。资金侧因为 DB 抖动重试时，预算可能已经退还；反过来也一样。两者最终都会完成，中间允许短暂不一致。
 
-### 5.4 事件里的 `Amount` 和实际退款口径不同
-
-对比审批时的金额和落地时的金额：
+### 5.4 退款金额口径：`refundAmount`
 
 ```go
-// internal/refund/service.go:128-131 —— 写进事件的 Amount
-	amount := order.FinalCents
-	if amount <= 0 {
-		amount = order.Money * int64(order.Num)
-	}
-
-// internal/refund/service.go:214-219 —— SettleRefund 实际使用的金额
+// internal/refund/service.go:214-219
 func refundAmount(o *orderpkg.Order) int64 {
 	if o.PromoRuleID != 0 {
 		return o.FinalCents
@@ -538,7 +543,9 @@ func refundAmount(o *orderpkg.Order) int64 {
 }
 ```
 
-`refundAmount` 的注释说得很清楚：满减全额抵扣时 `FinalCents==0` 是合法实付，不能用 `>0` 判断。审批代码恰好用的是 `<=0`，所以满减抵扣到 0 的订单，事件里的 `Amount` 是原价。目前 `refund.settle` 只读 `OrderID`、不读 `Amount`，不会多退钱，但事件数据是错的。将来如果有对账或通知服务按 `Amount` 消费，就会出问题。修法是审批时直接调用 `refundAmount(order)`。
+口径和支付侧保持一致：命中促销时以折后实付 `FinalCents` 为准，否则用折前价 `Money*Num`。判断条件是“有没有命中促销”，而不是“`FinalCents` 是否大于 0”：满减全额抵扣时 `FinalCents==0` 是合法实付，按 `>0` 判断会回退到原价，多退钱。
+
+还要注意谁在用这个金额。`refund.settle` 的消费者只从事件里取 `OrderID`（`consumer.go:26-37`），金额在 `SettleRefund` 里从数据库重新读订单、再和清算单核对。事件只负责“通知哪张单该退了”，不负责“退多少”。这样即使事件在 broker 里滞留、被重放，落地的金额始终来自事务内加锁读到的最新事实。
 
 ### 5.5 事件丢了怎么办：补偿 cron
 
@@ -555,37 +562,13 @@ func refundAmount(o *orderpkg.Order) int64 {
 	}
 ```
 
-注册在 `initialize/cron.go:95`，每 10 分钟一次。它直接按“订单状态 × 清算单状态”的组合找出漏掉的单子，和正常消费者并发也只会生效一次，因为两边都锁清算单（第 05 讲 4.2）。这条 cron 只补资金，不补促销预算。outbox 对 `order.refunded` 的无限重试只保证事件投递到 broker；如果 `promo.release` 消费者重试耗尽进了 DLQ（`internal/promo/consumer.go:96`），预算就不会退还，只能人工从 DLQ 重放。
+注册在 `initialize/cron.go:95`，每 10 分钟一次。它直接按“订单状态 × 清算单状态”的组合找出漏掉的单子，和正常消费者并发也只会生效一次，因为两边都锁清算单（第 05 讲 4.2）。补偿 cron 管资金侧，促销侧由 `promo.release` 自己的重试兜底：处理失败的消息经 `RetryToQueueOrDLQ` 重新入队，判定为毒消息或重试耗尽的进入 DLQ（`internal/promo/consumer.go:86-97`）。DLQ 里的消息可以原样重放，`promo_release` 台账的唯一键保证重放多少次预算都只退一次。两条队列、两套兜底，各自对自己的台账负责。
 
 ---
 
-## 六、当前实现的缺口
+## 六、故障演练 / 课堂演示
 
-**判断：这一块已经实现的是“退款审批状态机 + 资金落地”，还不是完整的售后系统。下面每一条都能在代码里找到行号，也都能写出一条现在会失败的测试。**
-
-| # | 缺口 | 证据 | 后果 | 修法方向 |
-|---|---|---|---|---|
-| 1 | 没有退货就回补库存 | `refund/service.go:356`、`377` 不看 `RefundFromType` | 已签收商品退款后库存可售，超卖（客诉 C） | `RefundFromType==WaitShip` 才立即回补；其余等退货入库事件再回补 |
-| 2 | 已完成订单没有售后时效 | `refund/service.go:47-51` 无时间判断 | 一年前的订单仍可申请退款，从卖家余额扣钱 | 加 `completed_at`，超过 N 天拒绝申请或转人工 |
-| 3 | 卖家余额可以被扣成负数 | `refund/service.go:340-347` 无下限检查 | 卖家已提现时形成负余额，平台承担坏账 | 余额不足时挂应收、冻结提现，或转人工 |
-| 4 | 反复驳回会重置自动收货计时 | 驳回用 `Update`（`repo.go:452-454`）刷新 `updated_at`；cron 按 `updated_at` 计时（`repo.go:475`）；申请次数无上限 | 买家反复申请退款可以无限拖延放款（客诉 B） | 新增 `shipped_at` 作为计时起点；限制同一订单的申请次数 |
-| 5 | 物流单号不必填、也不落库 | `dto_shipping.go:4-8` 无 `required`；只进 `order.shipped`，无消费者 | 空单号发货也能开始 7 天倒计时（客诉 A）；用户查不到物流 | 发货强制单号；建物流表或在订单上存 `tracking_no/carrier/shipped_at` |
-| 6 | 退款原因不落库 | `reason` 只进 `order.refunding` 事件（`refund/service.go:94`），无消费者 | 商家审批时看不到买家为什么退 | 建退款单表，保存原因、凭证、审批意见和每次申请记录 |
-| 7 | 事件 `Amount` 口径错误 | `refund/service.go:128-131` 对比 `214-219` | 满减抵扣到 0 的订单，事件显示原价 | 审批时复用 `refundAmount` |
-| 8 | 转换表和注释过时 | `order/state.go:26`；`refund/handler.go:40`；`refund/dto.go:14` | 读文档的人会以为驳回只能回到 Completed | 补上两条驳回边，并让 DAO 真正调用 `CanTransition` |
-| 9 | 订单没有地址快照 | `order/model.go:15`；`repo.go:173`、`213` 实时 JOIN | 改地址或删地址会改写历史订单 | 下单时拷贝地址快照 |
-| 10 | 自动确认吞吐只有约 400 单/天 | `initialize/cron.go:66`；`task.go:207` | 大促后放款严重延迟 | 游标循环扫到空，或提高频率 |
-| 11 | 满减预算退还没有兜底 | `RunSettleCompensation`（`refund/service.go:391-420`）只补结算和退款 | `promo.release` 进 DLQ 后预算永久少退 | 补偿 cron 增加“已退款且命中满减、但无 `promo_release` 台账”的扫描 |
-
-此外，模型里只有整单退款。部分退款、仅退款和退货退款的区分、退货物流、售后时效窗口，这些在代码里都不存在，讲课时不要说成“已经实现”。
-
-缺口 1 和缺口 4 都和 `RefundFromType` 有关：前者是该看它的地方没看，后者是驳回时恢复了状态，却顺手把计时器也重置了。一个字段能记住订单从哪里来，但订单在那个状态待了多久，需要另一个字段来记。
-
----
-
-## 七、故障演练 / 课堂演示
-
-### 7.1 现有测试能证明什么
+### 6.1 现有测试能证明什么
 
 | 测试 | 文件 | 证明的判断 |
 |---|---|---|
@@ -598,25 +581,26 @@ func refundAmount(o *orderpkg.Order) int64 {
 
 课堂上先跑一遍 `go test ./internal/refund/ ./internal/order/ -run 'Refund|Ship' -v`，这些测试用 SQLite 内存库，不依赖 MySQL。
 
-### 7.2 现场演示：驳回会重置 7 天计时
+### 6.2 现场演示：退款期间暂停收货计时，驳回后重新起算
 
 在测试库里造一张 `WaitReceive` 订单，把 `updated_at` 改成 8 天前：
 
-1. 调用 `GetTimeoutWaitReceive(7, 100)`，订单出现在结果里；
-2. 以买家身份 `RequestRefund`，再以商家身份 `RejectRefund`；
-3. 再次调用 `GetTimeoutWaitReceive(7, 100)`，订单消失了，因为驳回把 `updated_at` 刷成了现在。
+1. 调用 `GetTimeoutWaitReceive(7, 100)`，订单出现在结果里，说明它已经满足自动确认条件；
+2. 以买家身份 `RequestRefund`，再调用一次 `GetTimeoutWaitReceive(7, 100)`：订单不在结果里，因为它已经是 `Refunding`，退款中的订单不会被自动完成放款；
+3. 以商家身份 `RejectRefund`，查订单：`type` 回到 `WaitReceive`（来路被正确恢复），`updated_at` 是刚才驳回的时刻；
+4. 第三次调用 `GetTimeoutWaitReceive(7, 100)`：订单仍不在结果里，买家重新获得完整的 7 天收货期。
 
-这一步不需要改任何代码，直接演示客诉 B 的根因。
+这一步不需要改任何代码，把 3.3 讲的“`updated_at` 等于进入当前状态的时间”直接演示出来。
 
 ---
 
 ## 课后练习
 
-1. **补一条会失败的测试：** 从 `WaitReceive` 申请退款并获批，调用 `SettleRefund` 后断言商品库存不变。当前会失败，说明缺口 1。然后按 `RefundFromType` 修好它，思考退货入库时由谁、靠哪个事件把库存加回去。
-2. **加 `shipped_at`：** 给 `Order` 加 `ShippedAt *time.Time`，在 `OrderDao.ShipOrder` 的同一条 UPDATE 里写入，把 `GetTimeoutWaitReceive` 改成按 `shipped_at` 判定。再跑 7.2 的演示，确认驳回不再重置计时。注意存量订单 `shipped_at` 为空时怎么处理。
-3. **售后时效：** 设计一个“确认收货后 15 天内可申请退款”的规则。说明需要哪个时间字段、判断放在 service 还是 SQL 的 `WHERE` 里，以及 `RequestRefund` 的 `FOR UPDATE` 是否还需要。
-4. **卖家负余额：** 写出卖家余额 30 元、退款 100 元时你认为正确的分录和状态，并说明 `SettleRefund` 应该失败重试、挂应收还是转人工，各自对买家体验的影响。
-5. **口径统一：** 把 `ApproveRefund` 的金额计算换成 `refundAmount`，补一条满减抵扣到 0 的订单测试，断言事件 `Amount==0`。
+1. **验证库存回补幂等：** 从 `WaitShip` 申请退款并获批，调用 `SettleRefund` 后断言商品库存加回了 `Num`、清算单变成 `refunded`；再调用一次 `SettleRefund`，断言库存和流水条数都不再变化。说明是哪一行让第二次调用直接返回。
+2. **验证一次放款：** 造一张 `WaitReceive` 订单，先调用 `ConfirmReceive`，再对同一订单跑一次 `RunAutoConfirmReceive`（把 `updated_at` 改到 8 天前）。断言 outbox 里 `order.completed` 只有一条，`Auto=false`。再反过来先跑 cron、后手动确认，断言手动确认返回非法状态转换。
+3. **设计扩展：售后时效：** 设计一个“确认收货后 15 天内可申请退款”的规则。说明需要哪个时间字段、写入时机放在哪条状态推进 SQL 里、判断放在 service 还是 SQL 的 `WHERE` 里，以及 `RequestRefund` 的 `FOR UPDATE` 是否还需要。
+4. **讲清资金来源：** 分别写出清算单为 `cleared`（还在托管）和 `settled`（已结算给卖家）时退款 100 元的两组分录，对照 `SettleRefund` 里 `fromEscrow` 的分支（`service.go:267`）解释为什么待发货阶段的退款不需要动卖家余额。
+5. **设计扩展：独立的发货时间：** 如果业务要求 7 天严格从首次发货起算、退款中的时间也计入，你会怎样改？给 `Order` 加 `ShippedAt *time.Time`，在 `OrderDao.ShipOrder` 的同一条 UPDATE 里写入，把 `GetTimeoutWaitReceive` 改成按 `shipped_at` 判定。重跑 6.2 的演示，对比两种口径下第 4 步的结果，并说明存量订单 `shipped_at` 为空时怎么处理。
 
 ---
 
@@ -628,8 +612,7 @@ func refundAmount(o *orderpkg.Order) int64 {
 | 状态推进 SQL | `internal/order/repo.go` | `whereBoss`、`ShipOrder`、`ConfirmReceive`、`RequestRefund`、`ApproveRefund`、`RejectRefund`、`GetTimeoutWaitReceive` |
 | 不刷新计时器的写法 | `internal/order/repo.go` | `SetStockCommitPending` |
 | 7 天自动确认 | `internal/order/task.go`、`initialize/cron.go` | `RunAutoConfirmReceive` |
-| 状态转换表（未接入生产） | `internal/order/state.go` | `orderStateTransitions`、`CanTransition` |
-| 订单字段 | `internal/order/model.go` | `RefundFromType`、`AddressID`、`FinalCents` |
+| 订单字段 | `internal/order/model.go` | `RefundFromType`、`FinalCents`、`PromoRuleID` |
 | 发货请求 | `internal/order/dto_shipping.go` | `ShipOrderReq` |
 | 退款审批 | `internal/refund/service.go` | `RequestRefund`、`ApproveRefund`、`RejectRefund` |
 | 退款落地与补偿 | `internal/refund/service.go` | `SettleRefund`、`refundAmount`、`RunSettleCompensation` |
@@ -638,4 +621,4 @@ func refundAmount(o *orderpkg.Order) int64 {
 | 驳回后放款握手 | `internal/clearing/consumer.go` | `HandleRefundRejectedEvent` |
 | 资金事件分级 | `internal/shared/outbox/publisher.go` | `fundsRoutingKeys`、`drainBatch` |
 | 事件定义 | `service/events/events.go` | `OrderShipped`、`OrderRefunding`、`OrderRefundRejected` |
-| 测试 | `internal/order/order_test.go`、`internal/refund/service_test.go` | 见第七节表格 |
+| 测试 | `internal/order/order_test.go`、`internal/refund/service_test.go` | 见第六节表格 |

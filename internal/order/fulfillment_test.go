@@ -50,7 +50,7 @@ func TestOrderAddressSnapshotSurvivesAddressEditAndDelete(t *testing.T) {
 	prev := order.AsyncOrderTicketStoreInstance()
 	order.SetAsyncOrderTicketStore(memTicketStore{})
 	t.Cleanup(func() { order.SetAsyncOrderTicketStore(prev) })
-	body, _ := json.Marshal(order.AsyncOrderTask{Ticket: "77", UserID: 11, ProductID: p.ID, Num: 1, AddressID: addr.ID, ShipTo: snap})
+	body, _ := json.Marshal(order.AsyncOrderTask{Ticket: order.NewTicket(), UserID: 11, ProductID: p.ID, Num: 1, AddressID: addr.ID, ShipTo: snap})
 	if err := order.HandleAsyncOrderTask(context.Background(), body); err != nil {
 		t.Fatal(err)
 	}

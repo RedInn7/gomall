@@ -7,6 +7,8 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/RedInn7/gomall/consts"
+	"github.com/RedInn7/gomall/internal/coupon"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/repository/cache"
@@ -17,7 +19,7 @@ import (
 //  0. 还有能付款的外部支付（Stripe 会话 / Xcash 账单 / Web3 签名占位）就先不关，等它们过期后由下一轮 cron 关
 //  1. CloseOrderWithCheck: 只对 UnPaid 状态的普通订单生效（已付定金的预售单除外），二次调用直接 no-op
 //  2. 不再回写 product.Num：未支付订单从未真正扣减过 DB 库存，回写会虚高
-//  3. 释放 Redis reserved 预占 (退回 available)
+//  3. 释放 Redis reserved 预占 (退回 available)；秒杀单同事务归还活动 sold，提交后归还 Redis 秒杀名额
 //  4. outbox 写 order.cancelled 事件
 func CancelUnpaidOrder(orderNum uint64) error {
 	ctx := context.Background()
@@ -51,6 +53,15 @@ func CancelUnpaidOrder(orderNum uint64) error {
 			return nil
 		}
 		closed = true
+		// 券与关单同事务退回：还没过期回到未使用，已过期直接记已过期。
+		if err := coupon.NewCouponDaoByDB(tx).ReleaseForOrderInTx(order.UserCouponID, order.ID, time.Now()); err != nil {
+			return err
+		}
+		if order.SeckillID != 0 && seckillBinder != nil {
+			if err := seckillBinder.UnbindTx(tx, order); err != nil {
+				return err
+			}
+		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderCancelled", "order.cancelled", order.ID,
 			events.OrderCancelled{
@@ -62,6 +73,7 @@ func CancelUnpaidOrder(orderNum uint64) error {
 				Reason:             "timeout",
 				PromoRuleID:        order.PromoRuleID,
 				PromoDiscountCents: order.PromoDiscountCents,
+				PromoBudgetDate:    promo.BudgetDay(order.CreatedAt),
 			},
 		)
 	})
@@ -74,6 +86,9 @@ func CancelUnpaidOrder(orderNum uint64) error {
 
 	if relErr := cache.ReleaseReservation(ctx, order.ProductID, int64(order.Num)); relErr != nil {
 		util.LogrusObj.Errorf("release reservation on cancel failed orderNum=%d err=%v", orderNum, relErr)
+	}
+	if order.SeckillID != 0 && seckillBinder != nil {
+		seckillBinder.Return(ctx, order)
 	}
 
 	// 满减预算退还不在这里同步执行：order.cancelled 事件已携带 promo_rule_id /

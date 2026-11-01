@@ -13,8 +13,10 @@ import (
 	conf "github.com/RedInn7/gomall/config"
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/address"
+	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/product"
 	"github.com/RedInn7/gomall/internal/promo"
+	"github.com/RedInn7/gomall/internal/shared/dbmodel"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
 	util "github.com/RedInn7/gomall/pkg/utils/log"
@@ -40,6 +42,7 @@ var OrderSrvOnce sync.Once
 
 // PromoCalculator 满减引擎在下单链路暴露的能力面。
 // 以接口注入而非直引 *promo.PromoSrv，便于在测试中用替身验证降级与预算耗尽分支。
+// CalculateBestDiscount 返回的 Candidates 是事务内预算挤光时的降级顺序。
 type PromoCalculator interface {
 	CalculateBestDiscount(ctx context.Context, items []promo.CartItem) (*promo.PromoApplyResp, error)
 	ApplyDiscountInTx(tx *gorm.DB, orderID, ruleID uint, discountCents int64) error
@@ -97,26 +100,12 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 		return nil, err
 	}
 	qty := int64(req.Num)
-	subtotalCents := unitCents * qty
 
-	// 满减计算先于事务发生：纯读路径，DB 慢一点也不影响事务保持时间。
+	// 满减与券都先于事务算好：纯读路径，DB 慢一点也不影响事务保持时间。
 	// CategoryID 已由上面的权威反查一并取出，引擎无需再查库。
-	cartItems := buildPromoCartItems(req.ProductID, categoryID, unitCents, qty)
-	promoApply, promoErr := s.promo.CalculateBestDiscount(ctx, cartItems)
-	if promoErr != nil {
-		// 失败降级：CalculateBestDiscount 不应阻断下单（SLO 承诺：不影响 happy path）。
-		util.LogrusObj.Warnf("[promo] calculate best discount failed product=%d err=%v, fallback to no-discount",
-			req.ProductID, promoErr)
-		promoApply = &promo.PromoApplyResp{OriginalCents: subtotalCents, FinalCents: subtotalCents}
-	}
-
-	discountCents, ruleID := promoApply.DiscountCents, promoApply.RuleID
-	finalCents := subtotalCents - discountCents
-	if finalCents < 0 {
-		// 规则配置畸形（discount > subtotal）兜底到 0，不让用户实付变负数
-		util.LogrusObj.Warnf("[promo] discount %d > subtotal %d rule=%d, clamp final to 0",
-			discountCents, subtotalCents, ruleID)
-		finalCents = 0
+	quote, err := s.quoteOrder(ctx, u.Id, req.ProductID, categoryID, unitCents, qty, req.UserCouponID)
+	if err != nil {
+		return nil, err
 	}
 
 	order := &Order{
@@ -124,15 +113,13 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 		ProductID: req.ProductID,
 		BossID:    bossID,
 		Num:       int(req.Num),
-		Money:     unitCents, // 单价口径不变；满减结果记在 PromoDiscountCents / FinalCents
+		Money:     unitCents, // 单价口径不变；减免结果记在 PromoDiscountCents / CouponDiscountCents / FinalCents
 		Type:      consts.OrderWaitPay,
 		AddressID: req.AddressID,
 		ShipTo:    shipTo,
 		OrderNum:  uint64(snowflake.GenSnowflakeID()),
-		// 满减字段会在事务内根据 ApplyDiscountInTx 的结果再次确认 / 降级写回
-		PromoRuleID:        ruleID,
-		PromoDiscountCents: discountCents,
-		FinalCents:         finalCents,
+		// 减免字段在事务内按扣预算 / 核销券的实际结果写回
+		FinalCents: quote.subtotal,
 	}
 
 	// 1) Redis 预扣库存: available -> reserved，失败直接拒单
@@ -141,34 +128,14 @@ func (s *OrderSrv) OrderCreate(ctx context.Context, req *OrderCreateReq) (*Order
 		return nil, err
 	}
 
-	// 2) 同事务写订单 + 应用满减 + 写 outbox 事件
-	//    满减 budget 耗尽降级：宁可不给折扣也不能让用户下不了单。
+	// 2) 同事务写订单 + 扣满减预算 + 核销券 + 写 outbox 事件
+	//    满减 budget 耗尽降级：宁可少给折扣也不能让用户下不了单。
 	err = dao.NewDBClient(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := NewOrderDaoByDB(tx).CreateOrder(order); e != nil {
 			return e
 		}
-
-		// 试着扣预算；budget 用尽则降级为无折扣，并改写订单上的满减字段
-		if order.PromoRuleID != 0 && order.PromoDiscountCents > 0 {
-			applyErr := s.promo.ApplyDiscountInTx(tx, order.ID, order.PromoRuleID, order.PromoDiscountCents)
-			if applyErr != nil {
-				if errors.Is(applyErr, promo.ErrPromoBudgetExhausted) {
-					util.LogrusObj.Warnf("[promo] downgrade rule=%d budget exhausted, order=%d falls back to no-discount",
-						order.PromoRuleID, order.ID)
-					order.PromoRuleID = 0
-					order.PromoDiscountCents = 0
-					order.FinalCents = subtotalCents
-					if uerr := NewOrderDaoByDB(tx).UpdatePromoFields(order.ID,
-						order.PromoRuleID, order.PromoDiscountCents, order.FinalCents); uerr != nil {
-						return uerr
-					}
-				} else {
-					return applyErr
-				}
-			} else {
-				util.LogrusObj.Infof("[promo] applied rule=%d discount=%d order=%d final=%d",
-					order.PromoRuleID, order.PromoDiscountCents, order.ID, order.FinalCents)
-			}
+		if e := s.applyDiscountsInTx(tx, order, quote); e != nil {
+			return e
 		}
 
 		return outbox.NewOutboxDaoByDB(tx).Insert(
@@ -248,6 +215,101 @@ func (s *OrderSrv) OrderShow(ctx context.Context, req *OrderShowReq) (*OrderList
 	return order, nil
 }
 
+// orderQuote 事务外算好的优惠方案（纯读），事务内按它扣预算、核销券。
+type orderQuote struct {
+	subtotal int64
+	promos   []promo.PromoCandidate // 按减免从大到小；前一条预算被并发挤光就试下一条
+	coupon   *coupon.UserCoupon     // nil = 不用券
+	batch    *coupon.CouponBatch
+}
+
+// quoteOrder 选满减候选、校验要用的券。满减试算失败降级成无折扣，不阻断下单；
+// 券是用户主动选的，不可用 / 不满门槛就拒单，不能悄悄按原价收钱。
+func (s *OrderSrv) quoteOrder(ctx context.Context, userID, productID uint, categoryID, unitCents, qty int64, userCouponID uint) (*orderQuote, error) {
+	q := &orderQuote{subtotal: unitCents * qty}
+	if s.promo != nil {
+		apply, err := s.promo.CalculateBestDiscount(ctx, buildPromoCartItems(productID, categoryID, unitCents, qty))
+		if err != nil {
+			// 失败降级：CalculateBestDiscount 不应阻断下单（SLO 承诺：不影响 happy path）。
+			util.LogrusObj.Warnf("[promo] calculate best discount failed product=%d err=%v, fallback to no-discount",
+				productID, err)
+		} else {
+			q.promos = promoCandidates(apply)
+		}
+	}
+	if userCouponID == 0 {
+		return q, nil
+	}
+	uc, batch, err := coupon.NewCouponDao(ctx).GetUsable(userID, userCouponID, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	base := q.subtotal
+	if len(q.promos) > 0 {
+		base -= q.promos[0].DiscountCents
+	}
+	// 事务里满减只可能降级（减得更少），券的基数只会变大，这里按最优满减判门槛是最严的口径。
+	if coupon.ComputeDiscount(batch, base) <= 0 {
+		return nil, coupon.ErrCouponThresholdNotMet
+	}
+	q.coupon, q.batch = uc, batch
+	return q, nil
+}
+
+// promoCandidates 兼容只填了 RuleID 没带 Candidates 的计算器实现。
+func promoCandidates(r *promo.PromoApplyResp) []promo.PromoCandidate {
+	if r == nil || r.RuleID == 0 || r.DiscountCents <= 0 {
+		return nil
+	}
+	if len(r.Candidates) > 0 {
+		return r.Candidates
+	}
+	return []promo.PromoCandidate{{Rule: &promo.PromoRule{Model: dbmodel.Model{ID: r.RuleID}}, DiscountCents: r.DiscountCents}}
+}
+
+// applyDiscountsInTx 在下单事务里落实优惠：先满减、后券。
+//   - 满减按候选顺序扣预算，被并发挤光就降级到次优，全挤光才无折扣；
+//   - 券在满减后的金额上算，条件 UPDATE 核销，同一张券被两单并发选中时后到的整单回滚；
+//   - 订单上的减免字段与 FinalCents 一次写回，同进同退。
+func (s *OrderSrv) applyDiscountsInTx(tx *gorm.DB, o *Order, q *orderQuote) error {
+	for _, c := range q.promos {
+		err := s.promo.ApplyDiscountInTx(tx, o.ID, c.Rule.ID, c.DiscountCents)
+		if err == nil {
+			o.PromoRuleID, o.PromoDiscountCents = c.Rule.ID, c.DiscountCents
+			break
+		}
+		if !errors.Is(err, promo.ErrPromoBudgetExhausted) {
+			return err
+		}
+		util.LogrusObj.Warnf("[promo] downgrade rule=%d budget exhausted, order=%d tries next candidate",
+			c.Rule.ID, o.ID)
+	}
+
+	base := q.subtotal - o.PromoDiscountCents
+	if q.coupon != nil {
+		d := coupon.ComputeDiscount(q.batch, base)
+		if d <= 0 {
+			return coupon.ErrCouponThresholdNotMet
+		}
+		if err := coupon.NewCouponDaoByDB(tx).UseInTx(q.coupon.ID, o.UserID, o.ID, time.Now()); err != nil {
+			return err
+		}
+		o.UserCouponID, o.CouponDiscountCents = q.coupon.ID, d
+	}
+	o.FinalCents = base - o.CouponDiscountCents
+	if o.FinalCents < 0 {
+		// 建规则 / 建批次都校验了金额，这里只是兜底，不让实付变负数
+		util.LogrusObj.Warnf("[promo] discounts exceed subtotal order=%d, clamp final to 0", o.ID)
+		o.FinalCents = 0
+	}
+	if o.PromoRuleID == 0 && o.UserCouponID == 0 {
+		return nil // 建单时 FinalCents 已是原价
+	}
+	util.LogrusObj.Infof("[promo] order=%d rule=%d promo=%d coupon=%d couponDiscount=%d final=%d",
+		o.ID, o.PromoRuleID, o.PromoDiscountCents, o.UserCouponID, o.CouponDiscountCents, o.FinalCents)
+	return NewOrderDaoByDB(tx).UpdateDiscountFields(o)
+}
+
 // buildPromoCartItems 给满减引擎拼一行 CartItem。单价与类目均由调用方从权威反查传入，
 // 这里只做纯拼装，不再触库——避免与 resolveProductPricing 重复查询同一商品。
 func buildPromoCartItems(productID uint, categoryID, unitCents, qty int64) []promo.CartItem {
@@ -292,12 +354,6 @@ func ensureUnpaidQuota(ctx context.Context, userID uint) error {
 		return ErrTooManyUnpaidOrders
 	}
 	return nil
-}
-
-// resolveProductSettlement 仅取权威单价（分）与卖家，异步消费侧不需要类目时用它。
-func resolveProductSettlement(ctx context.Context, productID uint) (unitCents int64, bossID uint, err error) {
-	cents, _, boss, err := resolveProductPricing(ctx, productID)
-	return cents, boss, err
 }
 
 // OrderDelete 删除订单（物理删除）。成功时不回传订单体（保持既有 API 契约：data 为 null）。
