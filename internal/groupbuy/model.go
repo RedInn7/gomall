@@ -53,3 +53,25 @@ type GroupbuyMember struct {
 }
 
 func (GroupbuyMember) TableName() string { return "groupbuy_member" }
+
+// 拼团站内通知类型。
+const (
+	NoticeKindJoined  = "joined"  // 团长：有新成员参团
+	NoticeKindSuccess = "success" // 全体成员：成团，等待发货
+	NoticeKindExpired = "expired" // 全体成员：超时散团 / 人工关团，款项已退回
+)
+
+// GroupbuyNotice 拼团站内通知，由 groupbuy.notify 消费者按事件写入。
+//
+//	uk_gb_notice(user_id, group_id, kind, ref_id) 吸收 at-least-once 重复投递；
+//	joined 的 ref_id 是新成员 user_id（团长每来一人收一条），其余为 0。
+type GroupbuyNotice struct {
+	dbmodel.Model
+	UserID  uint   `gorm:"not null;uniqueIndex:uk_gb_notice,priority:1"`
+	GroupID uint   `gorm:"not null;uniqueIndex:uk_gb_notice,priority:2"`
+	Kind    string `gorm:"size:16;not null;uniqueIndex:uk_gb_notice,priority:3"`
+	RefID   uint   `gorm:"not null;default:0;uniqueIndex:uk_gb_notice,priority:4"`
+	Content string `gorm:"size:255;not null"`
+}
+
+func (GroupbuyNotice) TableName() string { return "groupbuy_notice" }

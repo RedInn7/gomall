@@ -41,7 +41,7 @@ func Run() error {
 			&coupon.CouponBatch{}, &coupon.UserCoupon{},
 			&redpacket.RedPacket{}, &redpacket.RedPacketClaim{},
 			&promo.PromoRule{}, &promo.PromoRelease{},
-			&groupbuy.GroupbuyGroup{}, &groupbuy.GroupbuyMember{},
+			&groupbuy.GroupbuyGroup{}, &groupbuy.GroupbuyMember{}, &groupbuy.GroupbuyNotice{},
 			&preorder.ProductPreorder{},
 			&money.AccountTransaction{}, &clearing.PaymentClearing{}, &clearing.PaymentAnomaly{},
 			&clearing.PaymentAnomalyTransition{},
