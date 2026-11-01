@@ -13,9 +13,11 @@ import (
 
 	"github.com/RedInn7/gomall/consts"
 	"github.com/RedInn7/gomall/internal/clearing"
+	"github.com/RedInn7/gomall/internal/coupon"
 	"github.com/RedInn7/gomall/internal/money"
 	orderpkg "github.com/RedInn7/gomall/internal/order"
 	"github.com/RedInn7/gomall/internal/product"
+	"github.com/RedInn7/gomall/internal/promo"
 	"github.com/RedInn7/gomall/internal/shared/outbox"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/pkg/utils/ctl"
@@ -103,7 +105,8 @@ func (s *RefundSrv) RequestRefund(ctx context.Context, orderNum uint64, reason s
 // ApproveRefund 运营同意退款。
 //   - 商家只能审批自己的订单（MerchantScope），admin 不限
 //   - 仅允许 Refunding -> Refunded
-//   - 写 outbox(order.refunded)，amount 取实付口径 FinalCents（回退到 Money*Num）；tx_id 留空待下游回填
+//   - 写 outbox(order.refunded)，amount 与实际打款同一口径 refundAmount；tx_id 留空待下游回填
+//   - 同事务退回本单核销的优惠券
 //
 // 真正的资金回退在下游 wallet 服务消费事件时执行；本服务仅做状态推进。
 func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
@@ -125,13 +128,9 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 	if order.Type != consts.OrderRefunding {
 		return orderpkg.ErrInvalidOrderStateTransition
 	}
-	// 退款额取实付口径，与 payment 侧保持一致：命中满减时以折后实付 FinalCents 为准，
-	// 仅当 FinalCents 未写入（<=0）时回退到折前价 Money*Num。
-	// 用折前价会把满减优惠重复退还（promo 已随事件退预算，钱包再按原价退钱即双重退还）。
-	amount := order.FinalCents
-	if amount <= 0 {
-		amount = order.Money * int64(order.Num)
-	}
+	// 事件里的 amount 必须与 SettleRefund 真正打款的 refundAmount 同口径：
+	// 原来按 FinalCents>0 判，全额抵扣到 0 的订单会在事件里带出折前原价。
+	amount := refundAmount(order)
 	txErr := baseDao.DB.Transaction(func(tx *gorm.DB) error {
 		ok, err := orderpkg.NewOrderDaoByDB(tx).ApproveRefund(orderNum, bossID)
 		if err != nil {
@@ -139,6 +138,9 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 		}
 		if !ok {
 			return orderpkg.ErrInvalidOrderStateTransition
+		}
+		if err := coupon.NewCouponDaoByDB(tx).ReleaseForOrderInTx(order.UserCouponID, order.ID, time.Now()); err != nil {
+			return err
 		}
 		return outbox.NewOutboxDaoByDB(tx).Insert(
 			"order", "OrderRefunded", "order.refunded", order.ID,
@@ -150,6 +152,7 @@ func (s *RefundSrv) ApproveRefund(ctx context.Context, orderNum uint64) error {
 				TxID:               "",
 				PromoRuleID:        order.PromoRuleID,
 				PromoDiscountCents: order.PromoDiscountCents,
+				PromoBudgetDate:    promo.BudgetDay(order.CreatedAt),
 			},
 		)
 	})
@@ -211,14 +214,10 @@ func (s *RefundSrv) RejectRefund(ctx context.Context, orderNum uint64, reason st
 	})
 }
 
-// refundAmount 退款额取实付口径，与 payment 侧建会话 / 结算保持一致：
-// 命中促销(PromoRuleID!=0)即以折后实付 FinalCents 为准，否则回退折前价 Money*Num。
-// 不能用 FinalCents>0 判：满减全额抵扣到 0 时 FinalCents==0 是合法实付，用 >0 会误回退折前全价多退。
+// refundAmount 退款额取实付口径，与 payment 侧建会话 / 结算保持一致，口径收口在 order.Order.PayableCents：
+// 不能用 FinalCents>0 判：全额抵扣到 0 时 FinalCents==0 是合法实付，用 >0 会误回退折前全价多退。
 func refundAmount(o *orderpkg.Order) int64 {
-	if o.PromoRuleID != 0 {
-		return o.FinalCents
-	}
-	return o.Money * int64(o.Num)
+	return o.PayableCents()
 }
 
 // SettleRefund 真正落地一笔已获批退款，由 order.refunded 消费者驱动，全程单事务原子。
