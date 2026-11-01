@@ -31,6 +31,8 @@ import (
 // 避免基础 db 包反向依赖各领域的 model。
 func Run() error {
 	db := dao.NewDBClient(context.Background())
+	// 必须在 AutoMigrate 之前看：迁移完列就都在了，分不出哪些是这次新建的。
+	fulfillmentMissing := order.MissingFulfillmentColumns(db)
 	if err := db.Set("gorm:table_options", "charset=utf8mb4").
 		AutoMigrate(
 			&user.User{}, &favorite.Favorite{},
@@ -50,7 +52,7 @@ func Run() error {
 		); err != nil {
 		return err
 	}
-	if err := order.BackfillFulfillmentColumns(db); err != nil {
+	if err := order.BackfillFulfillmentColumns(db, fulfillmentMissing); err != nil {
 		return err
 	}
 	// account_code 是新增列：AutoMigrate 会把历史行填成默认 user_wallet。

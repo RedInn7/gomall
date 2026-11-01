@@ -70,31 +70,61 @@ type Order struct {
 	Ticket *string `gorm:"size:32;uniqueIndex"`
 }
 
-// BackfillFulfillmentColumns 给新增的履约 / 售后列回填历史数据，迁移时在 AutoMigrate 之后调用，可重复执行。
+// fulfillmentBackfillColumns 需要回填历史数据的新列，按列名判断"是不是这次迁移刚建出来的"。
+var fulfillmentBackfillColumns = []string{"shipped_at", "completed_at", "address_name", "refund_count", "restocked_at"}
+
+// MissingFulfillmentColumns 在 AutoMigrate 之前调用，记下哪些新列还不存在。回填只能在列刚建出来时跑一次：
+// migrate.Run 每次启动都执行，restocked_at 那步要是每次都跑，会把"新逻辑下已结算、等商家确认退货"的单
+// 当成旧单标成已回补，商家再确认退货就补不回库存了。
+// ponytail: AutoMigrate 成功后、回填前进程挂掉，下次启动列已存在就不会再回填；真遇到就手工补跑这几条 UPDATE。
+func MissingFulfillmentColumns(db *gorm.DB) map[string]bool {
+	m := db.Migrator()
+	missing := make(map[string]bool, len(fulfillmentBackfillColumns))
+	for _, col := range fulfillmentBackfillColumns {
+		missing[col] = !m.HasColumn(&Order{}, col)
+	}
+	return missing
+}
+
+// BackfillFulfillmentColumns 给本次迁移新建的履约 / 售后列回填历史数据，在 AutoMigrate 之后调用；
+// missing 是 MissingFulfillmentColumns 在迁移前的结果，已存在的列一律不碰。
 //   - shipped_at / completed_at：历史订单没有，用 updated_at 近似，否则老的待收货单永远不会被自动确认、
 //     老的已完成单拿不到售后时效起点；
 //   - 地址快照：从地址表拷一次，已被删掉的地址只能留空；
+//   - refund_count：迁移时正在退款中的单算申请过一次，结算补偿按 refund_count>0 识别新逻辑下的退款单；
 //   - restocked_at：旧逻辑在退款结算时一律回补过库存，已结算的退款单标成已回补，避免商家确认退货时再补一次。
-func BackfillFulfillmentColumns(db *gorm.DB) error {
+func BackfillFulfillmentColumns(db *gorm.DB, missing map[string]bool) error {
 	shipped := []uint{consts.OrderWaitReceive, consts.OrderCompleted}
-	steps := []*gorm.DB{
-		db.Model(&Order{}).
+	var steps []*gorm.DB
+	if missing["shipped_at"] {
+		steps = append(steps, db.Model(&Order{}).
 			Where("shipped_at IS NULL AND (type IN ? OR (type=? AND refund_from_type IN ?))", shipped, consts.OrderRefunding, shipped).
-			UpdateColumn("shipped_at", gorm.Expr("updated_at")),
-		db.Model(&Order{}).
+			UpdateColumn("shipped_at", gorm.Expr("updated_at")))
+	}
+	if missing["completed_at"] {
+		steps = append(steps, db.Model(&Order{}).
 			Where("completed_at IS NULL AND (type=? OR (type=? AND refund_from_type=?))", consts.OrderCompleted, consts.OrderRefunding, consts.OrderCompleted).
-			UpdateColumn("completed_at", gorm.Expr("updated_at")),
-		db.Model(&Order{}).
+			UpdateColumn("completed_at", gorm.Expr("updated_at")))
+	}
+	if missing["address_name"] {
+		steps = append(steps, db.Model(&Order{}).
 			Where("address_name='' AND address_id IN (SELECT id FROM address)").
 			UpdateColumns(map[string]interface{}{
 				"address_name":   gorm.Expr("(SELECT name FROM address WHERE address.id=`order`.address_id)"),
 				"address_phone":  gorm.Expr("(SELECT phone FROM address WHERE address.id=`order`.address_id)"),
 				"address_detail": gorm.Expr("(SELECT address FROM address WHERE address.id=`order`.address_id)"),
-			}),
-		db.Model(&Order{}).
+			}))
+	}
+	if missing["refund_count"] {
+		steps = append(steps, db.Model(&Order{}).
+			Where("type=? AND refund_count=0", consts.OrderRefunding).
+			UpdateColumn("refund_count", 1))
+	}
+	if missing["restocked_at"] {
+		steps = append(steps, db.Model(&Order{}).
 			Where("restocked_at IS NULL AND type=? AND EXISTS (SELECT 1 FROM account_transaction WHERE ref_order_id=`order`.id AND direction=? AND biz_type IN ?)",
 				consts.OrderRefunded, money.DirectionCredit, []string{money.BizTypeRefund, money.BizTypeEscrowRefund}).
-			UpdateColumn("restocked_at", gorm.Expr("updated_at")),
+			UpdateColumn("restocked_at", gorm.Expr("updated_at")))
 	}
 	for _, s := range steps {
 		if s.Error != nil {

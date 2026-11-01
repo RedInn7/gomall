@@ -232,11 +232,27 @@ func TestBackfillFulfillmentColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for i := 0; i < 2; i++ { // 可重复执行
-		if err := order.BackfillFulfillmentColumns(db); err != nil {
-			t.Fatalf("backfill run %d: %v", i+1, err)
+	// 模拟老库：这几列在 AutoMigrate 之前还不存在（openOrderTestDB 已按新结构建表，先删掉）
+	m := db.Migrator()
+	if err := m.DropIndex(&order.Order{}, "ShippedAt"); err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"shipped_at", "completed_at", "address_name", "address_phone", "address_detail", "refund_count", "restocked_at"} {
+		if err := m.DropColumn(&order.Order{}, col); err != nil {
+			t.Fatalf("drop %s: %v", col, err)
 		}
 	}
+	migrateOnce := func() {
+		t.Helper()
+		missing := order.MissingFulfillmentColumns(db)
+		if err := db.AutoMigrate(&order.Order{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := order.BackfillFulfillmentColumns(db, missing); err != nil {
+			t.Fatal(err)
+		}
+	}
+	migrateOnce()
 	load := func(id uint) order.Order {
 		var o order.Order
 		if err := db.First(&o, id).Error; err != nil {
@@ -258,5 +274,23 @@ func TestBackfillFulfillmentColumns(t *testing.T) {
 	}
 	if o := load(pendingRefund.ID); o.RestockedAt != nil {
 		t.Fatalf("unsettled refund must not be marked restocked")
+	}
+	if o := load(refundingFromShip.ID); o.RefundCount != 1 {
+		t.Fatalf("in-flight refund refund_count=%d, want 1", o.RefundCount)
+	}
+
+	// 上线后：发货后才退的单已结算（有退款 credit 流水）但还没确认退货入库。
+	// 之后每次启动都会再跑一遍迁移，不能把它当旧单标成已回补，否则商家确认退货时库存补不回来。
+	newRefund := seedOrder(t, db, &order.Order{UserID: 11, BossID: 22, Type: consts.OrderRefunded,
+		RefundFromType: consts.OrderWaitReceive, RefundCount: 1, OrderNum: 6})
+	if err := money.NewLedgerDaoByDB(db).AppendTransaction(11, newRefund.ID, money.DirectionCredit, 100, 200, money.BizTypeRefund); err != nil {
+		t.Fatal(err)
+	}
+	migrateOnce()
+	if o := load(newRefund.ID); o.RestockedAt != nil {
+		t.Fatalf("restart re-ran backfill and marked a pending-return refund restocked: %+v", o)
+	}
+	if ok, err := order.NewOrderDaoByDB(db).MarkRestocked(newRefund.ID, 22, false); err != nil || !ok {
+		t.Fatalf("merchant must still be able to confirm return: ok=%v err=%v", ok, err)
 	}
 }
