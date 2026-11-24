@@ -29,6 +29,7 @@ x-connector[from="tr"]::after { right: auto; left: -2px; border-left: none; bord
 #notes { position: fixed; left: 0; right: 0; bottom: 0; max-height: 34%; overflow: auto; padding: 16px 28px 22px; font: 20px/1.7 'PingFang SC', 'Microsoft YaHei', sans-serif; color: #FFE8CC; background: rgba(42, 21, 8, .94); border-top: 3px solid #FF922B; display: none; }
 #notes.on { display: block; }
 @media print {
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   html, body { height: auto; overflow: visible; background: #fff; }
   #stage { position: static; transform: none !important; width: auto; height: auto; }
   #stage > section { position: relative; display: flex !important; page-break-after: always; }
