@@ -223,17 +223,30 @@ x-connector { border: none !important; }
 </section>
 <section id="rediskeys" data-transition="fade">
 <p class="eye">一 · 数据结构 · repository/cache/redpacket.go:16-22</p>
-<h2>Redis 侧：两个 Key，抢包前后怎么变</h2>
+<h2>Redis 侧：一摞红包，加一张“谁抢过了”的名单</h2>
 <div class="body">
+<p class="lead">例：发 100 元 3 份，拆成 30、50、20 元（3000、5000、2000 分）。<span class="hl">amounts</span>（LIST）是一摞还没被抢的红包，<span class="hl">claimed</span>（HASH）是抢过的人的名单。抢 ＝ 从那一摞拿走一个，同时在名单上记一笔。</p>
 <div class="flow">
-<div class="card soft"><p class="k">① 发包后</p><p class="t"><b>amounts</b>（LIST）</p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>claimed</b>（HASH）</p><p class="c" style="color:#3D1F0B">（空）</p></div>
+<div class="card soft"><p class="k">① 发包后</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">（空）</p></div>
 <x-connector class="go fragment" data-fragment-index="1"></x-connector>
-<div class="card soft fragment" data-fragment-index="1"><p class="k">② 用户 101 抢到 3000</p><p class="t"><b>amounts</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>claimed</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000</p></div>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">② 用户 101 抢到 3000</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000</p></div>
 <x-connector class="go fragment" data-fragment-index="2"></x-connector>
-<div class="card yes fragment" data-fragment-index="2"><p class="k">③a DB 失败，回补</p><p class="t"><b>amounts</b></p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>claimed</b></p><p class="c" style="color:#3D1F0B">（101 的标记已删）</p></div>
-<div class="card no fragment" data-fragment-index="3"><p class="k">③b 成了孤儿，对账接手</p><p class="t"><b>amounts</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>claimed</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000:r</p></div>
+<div class="card yes fragment" data-fragment-index="2"><p class="k">③a 数据库写失败：反悔</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">（101 那行擦掉）</p></div>
+<div class="card no fragment" data-fragment-index="3"><p class="k">③b 断电了：成了孤儿</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000:r</p></div>
 </div>
-<p class="lead fragment" data-fragment-index="4">claimed 存的是 <span class="hl">金额:unix秒[:r]</span>，不是一个 1：断电后靠金额知道补多少，靠时间分清在途还是孤儿。</p>
+</div>
+</section>
+<section id="markwhy" data-transition="fade">
+<p class="eye">一 · 数据结构 · claimed 标记的格式</p>
+<h2>名单上为什么要记金额和时间</h2>
+<div class="body">
+<p class="lead">只为了防重复领，名单上写个 1 就够了。实际写的是 <span class="hl">金额:抢到的时间</span>，例如 3000:1730680000。</p>
+<div class="cards">
+<div class="card no"><p class="k">如果只写</p><p class="c" style="color:#3D1F0B">101 → 1</p><p class="t">断电后，后台只知道“101 抢过”，不知道该补他多少钱，也不知道他是刚抢还是早就卡住了。</p></div>
+<div class="card yes fragment" data-fragment-index="1"><p class="k">记金额</p><h3>知道补多少</h3><p class="t">那 30 元已经从一摞里拿走，数据库里也没有。名单是唯一还记得这个数的地方。</p></div>
+<div class="card yes fragment" data-fragment-index="2"><p class="k">记时间</p><h3>分清在途和卡死</h3><p class="t">不到 1 分钟：数据库可能还在写，先不碰。</p><p class="t">超过 1 分钟还没到账：当成孤儿去补。</p></div>
+</div>
+<p class="formula fragment" data-fragment-index="3">名单不只是防重复领，它还是断电之后找回这笔钱的唯一线索</p>
 </div>
 </section>
 <section id="tables" data-transition="fade">
