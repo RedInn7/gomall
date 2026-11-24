@@ -282,12 +282,14 @@ x-connector { border: none !important; }
 <div class="seq">
 <div class="row p4"><p class="who">Sender</p><p class="who">Service</p><p class="who">Friend</p><p class="who">Attacker</p></div>
 <div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">POST 发红包</p><x-connector></x-connector></div></div>
-<div class="row p4"><div class="m ret" style="grid-column:2/4"><p class="lb">id=88，ShareCode（只返回这一次）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4"><div class="m ret" style="grid-column:2/4"><p class="lb">id=88 + 口令（只返回一次）</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/6"><p class="lb">分享链接（id + ShareCode）</p><x-connector></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">抢红包（id=88, code）</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">口令正确，进入抢包</p><x-connector></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="2"><div class="m lost" style="grid-column:4/8"><p class="lb">脚本遍历 id = 1, 2, 3 ...（没有口令）</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="2"><div class="m ret" style="grid-column:4/8"><p class="lb">84006 口令不对</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><p class="note" style="grid-column:1/9">猜不中：16 位十六进制约 1800 亿亿种组合，抢包接口每人每秒最多 3 次</p></div>
+<div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:1/9">已知缺口：口令上线前发的老红包没有口令，代码直接放行，仍可凭 id 遍历</p></div>
 </div>
 </section>
 <section id="timing" data-transition="fade">
