@@ -4,7 +4,7 @@
 >
 > **怎么用**：`---` 是分页线，一页一个要点、一张图。每页底部的「讲稿」是上课照着念的话。
 >
-> **幻灯片版**：[18-redpacket-slides.pdf](./18-redpacket-slides.pdf)（43 页，每页一张）；[18-redpacket-slides.html](./18-redpacket-slides.html) 用浏览器打开可分步演示，→ 下一步，← 上一步，N 显示讲稿，F 全屏。
+> **幻灯片版**：[18-redpacket-slides.html](./18-redpacket-slides.html)，浏览器直接打开。→ 下一步，← 上一步，N 显示讲稿，F 全屏。需要 PDF 时在浏览器里打印即可（每页一张，仓库不跟踪 PDF）。
 
 | 部分 | 讲什么 | 对应工单 |
 |---|---|---|
