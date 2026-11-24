@@ -129,7 +129,29 @@ x-connector { border: none !important; }
 <h1>红包：Redis 分发与<br>DB 记账的一致性</h1>
 <p class="sub">Redis 决定谁拿到哪一份，MySQL 决定钱有没有动</p>
 <p class="meta">internal/redpacket（发包、抢包、退款与对账）<br>repository/cache/redpacket.go（二倍均值拆包与 Lua 脚本）</p>
-<aside>这一讲讲红包。红包看着是个小功能，其实它同时是两件事：一件是高并发争抢，一件是真金白银的转账。我们用 Redis 管争抢，用 MySQL 管钱，今天所有的内容都围绕一个问题：这两边对不上的时候怎么办。先看为什么需要两套存储，再看四张客诉单，然后一张一张把它们解决掉。</aside>
+<aside>这一讲讲红包。红包看着是个小功能，其实它同时是两件事：一件是高并发争抢，一件是真金白银的转账。我们用 Redis 管争抢，用 MySQL 管钱，今天所有的内容都围绕一个问题：这两边对不上的时候怎么办。先说红包这个功能本身是干什么的，再看为什么需要两套存储，然后看四张客诉单，一张一张把它们解决掉。</aside>
+</section>
+<section id="intro" data-transition="fade">
+<p class="eye">开场 · 业务背景</p>
+<h2>红包是拿来干什么的</h2>
+<div class="body">
+<p class="lead">用户从自己的钱包里拿出一笔钱，拆成若干份，发给一群人<span class="hl">先到先得</span>：每人最多领一份，金额随机，没领完的到期退回。它是商城里的一种营销玩法，和优惠券、秒杀同一类。</p>
+<div class="flow">
+<p class="box"><b>① 发</b><br>金额、份数、祝福语<br>验支付密码后当场扣款</p>
+<x-connector class="go fragment" data-fragment-index="1"></x-connector>
+<p class="box fragment" data-fragment-index="1"><b>② 分享</b><br>拿到带口令的链接<br>发到群里</p>
+<x-connector class="go fragment" data-fragment-index="2"></x-connector>
+<p class="box fragment" data-fragment-index="2"><b>③ 抢</b><br>群友点开，先到先得<br>钱直接进自己钱包</p>
+<x-connector class="go fragment" data-fragment-index="3"></x-connector>
+<p class="box end fragment" data-fragment-index="3"><b>④ 过期</b><br>默认 24 小时，最长 7 天<br>没领完的退回发包人</p>
+</div>
+<div class="cards fragment" data-fragment-index="4">
+<div class="card"><p class="k">金额</p><p class="t">单个红包最多 200 元，每份至少 1 分，最多 1000 份。</p></div>
+<div class="card"><p class="k">公平</p><p class="t">每人只能领一次；每份金额随机，但总和必须等于总金额。</p></div>
+<div class="card"><p class="k">钱不能错</p><p class="t">发出去多少，领走的加退回的就必须是多少，一分不多一分不少。</p></div>
+</div>
+</div>
+<aside>在讲技术之前，先说清楚红包这个功能是拿来干什么的。它和微信群里的拼手气红包是一回事：一个用户从自己的钱包里拿出一笔钱，拆成若干份，发到群里让大家抢，先到先得，每人最多领一份，每份金额随机。在商城里，它是一种营销玩法，和优惠券、秒杀是同一类，用来拉人气、带活跃。整个过程四步：第一步发，填总金额、份数和祝福语，输支付密码，钱当场从钱包扣走。第二步分享，发包人拿到一个带口令的链接，发到群里。第三步抢，群友点开链接，抢到的钱直接进自己钱包。第四步过期，默认二十四小时，最长七天，没被领完的钱退回发包人。再看三条业务规则：单个红包最多两百块，每份至少一分钱，最多一千份；每人只能领一次，金额随机但总和必须等于总金额；最重要的一条，钱不能错，发出去多少，领走的加上退回的就必须是多少。今天后面所有的设计，都是为了在几百人同时抢的情况下守住这三条。</aside>
 </section>
 <section id="mysql" data-transition="fade">
 <div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
