@@ -275,14 +275,26 @@ x-connector { border: none !important; }
 </div>
 </div>
 </section>
+<section id="sharewhat" data-transition="fade">
+<p class="eye">一 · 1.2 防扫号口令</p>
+<h2>ShareCode 是干什么的</h2>
+<div class="body">
+<p class="lead">ShareCode 是红包的<span class="hl">领取口令</span>：只有拿到分享链接的人才能抢这个红包，相当于微信里“只有群里的人能抢”。</p>
+<div class="cards">
+<div class="card no"><p class="k">没有口令会怎样</p><h3>谁都能抢遍全平台</h3><p class="t">红包 ID 是自增的：1、2、3……</p><p class="t">抢红包只要传一个 ID。</p><p class="t">写个循环从 1 抢到 10000，别人群里的红包也全被抢走。</p></div>
+<div class="card yes fragment" data-fragment-index="1"><p class="k">有了口令</p><h3>没有链接就抢不了</h3><p class="t">发红包时生成 16 位随机串，例如</p><p class="c" style="color:#3D1F0B">a3f9c0128b7e4d56</p><p class="t">只返回给发包人一次，拼进分享链接发到群里。抢的时候 ID 和口令都要对。</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="k">能不能猜出来</p><h3>猜不中</h3><p class="t">16 位十六进制约 1800 亿亿种组合。</p><p class="t">抢包接口每人每秒最多 3 次。</p><p class="t">口令不对一律返回 84006。</p></div>
+</div>
+</div>
+</section>
 <section id="sharecode" data-transition="fade">
 <div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
 <p class="eye">一 · 1.2 防扫号口令</p>
-<h2>ShareCode：自增 id 能遍历，口令不能</h2>
+<h2>走一遍：群友能抢，遍历 id 的脚本被拒</h2>
 <div class="seq">
 <div class="row p4"><p class="who">Sender</p><p class="who">Service</p><p class="who">Friend</p><p class="who">Attacker</p></div>
 <div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">POST 发红包</p><x-connector></x-connector></div></div>
-<div class="row p4"><div class="m ret" style="grid-column:2/4"><p class="lb">id=88，ShareCode（只返回这一次）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4"><div class="m ret" style="grid-column:2/4"><p class="lb">id=88 + 口令（只返回一次）</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/6"><p class="lb">分享链接（id + ShareCode）</p><x-connector></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">抢红包（id=88, code）</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">口令正确，进入抢包</p><x-connector></x-connector></div></div>

@@ -235,6 +235,12 @@ erDiagram
 
 ## 1.2 防扫号口令 `ShareCode`
 
+`ShareCode` 是红包的**领取口令**：只有拿到分享链接的人才能抢这个红包，相当于微信里“只有群里的人能抢”。
+
+- **为什么需要**：红包 ID 是自增的（1、2、3……），抢红包接口只要传一个 ID。没有口令时，写个循环从 1 抢到 10000，就能把全平台正在发的红包都抢一遍。
+- **怎么起作用**：发红包时生成 16 位随机十六进制串，只在创建成功那一次响应里返回给发包人；发包人把 ID 和口令拼进链接发到群里；抢红包必须同时带上两者，口令不对返回 `84006`。
+- **猜不中**：16 位十六进制约 1800 亿亿种组合，抢包接口每个用户每秒最多 3 次。
+
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
 sequenceDiagram
