@@ -5,6 +5,8 @@
 > **怎么用**：`---` 是分页线，一页一个要点、一张图。每页底部的「讲稿」是上课照着念的话。
 >
 > **幻灯片版**：[18-redpacket-slides.html](./18-redpacket-slides.html)，浏览器直接打开。→ 下一步，← 上一步，N 显示讲稿，F 全屏。需要 PDF 时在浏览器里打印即可（每页一张，仓库不跟踪 PDF）。
+>
+> **逐页讲稿**：[18-redpacket-script.md](./18-redpacket-script.md)，页码与幻灯片一致，可以直接照着念。
 
 | 部分 | 讲什么 | 对应工单 |
 |---|---|---|
@@ -17,6 +19,26 @@
 | 六 | 故障演练、课后思考、代码索引 | |
 
 > **讲稿**　这一讲讲红包。红包看着是个小功能，其实它同时是两件事：一件是高并发争抢，一件是真金白银的转账。我们用 Redis 管争抢，用 MySQL 管钱，今天所有的内容都围绕一个问题：这两边对不上的时候怎么办。先看四张客诉单，再一张一张把它们解决掉。
+
+---
+
+## 开场：红包是拿来干什么的
+
+用户从自己的钱包里拿出一笔钱，拆成若干份，发给一群人**先到先得**：每人最多领一份，金额随机，没领完的到期退回。它是商城里的一种营销玩法，和优惠券、秒杀同一类。
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
+flowchart LR
+    A["① 发<br/>总金额、份数、祝福语<br/>校验支付密码，钱从钱包扣走"] --> B["② 分享<br/>拿到带口令的链接<br/>发到群里"]
+    B --> C["③ 抢<br/>群友点开，先到先得<br/>钱直接进自己钱包"]
+    C --> D(["④ 过期<br/>默认 24 小时，最长 7 天<br/>没领完的退回发包人"])
+```
+
+- **金额**：单个红包最多 200 元（`MaxRedPacketTotalCents`），每份至少 1 分，最多 1000 份。
+- **公平**：每人只能领一次；每份金额随机，但总和必须等于总金额。
+- **钱不能错**：发出去多少，领走的加退回的就必须是多少。
+
+> **讲稿**　在讲技术之前，先说清楚红包这个功能是拿来干什么的。它和微信群里的拼手气红包是一回事：一个用户从自己的钱包里拿出一笔钱，拆成若干份，发到群里让大家抢，先到先得，每人最多领一份，每份金额随机。在商城里，它是一种营销玩法，和优惠券、秒杀是同一类，用来拉人气、带活跃。整个过程四步：第一步发，填总金额、份数和祝福语，输支付密码，钱当场从钱包扣走。第二步分享，发包人拿到一个带口令的链接，发到群里。第三步抢，群友点开链接，抢到的钱直接进自己钱包。第四步过期，默认二十四小时，最长七天，没被领完的钱退回发包人。再看三条业务规则：单个红包最多两百块，每份至少一分钱，最多一千份；每人只能领一次，金额随机但总和必须等于总金额；最重要的一条，钱不能错，发出去多少，领走的加上退回的就必须是多少。今天后面所有的设计，都是为了在几百人同时抢的情况下守住这三条。
 
 ---
 
