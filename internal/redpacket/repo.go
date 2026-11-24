@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/plugin/dbresolver"
 
 	"github.com/RedInn7/gomall/repository/db/dao"
 )
@@ -110,11 +111,31 @@ func (d *RedPacketDao) ListClaims(redPacketID uint) ([]*RedPacketClaim, error) {
 	return out, err
 }
 
+// ListClaimsFromPrimary 同 ListClaims，但强制读主库：对账拿它和 Redis 标记比对，
+// 读到有延迟的从库会把已落库的领取当成孤儿。
+func (d *RedPacketDao) ListClaimsFromPrimary(redPacketID uint) ([]*RedPacketClaim, error) {
+	var out []*RedPacketClaim
+	err := d.DB.Clauses(dbresolver.Write).Where("red_packet_id = ?", redPacketID).
+		Order("id ASC").
+		Find(&out).Error
+	return out, err
+}
+
+// TotalInTx 领取事务内读红包总额（普通读，不加锁）。调用前 DecrRemaining 已持有这行的锁。
+func (d *RedPacketDao) TotalInTx(id uint) (int64, error) {
+	var total int64
+	err := d.DB.Model(&RedPacket{}).Where("id = ?", id).Select("total").Scan(&total).Error
+	return total, err
+}
+
 // GetClaim 按 (red_packet_id, user_id) 反查领取记录（uniq 约束保证至多一行），用于事件结算定位 ref。
 // 未找到返回 (nil, nil)，由调用方判脏事件。
+//
+// 强制读主库：调用方都拿「查不到」当依据做有后果的事——Claim 据此回补 Redis、对账据此判孤儿、
+// 消费者据此判脏事件。读写分离下事务外的查询默认走从库，从库有延迟时会把刚提交的领取查成不存在。
 func (d *RedPacketDao) GetClaim(redPacketID, userID uint) (*RedPacketClaim, error) {
 	var c RedPacketClaim
-	err := d.DB.Where("red_packet_id = ? AND user_id = ?", redPacketID, userID).
+	err := d.DB.Clauses(dbresolver.Write).Where("red_packet_id = ? AND user_id = ?", redPacketID, userID).
 		First(&c).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -129,10 +150,14 @@ func (d *RedPacketDao) GetClaim(redPacketID, userID uint) (*RedPacketClaim, erro
 // finished 只在领取事务里 DB 剩余份数归零时才标（MarkFinishedIfDrained），一定没有余额，不扫：
 // 写成 status<>refunded 会让抢完的红包永远留在扫描范围里，每轮每行都要跑一次 SUM 子查询。
 // 发包后 Redis 准备失败的红包仍是 active，照样会被扫到退款。
-func (d *RedPacketDao) GetExpired(limit int) ([]*RedPacket, error) {
+//
+// 按 id 游标分批：取 id > afterID 的前 limit 个。不带游标只取前 N 个时，前 N 个里退款一直失败的红包
+// 每轮都会被重新取到，排在后面的永远轮不到。
+func (d *RedPacketDao) GetExpired(afterID uint, limit int) ([]*RedPacket, error) {
 	var out []*RedPacket
-	err := d.DB.Where("status = ? AND expire_at <= ?", RedPacketStatusActive, time.Now()).
+	err := d.DB.Where("status = ? AND expire_at <= ? AND id > ?", RedPacketStatusActive, time.Now(), afterID).
 		Where("total > (SELECT COALESCE(SUM(c.amount), 0) FROM red_packet_claim c WHERE c.red_packet_id = red_packet.id)").
+		Order("id ASC").
 		Limit(limit).
 		Find(&out).Error
 	return out, err

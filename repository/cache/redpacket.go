@@ -258,6 +258,12 @@ func LockRedPacketClaimForRepair(ctx context.Context, id, userID uint, raw strin
 	return n == 1, err
 }
 
+// DropRedPacketClaimMark 只撤销 claimed 标记、不放回金额：这一份被 DB 判定作废（入账会超出红包总额），
+// 金额不能再回到 list，但用户应当还能重抢。
+func DropRedPacketClaimMark(ctx context.Context, id, userID uint) error {
+	return RedisClient.HDel(ctx, RedPacketClaimedKey(id), strconv.FormatUint(uint64(userID), 10)).Err()
+}
+
 // RedPacketClaimMark Redis claimed HASH 里的一条领取标记
 type RedPacketClaimMark struct {
 	Amount int64

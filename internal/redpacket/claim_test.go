@@ -579,3 +579,90 @@ func TestReconcileScansAllActiveInBatches(t *testing.T) {
 		t.Fatalf("active left %d sender %d", active, redPacketUserBalance(t, db, 1))
 	}
 }
+
+// Redis 回档后已发出的金额又回到 list：份数没超、总额超了。领取事务按 DB 总额拦下，这份作废且不放回。
+func TestClaimRejectsShareOverTotal(t *testing.T) {
+	db := openRedPacketTestDB(t)
+	seedSender(t, db, 1, 1000)
+	for _, uid := range []uint{100, 101, 102} {
+		seedRedPacketUser(t, db, uid, 0)
+	}
+	rp := createPacket(t, 1, 100, 2)
+	ctx := context.Background()
+	amounts := cache.RedPacketAmountsKey(rp.ID)
+
+	// 100 领走 99 并落库；随后 Redis 回档，list 里又是 99，claimed 标记也没了
+	if _, err := claimTx(db, rp.ID, 100, 99); err != nil {
+		t.Fatal(err)
+	}
+	cache.RedisClient.Del(ctx, amounts)
+	cache.RedisClient.RPush(ctx, amounts, "99")
+
+	if _, err := GetRedPacketSrv().Claim(asUser(101), &RedPacketClaimReq{ID: rp.ID, Code: rp.ShareCode}); !errors.Is(err, ErrRedPacketDrained) {
+		t.Fatalf("want drained got %v", err)
+	}
+	if got := redPacketUserBalance(t, db, 101); got != 0 {
+		t.Fatalf("over-total share was paid: balance %d", got)
+	}
+	if got := sumClaims(t, db, rp.ID); got != 99 {
+		t.Fatalf("claimed sum %d want 99", got)
+	}
+	if n := cache.RedisClient.LLen(ctx, amounts).Val(); n != 0 {
+		t.Fatalf("bogus share was pushed back, list len %d", n)
+	}
+	var row RedPacket
+	db.First(&row, rp.ID)
+	if row.Remaining != 1 || row.Status != RedPacketStatusActive {
+		t.Fatalf("remaining %d status %d, want 1 / active", row.Remaining, row.Status)
+	}
+
+	claimedKey := cache.RedPacketClaimedKey(rp.ID)
+	if cache.RedisClient.HExists(ctx, claimedKey, "101").Val() {
+		t.Fatal("void share must not leave a claimed mark: user could never retry")
+	}
+
+	// 对账路径：102 在 Redis 抢到同样多出来的 99 后进程崩溃，对账补不进，也要撤掉标记
+	cache.RedisClient.RPush(ctx, amounts, "99")
+	if _, err := cache.ClaimRedPacket(ctx, rp.ID, 102, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	ageMark(t, rp.ID, 102, 99)
+	(&RedPacketTaskService{}).RunRedPacketClaimReconcile()
+	if got := redPacketUserBalance(t, db, 102); got != 0 {
+		t.Fatalf("reconcile paid over-total share: balance %d", got)
+	}
+	if cache.RedisClient.HExists(ctx, claimedKey, "102").Val() {
+		t.Fatal("reconcile must drop the mark of a void share")
+	}
+
+	// 真正剩下的那 1 分，之前被拒的 101 重抢能领到，领完托管清零
+	cache.RedisClient.RPush(ctx, amounts, "1")
+	if _, err := GetRedPacketSrv().Claim(asUser(101), &RedPacketClaimReq{ID: rp.ID, Code: rp.ShareCode}); err != nil {
+		t.Fatalf("retry after void share: %v", err)
+	}
+	if got, esc := sumClaims(t, db, rp.ID), escrowBalance(t, db); got != 100 || esc != 0 {
+		t.Fatalf("claimed %d escrow %d, want 100 / 0", got, esc)
+	}
+}
+
+// 过期回收按 id 游标扫完全部已过期红包，不只处理第一批。
+func TestExpireScansAllInBatches(t *testing.T) {
+	db := openRedPacketTestDB(t)
+	seedSender(t, db, 1, 1000)
+	prev := expireBatch
+	expireBatch = 2
+	t.Cleanup(func() { expireBatch = prev })
+	var ids []uint
+	for i := 0; i < 5; i++ {
+		ids = append(ids, createPacket(t, 1, 200, 2).ID)
+	}
+	db.Model(&RedPacket{}).Where("id IN ?", ids).Update("expire_at", time.Now().Add(-time.Minute))
+
+	(&RedPacketTaskService{}).RunRedPacketExpireCheck()
+
+	var active int64
+	db.Model(&RedPacket{}).Where("status = ?", RedPacketStatusActive).Count(&active)
+	if active != 0 || redPacketUserBalance(t, db, 1) != 1000 {
+		t.Fatalf("active left %d sender %d", active, redPacketUserBalance(t, db, 1))
+	}
+}
