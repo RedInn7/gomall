@@ -279,6 +279,55 @@ func codeMatches(rp *RedPacket, code string, legacyOK bool) bool {
 
 ---
 
+## 二-0 方案取舍：金额什么时候定、放在哪
+
+| 方案 | 做法 | 省在哪 | 费在哪 |
+|---|---|---|---|
+| **A** 抢的时候实时算 | 只存剩余金额和剩余份数，每次抢都现算一份 | 发包最轻，不占额外存储 | 热路径要读、算、写回；失败回补会改变后面的分布 |
+| **B** 发时预拆，只放 Redis（**gomall 现在用的**） | 金额数组一次算好，`RPUSH` 进 `LIST` | 抢包只有一次 `LPOP`，回补原样塞回 | 数组不落库，Redis 丢了没法重建，只能提前退款 |
+| **C** 发时预拆，逐份落库 | 发之前每一份就定好，DB 里一份一行 | Redis 丢了能从 DB 重建；每份可审计、可指定金额 | 发包事务多写 N 行，领取多更新一行 |
+| **D** 活动前批量预生成 | 平台按预算离线生成全部金额，开抢前预热进缓存 | 开抢时只扣库存，预算不会超 | 要提前知道总量，不适合用户随手发 |
+
+- 越往下，金额定得越早、越可控，发包也越重。
+- gomall 是用户随手发的小额红包，选 B：把丢份额的风险交给 5.3 节的“池丢失提前退款”兜底。
+
+> **讲稿**　讲 gomall 的做法之前，先看看这个问题有几种解法。核心就两个问题：每一份的金额什么时候定，定好以后放在哪。方案 A，抢的时候实时算：只存剩余金额和剩余份数，每来一个人现算一份。好处是发包最轻，坏处是抢包这条最热的路上要读、要算、要写回，而且失败回补会把后面的分布搞乱。方案 B，发的时候一次拆好，只放进 Redis，这是 gomall 现在的做法：抢包只有一次 LPOP，回补就是原样塞回去。代价是这个金额数组没有落库，Redis 要是把它丢了，没法重建，只能提前退款。方案 C，发的时候拆好，并且每一份都在数据库里落一行，也就是发之前这个红包就已经完整设计好了。好处是 Redis 丢了可以从数据库重建，每一份都能审计，运营还可以指定某一份的金额；代价是发包事务要多写 N 行，领取的时候也要多更新一行。方案 D 是平台做活动的时候用的：活动开始前按预算把所有金额离线生成好，预热进缓存，开抢的时候只扣库存，预算一定不会超；但它要提前知道总量，不适合用户随手发的红包。从左到右看，金额定得越早就越可控，发包也越重。gomall 是用户之间随手发的小额红包，所以选了 B，把丢份额的风险交给后面要讲的池丢失提前退款来兜底。
+
+---
+
+## 二-0 方案 C 展开：发之前就设计好，每一份都先落库
+
+gomall 没有采用，用来和方案 B 对比。
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
+sequenceDiagram
+    participant Sender
+    participant Service
+    participant DB
+    participant Redis
+
+    Sender->>Service: 发红包 (100 元, 3 份)
+    activate Service
+    Service->>DB: 事务 (主表 + 扣款 + 3 行份额)
+    Note over DB: 份额表：#1 3000 未领 / #2 5000 未领 / #3 2000 未领
+    Service->>Redis: RPUSH 份额编号 (#1, #2, #3)
+    deactivate Service
+    Note over Service,Redis: 抢：LPOP 拿到编号，DB 把这一行改成已领并入账，同一个事务
+    opt Redis 丢了 LIST
+        Service->>DB: 查出未领的行
+        DB-->>Service: (#2, #3)
+        Service->>Redis: 按未领的行重建 LIST
+    end
+```
+
+- 好处：可重建、可审计、可指定某一份的金额。
+- 代价：1000 份的红包，发包事务要多写 1000 行。
+
+> **讲稿**　把方案 C 展开看一下，它和 gomall 现在的做法只差一步。发红包的时候，同一个事务里除了写主表、扣钱，还把拆好的每一份写进一张份额表：第一份三十块未领，第二份五十块未领，第三份二十块未领。然后推进 Redis 的不再是金额，而是份额编号。抢的时候 LPOP 拿到一个编号，再到数据库里把这一行改成已领，同时入账，在同一个事务里完成。这样做最大的好处是：Redis 要是把 LIST 丢了，不用退款，把数据库里还是未领的那几行重新推进去就行。另外每一份从生到死都有记录，对账更直接；运营想让某一份是大额，也可以在发之前直接指定。代价也很明显：一个一千份的红包，发包事务要多写一千行，领取的时候也要多更新一行。所以这是一个取舍：gomall 选择发包轻一点，丢了就退；如果是金额大、要审计、或者金额需要人为设计的红包，方案 C 更合适。
+
+---
+
 ## 二、分发模型：发包时预拆好，抢包只做 `LPOP`
 
 ```mermaid
