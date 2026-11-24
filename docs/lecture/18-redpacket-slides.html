@@ -1,0 +1,910 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>18 红包：Redis 分发与 DB 记账的一致性</title>
+<!-- 单文件幻灯片，无外部依赖。→ / 空格 / 点击：下一步；←：上一步；F：全屏；Home / End：首页 / 末页 -->
+<style>
+* { margin: 0; box-sizing: content-box; }
+html, body { height: 100%; overflow: hidden; background: #2A1508; }
+body { font: 32px/1.2 sans-serif; }
+#stage { position: absolute; left: 50%; top: 50%; width: 1920px; height: 1080px; transform-origin: 0 0; }
+#stage > section { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; box-sizing: border-box; overflow: hidden; isolation: isolate; display: none; }
+#stage > section.on { display: flex; }
+h1 { font-size: 96px; font-weight: 600; } h2 { font-size: 64px; font-weight: 600; } h3 { font-size: 44px; font-weight: 600; }
+p, li, h1, h2, h3, td, th { overflow-wrap: break-word; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; border: solid #0003; border-width: 2px 0 0 2px; }
+th, td { padding: .35em .6em; text-align: left; border: solid #0003; border-width: 0 2px 2px 0; }
+.lifes { z-index: -1; }
+/* 箭头：实线带箭头，返回为虚线 */
+x-connector { display: block; position: relative; flex: none; height: 4px !important; background: currentColor; }
+x-connector::after { content: ""; position: absolute; right: -2px; top: 50%; transform: translateY(-50%); border-left: 16px solid currentColor; border-top: 9px solid transparent; border-bottom: 9px solid transparent; }
+x-connector[from="tr"]::after { right: auto; left: -2px; border-left: none; border-right: 16px solid currentColor; }
+.ret x-connector, .lost x-connector { background: repeating-linear-gradient(90deg, currentColor 0 14px, transparent 14px 24px); }
+/* 页码与进度 */
+#bar { position: fixed; left: 0; bottom: 0; height: 4px; background: #FF922B; transition: width .2s; }
+#no { position: fixed; right: 14px; bottom: 10px; font: 14px/1 sans-serif; color: #E8B88A; }
+@media print {
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { height: auto; overflow: visible; background: #fff; }
+  #stage { position: static; transform: none !important; width: auto; height: auto; }
+  #stage > section { position: relative; display: flex !important; page-break-after: always; }
+  .fragment { opacity: 1 !important; }
+  #bar, #no { display: none !important; }
+  @page { size: 1920px 1080px; margin: 0; }
+}
+body { font-family: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif; color: #3D1F0B; }
+section { background: #FFF8EE; padding: 128px; display: flex; flex-direction: column; counter-increment: page; }
+
+/* 页眉 */
+.eye { font-size: 24px; font-weight: 700; letter-spacing: 2px; color: #D9480F; line-height: 32px; height: 32px; }
+h2 { font-size: 50px; font-weight: 700; line-height: 64px; height: 64px; margin-top: 4px; color: #3D1F0B; }
+.body { margin-top: 28px; display: flex; flex-direction: column; gap: 24px; }
+.lead { font-size: 30px; line-height: 44px; color: #5C3A21; }
+.pts { font-size: 28px; line-height: 44px; color: #5C3A21; }
+.hl { color: #C2410C; font-weight: 700; }
+.red { color: #C92A2A; font-weight: 700; }
+
+/* 深色页 */
+.dark { background: #3D1F0B; justify-content: center; gap: 32px; }
+.dark h1 { font-size: 92px; font-weight: 700; line-height: 116px; color: #FFE8CC; }
+.dark .sub { font-size: 40px; line-height: 56px; color: #FFC078; }
+.dark .meta { font-size: 26px; line-height: 40px; color: #E8B88A; }
+.dark .tag { font-size: 26px; font-weight: 700; letter-spacing: 3px; color: #FF922B; }
+
+/* 时序图 */
+.lifes { position: absolute; left: 128px; top: 256px; width: 1664px; height: 696px; display: flex; }
+.lane { flex: 1; display: flex; justify-content: center; }
+.wire { width: 4px; background: #F3C99B; }
+.seq { margin-top: 28px; display: flex; flex-direction: column; gap: 14px; }
+.row { display: grid; }
+.p2 { grid-template-columns: repeat(4, 1fr); }
+.p3 { grid-template-columns: repeat(6, 1fr); }
+.p4 { grid-template-columns: repeat(8, 1fr); }
+.p5 { grid-template-columns: repeat(10, 1fr); }
+.who { grid-column: span 2; margin: 0 20px; padding: 10px 8px; text-align: center; font-size: 30px; font-weight: 700; line-height: 38px; color: #3D1F0B; background: #FFD8A8; border: 3px solid #E8590C; border-radius: 14px; }
+.m { display: flex; flex-direction: column; gap: 2px; }
+.lb { font-size: 28px; line-height: 38px; text-align: center; color: #3D1F0B; background: #FFF8EE; }
+.m x-connector { width: 100%; height: 2px; color: #C2410C; border-width: 4px; }
+.ret .lb { color: #8A4B1F; }
+.ret x-connector { color: #D9A066; border-width: 3px; border-style: dashed; }
+.lost .lb { color: #C92A2A; font-weight: 700; }
+.lost x-connector { color: #C92A2A; border-style: dashed; }
+.note { font-size: 26px; line-height: 36px; text-align: center; padding: 8px 12px; color: #5C2E0E; background: #FFF3BF; border: 2px solid #F08C00; border-radius: 10px; }
+.note.warn { color: #7A1212; background: #FFE3E3; border: 2px solid #C92A2A; font-weight: 700; }
+
+/* 分步出现 */
+.fragment { opacity: 0; transition: opacity .3s; }
+.fragment.visible { opacity: 1; }
+
+/* 卡片 */
+.cards { display: flex; gap: 28px; }
+.card { flex: 1; display: flex; flex-direction: column; gap: 12px; padding: 28px 32px; background: #FFFDF8; border: 2px solid #F3C99B; border-radius: 20px; }
+.card h3 { font-size: 34px; font-weight: 700; line-height: 46px; color: #C2410C; }
+.card .t { font-size: 26px; line-height: 40px; color: #5C3A21; }
+.card .k { font-size: 24px; font-weight: 700; line-height: 34px; letter-spacing: 1px; color: #B8672E; }
+.card.no { background: #FFE3E3; border: 2px solid #C92A2A; }
+.card.no h3 { color: #A51111; }
+.card.yes { background: #FFF3BF; border: 2px solid #F08C00; }
+.card.soft { background: #FFE8CC; border: 2px solid #E8590C; }
+.num { font-size: 72px; font-weight: 700; line-height: 80px; color: #D9480F; }
+
+/* 流程盒 */
+.flow { display: flex; align-items: stretch; gap: 12px; }
+.box { flex: 1; padding: 20px 22px; font-size: 26px; line-height: 38px; text-align: center; color: #3D1F0B; background: #FFE8CC; border: 3px solid #E8590C; border-radius: 16px; }
+.box.end { background: #FFF3BF; border: 3px solid #F08C00; font-weight: 700; }
+.box.bad { background: #FFE3E3; border: 3px solid #C92A2A; color: #7A1212; font-weight: 700; }
+.go { align-self: center; width: 56px; height: 2px; color: #C2410C; border-width: 4px; }
+.down { align-self: center; width: 2px; height: 36px; color: #C2410C; border-width: 4px; }
+
+/* 代码 */
+.code { display: flex; flex-direction: column; padding: 22px 28px; background: #3D1F0B; border-radius: 16px; }
+.c { font-family: 'JetBrains Mono', 'Courier New', monospace; font-size: 24px; line-height: 36px; color: #FFE8CC; white-space: nowrap; }
+.i1 { padding-left: 44px; }
+.i2 { padding-left: 88px; }
+.i3 { padding-left: 132px; }
+.cm { color: #F0A868; }
+.kw { color: #FFD43B; }
+.src { font-size: 24px; line-height: 32px; color: #B8672E; }
+
+/* 表格 */
+table { font-size: 24px; color: #3D1F0B; }
+.thead { background: #FFD8A8; }
+.alt { background: #FFF1DE; }
+
+/* 大字 */
+.big { font-size: 44px; font-weight: 700; line-height: 60px; color: #3D1F0B; }
+.formula { padding: 24px 32px; font-size: 34px; font-weight: 700; line-height: 50px; text-align: center; color: #3D1F0B; background: #FFF3BF; border: 3px solid #F08C00; border-radius: 16px; }
+x-connector { border: none !important; }
+</style>
+</head>
+<body>
+<div id="stage">
+<section id="cover" class="dark" data-transition="fade">
+<p class="tag">GOMALL · 第 18 讲</p>
+<h1>红包：Redis 分发与<br>DB 记账的一致性</h1>
+<p class="sub">Redis 决定谁拿到哪一份，MySQL 决定钱有没有动</p>
+<p class="meta">internal/redpacket（发包、抢包、退款与对账）<br>repository/cache/redpacket.go（二倍均值拆包与 Lua 脚本）</p>
+</section>
+<section id="intro" data-transition="fade">
+<p class="eye">开场 · 业务背景</p>
+<h2>红包是拿来干什么的</h2>
+<div class="body">
+<p class="lead">用户从自己的钱包里拿出一笔钱，拆成若干份，发给一群人<span class="hl">先到先得</span>：每人最多领一份，金额随机，没领完的到期退回。它是商城里的一种营销玩法，和优惠券、秒杀同一类。</p>
+<div class="flow">
+<p class="box"><b>① 发</b><br>金额、份数、祝福语<br>验支付密码后当场扣款</p>
+<x-connector class="go fragment" data-fragment-index="1"></x-connector>
+<p class="box fragment" data-fragment-index="1"><b>② 分享</b><br>拿到带口令的链接<br>发到群里</p>
+<x-connector class="go fragment" data-fragment-index="2"></x-connector>
+<p class="box fragment" data-fragment-index="2"><b>③ 抢</b><br>群友点开，先到先得<br>钱直接进自己钱包</p>
+<x-connector class="go fragment" data-fragment-index="3"></x-connector>
+<p class="box end fragment" data-fragment-index="3"><b>④ 过期</b><br>默认 24 小时，最长 7 天<br>没领完的退回发包人</p>
+</div>
+<div class="cards fragment" data-fragment-index="4">
+<div class="card"><p class="k">金额</p><p class="t">单个红包最多 200 元，每份至少 1 分，最多 1000 份。</p></div>
+<div class="card"><p class="k">公平</p><p class="t">每人只能领一次；每份金额随机，但总和必须等于总金额。</p></div>
+<div class="card"><p class="k">钱不能错</p><p class="t">发出去多少，领走的加退回的就必须是多少，一分不多一分不少。</p></div>
+</div>
+</div>
+</section>
+<section id="mysql" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">00 · 核心认知</p>
+<h2>只用 MySQL：所有人排同一把锁</h2>
+<div class="seq">
+<div class="row p3"><p class="who">Client</p><p class="who">Service</p><p class="who">DB (MySQL)</p></div>
+<div class="row p3"><p class="note" style="grid-column:1/4">100 人红包，几百人同一毫秒点开</p></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">抢红包（几百个并发请求）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">SELECT ... FOR UPDATE（同一行红包记录）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="2"><p class="note" style="grid-column:4/7">一个请求持锁：算随机金额、改余额、写流水</p></div>
+<div class="row p3 fragment" data-fragment-index="2"><p class="note warn" style="grid-column:3/7">其余几百个请求全部排队等这把行锁</p></div>
+<div class="row p3 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:4/6"><p class="lb">锁等待超时</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:2/4"><p class="lb">失败（数据库被打挂）</p><x-connector from="tr"></x-connector></div></div>
+</div>
+</section>
+<section id="redis" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">00 · 核心认知</p>
+<h2>只用 Redis：扣了份额，钱不一定到账</h2>
+<div class="seq">
+<div class="row p3"><p class="who">Client</p><p class="who">Service</p><p class="who">Redis</p></div>
+<div class="row p3"><div class="m" style="grid-column:2/4"><p class="lb">抢红包</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">扣一份份额（LPOP）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">3000 分</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="2"><p class="note warn" style="grid-column:3/6">准备给用户钱包加钱时，进程崩溃</p></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m lost" style="grid-column:2/4"><p class="lb">连接断开</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><p class="note warn" style="grid-column:2/7">份额已扣，钱没到账，没有跨表事务可以回滚</p></div>
+</div>
+</section>
+<section id="rule" data-transition="fade">
+<p class="eye">00 · 核心认知</p>
+<h2>铁律：Redis 发号码牌，MySQL 发钱</h2>
+<div class="body">
+<div class="flow">
+<p class="box">抢包请求</p>
+<x-connector class="go"></x-connector>
+<p class="box"><b>Redis</b><br>发号码牌：谁拿到哪一份</p>
+<x-connector class="go"></x-connector>
+<p class="box"><b>MySQL</b><br>发钱记账：钱有没有动</p>
+<x-connector class="go"></x-connector>
+<p class="box end">钱到账</p>
+</div>
+<p class="lead fragment" data-fragment-index="1">红包结束时，数据库里必须满足<span class="hl">资金守恒</span>：</p>
+<p class="formula fragment" data-fragment-index="1">红包总金额 Total ＝ 已领取落库金额 SUM(red_packet_claim.amount) ＋ 过期退回发包人 Leftover</p>
+<div class="cards fragment" data-fragment-index="2">
+<div class="card yes"><h3>只从 MySQL 算</h3><p class="t">公式里的每一项都取自数据库。</p></div>
+<div class="card no"><h3>不信 Redis 的剩余金额</h3><p class="t">两边不一致，一律向 MySQL 对齐。</p></div>
+</div>
+</div>
+</section>
+<section id="overview" data-transition="fade">
+<p class="eye">00 · 核心认知</p>
+<h2>全景：发红包、抢红包、后台兜底</h2>
+<div class="body">
+<div class="cards">
+<div class="card soft"><p class="k">阶段一 · CREATE</p><h3>发红包</h3><p class="t">① 校验支付密码，二倍均值预拆 N 份</p><p class="t">② DB 事务：写主表 + 扣发包人钱包 + 记入 redpacket_escrow</p><p class="t">③ 提交后 RPUSH 金额进 Redis LIST</p><p class="t"><span class="red">写 Redis 失败</span>：当场全额退回，状态 refunded</p></div>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">阶段二 · CLAIM</p><h3>抢红包</h3><p class="t">① Lua：HEXISTS 去重 → LPOP → HSET 标记</p><p class="t">② DB 事务 claimTx：INSERT claim + remaining-1 + 校验总额 + 托管转钱包</p><p class="t">③ 事务报错：先反查 GetClaim</p><p class="t">④ 确认未落库才回补：LPUSH + HDEL</p></div>
+<div class="card soft fragment" data-fragment-index="2"><p class="k">阶段三 · RECONCILE &amp; EXPIRE</p><h3>后台兜底</h3><p class="t"><b>每 2 分钟</b> 孤儿对账：超过 1 分钟未落库的标记 → 加 :r 锁 → claimTx 补发</p><p class="t"><b>每 5 分钟</b> 过期回收：先补齐孤儿，再按 DB 算 Total − SUM(已领) 退回发包人</p></div>
+</div>
+</div>
+</section>
+<section id="tickets" data-transition="fade">
+<p class="eye">一 · 四张客诉单</p>
+<h2>先看四张客诉单：事故都出在两边的交界处</h2>
+<div class="body">
+<div class="cards">
+<div class="card"><p class="num">A</p><h3>失败后再点，提示已领过</h3><p class="t">Redis 扣了份额、打了标记，DB 事务失败后没退回 Redis。</p><p class="k">→ 4.1、4.5 先查库 + 原子回补</p></div>
+<div class="card fragment" data-fragment-index="1"><p class="num">B</p><h3>抢到的人和发包人各拿一次</h3><p class="t">领取事务与过期退款并发，读了旧的 MVCC 快照。</p><p class="k">→ 4.3、4.4 FOR UPDATE 置于事务首行</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="num">C</p><h3>抢到了，钱没到账</h3><p class="t">抢完 Redis 后服务器断电，回补没跑成，份额卡在半空。</p><p class="k">→ 5.2 孤儿对账补领（:r 抢占锁）</p></div>
+<div class="card fragment" data-fragment-index="3"><p class="num">D</p><h3>扣了 100 元，却显示已抢完</h3><p class="t">DB 扣款已提交，往 Redis 写金额列表时 Redis 挂了。</p><p class="k">→ 5.3 立即逆向退款 + 池丢失提前退款</p></div>
+</div>
+</div>
+</section>
+<section id="rediskeys" data-transition="fade">
+<p class="eye">一 · 数据结构 · repository/cache/redpacket.go:16-22</p>
+<h2>Redis 侧：两个 Key，抢包前后怎么变</h2>
+<div class="body">
+<div class="flow">
+<div class="card soft"><p class="k">① 发包后</p><p class="t"><b>amounts</b>（LIST）</p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>claimed</b>（HASH）</p><p class="c" style="color:#3D1F0B">（空）</p></div>
+<x-connector class="go fragment" data-fragment-index="1"></x-connector>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">② 用户 101 抢到 3000</p><p class="t"><b>amounts</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>claimed</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000</p></div>
+<x-connector class="go fragment" data-fragment-index="2"></x-connector>
+<div class="card yes fragment" data-fragment-index="2"><p class="k">③a DB 失败，回补</p><p class="t"><b>amounts</b></p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>claimed</b></p><p class="c" style="color:#3D1F0B">（101 的标记已删）</p></div>
+<div class="card no fragment" data-fragment-index="3"><p class="k">③b 成了孤儿，对账接手</p><p class="t"><b>amounts</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>claimed</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000:r</p></div>
+</div>
+<p class="lead fragment" data-fragment-index="4">claimed 存的是 <span class="hl">金额:unix秒[:r]</span>，不是一个 1：断电后靠金额知道补多少，靠时间分清在途还是孤儿。</p>
+</div>
+</section>
+<section id="tables" data-transition="fade">
+<p class="eye">一 · 数据结构 · internal/redpacket/model.go:20-44</p>
+<h2>MySQL 侧：两张核心表</h2>
+<div class="body">
+<div class="cards">
+<div class="card" style="flex:3"><h3>red_packet 红包主表</h3>
+<table>
+<tr class="thead"><th style="width:26%">字段</th><th>含义</th></tr>
+<tr><td>UserID</td><td>发包人 ID</td></tr>
+<tr class="alt"><td>Total / Count</td><td>总金额（分）/ 总份数</td></tr>
+<tr><td>Remaining</td><td>剩余未领份数，领取事务内递减</td></tr>
+<tr class="alt"><td>ExpireAt</td><td>过期时间（最长 7 天）</td></tr>
+<tr><td>Status</td><td>1 进行中 / 3 已抢完 / 4 已过期退款</td></tr>
+<tr class="alt"><td>ShareCode</td><td>16 位随机领取口令，防按自增 id 扫号</td></tr>
+</table></div>
+<div class="card" style="flex:2"><h3>red_packet_claim 领取表</h3>
+<table>
+<tr class="thead"><th style="width:42%">字段</th><th>含义</th></tr>
+<tr><td>RedPacketID</td><td>红包 ID</td></tr>
+<tr class="alt"><td>UserID</td><td>领取人 ID</td></tr>
+<tr><td>Amount</td><td>抢到的金额（分）</td></tr>
+</table>
+<p class="t fragment" data-fragment-index="1"><span class="hl">唯一索引 uk_rp_user</span><br>(red_packet_id, user_id)<br>DB 层兜底：同一用户只能领一次</p></div>
+</div>
+</div>
+</section>
+<section id="sharecode" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">一 · 1.2 防扫号口令</p>
+<h2>ShareCode：自增 id 能遍历，口令不能</h2>
+<div class="seq">
+<div class="row p4"><p class="who">Sender</p><p class="who">Service</p><p class="who">Friend</p><p class="who">Attacker</p></div>
+<div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">POST 发红包</p><x-connector></x-connector></div></div>
+<div class="row p4"><div class="m ret" style="grid-column:2/4"><p class="lb">id=88，ShareCode（只返回这一次）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/6"><p class="lb">分享链接（id + ShareCode）</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">抢红包（id=88, code）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">口令正确，进入抢包</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m lost" style="grid-column:4/8"><p class="lb">脚本遍历 id = 1, 2, 3 ...（没有口令）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m ret" style="grid-column:4/8"><p class="lb">84006 口令不对</p><x-connector></x-connector></div></div>
+</div>
+</section>
+<section id="timing" data-transition="fade">
+<p class="eye">一 · 1.2 防扫号口令 · internal/redpacket/service.go:165-170</p>
+<h2>口令比较为什么不用 ==</h2>
+<div class="body">
+<div class="code">
+<p class="c"><span class="kw">func</span> codeMatches(rp *RedPacket, code string, legacyOK bool) bool {</p>
+<p class="c i1"><span class="kw">if</span> rp.ShareCode == "" {</p>
+<p class="c i2"><span class="kw">return</span> legacyOK <span class="cm">// 没有口令的老红包</span></p>
+<p class="c i1">}</p>
+<p class="c i1"><span class="kw">return</span> subtle.ConstantTimeCompare([]byte(rp.ShareCode), []byte(code)) == 1</p>
+<p class="c">}</p>
+</div>
+<div class="cards">
+<div class="card no fragment" data-fragment-index="1"><h3>普通 == 逐字节比较</h3><p class="t">第 1 位错就立刻返回；前 15 位都对才比第 16 位。</p><p class="t">攻击者测微秒级时间差，一位一位猜出口令：<b>计时攻击</b>。</p></div>
+<div class="card yes fragment" data-fragment-index="2"><h3>ConstantTimeCompare</h3><p class="t">不管对了几位，永远比完所有字节。</p><p class="t">耗时恒定，时间差不泄露信息。</p></div>
+</div>
+</div>
+</section>
+<section id="schemes" data-transition="fade">
+<p class="eye">二 · 分发模型 · 方案取舍</p>
+<h2>金额什么时候定、放在哪：四种方案</h2>
+<div class="body">
+<div class="cards">
+<div class="card"><p class="k">方案 A</p><h3>抢的时候实时算</h3><p class="t">只存剩余金额和剩余份数，每次抢都现算一份。</p><p class="t"><b>省</b>：发包最轻，不占额外存储。</p><p class="t"><b>费</b>：热路径要读、算、写回；失败回补会改变后面的分布。</p></div>
+<div class="card yes fragment" data-fragment-index="1"><p class="k">方案 B · gomall 现在用的</p><h3>发时预拆，只放 Redis</h3><p class="t">金额数组一次算好，RPUSH 进 LIST。</p><p class="t"><b>省</b>：抢包只有一次 LPOP，回补原样塞回。</p><p class="t"><b>费</b>：数组不落库，Redis 丢了没法重建，只能提前退款。</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="k">方案 C</p><h3>发时预拆，逐份落库</h3><p class="t">发之前每一份就定好，DB 里一份一行。</p><p class="t"><b>省</b>：Redis 丢了能从 DB 重建；每份可审计、可指定金额。</p><p class="t"><b>费</b>：发包事务多写 N 行，领取多更新一行。</p></div>
+<div class="card fragment" data-fragment-index="3"><p class="k">方案 D</p><h3>活动前批量预生成</h3><p class="t">平台按预算离线生成全部金额，开抢前预热进缓存。</p><p class="t"><b>省</b>：开抢时只扣库存，预算不会超。</p><p class="t"><b>费</b>：要提前知道总量，不适合用户随手发。</p></div>
+</div>
+<p class="lead fragment" data-fragment-index="4">越往右，金额定得越早、越可控，发包也越重。gomall 是用户随手发的小额红包，选 B：把丢份额的风险交给“池丢失提前退款”兜底。</p>
+</div>
+</section>
+<section id="pregen" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">二 · 分发模型 · 方案 C（gomall 没有采用，用来对比）</p>
+<h2>发之前就设计好：每一份都先落库</h2>
+<div class="seq">
+<div class="row p4"><p class="who">Sender</p><p class="who">Service</p><p class="who">DB</p><p class="who">Redis</p></div>
+<div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">发红包（100 元，3 份）</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">事务：主表 + 扣款 + 3 行份额</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><p class="note" style="grid-column:4/9">份额表：#1 3000 未领 · #2 5000 未领 · #3 2000 未领</p></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/8"><p class="lb">RPUSH 份额编号（#1, #2, #3）</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><p class="note" style="grid-column:2/9">抢：LPOP 拿到编号 → DB 把这一行改成“已领”并入账，同一个事务</p></div>
+<div class="row p4 fragment" data-fragment-index="4"><div class="m ret" style="grid-column:4/8"><p class="lb">Redis 丢了：按未领的行重建 LIST</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="5"><p class="note warn" style="grid-column:1/9">代价：1000 份的红包，发包事务要多写 1000 行；换来可重建、可审计、可指定金额</p></div>
+</div>
+</section>
+<section id="presplit" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">二 · 分发模型</p>
+<h2>发包时预拆好，抢包只做一次 LPOP</h2>
+<div class="seq">
+<div class="row p5"><p class="who">Sender</p><p class="who">Service</p><p class="who">DB</p><p class="who">Redis</p><p class="who">Client</p></div>
+<div class="row p5"><div class="m" style="grid-column:2/4"><p class="lb">发红包（100 元，3 份）</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="1"><p class="note" style="grid-column:2/7">SplitRedPacket → [3000, 5000, 2000]</p></div>
+<div class="row p5 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">事务：写主表 + 扣款进托管</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/8"><p class="lb">RPUSH amounts（3000, 5000, 2000）</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="3"><div class="m" style="grid-column:4/10"><p class="lb">抢红包（每个请求）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="3"><div class="m" style="grid-column:4/8"><p class="lb">claim Lua：LPOP 一次</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="3"><div class="m ret" style="grid-column:4/8"><p class="lb">amount</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="4"><p class="note" style="grid-column:3/11">抢包热路径：没有随机数计算，没有分布式锁。失败回补就是 LPUSH 原样塞回一张</p></div>
+</div>
+</section>
+<section id="split" data-transition="fade">
+<p class="eye">二 · 2.1 二倍均值 · repository/cache/redpacket.go:127-167</p>
+<h2>算例：10 元（1000 分）拆成 3 份</h2>
+<div class="body">
+<p class="lead">每次随机的上限 ＝ <span class="hl">当前剩余人均金额 × 2</span>，并给后面每份至少留 1 分。</p>
+<div class="flow">
+<div class="card soft"><p class="k">第 1 份 · 剩 1000，3 人</p><p class="t">人均 1000 / 3 = 333</p><p class="t">上界 333 × 2 = 666</p><p class="t">区间 [1, 665]，期望 333</p><h3>抽中 300</h3></div>
+<x-connector class="go fragment" data-fragment-index="1"></x-connector>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">第 2 份 · 剩 700，2 人</p><p class="t">人均 700 / 2 = 350</p><p class="t">上界 350 × 2 = 700</p><p class="t">区间 [1, 699]，期望 350</p><h3>抽中 500</h3></div>
+<x-connector class="go fragment" data-fragment-index="2"></x-connector>
+<div class="card soft fragment" data-fragment-index="2"><p class="k">第 3 份 · 最后一份</p><p class="t">不再随机</p><p class="t">直接拿走全部剩余</p><p class="t">总和分毫不差</p><h3>拿走 200</h3></div>
+<x-connector class="go fragment" data-fragment-index="3"></x-connector>
+<div class="card yes fragment" data-fragment-index="3"><p class="k">最后 · Shuffle</p><p class="t">[300, 500, 200] 随机打乱</p><p class="t">前面抽得小，最后一份会特别大</p><p class="t">打乱后大额不固定在最后</p><h3>RPUSH 进 LIST</h3></div>
+</div>
+</div>
+</section>
+<section id="lua" data-transition="fade">
+<p class="eye">二 · 2.2 抢包 Lua · repository/cache/redpacket.go:55-66</p>
+<h2>去重、出队、打标记，一次原子完成</h2>
+<div class="body">
+<div class="cards">
+<div class="code" style="flex:3">
+<p class="c"><span class="cm">-- KEYS[1] amounts  KEYS[2] claimed</span></p>
+<p class="c"><span class="cm">-- ARGV[1] userID  ARGV[2] TTL  ARGV[3] now</span></p>
+<p class="c"><span class="kw">if</span> redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 <span class="kw">then</span></p>
+<p class="c i1"><span class="kw">return</span> -2 <span class="cm">-- 已领过</span></p>
+<p class="c"><span class="kw">end</span></p>
+<p class="c"><span class="kw">local</span> amt = redis.call('LPOP', KEYS[1])</p>
+<p class="c"><span class="kw">if not</span> amt <span class="kw">then</span></p>
+<p class="c i1"><span class="kw">return</span> -1 <span class="cm">-- LIST 空了，已抢完</span></p>
+<p class="c"><span class="kw">end</span></p>
+<p class="c">redis.call('HSET', KEYS[2], ARGV[1], amt .. ':' .. ARGV[3])</p>
+<p class="c">redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))</p>
+<p class="c"><span class="kw">return</span> tonumber(amt) <span class="cm">-- 抢到的金额（分）</span></p>
+</div>
+<div style="flex:2; display:flex; flex-direction:column; gap:20px">
+<div class="card yes fragment" data-fragment-index="1"><h3>101 第一次抢 → 3000</h3><p class="t">标记 101 → 3000:时间</p></div>
+<div class="card fragment" data-fragment-index="2"><h3>101 再点一次 → -2</h3><p class="t">已领过，错误码 84005</p></div>
+<div class="card fragment" data-fragment-index="3"><h3>抢空后 104 来 → -1</h3><p class="t">已抢完，错误码 84004</p></div>
+</div>
+</div>
+</div>
+</section>
+<section id="escrow" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">三 · 资金模型</p>
+<h2>钱先进红包托管，再分给领取人</h2>
+<div class="seq">
+<div class="row p4"><p class="who">A 钱包（发包人）</p><p class="who">redpacket_escrow</p><p class="who">B 钱包</p><p class="who">C 钱包</p></div>
+<div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">① 发包 10000 · ref = 88</p><x-connector></x-connector></div></div>
+<div class="row p4"><p class="note" style="grid-column:3/6">托管余额 10000</p></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">② B 领包 3000 · ref = 501</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><p class="note" style="grid-column:3/6">托管余额 7000</p></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/8"><p class="lb">③ C 领包 5000 · ref = 502</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><p class="note" style="grid-column:3/6">托管余额 2000</p></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m" style="grid-column:2/4"><p class="lb">④ 过期退款 2000 · ref = 88</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><p class="note" style="grid-column:3/6">托管余额 0</p></div>
+</div>
+</section>
+<section id="ledger" data-transition="fade">
+<p class="eye">三 · 3.1 完整台账</p>
+<h2>account_transaction 里的 8 条流水</h2>
+<div class="body">
+<table>
+<tr class="thead"><th style="width:14%">阶段</th><th style="width:16%">结算函数</th><th style="width:15%">ref_order_id</th><th style="width:20%">账户</th><th style="width:9%">方向</th><th style="width:10%;text-align:right">金额(分)</th><th>biz_type</th></tr>
+<tr><td>1 发包</td><td>settleSendTx</td><td>88（红包 ID）</td><td>A 的个人钱包</td><td>debit</td><td style="text-align:right">10000</td><td>redpacket_send</td></tr>
+<tr><td>1 发包</td><td>settleSendTx</td><td>88（红包 ID）</td><td>redpacket_escrow</td><td>credit</td><td style="text-align:right">10000</td><td>redpacket_send</td></tr>
+<tr class="alt"><td>2 B 领包</td><td>settleClaimTx</td><td>501（领取 ID）</td><td>redpacket_escrow</td><td>debit</td><td style="text-align:right">3000</td><td>redpacket_claim</td></tr>
+<tr class="alt"><td>2 B 领包</td><td>settleClaimTx</td><td>501（领取 ID）</td><td>B 的个人钱包</td><td>credit</td><td style="text-align:right">3000</td><td>redpacket_claim</td></tr>
+<tr><td>3 C 领包</td><td>settleClaimTx</td><td>502（领取 ID）</td><td>redpacket_escrow</td><td>debit</td><td style="text-align:right">5000</td><td>redpacket_claim</td></tr>
+<tr><td>3 C 领包</td><td>settleClaimTx</td><td>502（领取 ID）</td><td>C 的个人钱包</td><td>credit</td><td style="text-align:right">5000</td><td>redpacket_claim</td></tr>
+<tr class="alt"><td>4 过期退款</td><td>settleRefundTx</td><td>88（红包 ID）</td><td>redpacket_escrow</td><td>debit</td><td style="text-align:right">2000</td><td>redpacket_refund</td></tr>
+<tr class="alt"><td>4 过期退款</td><td>settleRefundTx</td><td>88（红包 ID）</td><td>A 的个人钱包</td><td>credit</td><td style="text-align:right">2000</td><td>redpacket_refund</td></tr>
+</table>
+<p class="formula fragment" data-fragment-index="1">redpacket_escrow 净余额：+10000 − 3000 − 5000 − 2000 ＝ 0</p>
+</div>
+</section>
+<section id="refid" data-transition="fade">
+<p class="eye">三 · 3.2 防重唯一索引</p>
+<h2>领包的 ref_order_id 为什么用“领取记录 ID”</h2>
+<div class="body">
+<p class="lead">流水表唯一索引 <span class="hl">uniq_acct_tx_order_dir (ref_order_id, direction, biz_type)</span>，里面没有 user_id。</p>
+<div class="cards">
+<div class="card no fragment" data-fragment-index="1"><h3>领包也用红包 ID</h3><p class="t">B 写入</p><p class="c" style="color:#3D1F0B">(88, credit, redpacket_claim)</p><p class="t">C 写入</p><p class="c" style="color:#3D1F0B">(88, credit, redpacket_claim)</p><p class="t"><span class="red">撞唯一索引，C 领不了</span></p></div>
+<div class="card yes fragment" data-fragment-index="2"><h3>领包用 RedPacketClaim.ID</h3><p class="t">B 写入</p><p class="c" style="color:#3D1F0B">(501, credit, redpacket_claim)</p><p class="t">C 写入</p><p class="c" style="color:#3D1F0B">(502, credit, redpacket_claim)</p><p class="t"><b>互不冲突</b></p></div>
+</div>
+<p class="lead fragment" data-fragment-index="3">发包和过期退款：一个红包只发一次、最多退一次，用红包 ID，靠 redpacket_send / redpacket_refund 区分。</p>
+</div>
+</section>
+<section id="order" data-transition="fade">
+<p class="eye">三 · 3.3 记账顺序 · internal/redpacket/settle.go:101-110</p>
+<h2>永远先改用户钱包，后记系统托管</h2>
+<div class="body">
+<div class="code">
+<p class="c"><span class="kw">func</span> settleSendTx(tx *gorm.DB, rpID, senderID uint, total int64) (wrote bool, err error) {</p>
+<p class="c i1"><span class="cm">// 第 1 腿：用户钱包（行锁 FOR UPDATE + 余额不足检查 + 幂等预检）</span></p>
+<p class="c i1">skipped, _, err := adjustWallet(tx, senderID, rpID, -total, money.BizTypeRedPacketSend)</p>
+<p class="c i1"><span class="kw">if</span> err != nil || skipped {</p>
+<p class="c i2"><span class="kw">return</span> false, err</p>
+<p class="c i1">}</p>
+<p class="c i1"><span class="cm">// 第 2 腿：钱包扣成功后，再追加系统托管账户流水</span></p>
+<p class="c i1"><span class="kw">return</span> true, adjustClearing(tx, rpID, total, money.BizTypeRedPacketSend)</p>
+<p class="c">}</p>
+</div>
+<div class="cards">
+<div class="card fragment" data-fragment-index="1"><h3>先难后易</h3><p class="t">钱包一侧要加行锁、解密余额、校验够不够扣，最容易失败。余额不够直接返回，托管表不用碰。</p></div>
+<div class="card fragment" data-fragment-index="2"><h3>幂等短路</h3><p class="t">重复调用时台账已存在，adjustWallet 返回 skipped = true，两条腿一起跳过。</p></div>
+</div>
+</div>
+</section>
+<section id="boundary" class="dark" data-transition="fade">
+<p class="tag">四 · 一致性边界</p>
+<h1>Redis 先扣，<br>DB 说了算</h1>
+<p class="sub">LPOP 成功，只代表拿到了“领这一份钱的号码牌”</p>
+<p class="meta">钱有没有进钱包，由 DB 领取事务决定。<br>DB 报错后的顺序：先查库确认，再对比标记回补。</p>
+</section>
+<section id="claimflow" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">四 · 4.1 领取主链路</p>
+<h2>一次抢包：先 Redis 抢份额，再 DB 落库入账</h2>
+<div class="seq">
+<div class="row p4"><p class="who">Client</p><p class="who">Service</p><p class="who">Redis</p><p class="who">DB (MySQL)</p></div>
+<div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">POST /redpacket/claim (id, code)</p><x-connector></x-connector></div></div>
+<div class="row p4"><div class="m" style="grid-column:4/8"><p class="lb">Get(id)：校验口令、status、expire_at</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">claim Lua (uid, now)</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">amount / -1 / -2</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><p class="note" style="grid-column:1/6">-1 已抢完 (84004) / -2 已领过 (84005)：直接失败</p></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m" style="grid-column:4/8"><p class="lb">claimTx：INSERT claim + remaining-1 + 校验总额 + 入账</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m ret" style="grid-column:4/8"><p class="lb">提交成功</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m ret" style="grid-column:2/4"><p class="lb">成功 (amount)</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:3/9">提交失败或结果未知：先 GetClaim(id, uid) 反查，再分四种情况处理</p></div>
+</div>
+</section>
+<section id="wrongcode" data-transition="fade">
+<p class="eye">四 · 4.2 DB 报错之后</p>
+<h2>很多人会这样写：报错就把份额塞回 Redis</h2>
+<div class="body">
+<div class="code">
+<p class="c"><span class="cm">// 极其危险的错误写法</span></p>
+<p class="c">amount := redisClaim()</p>
+<p class="c"><span class="kw">if</span> err := dbClaimTx(amount); err != nil {</p>
+<p class="c i1">redisRollback(amount) <span class="cm">// 只要报错就无脑塞回 Redis</span></p>
+<p class="c">}</p>
+</div>
+<p class="big fragment" data-fragment-index="1">报错 ≠ 没提交</p>
+<div class="cards fragment" data-fragment-index="1">
+<div class="card no"><h3>MySQL 里其实已经 COMMIT</h3><p class="t">钱已经加进用户钱包。</p></div>
+<div class="card no"><h3>确认包在路上丢了</h3><p class="t">Go 进程只收到 driver: bad connection。</p></div>
+</div>
+</div>
+</section>
+<section id="blind" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">四 · 4.2 无脑回补</p>
+<h2>一份 30 元被发了两次</h2>
+<div class="seq">
+<div class="row p5"><p class="who">UserA</p><p class="who">Service</p><p class="who">Redis</p><p class="who">DB</p><p class="who">UserB</p></div>
+<div class="row p5"><div class="m" style="grid-column:2/4"><p class="lb">抢红包</p><x-connector></x-connector></div></div>
+<div class="row p5"><div class="m" style="grid-column:4/6"><p class="lb">claim Lua → 3000</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/8"><p class="lb">dbClaimTx (A, 3000)</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="1"><p class="note" style="grid-column:6/11">COMMIT 成功，A 钱包 +3000</p></div>
+<div class="row p5 fragment" data-fragment-index="2"><div class="m lost" style="grid-column:4/8"><p class="lb">确认包丢失 (bad connection)</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:4/6"><p class="lb">无脑回补 LPUSH 3000</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="4"><div class="m" style="grid-column:4/10"><p class="lb">B 来抢红包</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="4"><div class="m" style="grid-column:4/6"><p class="lb">claim Lua → 又是 3000</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="4"><div class="m" style="grid-column:4/8"><p class="lb">dbClaimTx (B, 3000)，B 钱包 +3000</p><x-connector></x-connector></div></div>
+<div class="row p5 fragment" data-fragment-index="5"><p class="note warn" style="grid-column:3/11">同一份 3000 入账两次，托管池被击穿亏空</p></div>
+</div>
+</section>
+<section id="branches" data-transition="fade">
+<p class="eye">四 · 4.2 四分支判定 · internal/redpacket/service.go:217-246</p>
+<h2>正确做法：先反查 GetClaim，再分四种情况</h2>
+<div class="body">
+<div class="cards">
+<div class="card fragment" data-fragment-index="1"><p class="k">分支 1 · qErr != nil</p><h3>连反查都报错</h3><p class="t">什么都不知道，就什么都不动。</p><p class="t"><b>不回补</b>，保留 claimed 标记，交给对账兜底。</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="k">分支 2 · existing != nil</p><h3>库里已有记录</h3><p class="t">假失败：COMMIT 成功但回包丢了。</p><p class="t"><b>不回补</b>，按成功返回库里的金额。</p></div>
+<div class="card fragment" data-fragment-index="3"><p class="k">分支 3 · errRedPacketClosed</p><h3>红包已结束</h3><p class="t">剩余的钱已按 DB 退给发包人。</p><p class="t"><b>不回补</b>，这份不能再给别人抢。</p></div>
+<div class="card yes fragment" data-fragment-index="4"><p class="k">分支 4 · default</p><h3>确认没落库</h3><p class="t">红包还在进行中。</p><p class="t"><span class="hl">执行回补 Lua</span>：LPUSH 放回 + HDEL 删标记。</p></div>
+</div>
+<p class="lead fragment" data-fragment-index="5">四个分支里<span class="hl">只有分支 4 会回补</span>。回补若返回 ErrRedPacketClaimRepairing（对账已接手），再查一次 GetClaim，落库了就按成功返回。还有第五种情况不走回补：这一份入账会让已领总额超过红包总额，下一页讲。</p>
+</div>
+</section>
+<section id="overtotal" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">四 · 4.2 补充 · internal/redpacket/service.go:270-321</p>
+<h2>DB 不只限份数，还限金额</h2>
+<div class="seq">
+<div class="row p3"><p class="who">Service（B 抢包）</p><p class="who">Redis</p><p class="who">DB</p></div>
+<div class="row p3"><p class="note" style="grid-column:1/7">红包 100 元拆成 99 和 1；A 领走 99，已落库</p></div>
+<div class="row p3 fragment" data-fragment-index="1"><p class="note warn" style="grid-column:2/6">Redis 主从切换丢写：99 又回到 LIST，A 的标记也没了</p></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:2/4"><p class="lb">claim Lua → 99</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:2/6"><p class="lb">claimTx：INSERT claim(99) + remaining-1（份数没超）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><p class="note" style="grid-column:3/7">拿到行锁后 SUM(已领) = 198，大于 Total 100</p></div>
+<div class="row p3 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:2/6"><p class="lb">errShareOverTotal，事务回滚</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/4"><p class="lb">这份作废：不放回 LIST，只删 B 的标记</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="4"><p class="note" style="grid-column:1/7">B 看到“已抢完”，可以重抢；真正剩下的 1 分照常能领</p></div>
+</div>
+</section>
+<section id="racea" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">四 · 4.3 工单 B · 情况一</p>
+<h2>抢最后一份撞上过期退款：领取事务先拿到行锁</h2>
+<div class="seq">
+<div class="row p3"><p class="who">领取事务（用户 C）</p><p class="who">red_packet 行锁</p><p class="who">过期退款事务（Cron）</p></div>
+<div class="row p3"><p class="note" style="grid-column:1/7">100 元红包 12:00:00 到期，还剩最后一份 20 元；C 抢到的同一毫秒，过期回收也扫到了它</p></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">① INSERT claim (amount=2000)</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">② UPDATE remaining-1 WHERE status=active（拿到行锁）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">SELECT ... FOR UPDATE（请求同一行锁）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="2"><p class="note warn" style="grid-column:3/7">被阻塞，排队等领取事务释放锁</p></div>
+<div class="row p3 fragment" data-fragment-index="3"><div class="m" style="grid-column:2/4"><p class="lb">③ status=finished + 转账 + COMMIT</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="4"><div class="m ret" style="grid-column:4/6"><p class="lb">拿到行锁，读到最新 status = finished</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="4"><p class="note" style="grid-column:4/7">已是 finished，直接退出，退还 0 元</p></div>
+</div>
+</section>
+<section id="raceb" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">四 · 4.3 工单 B · 情况二 · internal/redpacket/task.go:73-123</p>
+<h2>反过来：退款事务先拿到行锁</h2>
+<div class="seq">
+<div class="row p3"><p class="who">领取事务（用户 C）</p><p class="who">red_packet 行锁</p><p class="who">过期退款事务（Cron）</p></div>
+<div class="row p3"><div class="m" style="grid-column:4/6"><p class="lb">SELECT ... FOR UPDATE（拿到行锁，status=active）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">INSERT claim，UPDATE remaining-1 WHERE status=active</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><p class="note warn" style="grid-column:1/5">被阻塞，等退款事务释放行锁</p></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">SUM(已领)，left = Total − SUM</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">status=refunded + 退 left 给发包人 + COMMIT</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:2/4"><p class="lb">RowsAffected = 0</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><p class="note" style="grid-column:1/6">errRedPacketClosed，领取事务整体回滚 → 四分支的分支 3，不回补 Redis</p></div>
+<div class="row p3 fragment" data-fragment-index="4"><p class="note" style="grid-column:2/7">两种顺序都是串行：同一份钱只会走一条路</p></div>
+</div>
+</section>
+<section id="snapshot" data-transition="fade">
+<p class="eye">四 · 4.4 MVCC 快照时机</p>
+<h2>为什么 FOR UPDATE 必须是事务第一条语句</h2>
+<div class="body">
+<p class="lead">MySQL InnoDB 默认 <span class="hl">RR（可重复读）</span>隔离级别下，两种读的行为不一样：</p>
+<div class="cards">
+<div class="card soft"><h3>普通 SELECT（不加锁）</h3><p class="t">事务里<b>第一条</b>普通读执行的瞬间，建立 ReadView 快照。</p><p class="t">此后所有普通读（包括 SUM）只看得到快照时刻的数据。</p></div>
+<div class="card soft fragment" data-fragment-index="1"><h3>SELECT ... FOR UPDATE（加锁读）</h3><p class="t"><b>不建立快照。</b></p><p class="t">等行锁，读最新已提交的数据。</p></div>
+</div>
+<p class="formula fragment" data-fragment-index="2">GetForUpdate 前面不能插任何普通 SELECT：否则快照提前建立，后面的 SUM 看不到并发提交的领取</p>
+</div>
+</section>
+<section id="mvccbad" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">四 · 4.4 反面推演</p>
+<h2>首行多了一句普通 SELECT：多退 50 元</h2>
+<div class="seq">
+<div class="row p3"><p class="who">过期退款事务</p><p class="who">MySQL（RR）</p><p class="who">用户 C 领取事务</p></div>
+<div class="row p3"><p class="note" style="grid-column:1/7">红包 88：100 元 3 份，B 已领 30；到期瞬间 C 抢到 50（还剩一份，状态仍是 active）</p></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m lost" style="grid-column:2/4"><p class="lb">① 普通 SELECT（错误地加在首行）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><p class="note warn" style="grid-column:1/5">RR 快照此刻建立：已领 SUM = 30</p></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">② INSERT claim(50) + remaining-1 + COMMIT</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><div class="m" style="grid-column:2/4"><p class="lb">③ SELECT ... FOR UPDATE（最新行仍是 active）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/4"><p class="lb">④ SELECT SUM（普通读，复用旧快照 = 30）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="5"><div class="m" style="grid-column:2/4"><p class="lb">⑤ left = 100 − 30 = 70，退款 + COMMIT</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="5"><p class="note warn" style="grid-column:2/7">100 元红包被领走 80 元，又退了 70 元</p></div>
+</div>
+</section>
+<section id="mvccgood" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">四 · 4.4 正确顺序</p>
+<h2>加锁读在前：快照在拿到锁之后才建</h2>
+<div class="seq">
+<div class="row p3"><p class="who">过期退款事务</p><p class="who">MySQL（RR）</p><p class="who">用户 C 领取事务</p></div>
+<div class="row p3"><div class="m" style="grid-column:4/6"><p class="lb">INSERT claim(50) + UPDATE remaining-1（持有行锁）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">① SELECT ... FOR UPDATE（事务第一条语句）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="1"><p class="note" style="grid-column:1/5">加锁读不建快照，排队等行锁</p></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">COMMIT</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m ret" style="grid-column:2/4"><p class="lb">拿到行锁，status = active</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><div class="m" style="grid-column:2/4"><p class="lb">② SELECT SUM（第一条普通读）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><p class="note" style="grid-column:1/6">快照此刻才建立，看得到 C 刚提交的 50：SUM = 80</p></div>
+<div class="row p3 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/4"><p class="lb">③ left = 100 − 80 = 20，退款 + COMMIT</p><x-connector></x-connector></div></div>
+</div>
+</section>
+<section id="rollback" data-transition="fade">
+<p class="eye">四 · 4.5 工单 A · repository/cache/redpacket.go:92-99</p>
+<h2>回补 Lua：先看标记，再决定放不放回</h2>
+<div class="body">
+<div class="cards">
+<div class="code" style="flex:3">
+<p class="c"><span class="cm">-- KEYS[1] amounts  KEYS[2] claimed</span></p>
+<p class="c"><span class="cm">-- ARGV[1] userID  ARGV[2] 刚才抢到的金额</span></p>
+<p class="c"><span class="kw">local</span> v = redis.call('HGET', KEYS[2], ARGV[1])</p>
+<p class="c"><span class="kw">if not</span> v <span class="kw">then return</span> 0 <span class="kw">end</span></p>
+<p class="c"><span class="kw">if</span> string.sub(v, -2) == ':r' <span class="kw">then return</span> -1 <span class="kw">end</span></p>
+<p class="c">redis.call('LPUSH', KEYS[1], ARGV[2])</p>
+<p class="c">redis.call('HDEL', KEYS[2], ARGV[1])</p>
+<p class="c"><span class="kw">return</span> 1</p>
+</div>
+<div style="flex:2; display:flex; flex-direction:column; gap:20px">
+<div class="card fragment" data-fragment-index="1"><h3>返回 0</h3><p class="t">标记不在了，已回补过。幂等返回。</p></div>
+<div class="card no fragment" data-fragment-index="2"><h3>返回 -1</h3><p class="t">末尾有 :r，对账已接手补领，绝不放回。</p></div>
+<div class="card yes fragment" data-fragment-index="3"><h3>返回 1</h3><p class="t">金额原样塞回 LIST，删掉已领标记，用户可以再点一次重抢。</p></div>
+</div>
+</div>
+</div>
+</section>
+<section id="defenses" data-transition="fade">
+<p class="eye">五 · 三道兜底防线</p>
+<h2>请求死掉以后，靠后台三道防线收尾</h2>
+<div class="body">
+<div class="flow">
+<p class="box"><b>active</b><br>发包事务提交</p>
+<x-connector class="go"></x-connector>
+<p class="box end"><b>finished</b><br>领取事务中 remaining 归零</p>
+<p class="box end"><b>refunded</b><br>过期回收 / 份额池丢失 / Redis 准备失败补偿</p>
+</div>
+<div class="cards">
+<div class="card fragment" data-fragment-index="1"><p class="k">5.2 · 每 2 分钟</p><h3>孤儿对账补领</h3><p class="t">工单 C：抢到了但钱没到账。</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="k">5.3 · 发包当场 + 每 2 分钟</p><h3>份额池丢失补偿</h3><p class="t">工单 D：扣了钱但没人能抢。</p></div>
+<div class="card fragment" data-fragment-index="3"><p class="k">5.4 · 每 5 分钟</p><h3>过期回收</h3><p class="t">没领完的钱退回发包人。</p></div>
+</div>
+</div>
+</section>
+<section id="orphan" data-transition="fade">
+<p class="eye">五 · 5.2 工单 C · internal/redpacket/task.go:197-233</p>
+<h2>孤儿领取：份额卡在半空，靠标记补发</h2>
+<div class="body">
+<div class="cards">
+<div class="card no"><p class="k">Redis · amounts</p><h3>30 元已经弹走</h3><p class="t">LIST 里没有这一份了。</p></div>
+<div class="card no"><p class="k">MySQL · red_packet_claim</p><h3>没有 101 的记录</h3><p class="t">钱没进钱包。</p></div>
+<div class="card yes"><p class="k">Redis · claimed</p><h3>101 → 3000:1730680000</h3><p class="t">唯一的线索：金额 + 时间。他再点只会收到“已领取过”。</p></div>
+</div>
+<p class="lead fragment" data-fragment-index="1">RunRedPacketClaimReconcile 每 2 分钟，对每个红包调 reconcileRedPacket，把每条标记和主库比：</p>
+<div class="flow fragment" data-fragment-index="1">
+<p class="box">DB 里已有记录<br><b>跳过</b></p>
+<p class="box">抢到不足 1 分钟<br><b>在途，先别动</b></p>
+<p class="box">超过 1 分钟未落库<br><b>CAS 把标记追加 :r</b></p>
+<x-connector class="go"></x-connector>
+<p class="box end">拿到 :r 锁<br>替用户调 claimTx 补发</p>
+</div>
+</div>
+</section>
+<section id="locka" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">五 · 5.2 :r 锁互斥（一）</p>
+<h2>对账先到：慢请求的回补被拒，按成功返回</h2>
+<div class="seq">
+<div class="row p4"><p class="who">慢请求（要回补）</p><p class="who">Redis claimed</p><p class="who">对账（要补领）</p><p class="who">DB</p></div>
+<div class="row p4"><p class="note" style="grid-column:2/7">标记 3000:1730680000；请求卡了 1 分多钟才走到回补</p></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">① LockForRepair Lua</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">1 成功，标记变 …:r</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:6/8"><p class="lb">② claimTx 落库 +30 元</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m" style="grid-column:2/4"><p class="lb">③ 醒来，rollback Lua</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:2/4"><p class="lb">-1 末尾是 :r，拒绝放回</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/8"><p class="lb">④ 再查 GetClaim：对账已帮他落库</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="4"><p class="note" style="grid-column:1/6">向客户端返回：抢包成功（30 元）</p></div>
+</div>
+</section>
+<section id="lockb" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">五 · 5.2 :r 锁互斥（二）</p>
+<h2>回补先到：对账抢占失败，跳过这一份</h2>
+<div class="seq">
+<div class="row p4"><p class="who">慢请求（要回补）</p><p class="who">Redis claimed</p><p class="who">对账（要补领）</p><p class="who">DB</p></div>
+<div class="row p4"><div class="m" style="grid-column:4/6"><p class="lb">HGETALL，读到原值</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">rollback Lua (101, 3000)</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><p class="note" style="grid-column:2/7">普通标记：LPUSH 3000 回 LIST + HDEL 101</p></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:2/4"><p class="lb">1 已回补</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">LockForRepair Lua（带原值）</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m lost" style="grid-column:4/6"><p class="lb">0 标记已不存在</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><p class="note" style="grid-column:4/9">对账跳过这一份，不调 claimTx</p></div>
+<div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:1/9">两段 Lua 都先看标记再动手：谁先改到标记，这一份就归谁处理，另一方让路</p></div>
+</div>
+</section>
+<section id="poollost" data-transition="fade">
+<p class="eye">五 · 5.3 工单 D</p>
+<h2>份额池丢失：amounts 这个 LIST 不存在了</h2>
+<div class="body">
+<div class="cards">
+<div class="card soft"><p class="k">防线 1 · service.go:141-150</p><h3>发包当场立即逆向退款</h3><p class="t">Create 里 DB 扣款事务已提交，PrepareRedPacket 写 Redis 失败。</p><p class="t">当场调 refundRedPacketLeft(ctx, rp.ID)：从 redpacket_escrow 全额退回发包人，状态置 refunded。</p></div>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">防线 2 · task.go:171-252</p><h3>对账发现池丢失，提前退款</h3><p class="t">每 2 分钟对账，四个条件同时成立：</p><p class="t">① 创建已超过 1 分钟<br>② amounts LIST 不存在<br>③ 没有在途孤儿标记<br>④ DB 里仍 active 且 remaining &gt; 0</p><p class="t">不用让发包人傻等 7 天过期。</p></div>
+</div>
+<p class="lead fragment" data-fragment-index="2">防线 1 的补偿也失败，或运行中途 Redis 丢了数据，都由防线 2 接住。</p>
+</div>
+</section>
+<section id="existsok" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">五 · 5.3 池丢失检查 · 正确顺序</p>
+<h2>先 EXISTS，后读 claimed：正常抢完不会误退</h2>
+<div class="seq">
+<div class="row p4"><p class="who">Service（Z 抢包）</p><p class="who">Redis</p><p class="who">Reconcile</p><p class="who">DB</p></div>
+<div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">claim Lua (Z) → 2000</p><x-connector></x-connector></div></div>
+<div class="row p4"><p class="note" style="grid-column:1/7">最后一份被抢走：LPOP 和 HSET 原子完成，空 LIST 被 Redis 自动删除</p></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">① EXISTS → false</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">② HGETALL → 含 Z 的标记</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:6/8"><p class="lb">ListClaims → 还没有 Z</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><p class="note" style="grid-column:3/9">Z 抢到不足 1 分钟，在途：pending = true，判定正常抢完，不退款</p></div>
+<div class="row p4 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/8"><p class="lb">claimTx (Z, 2000) → COMMIT</p><x-connector></x-connector></div></div>
+</div>
+</section>
+<section id="existsbad" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">五 · 5.3 池丢失检查 · 错误顺序</p>
+<h2>先读 claimed，后 EXISTS：把抢到的钱退给了发包人</h2>
+<div class="seq">
+<div class="row p4"><p class="who">Service（Z 抢包）</p><p class="who">Redis</p><p class="who">Reconcile</p><p class="who">DB</p></div>
+<div class="row p4"><div class="m" style="grid-column:4/6"><p class="lb">① HGETALL → 没有 Z</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">claim Lua (Z) → 2000</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="1"><p class="note" style="grid-column:1/6">微秒间隙里 Z 抢走最后 1 份，LIST 变空消失</p></div>
+<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">② EXISTS → false</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="2"><p class="note warn" style="grid-column:4/9">没有在途标记 + LIST 不存在 → 误判池丢失</p></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:6/8"><p class="lb">退 2000 给发包人</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/8"><p class="lb">claimTx (Z, 2000) → errRedPacketClosed</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:1/9">Z 正在入账的这笔钱，被当成未领余额退给了发包人</p></div>
+</div>
+</section>
+<section id="expire" data-transition="fade">
+<p class="eye">五 · 5.4 过期回收 · internal/redpacket/task.go:24-65</p>
+<h2>先补齐孤儿，再按 DB 退剩余</h2>
+<div class="body">
+<div class="flow">
+<p class="box">每 5 分钟<br>按 id 分批扫完已过期红包</p>
+<x-connector class="go"></x-connector>
+<p class="box"><b>第 1 步</b><br>reconcileRedPacket<br>先把孤儿补发给领取人</p>
+<x-connector class="go fragment" data-fragment-index="1"></x-connector>
+<p class="box fragment" data-fragment-index="1">对账出错或还有在途标记？<br>过期不足 1 小时：本轮跳过<br>超过 1 小时：保底照退</p>
+<x-connector class="go fragment" data-fragment-index="2"></x-connector>
+<p class="box end fragment" data-fragment-index="2"><b>第 2 步</b><br>refundRedPacketLeft<br>Total − SUM(claim.amount)</p>
+</div>
+<div class="cards fragment" data-fragment-index="3">
+<div class="card no"><h3>如果先退剩余</h3><p class="t">状态变成 refunded，孤儿用户的 claimTx 被拒：抢到了红包却再也补不进去。</p></div>
+<div class="card yes"><h3>先补孤儿</h3><p class="t">孤儿的金额先落库，SUM(已领) 包含这一份，只退真正没人领的钱。</p></div>
+</div>
+</div>
+</section>
+<section id="demo1" data-transition="fade">
+<p class="eye">六 · 故障演练 · 演示 1</p>
+<h2>Redis 清空后，过期退款依然严格按 DB 计算</h2>
+<div class="body">
+<div class="code">
+<p class="c">go test ./internal/redpacket \</p>
+<p class="c i1">-run TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty -v</p>
+</div>
+<div class="cards">
+<div class="card soft fragment" data-fragment-index="1"><p class="k">动手破坏</p><h3>改一行</h3><p class="t">打开 internal/redpacket/task.go，把</p><p class="c" style="color:#3D1F0B">left = rp.Total - claimed</p><p class="t">改成使用 Redis 清理脚本返回的剩余金额。</p></div>
+<div class="card no fragment" data-fragment-index="2"><p class="k">现象</p><h3>测试立刻失败</h3><p class="t">测试故意把 Redis 清空了。按 Redis 算就会退 0 元，发包人的钱就丢了。</p></div>
+</div>
+<p class="lead fragment" data-fragment-index="2">守住的判断：<span class="hl">退款只按 DB 算</span>。</p>
+</div>
+</section>
+<section id="demo2" data-transition="fade">
+<p class="eye">六 · 故障演练 · 演示 2</p>
+<h2>回补与对账补领的 :r 锁互斥</h2>
+<div class="body">
+<div class="code">
+<p class="c">go test ./repository/cache -v -run \</p>
+<p class="c i1">'TestRollbackAndRepairLockAreExclusive|TestRepairLockRequiresOriginalMark'</p>
+<p class="c">go test ./internal/redpacket -v -run \</p>
+<p class="c i1">'TestClaimTxFailureRollsBackRedis|TestClaimCommitUnknownDoesNotRollback'</p>
+<p class="c">go test ./internal/redpacket -v -run TestClaimRollbackYieldsToReconcileRepair</p>
+</div>
+<div class="cards">
+<div class="card soft fragment" data-fragment-index="1"><p class="k">动手破坏</p><h3>注释掉一行</h3><p class="t">repository/cache/redpacket.go:95，回补 Lua 里的</p><p class="c" style="color:#3D1F0B">if string.sub(v, -2) == ':r'</p><p class="c" style="color:#3D1F0B">then return -1 end</p><p class="t">再跑 TestClaimRollbackYieldsToReconcileRepair。</p></div>
+<div class="card no fragment" data-fragment-index="2"><p class="k">现象</p><h3>超发断言失败</h3><p class="t">对账帮用户补领入账后，慢请求又把份额塞回 Redis。</p><p class="t">报错 "redis has an extra share"。</p></div>
+</div>
+</div>
+</section>
+<section id="demo3" data-transition="fade">
+<p class="eye">六 · 故障演练 · 演示 3</p>
+<h2>真 MySQL 下的行锁与 MVCC 快照时机</h2>
+<div class="body">
+<div class="code">
+<p class="c">REDPACKET_TEST_MYSQL_DSN='root@tcp(127.0.0.1:3306)/rptest?charset=utf8mb4&amp;parseTime=True&amp;loc=Local' \</p>
+<p class="c i1">go test ./internal/redpacket -run TestClaimAndRefundRaceConservesMoney -count=3 -v</p>
+</div>
+<div class="cards">
+<div class="card soft fragment" data-fragment-index="1"><p class="k">动手破坏</p><h3>插一行普通查询</h3><p class="t">internal/redpacket/task.go:81，在 txDao.GetForUpdate(rpID) 前面插入</p><p class="c" style="color:#3D1F0B">_, _ = txDao.Get(rpID)</p></div>
+<div class="card no fragment" data-fragment-index="2"><p class="k">现象</p><h3>复现双倍退钱</h3><p class="t">断言失败：</p><p class="c" style="color:#3D1F0B">claimed X + refunded Y != 2000</p></div>
+</div>
+<p class="lead fragment" data-fragment-index="3">必须连真 MySQL 跑：默认的 SQLite 没有行锁和 RR 快照，插错了也测不出来。</p>
+</div>
+</section>
+<section id="homework" data-transition="fade">
+<p class="eye">六 · 课后思考与练习</p>
+<h2>四道题</h2>
+<div class="body">
+<div class="cards">
+<div class="card"><p class="num">1</p><h3>在途窗口推演</h3><p class="t">claimOrphanGrace 为 1 分钟。一个正常领取事务卡了 90 秒才报错进入回补分支：这 90 秒里对账做了什么？回补收到什么返回值？用户看到成功还是失败？（结合 4.2 和 5.2）</p></div>
+<div class="card"><p class="num">2</p><h3>口令轮换</h3><p class="t">设计 POST /redpacket/rotate-code：用旧口令领过的人还能不能看明细？并发正在抢的人受什么影响？</p></div>
+</div>
+<div class="cards">
+<div class="card"><p class="num">3</p><h3>验证二倍均值分布</h3><p class="t">调用 SplitRedPacket(10000, 10) 十万次，统计 10 个位置的平均金额和最大金额。删掉 Shuffle，第 10 个位置的最大值分布会怎样？</p></div>
+<div class="card"><p class="num">4</p><h3>托管池守恒巡检 SQL</h3><p class="t">找出状态已是 finished 或 refunded、但 redpacket_escrow 借贷净额不为 0 的红包。提示：领包流水的 ref_order_id 是 red_packet_claim.id。</p></div>
+</div>
+</div>
+</section>
+<section id="index1" data-transition="fade">
+<p class="eye">附录 · 核心代码索引（1/2）</p>
+<h2>Redis 脚本、表模型与服务入口</h2>
+<div class="body">
+<table>
+<tr class="thead"><th style="width:26%">技术点</th><th style="width:28%">文件</th><th>核心入口函数 / 脚本</th></tr>
+<tr><td>Redis 存储结构与 4 段 Lua</td><td>repository/cache/redpacket.go</td><td>prepareRedPacketScript、claimRedPacketScript、rollbackRedPacketClaimScript、lockRedPacketClaimForRepairScript</td></tr>
+<tr class="alt"><td>二倍均值预拆算法</td><td>repository/cache/redpacket.go</td><td>SplitRedPacket</td></tr>
+<tr><td>孤儿标记解析与份额池检查</td><td>repository/cache/redpacket.go</td><td>ListRedPacketClaimed、RedPacketPoolExists、LockRedPacketClaimForRepair</td></tr>
+<tr class="alt"><td>红包与领取记录表模型</td><td>internal/redpacket/model.go</td><td>RedPacket、RedPacketClaim</td></tr>
+<tr><td>发包 / 抢包 / 详情 / 列表 / 手动对账</td><td>internal/redpacket/service.go</td><td>Create、Claim、claimTx、Show、ListMine、ListReceived、AdminReconcile</td></tr>
+<tr class="alt"><td>防扫号口令生成与恒定时间比对</td><td>internal/redpacket/service.go</td><td>newShareCode、codeMatches</td></tr>
+<tr><td>DB 条件扣减与行锁查询</td><td>internal/redpacket/repo.go</td><td>DecrRemaining、GetForUpdate、SumClaimed、GetExpired、ListActive</td></tr>
+</table>
+</div>
+</section>
+<section id="index2" data-transition="fade">
+<p class="eye">附录 · 核心代码索引（2/2）</p>
+<h2>记账、定时任务、护栏与测试</h2>
+<div class="body">
+<table>
+<tr class="thead"><th style="width:26%">技术点</th><th style="width:28%">文件</th><th>核心入口函数 / 脚本</th></tr>
+<tr><td>三段式托管资金流复式记账</td><td>internal/redpacket/settle.go</td><td>adjustWallet、adjustClearing、settleSendTx、settleClaimTx、settleRefundTx</td></tr>
+<tr class="alt"><td>过期回收与孤儿对账定时任务</td><td>internal/redpacket/task.go</td><td>RunRedPacketExpireCheck、refundRedPacketLeft、RunRedPacketClaimReconcile、reconcileRedPacket</td></tr>
+<tr><td>台账对账消费者</td><td>internal/redpacket/consumer.go</td><td>StartSettleConsumer、DispatchSettleEvent、reportRepair</td></tr>
+<tr class="alt"><td>路由与限流 / 幂等护栏</td><td>internal/redpacket/routes.go</td><td>RegisterRoutes</td></tr>
+<tr><td>系统托管账户定义</td><td>internal/money/ledger_model.go</td><td>AccountCodeRedPacketEscrow</td></tr>
+<tr class="alt"><td>错误码定义</td><td>pkg/e/code.go</td><td>84001 ~ 84006</td></tr>
+<tr><td>单元与并发测试集</td><td>internal/redpacket/service_test.go、claim_test.go；repository/cache/redpacket_test.go</td><td>覆盖拆包、并发抢、MVCC 快照竞态、孤儿补领与互斥</td></tr>
+</table>
+</div>
+</section>
+<section id="closing" class="dark">
+<p class="tag">本讲小结</p>
+<h1>两边对不上的时候，<br>永远听 MySQL 的</h1>
+<p class="sub">Redis 决定谁拿到哪一份，MySQL 决定钱有没有动</p>
+<p class="meta">A 先查库再回补 · B FOR UPDATE 放事务首行 · C 孤儿对账补领 · D 立即退款 + 池丢失检测</p>
+</section>
+</div>
+<div id="bar"></div><div id="no"></div>
+<script>
+(function () {
+  var stage = document.getElementById('stage'), slides = [].slice.call(stage.children);
+  var bar = document.getElementById('bar'), no = document.getElementById('no');
+  var cur = 0, step = 0;
+  function steps(s) { // 该页的点击步骤：按 data-fragment-index 升序去重
+    var set = {}; [].forEach.call(s.querySelectorAll('.fragment'), function (f) { set[+f.dataset.fragmentIndex || 0] = 1; });
+    return Object.keys(set).map(Number).sort(function (a, b) { return a - b; });
+  }
+  function show() {
+    var s = slides[cur], st = steps(s);
+    slides.forEach(function (x, i) { x.classList.toggle('on', i === cur); });
+    [].forEach.call(s.querySelectorAll('.fragment'), function (f) {
+      f.classList.toggle('visible', st.indexOf(+f.dataset.fragmentIndex || 0) < step);
+    });
+    bar.style.width = ((cur + 1) / slides.length * 100) + '%';
+    no.textContent = (cur + 1) + ' / ' + slides.length;
+    history.replaceState(null, '', '#' + (cur + 1));
+  }
+  function next() { if (step < steps(slides[cur]).length) step++; else if (cur < slides.length - 1) { cur++; step = 0; } show(); }
+  function prev() { if (step > 0) step--; else if (cur > 0) { cur--; step = steps(slides[cur]).length; } show(); }
+  function fit() {
+    var H = innerHeight, k = Math.min(innerWidth / 1920, H / 1080);
+    stage.style.top = (H / 2) + "px";
+    stage.style.transform = 'scale(' + k + ') translate(-50%, -50%)';
+  }
+  addEventListener('keydown', function (e) {
+    var k = e.key;
+    if (k === 'ArrowRight' || k === ' ' || k === 'PageDown' || k === 'Enter') { e.preventDefault(); next(); }
+    else if (k === 'ArrowLeft' || k === 'PageUp' || k === 'Backspace') { e.preventDefault(); prev(); }
+    else if (k === 'Home') { cur = 0; step = 0; show(); }
+    else if (k === 'End') { cur = slides.length - 1; step = 0; show(); }
+    else if (k === 'f' || k === 'F') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+  });
+  stage.addEventListener('click', next);
+  addEventListener('resize', fit);
+  var h = parseInt(location.hash.slice(1), 10); if (h >= 1 && h <= slides.length) cur = h - 1;
+  fit(); show();
+})();
+</script>
+</body>
+</html>

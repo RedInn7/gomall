@@ -38,3 +38,7 @@ stressTest/config.json
 /docs/**/*.pdf
 /docs/slides/
 /docs/slides-pipeline/
+
+# 演讲者备注和幻灯片源文件只留本地
+/docs/lecture/*-script.md
+/docs/lecture/.private/
