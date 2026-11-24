@@ -23,31 +23,45 @@ var releaseRedPacketCache = cache.ReleaseRedPacketLeft
 // 剩余金额以 DB 为准（Total - 已领总额），不读 Redis：list 可能已被清空、过期，或发包后根本没写进去。
 func (s *RedPacketTaskService) RunRedPacketExpireCheck() {
 	ctx := context.Background()
-	rows, err := NewRedPacketDao(ctx).GetExpired(100)
+	rpDao := NewRedPacketDao(ctx)
+	// 按 id 游标扫完全部已过期红包：退款一直失败的红包留在原地，不会挡住排在后面的。
+	for afterID := uint(0); ; {
+		rows, err := rpDao.GetExpired(afterID, expireBatch)
+		if err != nil {
+			util.LogrusObj.Errorf("redpacket expire scan failed after=%d: %v", afterID, err)
+			return
+		}
+		for _, rp := range rows {
+			expireOne(ctx, rp)
+		}
+		if len(rows) < expireBatch {
+			return
+		}
+		afterID = rows[len(rows)-1].ID
+	}
+}
+
+// expireBatch 过期回收每批扫的红包数。变量是为了单测把它调小。
+var expireBatch = 100
+
+func expireOne(ctx context.Context, rp *RedPacket) {
+	// 先把孤儿领取补上，再按 DB 退剩余：否则抢到了的那份会被退给发包人。
+	r, err := reconcileRedPacket(ctx, rp)
 	if err != nil {
-		util.LogrusObj.Errorf("redpacket expire scan failed: %v", err)
+		util.LogrusObj.Errorf("redpacket reconcile before refund failed id=%d err=%v", rp.ID, err)
+	}
+	if (err != nil || r.pending) && time.Since(rp.ExpireAt) < refundHoldForReconcile {
+		return // 留一段时间给对账补领；超时照退，钱回发包人不会丢
+	}
+	if r.refunded {
 		return
 	}
-
-	for _, rp := range rows {
-		// 先把孤儿领取补上，再按 DB 退剩余：否则抢到了的那份会被退给发包人。
-		r, err := reconcileRedPacket(ctx, rp)
-		if err != nil {
-			util.LogrusObj.Errorf("redpacket reconcile before refund failed id=%d err=%v", rp.ID, err)
-		}
-		if (err != nil || r.pending) && time.Since(rp.ExpireAt) < refundHoldForReconcile {
-			continue // 留一段时间给对账补领；超时照退，钱回发包人不会丢
-		}
-		if r.refunded {
-			continue
-		}
-		left, err := refundRedPacketLeft(ctx, rp.ID)
-		if err != nil {
-			util.LogrusObj.Errorf("redpacket refund tx failed id=%d err=%v", rp.ID, err)
-			continue
-		}
-		util.LogrusObj.Infof("redpacket id=%d 过期回收 refund=%d", rp.ID, left)
+	left, err := refundRedPacketLeft(ctx, rp.ID)
+	if err != nil {
+		util.LogrusObj.Errorf("redpacket refund tx failed id=%d err=%v", rp.ID, err)
+		return
 	}
+	util.LogrusObj.Infof("redpacket id=%d 过期回收 refund=%d", rp.ID, left)
 }
 
 // refundRedPacketLeft 把红包剩余金额退回发包人，幂等。过期回收与发包后 Redis 准备失败的补偿共用。
@@ -78,6 +92,10 @@ func refundRedPacketLeft(ctx context.Context, rpID uint) (int64, error) {
 		left = rp.Total - claimed
 		if err = txDao.MarkStatus(rpID, RedPacketStatusRefunded); err != nil {
 			return err
+		}
+		if left < 0 {
+			// 已领总额超过红包总额：领取事务有总额校验，正常不会出现，出现就是历史数据或被绕过，需要人工核账。
+			util.LogrusObj.Errorf("redpacket 已领总额超过红包总额 id=%d total=%d claimed=%d", rpID, rp.Total, claimed)
 		}
 		if left <= 0 {
 			return nil
@@ -168,7 +186,7 @@ func reconcileRedPacket(ctx context.Context, rp *RedPacket) (reconcileResult, er
 		return r, err
 	}
 	rpDao := NewRedPacketDao(ctx)
-	claims, err := rpDao.ListClaims(rp.ID)
+	claims, err := rpDao.ListClaimsFromPrimary(rp.ID)
 	if err != nil {
 		return r, err
 	}
@@ -198,6 +216,10 @@ func reconcileRedPacket(ctx context.Context, rp *RedPacket) (reconcileResult, er
 		if _, err := claimTx(rpDao.DB, rp.ID, uid, m.Amount); err != nil {
 			if errors.Is(err, errRedPacketClosed) {
 				break // 已回收 / 抢完，剩下的标记补不了也不用补
+			}
+			if errors.Is(err, errShareOverTotal) {
+				dropVoidShareMark(ctx, rp.ID, uid) // 这份金额是 Redis 多出来的，补不了：撤掉标记，不算在途
+				continue
 			}
 			if c, qErr := rpDao.GetClaim(rp.ID, uid); qErr == nil && c != nil {
 				continue // 原请求刚好提交了

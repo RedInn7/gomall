@@ -41,6 +41,10 @@ var (
 // errRedPacketClosed 领取事务里发现红包已不在进行中（已被过期回收）。
 var errRedPacketClosed = ErrRedPacketEnded
 
+// errShareOverTotal 这一份入账后已领总额会超过红包总额：Redis 弹出的金额和 DB 账面对不上
+// （主从切换丢写、从备份恢复后，已发出的份额又回到 list）。这一份作废，不入账也不放回。
+var errShareOverTotal = errors.New("redpacket: share exceeds remaining total")
+
 var (
 	redPacketSrvIns  *RedPacketSrv
 	redPacketSrvOnce sync.Once
@@ -223,6 +227,11 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (inter
 			return &RedPacketClaimResp{RedPacketID: rp.ID, Amount: existing.Amount}, nil
 		case errors.Is(txErr, errRedPacketClosed):
 			// 红包已结束时剩余金额已按 DB 退回，这份不能再塞回 Redis 给别人抢。
+		case errors.Is(txErr, errShareOverTotal):
+			// 这份金额本身就是 Redis 多出来的，放回去只会让下一个人再弹出它：金额丢弃，只撤标记让用户能重抢。
+			// 对用户按「已抢完」返回。
+			dropVoidShareMark(ctx, rp.ID, u.Id)
+			return nil, ErrRedPacketDrained
 		default:
 			rbErr := rollbackClaimCache(ctx, rp.ID, u.Id, amount)
 			if errors.Is(rbErr, cache.ErrRedPacketClaimRepairing) {
@@ -241,6 +250,13 @@ func (s *RedPacketSrv) Claim(ctx context.Context, req *RedPacketClaimReq) (inter
 		RedPacketID: rp.ID,
 		Amount:      amount,
 	}, nil
+}
+
+// dropVoidShareMark 撤掉作废份额的 claimed 标记。失败只记日志：标记留着的后果是对账下一轮再撤一次。
+func dropVoidShareMark(ctx context.Context, rpID, uid uint) {
+	if err := cache.DropRedPacketClaimMark(ctx, rpID, uid); err != nil {
+		util.LogrusObj.Errorf("redpacket 撤销作废份额标记失败 id=%d uid=%d err=%v", rpID, uid, err)
+	}
 }
 
 // 留成函数变量，单测模拟「提交结果未知」并给回滚计数（同 releaseRedPacketCache）。
@@ -265,6 +281,22 @@ func claimTx(db *gorm.DB, rpID, uid uint, amount int64) (*RedPacketClaim, error)
 		}
 		if n == 0 {
 			return errRedPacketClosed
+		}
+		// 资金以 DB 为准：DecrRemaining 已拿到红包行锁，这里的 SUM 是事务里第一条普通读，
+		// 快照建在拿锁之后，看得到所有已提交的领取，也包含本事务刚插入的这一条。
+		// 只校验份数不够：Redis 回档后同一份金额可能被弹出两次，份数没超、总额却超了。
+		total, e := txDao.TotalInTx(rpID)
+		if e != nil {
+			return e
+		}
+		claimed, e := txDao.SumClaimed(rpID)
+		if e != nil {
+			return e
+		}
+		if claimed > total {
+			util.LogrusObj.Errorf("redpacket 份额超出总额，领取作废 id=%d uid=%d amount=%d claimed=%d total=%d",
+				rpID, uid, amount, claimed, total)
+			return errShareOverTotal
 		}
 		if e := txDao.MarkFinishedIfDrained(rpID); e != nil {
 			return e
