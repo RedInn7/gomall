@@ -262,7 +262,7 @@ sequenceDiagram
 ```
 
 ```go
-// internal/redpacket/service.go:161-166
+// internal/redpacket/service.go:165-170
 func codeMatches(rp *RedPacket, code string, legacyOK bool) bool {
 	if rp.ShareCode == "" {
 		return legacyOK
@@ -654,7 +654,7 @@ sequenceDiagram
 
 ## 4.2 正确做法：四分支判定
 
-`internal/redpacket/service.go:213-238`
+`internal/redpacket/service.go:217-246`
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
@@ -677,14 +677,47 @@ flowchart TD
 ```
 
 - 四个分支里**只有分支 4 会回补**。
+- 还有第五种情况同样不回补：这一份入账会让已领总额超过红包总额，见下一页。
 
-> **讲稿**　gomall 的做法是：DB 报错以后，先去数据库反查这条领取记录，再分四种情况。第一，连反查都报错，数据库彻底连不上了，这时候什么都不知道，就什么都不动，标记留在 Redis 里，交给后台对账。第二，库里查到了记录，说明刚才是假失败，直接按成功返回。第三，事务报的是红包已结束，说明剩下的钱已经退给发包人了，这一份不能再放回去给别人抢。第四，确认库里没有、红包还在进行中，这时候才回补。大家记一个结论：四个分支里只有一个会回补。分支四后面还有个小尾巴，回补的时候发现对账任务已经接手了，就再查一次库，这个放到第五部分讲。
+> **讲稿**　gomall 的做法是：DB 报错以后，先去数据库反查这条领取记录，再分四种情况。第一，连反查都报错，数据库彻底连不上了，这时候什么都不知道，就什么都不动，标记留在 Redis 里，交给后台对账。第二，库里查到了记录，说明刚才是假失败，直接按成功返回。第三，事务报的是红包已结束，说明剩下的钱已经退给发包人了，这一份不能再放回去给别人抢。第四，确认库里没有、红包还在进行中，这时候才回补。大家记一个结论：四个分支里只有一个会回补。分支四后面还有个小尾巴，回补的时候发现对账任务已经接手了，就再查一次库，这个放到第五部分讲。另外代码里其实还有第五种情况，同样不回补，我们单独用下一页讲。
+
+---
+
+## 4.2 补充：DB 不只限份数，还限金额
+
+`claimTx`（`internal/redpacket/service.go:270-321`）在拿到红包行锁之后，除了扣减剩余份数，还校验**已领总额不超过红包总额**。
+
+```mermaid
+%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
+sequenceDiagram
+    participant Service
+    participant Redis
+    participant DB
+
+    Note over Service,DB: 红包 100 元拆成 99 和 1，A 领走 99 已落库
+    Note over Redis: 主从切换丢写：99 又回到 LIST，A 的标记也没了
+    Service->>Redis: claim Lua (uid=B)
+    Redis-->>Service: (amount=99)
+    Service->>DB: claimTx (INSERT claim 99, remaining-1)
+    activate DB
+    Note over DB: 份数没超。拿到行锁后 SUM(已领) = 198，大于 Total 100
+    DB-->>Service: (errShareOverTotal，事务回滚)
+    deactivate DB
+    Service->>Redis: 这份作废：不放回 LIST，只删 B 的标记
+    Note over Service,Redis: B 看到已抢完，可以重抢。真正剩下的 1 分照常能领
+```
+
+- 只校验份数不够：Redis 回档后同一份金额可能被弹出两次，份数没超，总额却超了。
+- 这一份和回补不同：它本身是 Redis 多出来的，**不能放回** `LIST`，只撤掉 `claimed` 标记。
+- 对账补领走的是同一个 `claimTx`，同样会被拦下。
+
+> **讲稿**　四分支之外还有一种情况，它最能说明什么叫资金以数据库为准。前面我们一直默认 Redis 弹出来的金额是对的，但 Redis 自己也会出错：主从切换丢了最近的写入，或者从备份恢复，已经发出去的金额会回到 LIST 里。看这个例子：一百块拆成九十九和一，A 领走九十九，已经落库。这时候 Redis 回档，九十九又回到了 LIST。B 来抢，弹出九十九。如果领取事务只检查还有没有剩余份数，那份数确实没超，B 也能入账，一共付出一百九十八，托管账户被多付了九十八。所以领取事务在拿到红包行锁之后，还要再做一次求和：已领总额，包括刚插进去的这一条，不能超过红包总额。超过了就回滚。注意这一份和前面的回补不一样：它本身就是 Redis 多出来的，不能放回 LIST，否则下一个人还会弹到它；只删掉 B 的已领标记，让 B 可以重新抢。真正剩下的那一分钱，照常能领。结论是：数据库不能只相信 Redis 给的金额，份数和金额都要自己把关。
 
 ---
 
 ## 4.3 工单 B：抢最后一份与过期退款同时发生
 
-**场景**：100 元红包 `12:00:00` 到期，前两人领走 80 元，还剩最后一份 20 元。同一毫秒，用户 C 在执行 `claimTx`，过期回收任务在执行 `refundRedPacketLeft`（`internal/redpacket/task.go:59-105`）。
+**场景**：100 元红包 `12:00:00` 到期，前两人领走 80 元，还剩最后一份 20 元。同一毫秒，用户 C 在执行 `claimTx`，过期回收任务在执行 `refundRedPacketLeft`（`internal/redpacket/task.go:73-123`）。
 
 情况一，领取事务先拿到行锁：
 
@@ -871,7 +904,7 @@ stateDiagram-v2
 - `red_packet_claim` 里没有用户 101 的记录，钱没进钱包。
 - `claimed` 里一直挂着 101，他再点只会收到“您已领取过”。
 
-`RunRedPacketClaimReconcile` 每 2 分钟一次（`internal/redpacket/task.go:179-211`）：
+`RunRedPacketClaimReconcile` 每 2 分钟一次，对每个进行中的红包调 `reconcileRedPacket`，把标记和主库比（循环在 `internal/redpacket/task.go:197-233`）：
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
@@ -956,12 +989,12 @@ sequenceDiagram
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
 flowchart TD
-    subgraph P1 ["防线 1：发包当场立即逆向退款 (service.go:137-146)"]
+    subgraph P1 ["防线 1：发包当场立即逆向退款 (service.go:141-150)"]
         A1(["Create：DB 扣款事务已提交"]) --> A2{"PrepareRedPacket<br/>写 Redis 成功？"}
         A2 -- "成功" --> A3(["红包可抢"])
         A2 -- "失败" --> A4["当场调 refundRedPacketLeft(ctx, rp.ID)<br/>redpacket_escrow 全额退回发包人，状态置 refunded"]
     end
-    subgraph P2 ["防线 2：对账发现池丢失提前退款 (task.go:155-229)"]
+    subgraph P2 ["防线 2：对账发现池丢失提前退款 (task.go:171-252)"]
         B1(["每 2 分钟对账"]) --> B2{"创建已超过 1 分钟？"}
         B2 -- "是" --> B3{"amounts LIST 不存在？"}
         B3 -- "是" --> B4{"没有在途孤儿标记？"}
@@ -1043,12 +1076,12 @@ sequenceDiagram
 
 ## 5.4 过期回收：先补齐孤儿，再按 DB 退剩余
 
-`RunRedPacketExpireCheck` 每 5 分钟一次（`internal/redpacket/task.go:32-50`）：
+`RunRedPacketExpireCheck` 每 5 分钟一次（`internal/redpacket/task.go:24-65`）：
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
 flowchart TD
-    S(["扫出已过期的红包"]) --> R["第 1 步：reconcileRedPacket<br/>先把孤儿标记补发给领取人"]
+    S(["按 id 分批扫完已过期的红包"]) --> R["第 1 步：reconcileRedPacket<br/>先把孤儿标记补发给领取人"]
     R --> D1{"对账出错或还有在途标记？"}
     D1 -- "是" --> D2{"过期不足 1 小时？<br/>refundHoldForReconcile"}
     D2 -- "是" --> W(["本轮跳过，下轮再看"])
@@ -1063,7 +1096,7 @@ flowchart TD
 - 先退了剩余，状态变成 `refunded`，抢到红包却卡在半空的孤儿用户就再也补不进去。
 - 还有在途未决的标记时最多宽限 1 小时，超时保底退回发包人。
 
-> **讲稿**　最后一道防线，过期回收，每五分钟一次。它对每个过期的红包做两步，顺序不能反。第一步，先跑一遍对账，把孤儿补给领取人。第二步，再按数据库算，总额减去已领总和，退给发包人。为什么必须先补孤儿？因为一旦退款，状态就变成已退款，那个抢到了却卡在半空的用户，他的领取事务会被拒，这份钱就再也补不给他了。还有一个细节：如果对账出错，或者还有在途的标记没下结论，这一轮先不退，最多等一小时；一小时还没结果，保底退给发包人，钱至少不会丢。
+> **讲稿**　最后一道防线，过期回收，每五分钟一次。它对每个过期的红包做两步，顺序不能反。第一步，先跑一遍对账，把孤儿补给领取人。第二步，再按数据库算，总额减去已领总和，退给发包人。为什么必须先补孤儿？因为一旦退款，状态就变成已退款，那个抢到了却卡在半空的用户，他的领取事务会被拒，这份钱就再也补不给他了。还有一个细节：如果对账出错，或者还有在途的标记没下结论，这一轮先不退，最多等一小时；一小时还没结果，保底退给发包人，钱至少不会丢。如果对账里已经因为池丢失提前退过款，这里也直接跳过。扫描是按红包 ID 一批一批往后翻的，一直翻到扫完，所以某个红包退款一直失败，也不会挡住排在它后面的。
 
 ---
 
@@ -1097,7 +1130,7 @@ REDPACKET_TEST_MYSQL_DSN='root@tcp(127.0.0.1:3306)/rptest?charset=utf8mb4&parseT
   go test ./internal/redpacket -run TestClaimAndRefundRaceConservesMoney -count=3 -v
 ```
 
-- 破坏：在 `internal/redpacket/task.go:67` 的 `txDao.GetForUpdate(rpID)` 前面插入一行普通查询 `_, _ = txDao.Get(rpID)`，在真 MySQL 下重跑。
+- 破坏：在 `internal/redpacket/task.go:81` 的 `txDao.GetForUpdate(rpID)` 前面插入一行普通查询 `_, _ = txDao.Get(rpID)`，在真 MySQL 下重跑。
 - 现象：立刻复现 `claimed X + refunded Y != 2000` 的双倍退钱资损事故。
 
 > **讲稿**　讲了这么多，怎么证明代码真的守住了？做三个破坏实验，每个都是先跑通测试，再改坏一行，看测试变红。第一个，把退款金额从按数据库算改成按 Redis 算，测试里 Redis 是空的，于是退了零元，测试失败，对应的是资金以数据库为准。第二个，把回补脚本里检查冒号 r 的那一行注释掉，对账补领以后慢请求又放回一份，测试报 Redis 多了一份，对应的是冒号 r 互斥。第三个，在加锁读前面插一句普通查询，测试报领取加退款不等于总额，对应的是加锁读必须在第一句。注意第三个必须连真的 MySQL 跑，默认的 SQLite 没有行锁也没有快照，改错了也测不出来。

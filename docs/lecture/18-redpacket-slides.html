@@ -212,7 +212,7 @@ x-connector { border: none !important; }
 <div class="body">
 <div class="cards">
 <div class="card soft"><p class="k">阶段一 · CREATE</p><h3>发红包</h3><p class="t">① 校验支付密码，二倍均值预拆 N 份</p><p class="t">② DB 事务：写主表 + 扣发包人钱包 + 记入 redpacket_escrow</p><p class="t">③ 提交后 RPUSH 金额进 Redis LIST</p><p class="t"><span class="red">写 Redis 失败</span>：当场全额退回，状态 refunded</p></div>
-<div class="card soft fragment" data-fragment-index="1"><p class="k">阶段二 · CLAIM</p><h3>抢红包</h3><p class="t">① Lua：HEXISTS 去重 → LPOP → HSET 标记</p><p class="t">② DB 事务 claimTx：INSERT claim + remaining-1 + 托管转钱包</p><p class="t">③ 事务报错：先反查 GetClaim</p><p class="t">④ 确认未落库才回补：LPUSH + HDEL</p></div>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">阶段二 · CLAIM</p><h3>抢红包</h3><p class="t">① Lua：HEXISTS 去重 → LPOP → HSET 标记</p><p class="t">② DB 事务 claimTx：INSERT claim + remaining-1 + 校验总额 + 托管转钱包</p><p class="t">③ 事务报错：先反查 GetClaim</p><p class="t">④ 确认未落库才回补：LPUSH + HDEL</p></div>
 <div class="card soft fragment" data-fragment-index="2"><p class="k">阶段三 · RECONCILE &amp; EXPIRE</p><h3>后台兜底</h3><p class="t"><b>每 2 分钟</b> 孤儿对账：超过 1 分钟未落库的标记 → 加 :r 锁 → claimTx 补发</p><p class="t"><b>每 5 分钟</b> 过期回收：先补齐孤儿，再按 DB 算 Total − SUM(已领) 退回发包人</p></div>
 </div>
 </div>
@@ -291,7 +291,7 @@ x-connector { border: none !important; }
 <aside>红包 ID 是自增主键，一二三四往上涨。如果抢红包只要传 ID，写个循环脚本就能把全平台正在发的红包全抢光。所以发包时后端会生成一个十六位的随机十六进制口令，只在创建成功那一次响应里返回给发包人，由他拼进分享链接发给群友。没有口令的请求直接拒掉，返回八四零零六。</aside>
 </section>
 <section id="timing" data-transition="fade">
-<p class="eye">一 · 1.2 防扫号口令 · internal/redpacket/service.go:161-166</p>
+<p class="eye">一 · 1.2 防扫号口令 · internal/redpacket/service.go:165-170</p>
 <h2>口令比较为什么不用 ==</h2>
 <div class="body">
 <div class="code">
@@ -490,7 +490,7 @@ x-connector { border: none !important; }
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">claim Lua (uid, now)</p><x-connector></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">amount / -1 / -2</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="2"><p class="note" style="grid-column:1/6">-1 已抢完 (84004) / -2 已领过 (84005)：直接失败</p></div>
-<div class="row p4 fragment" data-fragment-index="3"><div class="m" style="grid-column:4/8"><p class="lb">claimTx：INSERT claim + remaining-1 + 入账 + outbox</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m" style="grid-column:4/8"><p class="lb">claimTx：INSERT claim + remaining-1 + 校验总额 + 入账</p><x-connector></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="3"><div class="m ret" style="grid-column:4/8"><p class="lb">提交成功</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="3"><div class="m ret" style="grid-column:2/4"><p class="lb">成功 (amount)</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:3/9">提交失败或结果未知：先 GetClaim(id, uid) 反查，再分四种情况处理</p></div>
@@ -536,7 +536,7 @@ x-connector { border: none !important; }
 <aside>看图。A 抢到三十块，DB 事务在 MySQL 里其实已经提交成功，钱已经进了 A 的钱包，但回确认包的路上网络断了，服务收到的是一个连接错误。这时候无脑回补，把三十块塞回 LIST。下一个人 B 来了，又把这三十块抢走并且入账。同一份三十块发了两次，托管账户被多扣了三十。</aside>
 </section>
 <section id="branches" data-transition="fade">
-<p class="eye">四 · 4.2 四分支判定 · internal/redpacket/service.go:213-238</p>
+<p class="eye">四 · 4.2 四分支判定 · internal/redpacket/service.go:217-246</p>
 <h2>正确做法：先反查 GetClaim，再分四种情况</h2>
 <div class="body">
 <div class="cards">
@@ -545,9 +545,26 @@ x-connector { border: none !important; }
 <div class="card fragment" data-fragment-index="3"><p class="k">分支 3 · errRedPacketClosed</p><h3>红包已结束</h3><p class="t">剩余的钱已按 DB 退给发包人。</p><p class="t"><b>不回补</b>，这份不能再给别人抢。</p></div>
 <div class="card yes fragment" data-fragment-index="4"><p class="k">分支 4 · default</p><h3>确认没落库</h3><p class="t">红包还在进行中。</p><p class="t"><span class="hl">执行回补 Lua</span>：LPUSH 放回 + HDEL 删标记。</p></div>
 </div>
-<p class="lead fragment" data-fragment-index="5">四个分支里<span class="hl">只有分支 4 会回补</span>。回补若返回 ErrRedPacketClaimRepairing（对账已接手），再查一次 GetClaim，落库了就按成功返回。</p>
+<p class="lead fragment" data-fragment-index="5">四个分支里<span class="hl">只有分支 4 会回补</span>。回补若返回 ErrRedPacketClaimRepairing（对账已接手），再查一次 GetClaim，落库了就按成功返回。还有第五种情况不走回补：这一份入账会让已领总额超过红包总额，下一页讲。</p>
 </div>
-<aside>gomall 的做法是：DB 报错以后，先去数据库反查这条领取记录，再分四种情况。第一，连反查都报错，数据库彻底连不上了，这时候什么都不知道，就什么都不动，标记留在 Redis 里，交给后台对账。第二，库里查到了记录，说明刚才是假失败，直接按成功返回。第三，事务报的是红包已结束，说明剩下的钱已经退给发包人了，这一份不能再放回去给别人抢。第四，确认库里没有、红包还在进行中，这时候才回补。大家记一个结论：四个分支里只有一个会回补。分支四后面还有个小尾巴，回补的时候发现对账任务已经接手了，就再查一次库，这个放到第五部分讲。</aside>
+<aside>gomall 的做法是：DB 报错以后，先去数据库反查这条领取记录，再分四种情况。第一，连反查都报错，数据库彻底连不上了，这时候什么都不知道，就什么都不动，标记留在 Redis 里，交给后台对账。第二，库里查到了记录，说明刚才是假失败，直接按成功返回。第三，事务报的是红包已结束，说明剩下的钱已经退给发包人了，这一份不能再放回去给别人抢。第四，确认库里没有、红包还在进行中，这时候才回补。大家记一个结论：四个分支里只有一个会回补。分支四后面还有个小尾巴，回补的时候发现对账任务已经接手了，就再查一次库，这个放到第五部分讲。另外代码里其实还有第五种情况，同样不回补，我们单独用下一页讲。</aside>
+</section>
+<section id="overtotal" data-transition="fade">
+<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
+<p class="eye">四 · 4.2 补充 · internal/redpacket/service.go:270-321</p>
+<h2>DB 不只限份数，还限金额</h2>
+<div class="seq">
+<div class="row p3"><p class="who">Service（B 抢包）</p><p class="who">Redis</p><p class="who">DB</p></div>
+<div class="row p3"><p class="note" style="grid-column:1/7">红包 100 元拆成 99 和 1；A 领走 99，已落库</p></div>
+<div class="row p3 fragment" data-fragment-index="1"><p class="note warn" style="grid-column:2/6">Redis 主从切换丢写：99 又回到 LIST，A 的标记也没了</p></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:2/4"><p class="lb">claim Lua → 99</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:2/6"><p class="lb">claimTx：INSERT claim(99) + remaining-1（份数没超）</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="3"><p class="note" style="grid-column:3/7">拿到行锁后 SUM(已领) = 198，大于 Total 100</p></div>
+<div class="row p3 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:2/6"><p class="lb">errShareOverTotal，事务回滚</p><x-connector from="tr"></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/4"><p class="lb">这份作废：不放回 LIST，只删 B 的标记</p><x-connector></x-connector></div></div>
+<div class="row p3 fragment" data-fragment-index="4"><p class="note" style="grid-column:1/7">B 看到“已抢完”，可以重抢；真正剩下的 1 分照常能领</p></div>
+</div>
+<aside>四分支之外还有一种情况，它最能说明什么叫资金以数据库为准。前面我们一直默认 Redis 弹出来的金额是对的，但 Redis 自己也会出错：主从切换丢了最近的写入，或者从备份恢复，已经发出去的金额会回到 LIST 里。看这个例子：一百块拆成九十九和一，A 领走九十九，已经落库。这时候 Redis 回档，九十九又回到了 LIST。B 来抢，弹出九十九。如果领取事务只检查还有没有剩余份数，那份数确实没超，B 也能入账，一共付出一百九十八，托管账户被多付了九十八。所以领取事务在拿到红包行锁之后，还要再做一次求和：已领总额，包括刚插进去的这一条，不能超过红包总额。超过了就回滚。注意这一份和前面的回补不一样：它本身就是 Redis 多出来的，不能放回 LIST，否则下一个人还会弹到它；只删掉 B 的已领标记，让 B 可以重新抢。真正剩下的那一分钱，照常能领。结论是：数据库不能只相信 Redis 给的金额，份数和金额都要自己把关。</aside>
 </section>
 <section id="racea" data-transition="fade">
 <div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
@@ -568,7 +585,7 @@ x-connector { border: none !important; }
 </section>
 <section id="raceb" data-transition="fade">
 <div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">四 · 4.3 工单 B · 情况二 · internal/redpacket/task.go:59-105</p>
+<p class="eye">四 · 4.3 工单 B · 情况二 · internal/redpacket/task.go:73-123</p>
 <h2>反过来：退款事务先拿到行锁</h2>
 <div class="seq">
 <div class="row p3"><p class="who">领取事务（用户 C）</p><p class="who">red_packet 行锁</p><p class="who">过期退款事务（Cron）</p></div>
@@ -673,7 +690,7 @@ x-connector { border: none !important; }
 <aside>前面讲的都是请求还活着的时候怎么处理。但请求可能直接死掉，比如服务器断电。所以第五部分是三道后台防线。先看状态机，很简单：红包从进行中出发，只有两个终点，抢完了，或者退款了。退款有三个来源：过期、份额池丢失、发包时 Redis 写入失败。下面三道防线，分别对应工单 C、工单 D，还有正常的过期。</aside>
 </section>
 <section id="orphan" data-transition="fade">
-<p class="eye">五 · 5.2 工单 C · internal/redpacket/task.go:179-211</p>
+<p class="eye">五 · 5.2 工单 C · internal/redpacket/task.go:197-233</p>
 <h2>孤儿领取：份额卡在半空，靠标记补发</h2>
 <div class="body">
 <div class="cards">
@@ -681,7 +698,7 @@ x-connector { border: none !important; }
 <div class="card no"><p class="k">MySQL · red_packet_claim</p><h3>没有 101 的记录</h3><p class="t">钱没进钱包。</p></div>
 <div class="card yes"><p class="k">Redis · claimed</p><h3>101 → 3000:1730680000</h3><p class="t">唯一的线索：金额 + 时间。他再点只会收到“已领取过”。</p></div>
 </div>
-<p class="lead fragment" data-fragment-index="1">RunRedPacketClaimReconcile 每 2 分钟，把每条标记和 DB 比：</p>
+<p class="lead fragment" data-fragment-index="1">RunRedPacketClaimReconcile 每 2 分钟，对每个红包调 reconcileRedPacket，把每条标记和主库比：</p>
 <div class="flow fragment" data-fragment-index="1">
 <p class="box">DB 里已有记录<br><b>跳过</b></p>
 <p class="box">抢到不足 1 分钟<br><b>在途，先别动</b></p>
@@ -731,8 +748,8 @@ x-connector { border: none !important; }
 <h2>份额池丢失：amounts 这个 LIST 不存在了</h2>
 <div class="body">
 <div class="cards">
-<div class="card soft"><p class="k">防线 1 · service.go:137-146</p><h3>发包当场立即逆向退款</h3><p class="t">Create 里 DB 扣款事务已提交，PrepareRedPacket 写 Redis 失败。</p><p class="t">当场调 refundRedPacketLeft(ctx, rp.ID)：从 redpacket_escrow 全额退回发包人，状态置 refunded。</p></div>
-<div class="card soft fragment" data-fragment-index="1"><p class="k">防线 2 · task.go:155-229</p><h3>对账发现池丢失，提前退款</h3><p class="t">每 2 分钟对账，四个条件同时成立：</p><p class="t">① 创建已超过 1 分钟<br>② amounts LIST 不存在<br>③ 没有在途孤儿标记<br>④ DB 里仍 active 且 remaining &gt; 0</p><p class="t">不用让发包人傻等 7 天过期。</p></div>
+<div class="card soft"><p class="k">防线 1 · service.go:141-150</p><h3>发包当场立即逆向退款</h3><p class="t">Create 里 DB 扣款事务已提交，PrepareRedPacket 写 Redis 失败。</p><p class="t">当场调 refundRedPacketLeft(ctx, rp.ID)：从 redpacket_escrow 全额退回发包人，状态置 refunded。</p></div>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">防线 2 · task.go:171-252</p><h3>对账发现池丢失，提前退款</h3><p class="t">每 2 分钟对账，四个条件同时成立：</p><p class="t">① 创建已超过 1 分钟<br>② amounts LIST 不存在<br>③ 没有在途孤儿标记<br>④ DB 里仍 active 且 remaining &gt; 0</p><p class="t">不用让发包人傻等 7 天过期。</p></div>
 </div>
 <p class="lead fragment" data-fragment-index="2">防线 1 的补偿也失败，或运行中途 Redis 丢了数据，都由防线 2 接住。</p>
 </div>
@@ -772,11 +789,11 @@ x-connector { border: none !important; }
 <aside>如果顺序反过来，先读标记再查 LIST。对账读标记的时候，最后一份还没人抢，没有 Z。就在这之后的一瞬间，Z 抢走了最后一份，LIST 消失。对账接着查 LIST，不存在。它手里的信息是：没有在途标记，LIST 没了，数据库里红包还是进行中、还剩一份，于是误判成份额池丢失，调 refundRedPacketLeft 把这二十块退给了发包人。等 Z 的领取事务跑到扣减那一步，红包已经是已退款，被拒掉。Z 明明抢到了，钱却退给了发包人。两次读取调个顺序，结论就完全不一样。</aside>
 </section>
 <section id="expire" data-transition="fade">
-<p class="eye">五 · 5.4 过期回收 · internal/redpacket/task.go:32-50</p>
+<p class="eye">五 · 5.4 过期回收 · internal/redpacket/task.go:24-65</p>
 <h2>先补齐孤儿，再按 DB 退剩余</h2>
 <div class="body">
 <div class="flow">
-<p class="box">每 5 分钟<br>扫出已过期的红包</p>
+<p class="box">每 5 分钟<br>按 id 分批扫完已过期红包</p>
 <x-connector class="go"></x-connector>
 <p class="box"><b>第 1 步</b><br>reconcileRedPacket<br>先把孤儿补发给领取人</p>
 <x-connector class="go fragment" data-fragment-index="1"></x-connector>
@@ -789,7 +806,7 @@ x-connector { border: none !important; }
 <div class="card yes"><h3>先补孤儿</h3><p class="t">孤儿的金额先落库，SUM(已领) 包含这一份，只退真正没人领的钱。</p></div>
 </div>
 </div>
-<aside>最后一道防线，过期回收，每五分钟一次。它对每个过期的红包做两步，顺序不能反。第一步，先跑一遍对账，把孤儿补给领取人。第二步，再按数据库算，总额减去已领总和，退给发包人。为什么必须先补孤儿？因为一旦退款，状态就变成已退款，那个抢到了却卡在半空的用户，他的领取事务会被拒，这份钱就再也补不给他了。还有一个细节：如果对账出错，或者还有在途的标记没下结论，这一轮先不退，最多等一小时；一小时还没结果，保底退给发包人，钱至少不会丢。如果对账里已经因为池丢失提前退过款，这里也直接跳过。</aside>
+<aside>最后一道防线，过期回收，每五分钟一次。它对每个过期的红包做两步，顺序不能反。第一步，先跑一遍对账，把孤儿补给领取人。第二步，再按数据库算，总额减去已领总和，退给发包人。为什么必须先补孤儿？因为一旦退款，状态就变成已退款，那个抢到了却卡在半空的用户，他的领取事务会被拒，这份钱就再也补不给他了。还有一个细节：如果对账出错，或者还有在途的标记没下结论，这一轮先不退，最多等一小时；一小时还没结果，保底退给发包人，钱至少不会丢。如果对账里已经因为池丢失提前退过款，这里也直接跳过。扫描是按红包 ID 一批一批往后翻的，一直翻到扫完，所以某个红包退款一直失败，也不会挡住排在它后面的。</aside>
 </section>
 <section id="demo1" data-transition="fade">
 <p class="eye">六 · 故障演练 · 演示 1</p>
@@ -834,7 +851,7 @@ x-connector { border: none !important; }
 <p class="c i1">go test ./internal/redpacket -run TestClaimAndRefundRaceConservesMoney -count=3 -v</p>
 </div>
 <div class="cards">
-<div class="card soft fragment" data-fragment-index="1"><p class="k">动手破坏</p><h3>插一行普通查询</h3><p class="t">internal/redpacket/task.go:67，在 txDao.GetForUpdate(rpID) 前面插入</p><p class="c" style="color:#3D1F0B">_, _ = txDao.Get(rpID)</p></div>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">动手破坏</p><h3>插一行普通查询</h3><p class="t">internal/redpacket/task.go:81，在 txDao.GetForUpdate(rpID) 前面插入</p><p class="c" style="color:#3D1F0B">_, _ = txDao.Get(rpID)</p></div>
 <div class="card no fragment" data-fragment-index="2"><p class="k">现象</p><h3>复现双倍退钱</h3><p class="t">断言失败：</p><p class="c" style="color:#3D1F0B">claimed X + refunded Y != 2000</p></div>
 </div>
 <p class="lead fragment" data-fragment-index="3">必须连真 MySQL 跑：默认的 SQLite 没有行锁和 RR 快照，插错了也测不出来。</p>
