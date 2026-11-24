@@ -3,6 +3,8 @@
 > **模块定位**：`gomall` · `internal/redpacket`（发包、抢包、退款与对账） / `repository/cache/redpacket.go`（二倍均值拆包与 Lua 脚本）
 >
 > **怎么用**：`---` 是分页线，一页一个要点、一张图。每页底部的「讲稿」是上课照着念的话。
+>
+> **幻灯片版**：[18-redpacket-slides.pdf](./18-redpacket-slides.pdf)（43 页，每页一张）；[18-redpacket-slides.html](./18-redpacket-slides.html) 用浏览器打开可分步演示，→ 下一步，← 上一步，N 显示讲稿，F 全屏。
 
 | 部分 | 讲什么 | 对应工单 |
 |---|---|---|
