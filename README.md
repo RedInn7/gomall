@@ -101,7 +101,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 | P2 营销秒杀 | 抢券 / 秒杀 / 抢红包 | 99.9%（年宕 8h46min） | < 200ms |
 | P3 信息类 | 轮播 / 分类 | 99.5%（年宕 1d19h） | < 1s |
 
-压测报告里 `/ping` 64K RPS、`/orders/list` 58K RPS 是在全局令牌桶开着时从本机压出来的，绝大部分请求在令牌桶就返回了 70001，只反映限流拒绝路径的开销，不是接口容量（见下文「压测数据」）。
+下文「压测数据」是 2026-11-24 临时放开全局令牌桶后在本机测的，反映接口真正处理请求时的吞吐；k6 和服务跑在同一台笔记本上，不代表服务器上的容量。
 
 当前入口统一经过全局 IP 令牌桶（100 RPS / 200 burst）。异步下单用于削平写入峰值；实际部署时应根据核心交易与普通读取的容量分别配置限流策略。
 
@@ -121,10 +121,10 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 处理中：返回 `60002`，让客户端等
 - 已完成：直接 replay 上一次响应体（responseRecorder 拦截过的）
 
-实测：50 VU × 15s 持续打 `/orders/create` 同 Idempotency-Key → 累计 755,033 次请求 → DB 实际 1 笔订单。压测时全局令牌桶开着，绝大多数请求在令牌桶就被 70001 拒绝，真正进入幂等中间件的只是放行的一小部分。
+实测（2026-11-24，放开全局令牌桶）：50 VU × 15s 持续用同一个 Idempotency-Key 打 `/orders/create` → 累计 102,941 次请求 → DB 实际新增 1 笔订单。其中 580 次落在第一个请求还在处理的窗口里，返回 60002；其余全部走缓存回放。
 `middleware/idempotency.go` + `repository/cache/idempotency.go`，详见 [`docs/lecture/15-middleware-transaction.md`](docs/lecture/15-middleware-transaction.md)。
 
-### 2 · 两桶库存 + Saga 回滚：500 抢 100 零超发
+### 2 · 两桶库存 + Saga 回滚：100 万并发抢 1 万件零超发
 
 **难**：抢券抢库存最容易超卖；Redis 扣成功但 DB 落库失败会导致库存"凭空消失"。
 **解**：
@@ -132,7 +132,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 - 支付时 Lua `reserved -= n`；取消时 Lua `reserved → available`
 - DB 事务失败 → defer 调 release Lua 把扣的退回
 
-实测（单测 `TestCoupon_AtomicClaimNoOversell`，已在 3461689 删除）：500 goroutine 抢 100 张券 → **成功数恰好 100**；Redis Lua max 136ms vs DB `SELECT FOR UPDATE` max 453ms（k6 压测时同样被全局令牌桶限流，max 延迟只作参考）。
+实测（2026-11-24，对真实 Redis 直接调用缓存层的 Lua）：100 万个请求抢 1 万件库存，**成功数恰好 1 万**，结束时 `available = 0`、`reserved = 10000`；抢券路径在同样规模下结果一致。同时在途 2000 个请求，这台笔记本上 Lua 路径约每秒 4～5 万次。
 `repository/cache/inventory.go` 3 个 Lua 脚本（reserve / commit / release）+ `internal/order/cancel.go` Saga 回滚。
 
 ### 3 · Outbox + 协同 Saga：解双写问题
@@ -169,7 +169,7 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 **难**：fixed window 限流在窗口边界有 2× 突发（59 秒 + 0 秒并发）。
 **解**：Redis ZSet score = 时间戳，Lua 一次性 `ZREMRANGEBYSCORE 清过期 + ZCARD 数当前 + ZADD 加新` → 精确滑动窗口
 - 秒杀场景 `Scope:seckill, Limit:3, Window:1s, ByUser:true`
-- 30VU × 15s 实测：通过 46 次（期望 45），**误差 2.2%**；返回 70001 的 781,624 次里绝大多数是全局令牌桶拒绝的，不是滑动窗口
+- 30VU × 15s 实测（2026-11-24，放开全局令牌桶）：88,012 次请求里通过 48 次（每秒 3 次 × 15 秒，期望约 45 次），其余 87,964 次被滑动窗口拒绝
 
 `middleware/ratelimit.go::SlidingWindow` + `repository/cache/ratelimit.go` Lua。
 
@@ -306,18 +306,19 @@ RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和�
 
 ## 压测数据（`stressTest/REPORT.md`）
 
-> 适用条件：2026-05-15 压测时全局令牌桶（每 IP 100 RPS / 突发 200）已经开着，k6 从本机发起，所有 VU 共用 127.0.0.1 一个桶。超出的请求直接返回 HTTP 200 + 业务码 70001，当时的脚本只检查 HTTP 状态码，把这些拒绝也算成了成功。所以下表上万 RPS 的几行主要反映限流拒绝路径的开销，不是接口容量；不到 100 RPS 的 `/product/list` 不受影响。复测接口容量要临时放宽 `routes/router.go` 里的全局令牌桶，脚本现在会断言响应不是 70001。
+> 适用条件：2026-11-24 复测。临时放开了全局令牌桶（改动不入库），k6 与服务跑在同一台 MacBook（M2，8 核 8GB）上，依赖是本机的 MySQL 和 Redis，RabbitMQ 未启动。数字反映这台笔记本上的处理吞吐，不是服务器容量。2026-05-15 那一版上万 RPS 的数字测的是限流拒绝路径，已经作废，原始记录留在 `stressTest/REPORT.md` 里作对照。
 
-| 链路 | RPS | p95 | 备注 |
-|------|----:|----:|------|
-| `/ping` 基线 | 64,254 | 3.51ms | 裸 gin 链路上限 |
-| `/product/show`（无缓存 + PK 查询）| 62,226 | 3.01ms | 接近裸 ping |
-| `/orders/list`（游标分页 + 缓存）| 58,406 | 5.00ms | PR #38 |
-| `/orders/create`（幂等 50 VU × 15s）| 50,319 | 2.33ms | **755,033 次请求 → 1 笔订单** |
-| `/coupon/claim` Redis Lua | 51,362 | 3.52ms | 500 抢 100 张零超发 |
-| `/coupon/claim` DB FOR UPDATE | 50,142 | 3.65ms | max 453ms（vs Lua max 136ms）|
-| `/skill_product/skill` + SlidingWindow | 52,082 | 1.24ms | 30VU 通过 46 / 限流 781,624 / 误差 2.2% |
-| `/product/list`（COUNT 全表 反例） | 24.5 | 2.50s | 956K 行 product 表 |
+| 链路 | 并发 × 时长 | RPS | p95 | 备注 |
+|------|------|----:|----:|------|
+| `/ping` 基线 | 100 VU × 30s | 26,426 | 9.62ms | 裸 gin 链路 |
+| `/product/show`（PK 查询）| 80 VU × 30s | 8,309 | 21.63ms | 956K 行 product 表 |
+| `/orders/create`（同一个幂等 key）| 50 VU × 15s | 6,829 | 11.36ms | **102,941 次请求 → 1 笔订单** |
+| `/skill_product/skill` + SlidingWindow | 30 VU × 15s | 5,866 | 10.46ms | 通过 48 次，滑窗拒绝 87,964 次 |
+| `/coupon/claim` Redis Lua（同一用户重复领）| 80 VU × 20s | 2,962 | 79.75ms | 成功 1 次，其余命中每人限领 |
+| `/orders/list`（游标分页 + 缓存）| 100 VU × 30s | 2,577 | 177.34ms | 6M 行 order 表 |
+| 库存预扣 Lua（直接调缓存层）| 100 万请求 | 约 53,000 | — | 抢 1 万件，**零超发** |
+| 抢券 Lua（直接调缓存层）| 100 万请求 | 约 43,000 | — | 抢 1 万张，**零超发** |
+| `/product/list`（COUNT 全表 反例） | 50 VU × 30s | 24.5 | 2.50s | 2026-05-15 数据，未复测；低于限流阈值，不受影响 |
 
 数据规模：order 表 ~6M 行 / 653 MB，product 表 ~956K 行 / 364 MB。
 
