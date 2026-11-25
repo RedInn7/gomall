@@ -204,7 +204,7 @@ x-connector { border: none !important; }
 <div class="body">
 <div class="cards">
 <div class="card soft"><p class="k">阶段一 · CREATE</p><h3>发红包</h3><p class="t">① 校验支付密码，二倍均值预拆 N 份</p><p class="t">② DB 事务：写主表 + 扣发包人钱包 + 记入 redpacket_escrow</p><p class="t">③ 提交后 RPUSH 金额进 Redis LIST</p><p class="t"><span class="red">写 Redis 失败</span>：当场全额退回，状态 refunded</p></div>
-<div class="card soft fragment" data-fragment-index="1"><p class="k">阶段二 · CLAIM</p><h3>抢红包</h3><p class="t">① Lua：HEXISTS 去重 → LPOP → HSET 标记</p><p class="t">② DB 事务 claimTx：INSERT claim + remaining-1 + 校验总额 + 托管转钱包</p><p class="t">③ 事务报错：先反查 GetClaim</p><p class="t">④ 确认未落库才回补：LPUSH + HDEL</p></div>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">阶段二 · CLAIM</p><h3>抢红包</h3><p class="t">① Lua：HEXISTS 去重 → LPOP → HSET 标记</p><p class="t">② DB 事务 claimTx：INSERT claim + remaining-1 + 托管转钱包</p><p class="t">③ 事务报错：先反查 GetClaim</p><p class="t">④ 确认未落库才回补：LPUSH + HDEL</p></div>
 <div class="card soft fragment" data-fragment-index="2"><p class="k">阶段三 · RECONCILE &amp; EXPIRE</p><h3>后台兜底</h3><p class="t"><b>每 2 分钟</b> 孤儿对账：超过 1 分钟未落库的标记 → 加 :r 锁 → claimTx 补发</p><p class="t"><b>每 5 分钟</b> 过期回收：先补齐孤儿，再按 DB 算 Total − SUM(已领) 退回发包人</p></div>
 </div>
 </div>
@@ -485,7 +485,7 @@ x-connector { border: none !important; }
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">claim Lua (uid, now)</p><x-connector></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">amount / -1 / -2</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="2"><p class="note" style="grid-column:1/6">-1 已抢完 (84004) / -2 已领过 (84005)：直接失败</p></div>
-<div class="row p4 fragment" data-fragment-index="3"><div class="m" style="grid-column:4/8"><p class="lb">claimTx：INSERT claim + remaining-1 + 校验总额 + 入账</p><x-connector></x-connector></div></div>
+<div class="row p4 fragment" data-fragment-index="3"><div class="m" style="grid-column:4/8"><p class="lb">claimTx：INSERT claim + remaining-1 + 入账</p><x-connector></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="3"><div class="m ret" style="grid-column:4/8"><p class="lb">提交成功</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="3"><div class="m ret" style="grid-column:2/4"><p class="lb">成功 (amount)</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:3/9">提交失败或结果未知：先 GetClaim(id, uid) 反查，再分四种情况处理</p></div>
@@ -513,23 +513,7 @@ x-connector { border: none !important; }
 <div class="card fragment" data-fragment-index="3"><p class="k">分支 3 · errRedPacketClosed</p><h3>红包已结束</h3><p class="t">剩余的钱已按 DB 退给发包人。</p><p class="t"><b>不回补</b>，这份不能再给别人抢。</p></div>
 <div class="card yes fragment" data-fragment-index="4"><p class="k">分支 4 · default</p><h3>确认没落库</h3><p class="t">红包还在进行中。</p><p class="t"><span class="hl">执行回补 Lua</span>：LPUSH 放回 + HDEL 删标记。</p></div>
 </div>
-<p class="lead fragment" data-fragment-index="5">四个分支里<span class="hl">只有分支 4 会回补</span>。回补若返回 ErrRedPacketClaimRepairing（对账已接手），再查一次 GetClaim，落库了就按成功返回。还有第五种情况不走回补：这一份入账会让已领总额超过红包总额，下一页讲。</p>
-</div>
-</section>
-<section id="overtotal" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">四 · 4.2 补充 · internal/redpacket/service.go:270-321</p>
-<h2>DB 不只限份数，还限金额</h2>
-<div class="seq">
-<div class="row p3"><p class="who">Service（B 抢包）</p><p class="who">Redis</p><p class="who">DB</p></div>
-<div class="row p3"><p class="note" style="grid-column:1/7">红包 100 元拆成 99 和 1；A 领走 99，已落库</p></div>
-<div class="row p3 fragment" data-fragment-index="1"><p class="note warn" style="grid-column:2/6">Redis 主从切换丢写：99 又回到 LIST，A 的标记也没了</p></div>
-<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:2/4"><p class="lb">claim Lua → 99</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:2/6"><p class="lb">claimTx：INSERT claim(99) + remaining-1（份数没超）</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="3"><p class="note" style="grid-column:3/7">拿到行锁后 SUM(已领) = 198，大于 Total 100</p></div>
-<div class="row p3 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:2/6"><p class="lb">errShareOverTotal，事务回滚</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/4"><p class="lb">这份作废：不放回 LIST，只删 B 的标记</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="4"><p class="note" style="grid-column:1/7">B 看到“已抢完”，可以重抢；真正剩下的 1 分照常能领</p></div>
+<p class="lead fragment" data-fragment-index="5">四个分支里<span class="hl">只有分支 4 会回补</span>。回补若返回 ErrRedPacketClaimRepairing（对账已接手），再查一次 GetClaim，落库了就按成功返回。</p>
 </div>
 </section>
 <section id="racea" data-transition="fade">
