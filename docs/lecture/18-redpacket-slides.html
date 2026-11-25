@@ -441,6 +441,21 @@ x-connector { border: none !important; }
 <p class="formula fragment" data-fragment-index="1">redpacket_escrow 净余额：+10000 − 3000 − 5000 − 2000 ＝ 0</p>
 </div>
 </section>
+<section id="refwhat" data-transition="fade">
+<p class="eye">三 · 3.2 防重唯一索引</p>
+<h2>ref_order_id：这行流水是因为哪件事记的</h2>
+<div class="body">
+<p class="lead">流水表只记钱的进出，靠 <span class="hl">ref_order_id（关联单号）</span>指回引发这笔钱的那条业务记录。</p>
+<table>
+<tr class="thead"><th style="width:26%">业务</th><th style="width:34%">关联单号填什么</th><th>这件事会发生几次</th></tr>
+<tr><td>发红包</td><td>红包 ID</td><td>一个红包只发 1 次</td></tr>
+<tr class="alt"><td>领红包</td><td>领取记录 ID</td><td>一个红包被领 N 次，每次一条记录</td></tr>
+<tr><td>过期退款</td><td>红包 ID</td><td>一个红包最多退 1 次</td></tr>
+</table>
+<p class="lead fragment" data-fragment-index="1">一件事记两行、共用一个单号：<span class="hl">(501, debit)</span> 托管账户出账，<span class="hl">(501, credit)</span> B 的钱包入账，靠方向区分。</p>
+<p class="formula fragment" data-fragment-index="2">单号相同 ＝ 同一件事，重复记账被拦；单号不同 ＝ 不同的事，放行</p>
+</div>
+</section>
 <section id="refid" data-transition="fade">
 <p class="eye">三 · 3.2 防重唯一索引</p>
 <h2>领包的 ref_order_id 为什么用“领取记录 ID”</h2>
@@ -450,7 +465,7 @@ x-connector { border: none !important; }
 <div class="card no fragment" data-fragment-index="1"><h3>领包也用红包 ID</h3><p class="t">B 写入</p><p class="c" style="color:#3D1F0B">(88, credit, redpacket_claim)</p><p class="t">C 写入</p><p class="c" style="color:#3D1F0B">(88, credit, redpacket_claim)</p><p class="t"><span class="red">撞唯一索引，C 领不了</span></p></div>
 <div class="card yes fragment" data-fragment-index="2"><h3>领包用 RedPacketClaim.ID</h3><p class="t">B 写入</p><p class="c" style="color:#3D1F0B">(501, credit, redpacket_claim)</p><p class="t">C 写入</p><p class="c" style="color:#3D1F0B">(502, credit, redpacket_claim)</p><p class="t"><b>互不冲突</b></p></div>
 </div>
-<p class="lead fragment" data-fragment-index="3">发包和过期退款：一个红包只发一次、最多退一次，用红包 ID，靠 redpacket_send / redpacket_refund 区分。</p>
+<p class="lead fragment" data-fragment-index="3">单号的粒度跟着“这件事发生几次”走：发包、退款各一次，用红包 ID；领包有 N 次，用每次领取自己的 ID。</p>
 </div>
 </section>
 <section id="order" data-transition="fade">
