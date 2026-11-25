@@ -656,9 +656,10 @@ x-connector { border: none !important; }
 <x-connector class="go fragment" data-fragment-index="2"></x-connector>
 <p class="box end fragment" data-fragment-index="2"><b>第 2 步</b><br>refundRedPacketLeft<br>Total − SUM(claim.amount)</p>
 </div>
-<div class="cards fragment" data-fragment-index="3">
-<div class="card no"><h3>如果先退剩余</h3><p class="t">状态变成 refunded，孤儿用户的 claimTx 被拒：抢到了红包却再也补不进去。</p></div>
-<div class="card yes"><h3>先补孤儿红包</h3><p class="t">孤儿红包的金额先落库，SUM(已领) 包含这一份，只退真正没人领的钱。</p></div>
+<p class="lead fragment" data-fragment-index="3">例子：100 元的红包到期。A、B 各领 30 元已到账；C 抢到 20 元，但成了孤儿红包，数据库里没有他的记录。</p>
+<div class="cards fragment" data-fragment-index="4">
+<div class="card no"><h3>如果先退剩余</h3><p class="t">100 − 60 = <b>退 40 元</b>，状态变成 refunded。</p><p class="t">再给 C 补 20 元时，红包已结束，被拒。C 抢到了却拿不到钱，他那 20 元退给了发包人。</p></div>
+<div class="card yes"><h3>先补孤儿红包</h3><p class="t">先给 C 补上 20 元，已领变成 80 元。</p><p class="t">100 − 80 = <b>退 20 元</b>，只退真正没人领的钱。</p></div>
 </div>
 </div>
 </section>
