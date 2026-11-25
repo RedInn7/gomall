@@ -124,8 +124,21 @@ table { font-size: 24px; color: #3D1F0B; }
 .ico.service { background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%223%22%20y%3D%223.5%22%20width%3D%2218%22%20height%3D%227.5%22%20rx%3D%222%22%20fill%3D%22%238B4A1C%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%2213%22%20width%3D%2218%22%20height%3D%227.5%22%20rx%3D%222%22%20fill%3D%22%238B4A1C%22%2F%3E%3Ccircle%20cx%3D%227%22%20cy%3D%227.25%22%20r%3D%221.3%22%20fill%3D%22%23FFD8A8%22%2F%3E%3Ccircle%20cx%3D%227%22%20cy%3D%2216.75%22%20r%3D%221.3%22%20fill%3D%22%23FFD8A8%22%2F%3E%3Cpath%20stroke%3D%22%23FFD8A8%22%20stroke-width%3D%221.5%22%20stroke-linecap%3D%22round%22%20d%3D%22M12%207.25h6M12%2016.75h6%22%2F%3E%3C%2Fsvg%3E"); }
 .ico.user { background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%227.5%22%20r%3D%224.5%22%20fill%3D%22%23C2410C%22%2F%3E%3Cpath%20fill%3D%22%23C2410C%22%20d%3D%22M3.5%2021.5c0-4.7%203.8-8%208.5-8s8.5%203.3%208.5%208z%22%2F%3E%3C%2Fsvg%3E"); }
 .ico.cron { background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212%22%20r%3D%229%22%20fill%3D%22%23FFF3BF%22%20stroke%3D%22%23B45309%22%20stroke-width%3D%222.2%22%2F%3E%3Cpath%20fill%3D%22none%22%20stroke%3D%22%23B45309%22%20stroke-width%3D%222.2%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20d%3D%22M12%206.5V12l4%202.5%22%2F%3E%3C%2Fsvg%3E"); }
-.ico.wallet { background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%222.5%22%20y%3D%226%22%20width%3D%2219%22%20height%3D%2214%22%20rx%3D%223%22%20fill%3D%22%23B45309%22%2F%3E%3Cpath%20fill%3D%22%238B4A1C%22%20d%3D%22M5%206l11-3.5c1-.3%202%20.4%202%201.5V6z%22%2F%3E%3Crect%20x%3D%2214%22%20y%3D%2210.5%22%20width%3D%227.5%22%20height%3D%225%22%20rx%3D%222.5%22%20fill%3D%22%23FFE8CC%22%2F%3E%3Ccircle%20cx%3D%2217%22%20cy%3D%2213%22%20r%3D%221.2%22%20fill%3D%22%23B45309%22%2F%3E%3C%2Fsvg%3E"); }
-.who .ico { width: 1.2em; height: 1.2em; vertical-align: -.24em; }
+.ico.wallet { background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%222.5%22%20y%3D%226%22%20width%3D%2219%22%20height%3D%2214%22%20rx%3D%223%22%20fill%3D%22%233F8F3A%22%2F%3E%3Cpath%20fill%3D%22%232E6E2A%22%20d%3D%22M5%206l11-3.5c1-.3%202%20.4%202%201.5V6z%22%2F%3E%3Crect%20x%3D%2214%22%20y%3D%2210.5%22%20width%3D%227.5%22%20height%3D%225%22%20rx%3D%222.5%22%20fill%3D%22%23FFE8CC%22%2F%3E%3Ccircle%20cx%3D%2217%22%20cy%3D%2213%22%20r%3D%221.2%22%20fill%3D%22%23B45309%22%2F%3E%3C%2Fsvg%3E"); }
+.who .ico { width: 1.5em; height: 1.5em; margin-right: .36em; vertical-align: -.36em; }
+/* 每种角色一种底色，一眼能分开 */
+.who:has(.ico.redis) { background: #FFE0DC; border-color: #C6302B; color: #8E1B12; }
+.who:has(.ico.mysql) { background: #DCEBF7; border-color: #1F6FA8; color: #134B73; }
+.who:has(.ico.service) { background: #FFD8A8; border-color: #E8590C; color: #3D1F0B; }
+.who:has(.ico.user) { background: #FFFDF8; border-color: #C2410C; color: #7A2E0A; }
+.who:has(.ico.cron) { background: #FFF3BF; border-color: #B45309; color: #6B3A05; }
+.who:has(.ico.wallet) { background: #E6F4E1; border-color: #3F8F3A; color: #24591F; }
+.k:has(.ico.redis) { color: #C6302B; }
+.k:has(.ico.mysql) { color: #1F6FA8; }
+.ico.vault { background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Crect%20x%3D%222.5%22%20y%3D%223%22%20width%3D%2219%22%20height%3D%2216.5%22%20rx%3D%222.5%22%20fill%3D%22%23B45309%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%2219.5%22%20width%3D%223%22%20height%3D%222%22%20fill%3D%22%238B4A1C%22%2F%3E%3Crect%20x%3D%2216%22%20y%3D%2219.5%22%20width%3D%223%22%20height%3D%222%22%20fill%3D%22%238B4A1C%22%2F%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2211.25%22%20r%3D%224.6%22%20fill%3D%22%23FFE8CC%22%2F%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2211.25%22%20r%3D%221.6%22%20fill%3D%22%23B45309%22%2F%3E%3Cpath%20stroke%3D%22%23B45309%22%20stroke-width%3D%221.4%22%20stroke-linecap%3D%22round%22%20d%3D%22M12%206.9v1.6M12%2014v1.6M7.65%2011.25h1.6M14.75%2011.25h1.6%22%2F%3E%3C%2Fsvg%3E"); }
+.who:has(.ico.vault) { background: #FFE8CC; border-color: #B45309; color: #6B3A05; }
+.ico.attacker { background-image: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20fill%3D%22%234A1010%22%20d%3D%22M12%201.5c-4%200-6.5%203-6.5%207v3h13v-3c0-4-2.500-7-6.500-7z%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%227.200%22%20width%3D%2210%22%20height%3D%223.200%22%20rx%3D%221.600%22%20fill%3D%22%23FFE3E3%22%2F%3E%3Ccircle%20cx%3D%229.800%22%20cy%3D%228.800%22%20r%3D%221%22%20fill%3D%22%234A1010%22%2F%3E%3Ccircle%20cx%3D%2214.200%22%20cy%3D%228.800%22%20r%3D%221%22%20fill%3D%22%234A1010%22%2F%3E%3Cpath%20fill%3D%22%234A1010%22%20d%3D%22M3%2022c0-5%204-8.500%209-8.500s9%203.500%209%208.500z%22%2F%3E%3C%2Fsvg%3E"); }
+.who:has(.ico.attacker) { background: #F3DADA; border-color: #7A1212; color: #4A1010; }
 x-connector { border: none !important; }
 </style>
 </head>
@@ -301,7 +314,7 @@ x-connector { border: none !important; }
 <p class="eye">一 · 1.2 防扫号口令</p>
 <h2>走一遍：群友能抢，遍历 id 的脚本被拒</h2>
 <div class="seq">
-<div class="row p4"><p class="who"><span class="ico user"></span>Sender</p><p class="who"><span class="ico service"></span>Service</p><p class="who"><span class="ico user"></span>Friend</p><p class="who"><span class="ico user"></span>Attacker</p></div>
+<div class="row p4"><p class="who"><span class="ico user"></span>Sender</p><p class="who"><span class="ico service"></span>Service</p><p class="who"><span class="ico user"></span>Friend</p><p class="who"><span class="ico attacker"></span>Attacker</p></div>
 <div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">POST 发红包</p><x-connector></x-connector></div></div>
 <div class="row p4"><div class="m ret" style="grid-column:2/4"><p class="lb">id=88 + 口令（只返回一次）</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/6"><p class="lb">分享链接（id + ShareCode）</p><x-connector></x-connector></div></div>
@@ -421,7 +434,7 @@ x-connector { border: none !important; }
 <p class="eye">三 · 资金模型</p>
 <h2>钱先进红包托管，再分给领取人</h2>
 <div class="seq">
-<div class="row p4"><p class="who"><span class="ico wallet"></span>A 钱包（发包人）</p><p class="who"><span class="ico wallet"></span>redpacket_escrow</p><p class="who"><span class="ico wallet"></span>B 钱包</p><p class="who"><span class="ico wallet"></span>C 钱包</p></div>
+<div class="row p4"><p class="who"><span class="ico wallet"></span>A 钱包（发包人）</p><p class="who"><span class="ico vault"></span>redpacket_escrow</p><p class="who"><span class="ico wallet"></span>B 钱包</p><p class="who"><span class="ico wallet"></span>C 钱包</p></div>
 <div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">① 发包 10000 · ref = 88</p><x-connector></x-connector></div></div>
 <div class="row p4"><p class="note" style="grid-column:3/6">托管余额 10000</p></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">② B 领包 3000 · ref = 501</p><x-connector></x-connector></div></div>
