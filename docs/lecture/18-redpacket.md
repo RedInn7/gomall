@@ -14,7 +14,7 @@
 | 三 | 资金：钱先进托管账户 | |
 | 四 | 一致性：Redis 先扣，DB 说了算 | A |
 | 五 | 三道兜底防线 | B C |
-| 六 | 故障演练、课后思考、代码索引 | |
+| 六 | 课后作业、代码索引 | |
 
 ---
 
@@ -766,37 +766,27 @@ flowchart TD
 
 ---
 
-## 六、故障演练与课堂演示指南
+## 六、课后作业：两道设计题
 
-每个演示都是：**先跑通测试，再动手破坏一行代码，看测试变红。**
+**1. 不靠定时扫描，怎么发现孤儿红包**
 
-**演示 1：Redis 清空后，过期退款依然严格按 DB 计算**
+业务量涨了 100 倍，同时有上百万个进行中的红包。请为孤儿红包的发现和补领设计一个不依赖定时全量扫描的方案。
 
-```bash
-go test ./internal/redpacket -run TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty -v
-```
+提示：
 
-- 破坏：打开 `internal/redpacket/task.go`，把 `left = rp.Total - claimed` 改成使用 Redis 清理脚本返回的剩余金额。
-- 现象：测试立刻失败。测试故意把 Redis 清空了，按 Redis 算就会退 0 元，发包人的钱就丢了。
+- 抢到的那一刻，能不能顺手留下一个“1 分钟后回来看一眼”的提醒？项目里已经有 RabbitMQ 延迟队列。
+- 提醒可能重复，也可能丢。重复了靠什么保证不多发？丢了靠什么兜底？
+- 处理提醒时，“先查库、再加 `:r`、再补发”的顺序还成立吗？
 
-**演示 2：回补与对账补领的 `:r` 锁互斥**
+**2. 口令轮换**
 
-```bash
-go test ./repository/cache -run 'TestRollbackAndRepairLockAreExclusive|TestRepairLockRequiresOriginalMark' -v
-go test ./internal/redpacket -run 'TestClaimTxFailureRollsBackRedis|TestClaimCommitUnknownDoesNotRollback|TestClaimRollbackYieldsToReconcileRepair' -v
-```
+发包人把链接发错了群，想立刻换一个新口令。请设计 `POST /redpacket/rotate-code`。
 
-- 破坏：把 `repository/cache/redpacket.go:95` 回补 Lua 里的 `if string.sub(v, -2) == ':r' then return -1 end` 注释掉，再跑 `TestClaimRollbackYieldsToReconcileRepair`。
-- 现象：对账帮用户补领入账后，慢请求又把份额塞回 Redis，触发 `"redis has an extra share"` 超发断言失败。
+提示：
 
----
-
-## 课后思考与练习
-
-1. **在途窗口调参推演**：`claimOrphanGrace` 设为 1 分钟。如果某次数据库发生慢查询锁等待，导致一个正常领取事务卡了整整 90 秒才报错进入回补分支，请结合 4.2 和 5.2 节推演：这 90 秒里对账任务做了什么？慢请求醒来去回补时会收到什么返回值？用户最终看到成功还是失败？
-2. **设计口令轮换功能**：发包人把红包链接发错群了，想立刻换一个新口令（`POST /redpacket/rotate-code`）。请设计该接口：之前已经用旧口令领到红包的人还能不能打开详情页看明细？并发正在抢的人会受什么影响？
-3. **验证二倍均值分布**：写一段小测试调用 `SplitRedPacket(10000, 10)` 十万次，统计第 1 个位置到第 10 个位置的平均金额和最大金额。如果把代码里的 `Shuffle` 删掉，第 10 个位置的最大值分布会发生什么变化？
-4. **编写托管池守恒巡检 SQL**：请写出一条只读巡检 SQL，找出所有状态已经是 `finished` 或 `refunded`、但在 `account_transaction` 表中 `redpacket_escrow` 借贷净额不为 0 的异常红包（提示：注意发包/退款流水的 `ref_order_id` 是红包 ID，而领包流水的 `ref_order_id` 是 `red_packet_claim.id`）。
+- 口令存在红包表里，轮换是一次更新。谁有权换？同时点两次怎么办？
+- 已经用旧口令领到钱的人，还能不能看领取明细？明细页该凭口令看，还是凭“我领过”看？
+- 换口令的瞬间，有人已经通过了口令校验、正卡在抢包这一步。让他成功，还是让他失败？各有什么后果？
 
 ---
 
