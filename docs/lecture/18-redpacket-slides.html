@@ -239,7 +239,7 @@ x-connector { border: none !important; }
 <div class="cards">
 <div class="card"><p class="num">A</p><h3>失败后再点，提示已领过</h3><p class="t">Redis 扣了份额、打了标记，DB 事务失败后没退回 Redis。</p><p class="k">→ 4.2、4.3 先查库 + 原子回补</p></div>
 <div class="card fragment" data-fragment-index="1"><p class="num">B</p><h3>抢到了，钱没到账</h3><p class="t">抢完 Redis 后服务器断电，回补没跑成，份额卡在半空。</p><p class="k">→ 5.2 孤儿红包补领（:r 抢占锁）</p></div>
-<div class="card fragment" data-fragment-index="2"><p class="num">C</p><h3>扣了 100 元，却显示已抢完</h3><p class="t">DB 扣款已提交，往 Redis 写金额列表时 Redis 挂了。</p><p class="k">→ 5.3 立即逆向退款 + 池丢失提前退款</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="num">C</p><h3>扣了 100 元，却显示已抢完</h3><p class="t">DB 扣款已提交，往 Redis 写金额列表时 Redis 挂了。</p><p class="k">→ 第五部分 立即退款 + 池丢失提前退款</p></div>
 </div>
 </div>
 </section>
@@ -574,8 +574,8 @@ x-connector { border: none !important; }
 </div>
 <div class="cards">
 <div class="card fragment" data-fragment-index="1"><p class="k">5.2 · 每 2 分钟</p><h3>孤儿红包补领</h3><p class="t">工单 B：抢到了但钱没到账。</p></div>
-<div class="card fragment" data-fragment-index="2"><p class="k">5.3 · 发包当场 + 每 2 分钟</p><h3>份额池丢失补偿</h3><p class="t">工单 C：扣了钱但没人能抢。</p></div>
-<div class="card fragment" data-fragment-index="3"><p class="k">5.4 · 每 5 分钟</p><h3>过期回收</h3><p class="t">没领完的钱退回发包人。</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="k">发包当场 + 每 2 分钟</p><h3>份额池丢失补偿</h3><p class="t">工单 C：扣了钱但没人能抢。</p><p class="t">写 Redis 失败当场退款；运行中丢了，对账发现后退款。</p></div>
+<div class="card fragment" data-fragment-index="3"><p class="k">5.3 · 每 5 分钟</p><h3>过期回收</h3><p class="t">没领完的钱退回发包人。</p></div>
 </div>
 </div>
 </section>
@@ -643,39 +643,8 @@ x-connector { border: none !important; }
 <p class="lead fragment" data-fragment-index="5">这四种情况里请求都<span class="hl">没有死，只是慢</span>。它迟早会醒来走回补，而对账可能已经替它补了钱，:r 锁就是为这一刻准备的。</p>
 </div>
 </section>
-<section id="existsok" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">五 · 5.3 工单 C · 池丢失检查 · 正确顺序</p>
-<h2>先 EXISTS，后读 claimed：正常抢完不会误退</h2>
-<div class="seq">
-<div class="row p4"><p class="who"><span class="ico service"></span>Service（Z 抢包）</p><p class="who"><span class="ico redis"></span>Redis</p><p class="who"><span class="ico cron"></span>Reconcile</p><p class="who"><span class="ico mysql"></span>DB</p></div>
-<div class="row p4"><div class="m" style="grid-column:2/4"><p class="lb">claim Lua (Z) → 2000</p><x-connector></x-connector></div></div>
-<div class="row p4"><p class="note" style="grid-column:1/7">最后一份被抢走：LPOP 和 HSET 原子完成，空 LIST 被 Redis 自动删除</p></div>
-<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">① EXISTS → false</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">② HGETALL → 含 Z 的标记</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:6/8"><p class="lb">ListClaims → 还没有 Z</p><x-connector></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="3"><p class="note" style="grid-column:3/9">Z 抢到不足 1 分钟，在途：pending = true，判定正常抢完，不退款</p></div>
-<div class="row p4 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/8"><p class="lb">claimTx (Z, 2000) → COMMIT</p><x-connector></x-connector></div></div>
-</div>
-</section>
-<section id="existsbad" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">五 · 5.3 池丢失检查 · 错误顺序</p>
-<h2>先读 claimed，后 EXISTS：把抢到的钱退给了发包人</h2>
-<div class="seq">
-<div class="row p4"><p class="who"><span class="ico service"></span>Service（Z 抢包）</p><p class="who"><span class="ico redis"></span>Redis</p><p class="who"><span class="ico cron"></span>Reconcile</p><p class="who"><span class="ico mysql"></span>DB</p></div>
-<div class="row p4"><div class="m" style="grid-column:4/6"><p class="lb">① HGETALL → 没有 Z</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">claim Lua (Z) → 2000</p><x-connector></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="1"><p class="note" style="grid-column:1/6">微秒间隙里 Z 抢走最后 1 份，LIST 变空消失</p></div>
-<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">② EXISTS → false</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="2"><p class="note warn" style="grid-column:4/9">没有在途标记 + LIST 不存在 → 误判池丢失</p></div>
-<div class="row p4 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:6/8"><p class="lb">退 2000 给发包人</p><x-connector></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/8"><p class="lb">claimTx (Z, 2000) → errRedPacketClosed</p><x-connector></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:1/9">Z 正在入账的这笔钱，被当成未领余额退给了发包人</p></div>
-</div>
-</section>
 <section id="expire" data-transition="fade">
-<p class="eye">五 · 5.4 过期回收 · internal/redpacket/task.go:24-65</p>
+<p class="eye">五 · 5.3 过期回收 · internal/redpacket/task.go:24-65</p>
 <h2>先补齐孤儿红包，再按 DB 退剩余</h2>
 <div class="body">
 <div class="flow">
