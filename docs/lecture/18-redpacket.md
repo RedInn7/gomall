@@ -698,7 +698,7 @@ flowchart TD
 
 ---
 
-## 5.2 `:r` 锁互斥（一）：对账先到
+## 5.2 `:r` 锁互斥：对账先到
 
 用户请求卡了整整 1 分钟才走失败回补，恰好对账协程也扫到这个标记：
 
@@ -739,60 +739,7 @@ Redis 那一步是毫秒级的。慢请求都是卡在第二步“写数据库�
 
 ---
 
-## 5.2 `:r` 锁互斥（二）：回补先到
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant Service
-    participant Redis
-    participant Reconcile
-    participant DB
-
-    Reconcile->>Redis: HGETALL claimed
-    Redis-->>Reconcile: (101 → 3000:1732449600)
-    Service->>Redis: rollback Lua (uid=101, 3000)
-    activate Redis
-    Note over Redis: 普通标记：LPUSH 3000 回 LIST + HDEL 101
-    Redis-->>Service: (1 已回补)
-    deactivate Redis
-    Reconcile->>Redis: LockForRepair Lua (uid=101, 原值)
-    activate Redis
-    Note over Redis: 标记已不存在，和原值对不上
-    Redis-->>Reconcile: (0 抢占失败)
-    deactivate Redis
-    Note over Reconcile,DB: 跳过这一份，不调 claimTx
-```
-
-- 两段 Lua 都**先看标记再动手**：谁先改到标记谁处理这一份，另一方让路。
-
----
-
-## 5.3 工单 C：份额池丢失的两道防线
-
-`redpacket:{id}:amounts` 这个 `LIST` 不存在，别人一点开就提示“红包已抢完”。
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-flowchart TD
-    subgraph P1 ["防线 1：发包当场立即逆向退款 (service.go:141-150)"]
-        A1(["Create：DB 扣款事务已提交"]) --> A2{"PrepareRedPacket<br/>写 Redis 成功？"}
-        A2 -- "成功" --> A3(["红包可抢"])
-        A2 -- "失败" --> A4["当场调 refundRedPacketLeft(ctx, rp.ID)<br/>redpacket_escrow 全额退回发包人，状态置 refunded"]
-    end
-    subgraph P2 ["防线 2：对账发现池丢失提前退款 (task.go:171-252)"]
-        B1(["每 2 分钟对账"]) --> B2{"创建已超过 1 分钟？"}
-        B2 -- "是" --> B3{"amounts LIST 不存在？"}
-        B3 -- "是" --> B4{"没有在途孤儿标记？"}
-        B4 -- "是" --> B5{"DB 里仍 active<br/>且 remaining > 0？"}
-        B5 -- "是" --> B6["提前退款<br/>不用让发包人傻等 7 天过期"]
-    end
-    A4 -. "补偿也失败 / 运行中途 Redis 丢数据" .-> B1
-```
-
----
-
-## 5.3 池丢失检查：正确顺序（先 `EXISTS`，后读 `claimed`）
+## 5.3 工单 C · 池丢失检查：正确顺序（先 `EXISTS`，后读 `claimed`）
 
 难点：最后一份被**正常抢走**时，`LPOP` 弹出最后一个元素，Redis 自动删除空 `LIST`，`EXISTS amounts` 同样是 `false`。
 
