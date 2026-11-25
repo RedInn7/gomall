@@ -567,55 +567,20 @@ sequenceDiagram
 
 ---
 
-## 4.2 无脑回补：一份 30 元被发了两次
+## 4.2 DB 报错了，先查库确认
 
-```go
-// ❌ 极其危险的错误写法！
-amount := redisClaim()
-if err := dbClaimTx(amount); err != nil {
-    redisRollback(amount) // 只要报错就无脑把份额塞回 Redis！
-}
-```
+**报错 ≠ 没提交。** Redis 抢到份额后，DB 事务报错有两种可能：
 
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant UserA
-    participant Service
-    participant Redis
-    participant DB
-    participant UserB
+| | 实际情况 | 这一份该怎么办 |
+|---|---|---|
+| 可能一 | 事务真的没提交，钱没动 | 放回 Redis，让别人继续抢 |
+| 可能二 | MySQL 里已经 COMMIT，钱已进用户钱包，只是确认包在路上丢了，Go 进程收到 `driver: bad connection` | 不能放回，放回就会被第二个人领走 |
 
-    UserA->>Service: 抢红包 (uid=A)
-    activate Service
-    Service->>Redis: claim Lua (uid=A)
-    Redis-->>Service: (amount=3000)
-    Service->>DB: dbClaimTx (uid=A, 3000)
-    activate DB
-    Note over DB: COMMIT 成功，A 钱包 +3000
-    DB--xService: 确认包丢失 (driver: bad connection)
-    deactivate DB
-    Service->>Redis: redisRollback (LPUSH 3000)
-    Note over Redis: 已发出去的 3000 又回到 LIST
-    Service-->>UserA: 失败 (err)
-    deactivate Service
-
-    UserB->>Service: 抢红包 (uid=B)
-    activate Service
-    Service->>Redis: claim Lua (uid=B)
-    Redis-->>Service: (amount=3000)
-    Service->>DB: dbClaimTx (uid=B, 3000)
-    activate DB
-    DB-->>Service: (COMMIT OK，B 钱包 +3000)
-    deactivate DB
-    Service-->>UserB: 成功 (3000)
-    deactivate Service
-    Note over Redis,DB: 同一份 3000 入账两次，托管池被击穿亏空
-```
+两种情况服务端拿到的都只是一个 error，光看报错分不清。所以先用 `GetClaim` 反查：库里有记录就是已到账，没有才考虑放回。
 
 ---
 
-## 4.2 正确做法：四分支判定
+## 4.2 四分支判定
 
 `internal/redpacket/service.go:217-246`
 
