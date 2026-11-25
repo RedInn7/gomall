@@ -629,6 +629,20 @@ x-connector { border: none !important; }
 <div class="row p4 fragment" data-fragment-index="4"><p class="note" style="grid-column:1/6">向客户端返回：抢包成功（30 元）</p></div>
 </div>
 </section>
+<section id="slowreq" data-transition="fade">
+<p class="eye">五 · 5.2 慢请求从哪来</p>
+<h2>慢请求是怎么来的：Redis 抢到了，卡在数据库这一步</h2>
+<div class="body">
+<p class="lead">Redis 那一步是毫秒级的。慢请求都是卡在第二步“写数据库”上，一卡就超过 1 分钟。</p>
+<div class="cards">
+<div class="card fragment" data-fragment-index="1"><p class="num">1</p><h3>排队等行锁</h3><p class="t">领取事务要先锁住这个红包的那一行。很多人同时抢同一个红包，或者过期退款正好也在处理它，后来的就得排队。MySQL 默认最多等 50 秒。</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="num">2</p><h3>拿不到数据库连接</h3><p class="t">流量高峰时连接池被占满，请求连数据库的门都没进，一直在等空闲连接。</p></div>
+<div class="card fragment" data-fragment-index="3"><p class="num">3</p><h3>网络丢包</h3><p class="t">请求在去数据库的路上丢了，或者数据库的回复丢了。程序不知道对方收没收到，只能干等到超时。</p></div>
+<div class="card fragment" data-fragment-index="4"><p class="num">4</p><h3>数据库或服务卡住</h3><p class="t">主库故障正在切换；或者服务所在的机器负载太高，进程被暂停了几十秒。</p></div>
+</div>
+<p class="lead fragment" data-fragment-index="5">这四种情况里请求都<span class="hl">没有死，只是慢</span>。它迟早会醒来走回补，而对账可能已经替它补了钱，:r 锁就是为这一刻准备的。</p>
+</div>
+</section>
 <section id="lockb" data-transition="fade">
 <div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
 <p class="eye">五 · 5.2 :r 锁互斥（二）</p>
