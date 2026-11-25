@@ -663,49 +663,21 @@ x-connector { border: none !important; }
 </div>
 </div>
 </section>
-<section id="demo1" data-transition="fade">
-<p class="eye">六 · 故障演练 · 演示 1</p>
-<h2>Redis 清空后，过期退款依然严格按 DB 计算</h2>
-<div class="body">
-<div class="code">
-<p class="c">go test ./internal/redpacket \</p>
-<p class="c i1">-run TestExpireRefundsLeftoverFromDBWhenRedisIsEmpty -v</p>
-</div>
-<div class="cards">
-<div class="card soft fragment" data-fragment-index="1"><p class="k">动手破坏</p><h3>改一行</h3><p class="t">打开 internal/redpacket/task.go，把</p><p class="c" style="color:#3D1F0B">left = rp.Total - claimed</p><p class="t">改成使用 Redis 清理脚本返回的剩余金额。</p></div>
-<div class="card no fragment" data-fragment-index="2"><p class="k">现象</p><h3>测试立刻失败</h3><p class="t">测试故意把 Redis 清空了。按 Redis 算就会退 0 元，发包人的钱就丢了。</p></div>
-</div>
-<p class="lead fragment" data-fragment-index="2">守住的判断：<span class="hl">退款只按 DB 算</span>。</p>
-</div>
-</section>
-<section id="demo2" data-transition="fade">
-<p class="eye">六 · 故障演练 · 演示 2</p>
-<h2>回补与对账补领的 :r 锁互斥</h2>
-<div class="body">
-<div class="code">
-<p class="c">go test ./repository/cache -v -run \</p>
-<p class="c i1">'TestRollbackAndRepairLockAreExclusive|TestRepairLockRequiresOriginalMark'</p>
-<p class="c">go test ./internal/redpacket -v -run \</p>
-<p class="c i1">'TestClaimTxFailureRollsBackRedis|TestClaimCommitUnknownDoesNotRollback'</p>
-<p class="c">go test ./internal/redpacket -v -run TestClaimRollbackYieldsToReconcileRepair</p>
-</div>
-<div class="cards">
-<div class="card soft fragment" data-fragment-index="1"><p class="k">动手破坏</p><h3>注释掉一行</h3><p class="t">repository/cache/redpacket.go:95，回补 Lua 里的</p><p class="c" style="color:#3D1F0B">if string.sub(v, -2) == ':r'</p><p class="c" style="color:#3D1F0B">then return -1 end</p><p class="t">再跑 TestClaimRollbackYieldsToReconcileRepair。</p></div>
-<div class="card no fragment" data-fragment-index="2"><p class="k">现象</p><h3>超发断言失败</h3><p class="t">对账帮用户补领入账后，慢请求又把份额塞回 Redis。</p><p class="t">报错 "redis has an extra share"。</p></div>
-</div>
-</div>
-</section>
 <section id="homework" data-transition="fade">
-<p class="eye">六 · 课后思考与练习</p>
-<h2>四道题</h2>
+<p class="eye">六 · 课后作业</p>
+<h2>两道设计题</h2>
 <div class="body">
 <div class="cards">
-<div class="card"><p class="num">1</p><h3>在途窗口推演</h3><p class="t">claimOrphanGrace 为 1 分钟。一个正常领取事务卡了 90 秒才报错进入回补分支：这 90 秒里对账做了什么？回补收到什么返回值？用户看到成功还是失败？（结合 4.2 和 5.2）</p></div>
-<div class="card"><p class="num">2</p><h3>口令轮换</h3><p class="t">设计 POST /redpacket/rotate-code：用旧口令领过的人还能不能看明细？并发正在抢的人受什么影响？</p></div>
-</div>
-<div class="cards">
-<div class="card"><p class="num">3</p><h3>验证二倍均值分布</h3><p class="t">调用 SplitRedPacket(10000, 10) 十万次，统计 10 个位置的平均金额和最大金额。删掉 Shuffle，第 10 个位置的最大值分布会怎样？</p></div>
-<div class="card"><p class="num">4</p><h3>托管池守恒巡检 SQL</h3><p class="t">找出状态已是 finished 或 refunded、但 redpacket_escrow 借贷净额不为 0 的红包。提示：领包流水的 ref_order_id 是 red_packet_claim.id。</p></div>
+<div class="card"><p class="num">1</p><h3>不靠定时扫描，怎么发现孤儿红包</h3><p class="t">业务量涨了 100 倍，同时有上百万个进行中的红包。请为孤儿红包的发现和补领设计一个不依赖定时全量扫描的方案。</p>
+<p class="k fragment" data-fragment-index="1">提示</p>
+<p class="t fragment" data-fragment-index="1">① 抢到的那一刻，能不能顺手留下一个“1 分钟后回来看一眼”的提醒？项目里已经有 RabbitMQ 延迟队列。</p>
+<p class="t fragment" data-fragment-index="1">② 提醒可能重复，也可能丢。重复了靠什么保证不多发？丢了靠什么兜底？</p>
+<p class="t fragment" data-fragment-index="1">③ 处理提醒时，“先查库、再加 :r、再补发”的顺序还成立吗？</p></div>
+<div class="card"><p class="num">2</p><h3>口令轮换</h3><p class="t">发包人把链接发错了群，想立刻换一个新口令。请设计 POST /redpacket/rotate-code。</p>
+<p class="k fragment" data-fragment-index="2">提示</p>
+<p class="t fragment" data-fragment-index="2">① 口令存在红包表里，轮换是一次更新。谁有权换？同时点两次怎么办？</p>
+<p class="t fragment" data-fragment-index="2">② 已经用旧口令领到钱的人，还能不能看领取明细？明细页该凭口令看，还是凭“我领过”看？</p>
+<p class="t fragment" data-fragment-index="2">③ 换口令的瞬间，有人已经通过了口令校验、正卡在抢包这一步。让他成功，还是让他失败？各有什么后果？</p></div>
 </div>
 </div>
 </section>
