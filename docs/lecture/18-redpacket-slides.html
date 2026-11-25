@@ -491,45 +491,21 @@ x-connector { border: none !important; }
 <div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:3/9">提交失败或结果未知：先 GetClaim(id, uid) 反查，再分四种情况处理</p></div>
 </div>
 </section>
-<section id="wrongcode" data-transition="fade">
+<section id="whycheck" data-transition="fade">
 <p class="eye">四 · 4.2 DB 报错之后</p>
-<h2>很多人会这样写：报错就把份额塞回 Redis</h2>
+<h2>DB 报错了，先查库确认</h2>
 <div class="body">
-<div class="code">
-<p class="c"><span class="cm">// 极其危险的错误写法</span></p>
-<p class="c">amount := redisClaim()</p>
-<p class="c"><span class="kw">if</span> err := dbClaimTx(amount); err != nil {</p>
-<p class="c i1">redisRollback(amount) <span class="cm">// 只要报错就无脑塞回 Redis</span></p>
-<p class="c">}</p>
+<p class="big">报错 ≠ 没提交</p>
+<div class="cards">
+<div class="card fragment" data-fragment-index="1"><p class="k">可能一</p><h3>事务真的没提交</h3><p class="t">钱没动。</p><p class="t">这一份应该放回 Redis，让别人继续抢。</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="k">可能二</p><h3>MySQL 里已经 COMMIT</h3><p class="t">钱已进用户钱包，只是确认包在路上丢了，Go 进程收到 driver: bad connection。</p><p class="t">这一份<b>不能放回</b>，放回就会被第二个人领走。</p></div>
 </div>
-<p class="big fragment" data-fragment-index="1">报错 ≠ 没提交</p>
-<div class="cards fragment" data-fragment-index="1">
-<div class="card no"><h3>MySQL 里其实已经 COMMIT</h3><p class="t">钱已经加进用户钱包。</p></div>
-<div class="card no"><h3>确认包在路上丢了</h3><p class="t">Go 进程只收到 driver: bad connection。</p></div>
-</div>
-</div>
-</section>
-<section id="blind" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">四 · 4.2 无脑回补</p>
-<h2>一份 30 元被发了两次</h2>
-<div class="seq">
-<div class="row p5"><p class="who">UserA</p><p class="who">Service</p><p class="who">Redis</p><p class="who">DB</p><p class="who">UserB</p></div>
-<div class="row p5"><div class="m" style="grid-column:2/4"><p class="lb">抢红包</p><x-connector></x-connector></div></div>
-<div class="row p5"><div class="m" style="grid-column:4/6"><p class="lb">claim Lua → 3000</p><x-connector></x-connector></div></div>
-<div class="row p5 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/8"><p class="lb">dbClaimTx (A, 3000)</p><x-connector></x-connector></div></div>
-<div class="row p5 fragment" data-fragment-index="1"><p class="note" style="grid-column:6/11">COMMIT 成功，A 钱包 +3000</p></div>
-<div class="row p5 fragment" data-fragment-index="2"><div class="m lost" style="grid-column:4/8"><p class="lb">确认包丢失 (bad connection)</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p5 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:4/6"><p class="lb">无脑回补 LPUSH 3000</p><x-connector></x-connector></div></div>
-<div class="row p5 fragment" data-fragment-index="4"><div class="m" style="grid-column:4/10"><p class="lb">B 来抢红包</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p5 fragment" data-fragment-index="4"><div class="m" style="grid-column:4/6"><p class="lb">claim Lua → 又是 3000</p><x-connector></x-connector></div></div>
-<div class="row p5 fragment" data-fragment-index="4"><div class="m" style="grid-column:4/8"><p class="lb">dbClaimTx (B, 3000)，B 钱包 +3000</p><x-connector></x-connector></div></div>
-<div class="row p5 fragment" data-fragment-index="5"><p class="note warn" style="grid-column:3/11">同一份 3000 入账两次，托管池被击穿亏空</p></div>
+<p class="lead fragment" data-fragment-index="3">两种情况服务端拿到的都只是一个 error，光看报错分不清。所以<span class="hl">先用 GetClaim 反查</span>：库里有记录就是已到账，没有才考虑放回。</p>
 </div>
 </section>
 <section id="branches" data-transition="fade">
 <p class="eye">四 · 4.2 四分支判定 · internal/redpacket/service.go:217-246</p>
-<h2>正确做法：先反查 GetClaim，再分四种情况</h2>
+<h2>先反查 GetClaim，再分四种情况</h2>
 <div class="body">
 <div class="cards">
 <div class="card fragment" data-fragment-index="1"><p class="k">分支 1 · qErr != nil</p><h3>连反查都报错</h3><p class="t">什么都不知道，就什么都不动。</p><p class="t"><b>不回补</b>，保留 claimed 标记，交给对账兜底。</p></div>
