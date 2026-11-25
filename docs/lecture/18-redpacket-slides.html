@@ -251,10 +251,10 @@ x-connector { border: none !important; }
 <div class="flow">
 <div class="card soft"><p class="k">① 发包后</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">（空）</p></div>
 <x-connector class="go fragment" data-fragment-index="1"></x-connector>
-<div class="card soft fragment" data-fragment-index="1"><p class="k">② 用户 101 抢到 3000</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000</p></div>
+<div class="card soft fragment" data-fragment-index="1"><p class="k">② 用户 101 抢到 3000</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1732449600</p></div>
 <x-connector class="go fragment" data-fragment-index="2"></x-connector>
 <div class="card yes fragment" data-fragment-index="2"><p class="k">③a 数据库写失败：反悔</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">（101 那行擦掉）</p></div>
-<div class="card no fragment" data-fragment-index="3"><p class="k">③b 断电了：成了孤儿红包</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000:r</p></div>
+<div class="card no fragment" data-fragment-index="3"><p class="k">③b 断电了：成了孤儿红包</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1732449600:r</p></div>
 </div>
 </div>
 </section>
@@ -262,7 +262,7 @@ x-connector { border: none !important; }
 <p class="eye">一 · 数据结构 · claimed 标记的格式</p>
 <h2>名单上为什么要记金额和时间</h2>
 <div class="body">
-<p class="lead">只为了防重复领，名单上写个 1 就够了。实际写的是 <span class="hl">金额:抢到的时间</span>，例如 3000:1730680000。</p>
+<p class="lead">只为了防重复领，名单上写个 1 就够了。实际写的是 <span class="hl">金额:抢到的时间</span>，例如 3000:1732449600。</p>
 <div class="cards">
 <div class="card no"><p class="k">如果只写</p><p class="c" style="color:#3D1F0B">101 → 1</p><p class="t">断电后，后台只知道“101 抢过”，不知道该补他多少钱，也不知道他是刚抢还是早就卡住了。</p></div>
 <div class="card yes fragment" data-fragment-index="1"><p class="k">记金额</p><h3>知道补多少</h3><p class="t">那 30 元已经从一摞里拿走，数据库里也没有。名单是唯一还记得这个数的地方。</p></div>
@@ -586,7 +586,7 @@ x-connector { border: none !important; }
 <div class="cards">
 <div class="card no"><p class="k"><span class="ico redis"></span>Redis · amounts</p><h3>30 元已经弹走</h3><p class="t">LIST 里没有这一份了。</p></div>
 <div class="card no"><p class="k"><span class="ico mysql"></span>MySQL · red_packet_claim</p><h3>没有 101 的记录</h3><p class="t">钱没进钱包。</p></div>
-<div class="card yes"><p class="k"><span class="ico redis"></span>Redis · claimed</p><h3>101 → 3000:1730680000</h3><p class="t">唯一的线索：金额 + 时间。他再点只会收到“已领取过”。</p></div>
+<div class="card yes"><p class="k"><span class="ico redis"></span>Redis · claimed</p><h3>101 → 3000:1732449600</h3><p class="t">唯一的线索：金额 + 时间。他再点只会收到“已领取过”。</p></div>
 </div>
 <p class="lead fragment" data-fragment-index="1">RunRedPacketClaimReconcile 每 2 分钟，对每个红包调 reconcileRedPacket，把每条标记和主库比：</p>
 <div class="flow fragment" data-fragment-index="1">
@@ -604,11 +604,12 @@ x-connector { border: none !important; }
 <div class="body">
 <table>
 <tr class="thead"><th style="width:11%">时间</th><th style="width:35%">发生了什么</th><th style="width:27%"><span class="ico redis"></span>Redis 名单里 101 这一行</th><th><span class="ico mysql"></span>MySQL</th></tr>
-<tr><td>12:00:00</td><td>101 抢到 30 元，服务器随即断电</td><td>3000:1730680000</td><td>没有领取记录</td></tr>
-<tr class="alt fragment" data-fragment-index="1"><td>12:00:40</td><td>对账扫到：才过 40 秒，先不动</td><td>3000:1730680000</td><td>没有领取记录</td></tr>
-<tr class="fragment" data-fragment-index="2"><td>12:02:40</td><td>对账再扫：超过 1 分钟，<b>加上 :r</b></td><td><span class="hl">3000:1730680000:r</span></td><td>没有领取记录</td></tr>
-<tr class="alt fragment" data-fragment-index="3"><td>12:02:40</td><td>对账替 101 跑一遍领取事务</td><td>3000:1730680000:r</td><td><b>有领取记录，钱包 +30 元</b></td></tr>
+<tr><td>12:00:00</td><td>101 抢到 30 元，服务器随即断电</td><td>3000:1732449600</td><td>没有领取记录</td></tr>
+<tr class="alt fragment" data-fragment-index="1"><td>12:00:40</td><td>对账扫到：才过 40 秒，先不动</td><td>3000:1732449600</td><td>没有领取记录</td></tr>
+<tr class="fragment" data-fragment-index="2"><td>12:02:40</td><td>对账再扫：超过 1 分钟，<b>加上 :r</b></td><td><span class="hl">3000:1732449600:r</span></td><td>没有领取记录</td></tr>
+<tr class="alt fragment" data-fragment-index="3"><td>12:02:40</td><td>对账替 101 跑一遍领取事务</td><td>3000:1732449600:r</td><td><b>有领取记录，钱包 +30 元</b></td></tr>
 </table>
+<p class="t" style="margin-top:14px">这一行的格式是 <span class="hl">金额（分）:领取时间（秒）</span>。3000 是 3000 分，也就是 30 元；后面那串数字是 12:00:00 换算成的秒数。</p>
 <p class="lead fragment" data-fragment-index="4">加上 :r 之后，原来那个请求就算醒过来、想把这 30 元放回 Redis，看到 :r 也会停手，这一份不会被发两次。</p>
 </div>
 </section>
@@ -618,7 +619,7 @@ x-connector { border: none !important; }
 <h2>对账先到：慢请求的回补被拒，按成功返回</h2>
 <div class="seq">
 <div class="row p4"><p class="who"><span class="ico service"></span>慢请求（要回补）</p><p class="who"><span class="ico redis"></span>Redis claimed</p><p class="who"><span class="ico cron"></span>对账（要补领）</p><p class="who"><span class="ico mysql"></span>DB</p></div>
-<div class="row p4"><p class="note" style="grid-column:2/7">标记 3000:1730680000；请求卡了 1 分多钟才走到回补</p></div>
+<div class="row p4"><p class="note" style="grid-column:2/7">标记 3000:1732449600；请求卡了 1 分多钟才走到回补</p></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:4/6"><p class="lb">① LockForRepair Lua</p><x-connector from="tr"></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:4/6"><p class="lb">1 成功，标记变 …:r</p><x-connector></x-connector></div></div>
 <div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:6/8"><p class="lb">② claimTx 落库 +30 元</p><x-connector></x-connector></div></div>

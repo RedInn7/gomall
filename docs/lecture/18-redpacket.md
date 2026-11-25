@@ -170,7 +170,7 @@ flowchart LR
     subgraph T1 ["② 用户 101 抢到 3000"]
         direction TB
         L1["amounts<br/>5000 | 2000"]
-        H1["claimed<br/>101 → 3000:1730680000"]
+        H1["claimed<br/>101 → 3000:1732449600"]
     end
     subgraph T2a ["③a DB 失败，回补"]
         direction TB
@@ -180,7 +180,7 @@ flowchart LR
     subgraph T2b ["③b 成了孤儿红包，对账接手"]
         direction TB
         L3["amounts<br/>5000 | 2000"]
-        H3["claimed<br/>101 → 3000:1730680000:r"]
+        H3["claimed<br/>101 → 3000:1732449600:r"]
     end
     T0 -- "claim Lua" --> T1
     T1 -- "rollback Lua" --> T2a
@@ -410,7 +410,7 @@ local amt = redis.call('LPOP', KEYS[1])
 if not amt then
     return -1                      -- 2. LIST 空了，红包已抢完！
 end
--- 3. 写入抢包标记，例如 HSET redpacket:10:claimed 101 "3000:1730680000"
+-- 3. 写入抢包标记，例如 HSET redpacket:10:claimed 101 "3000:1732449600"
 redis.call('HSET', KEYS[2], ARGV[1], amt .. ':' .. ARGV[3])
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[2]))
 return tonumber(amt)               -- 4. 返回抢到的金额（分）
@@ -687,10 +687,12 @@ flowchart TD
 
 | 时间 | 发生了什么 | Redis 名单里 101 这一行 | MySQL |
 |---|---|---|---|
-| 12:00:00 | 101 抢到 30 元，服务器随即断电 | `3000:1730680000` | 没有领取记录 |
-| 12:00:40 | 对账扫到：才过 40 秒，先不动 | `3000:1730680000` | 没有领取记录 |
-| 12:02:40 | 对账再扫：超过 1 分钟，**加上 `:r`** | `3000:1730680000:r` | 没有领取记录 |
-| 12:02:40 | 对账替 101 跑一遍领取事务 | `3000:1730680000:r` | 有领取记录，钱包 +30 元 |
+| 12:00:00 | 101 抢到 30 元，服务器随即断电 | `3000:1732449600` | 没有领取记录 |
+| 12:00:40 | 对账扫到：才过 40 秒，先不动 | `3000:1732449600` | 没有领取记录 |
+| 12:02:40 | 对账再扫：超过 1 分钟，**加上 `:r`** | `3000:1732449600:r` | 没有领取记录 |
+| 12:02:40 | 对账替 101 跑一遍领取事务 | `3000:1732449600:r` | 有领取记录，钱包 +30 元 |
+
+这一行的格式是“金额（分）:领取时间（秒）”：`3000` 是 3000 分，也就是 30 元；后面那串数字是 12:00:00 换算成的秒数。
 
 加上 `:r` 之后，原来那个请求就算醒过来、想把这 30 元放回 Redis，看到 `:r` 也会停手，这一份不会被发两次。
 
@@ -708,9 +710,9 @@ sequenceDiagram
     participant Rec as 后台对账协程 (准备替用户补领入账)
     participant DB as MySQL
 
-    Note over Redis: 当前标记值: "3000:1730680000"
+    Note over Redis: 当前标记值: "3000:1732449600"
     Rec->>Redis: 1. LockForRepair Lua (对比原值一致，追加 :r)
-    Note over Redis: 标记变为: "3000:1730680000:r"
+    Note over Redis: 标记变为: "3000:1732449600:r"
     Redis-->>Rec: 返回 1 (加锁成功!)
     Rec->>DB: 2. 执行 claimTx 替用户落库并加钱 30 元，COMMIT!
     Claim->>Redis: 3. 慢请求终于醒来，执行 rollback Lua
@@ -733,7 +735,7 @@ sequenceDiagram
     participant DB
 
     Reconcile->>Redis: HGETALL claimed
-    Redis-->>Reconcile: (101 → 3000:1730680000)
+    Redis-->>Reconcile: (101 → 3000:1732449600)
     Service->>Redis: rollback Lua (uid=101, 3000)
     activate Redis
     Note over Redis: 普通标记：LPUSH 3000 回 LIST + HDEL 101
