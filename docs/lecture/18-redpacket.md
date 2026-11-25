@@ -144,7 +144,7 @@ flowchart TD
 |---|---|---|---|
 | **A** | 点“抢”报错失败；再点提示“您已领取过该红包”，钱也没到账 | Redis 扣了份额、打了已领标记，DB 事务失败后没把标记和份额退回 Redis | **4.2、4.3**：失败先查库 + Saga 原子回补 |
 | **B** | 抢的时候转圈断开；半小时后份额没退回红包池，钱包也没收到钱（孤儿红包） | 抢完 Redis 后服务器断电重启，回补没跑成，份额卡在半空 | **5.2**：`claimed` 孤儿红包对账自动补领（`:r` 抢占锁） |
-| **C** | 发包人被扣了 100 元，群里所有人点开都显示“红包已抢完” | DB 扣款事务提交成功，紧接着写 Redis 金额列表时 Redis 挂了 | **5.3**：发包失败立即逆向退款 + 份额池丢失检测提前退款 |
+| **C** | 发包人被扣了 100 元，群里所有人点开都显示“红包已抢完” | DB 扣款事务提交成功，紧接着写 Redis 金额列表时 Redis 挂了 | **第五部分**：发包失败立即逆向退款 + 份额池丢失检测提前退款 |
 
 ---
 
@@ -285,7 +285,7 @@ func codeMatches(rp *RedPacket, code string, legacyOK bool) bool {
 | **D** 活动前批量预生成 | 平台按预算离线生成全部金额，开抢前预热进缓存 | 开抢时只扣库存，预算不会超 | 要提前知道总量，不适合用户随手发 |
 
 - 越往下，金额定得越早、越可控，发包也越重。
-- gomall 是用户随手发的小额红包，选 B：把丢份额的风险交给 5.3 节的“池丢失提前退款”兜底。
+- gomall 是用户随手发的小额红包，选 B：把丢份额的风险交给第五部分的“池丢失提前退款”兜底。
 
 ---
 
@@ -653,8 +653,8 @@ stateDiagram-v2
 | 防线 | 触发 | 解决 |
 |---|---|---|
 | 5.2 孤儿红包补领 | 每 2 分钟 | 工单 B：抢到了但钱没到账 |
-| 5.3 份额池丢失补偿 | 发包当场 + 每 2 分钟 | 工单 C：扣了钱但没人能抢 |
-| 5.4 过期回收 | 每 5 分钟 | 没领完的钱退回发包人 |
+| 份额池丢失补偿 | 发包当场 + 每 2 分钟 | 工单 C：扣了钱但没人能抢。写 Redis 失败当场退款；运行中丢了，对账发现后退款 |
+| 5.3 过期回收 | 每 5 分钟 | 没领完的钱退回发包人 |
 
 ---
 
@@ -739,69 +739,7 @@ Redis 那一步是毫秒级的。慢请求都是卡在第二步“写数据库�
 
 ---
 
-## 5.3 工单 C · 池丢失检查：正确顺序（先 `EXISTS`，后读 `claimed`）
-
-难点：最后一份被**正常抢走**时，`LPOP` 弹出最后一个元素，Redis 自动删除空 `LIST`，`EXISTS amounts` 同样是 `false`。
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant Service
-    participant Redis
-    participant Reconcile
-    participant DB
-
-    Note over Redis: amounts 只剩最后 1 份
-    Service->>Redis: claim Lua (uid=Z)
-    activate Redis
-    Note over Redis: LPOP 和 HSET claimed 原子完成，空 LIST 被自动删除
-    Redis-->>Service: (amount=2000)
-    deactivate Redis
-    Reconcile->>Redis: 1. EXISTS amounts
-    Redis-->>Reconcile: (false)
-    Reconcile->>Redis: 2. HGETALL claimed
-    Redis-->>Reconcile: (一定含 Z 的标记，抢到不足 1 分钟)
-    Reconcile->>DB: ListClaims (id)
-    DB-->>Reconcile: (还没有 Z)
-    Note over Reconcile: Z 在途，r.pending = true，判定为正常抢完，不退款
-    Service->>DB: claimTx (uid=Z, 2000)
-    DB-->>Service: (COMMIT OK)
-```
-
----
-
-## 5.3 池丢失检查：错误顺序（先读 `claimed`，后 `EXISTS`）
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant Service
-    participant Redis
-    participant Reconcile
-    participant DB
-
-    Note over Redis: amounts 只剩最后 1 份，还没人抢
-    Reconcile->>Redis: 1. HGETALL claimed
-    Redis-->>Reconcile: (没有 Z 的标记)
-    Service->>Redis: claim Lua (uid=Z)
-    activate Redis
-    Note over Redis: 微秒间隙里 Z 抢走最后 1 份，LIST 变空消失
-    Redis-->>Service: (amount=2000)
-    deactivate Redis
-    Reconcile->>Redis: 2. EXISTS amounts
-    Redis-->>Reconcile: (false)
-    Note over Reconcile: 没有在途标记 + LIST 不存在，误以为 Redis 数据丢了
-    Reconcile->>DB: Get (id)
-    DB-->>Reconcile: (active，remaining = 1)
-    Reconcile->>DB: refundRedPacketLeft (退 2000 给发包人，status=refunded)
-    Service->>DB: claimTx (uid=Z, 2000)
-    DB-->>Service: (errRedPacketClosed)
-    Note over Service,DB: Z 正在入账的这笔钱被当成未领余额退给了发包人
-```
-
----
-
-## 5.4 过期回收：先补齐孤儿红包，再按 DB 退剩余
+## 5.3 过期回收：先补齐孤儿红包，再按 DB 退剩余
 
 `RunRedPacketExpireCheck` 每 5 分钟一次（`internal/redpacket/task.go:24-65`）：
 
