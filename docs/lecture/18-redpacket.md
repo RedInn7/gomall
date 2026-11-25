@@ -605,37 +605,6 @@ flowchart TD
 ```
 
 - 四个分支里**只有分支 4 会回补**。
-- 还有第五种情况同样不回补：这一份入账会让已领总额超过红包总额，见下一页。
-
----
-
-## 4.2 补充：DB 不只限份数，还限金额
-
-`claimTx`（`internal/redpacket/service.go:270-321`）在拿到红包行锁之后，除了扣减剩余份数，还校验**已领总额不超过红包总额**。
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant Service
-    participant Redis
-    participant DB
-
-    Note over Service,DB: 红包 100 元拆成 99 和 1，A 领走 99 已落库
-    Note over Redis: 主从切换丢写：99 又回到 LIST，A 的标记也没了
-    Service->>Redis: claim Lua (uid=B)
-    Redis-->>Service: (amount=99)
-    Service->>DB: claimTx (INSERT claim 99, remaining-1)
-    activate DB
-    Note over DB: 份数没超。拿到行锁后 SUM(已领) = 198，大于 Total 100
-    DB-->>Service: (errShareOverTotal，事务回滚)
-    deactivate DB
-    Service->>Redis: 这份作废：不放回 LIST，只删 B 的标记
-    Note over Service,Redis: B 看到已抢完，可以重抢。真正剩下的 1 分照常能领
-```
-
-- 只校验份数不够：Redis 回档后同一份金额可能被弹出两次，份数没超，总额却超了。
-- 这一份和回补不同：它本身是 Redis 多出来的，**不能放回** `LIST`，只撤掉 `claimed` 标记。
-- 对账补领走的是同一个 `claimTx`，同样会被拦下。
 
 ---
 
