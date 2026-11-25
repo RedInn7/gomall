@@ -1,558 +1,326 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" font-family="'Inter','SF Pro Display','Segoe UI',system-ui,sans-serif">
-  <!-- ============================================================= -->
-  <!-- gomall · 整体架构 (Overall Architecture)                       -->
-  <!-- Top→Bottom traffic topology: Client → Gateway → Services →    -->
-  <!-- (MQ bypass) → Data/Infra. Solid=#38bdf8 sync, dashed=#fbbf24. -->
-  <!-- ============================================================= -->
-
-  <!-- ===================== Shared defs ===================== -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 1000" font-family="'Inter','SF Pro Display','PingFang SC','Segoe UI',system-ui,sans-serif">
+  <!-- ================================================================== -->
+  <!-- gomall · 整体架构                                                   -->
+  <!-- 自上而下：Client → Gateway → Domains → Shared/Repository → Data     -->
+  <!-- 右侧：后台驱动（Cron / Web3 Listener）与异步旁路（Outbox → MQ）      -->
+  <!-- 实线 = 同步调用，虚线 = 异步 / 事件。所有连线只走层间空隙，不穿组件。 -->
+  <!-- ================================================================== -->
   <defs>
-    <!-- 层级渐变 -->
-    <linearGradient id="gClient" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#f472b6"/><stop offset="1" stop-color="#a855f7"/>
-    </linearGradient>
-    <linearGradient id="gGate" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#0ea5e9"/>
-    </linearGradient>
-    <linearGradient id="gTrade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#60a5fa"/><stop offset="1" stop-color="#2563eb"/>
-    </linearGradient>
-    <linearGradient id="gProduct" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2dd4bf"/><stop offset="1" stop-color="#0d9488"/>
-    </linearGradient>
-    <linearGradient id="gPromo" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fb923c"/><stop offset="1" stop-color="#ea580c"/>
-    </linearGradient>
-    <linearGradient id="gUser" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#c084fc"/><stop offset="1" stop-color="#9333ea"/>
-    </linearGradient>
-    <linearGradient id="gData" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#059669"/>
-    </linearGradient>
-    <linearGradient id="gMQ" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#d97706"/>
-    </linearGradient>
-    <!-- 阴影 -->
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.35"/>
-    </filter>
-    <!-- 核心组件发光 -->
-    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="6" result="b"/>
-      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <!-- 实线箭头(同步主流量) -->
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#38bdf8"/>
-    </marker>
-    <!-- 虚线箭头(异步/MQ/旁路) -->
-    <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M0,0 L10,5 L0,10 z" fill="#fbbf24"/>
-    </marker>
+    <!-- 渐变：每一层一种色系 -->
+    <linearGradient id="gBg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0d1117"/><stop offset="1" stop-color="#111827"/></linearGradient>
+    <linearGradient id="gTitle" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#7dd3fc"/><stop offset=".5" stop-color="#a78bfa"/><stop offset="1" stop-color="#f9a8d4"/></linearGradient>
+    <linearGradient id="gClient" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ec4899"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+    <linearGradient id="gGate" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0ea5e9"/><stop offset="1" stop-color="#06b6d4"/></linearGradient>
+    <linearGradient id="gChip" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1e3a5f"/><stop offset="1" stop-color="#172554"/></linearGradient>
+    <linearGradient id="gTrade" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#4f46e5"/></linearGradient>
+    <linearGradient id="gProd" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0d9488"/></linearGradient>
+    <linearGradient id="gPromo" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f59e0b"/><stop offset="1" stop-color="#ea580c"/></linearGradient>
+    <linearGradient id="gUser" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#a855f7"/><stop offset="1" stop-color="#7c3aed"/></linearGradient>
+    <linearGradient id="gShared" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#334155"/><stop offset="1" stop-color="#1e293b"/></linearGradient>
+    <linearGradient id="gData" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22c55e"/><stop offset="1" stop-color="#059669"/></linearGradient>
+    <linearGradient id="gExt" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f43f5e"/><stop offset="1" stop-color="#be185d"/></linearGradient>
+    <linearGradient id="gAsync" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#f97316"/></linearGradient>
+    <linearGradient id="gBack" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#64748b"/><stop offset="1" stop-color="#475569"/></linearGradient>
+    <radialGradient id="orbA" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#38bdf8" stop-opacity=".16"/><stop offset="1" stop-color="#38bdf8" stop-opacity="0"/></radialGradient>
+    <radialGradient id="orbB" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#f59e0b" stop-opacity=".12"/><stop offset="1" stop-color="#f59e0b" stop-opacity="0"/></radialGradient>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="#ffffff" fill-opacity=".045"/></pattern>
 
-    <!-- ===== Component Icons (24x24, white) ===== -->
-    <!-- MySQL: 数据库圆柱 + 海豚尾鳍点睛 -->
-    <symbol id="ic-mysql" viewBox="0 0 24 24">
-      <g fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round">
-        <ellipse cx="11" cy="5.2" rx="6.6" ry="2.4"/>
-        <path d="M4.4 5.2 V15 c0 1.33 2.96 2.4 6.6 2.4 s6.6-1.07 6.6-2.4 V5.2"/>
-        <path d="M4.4 10.1 c0 1.33 2.96 2.4 6.6 2.4 s6.6-1.07 6.6-2.4" stroke-opacity="0.65"/>
-      </g>
-      <path d="M16.4 14.2 c2.2 0.2 3.4 1.6 4.2 3.4 c-1.7-0.7-2.6-0.5-3.4-0.2 c0.5-1.1 0.1-2.2-0.8-3.2 z" fill="#ffffff"/>
-    </symbol>
-    <!-- Redis: 堆叠立方(三层菱形) -->
-    <symbol id="ic-redis" viewBox="0 0 24 24">
-      <g fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round">
-        <path d="M2.6 7.2 L12 3.4 L21.4 7.2 L12 11 Z"/>
-        <path d="M2.6 12 L12 15.8 L21.4 12"/>
-        <path d="M2.6 16.6 L12 20.4 L21.4 16.6"/>
-      </g>
-      <circle cx="12" cy="7.2" r="1.1" fill="#ffffff"/>
-    </symbol>
-    <!-- RabbitMQ: 消息队列(信封 + 流转箭头) -->
-    <symbol id="ic-rabbitmq" viewBox="0 0 24 24">
-      <rect x="3" y="6" width="14" height="10" rx="1.6" fill="none" stroke="#ffffff" stroke-width="1.6"/>
-      <path d="M3.6 7 L10 11.4 L16.4 7" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
-      <path d="M16 18.6 h4 m0 0 l-2-2 m2 2 l-2 2" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-    </symbol>
-    <!-- ElasticSearch: 放大镜(检索) -->
-    <symbol id="ic-es" viewBox="0 0 24 24">
-      <circle cx="10" cy="10" r="6" fill="none" stroke="#ffffff" stroke-width="1.7"/>
-      <path d="M14.6 14.6 L20 20" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
-      <path d="M7.4 10 h5.2 M10 7.4 v5.2" stroke="#ffffff" stroke-width="1.3" stroke-opacity="0.7"/>
-    </symbol>
-    <!-- Milvus: 向量散点(近邻连边) -->
-    <symbol id="ic-milvus" viewBox="0 0 24 24">
-      <g stroke="#ffffff" stroke-width="1.3" stroke-opacity="0.7">
-        <path d="M6 7 L12 12 M18 6 L12 12 M5 17 L12 12 M17 17 L12 12"/>
-      </g>
-      <g fill="#ffffff">
-        <circle cx="6" cy="7" r="1.7"/><circle cx="18" cy="6" r="1.7"/>
-        <circle cx="5" cy="17" r="1.7"/><circle cx="17" cy="17" r="1.7"/>
-        <circle cx="12" cy="12" r="2.2"/>
-      </g>
-    </symbol>
-    <!-- Web3 / EVM: 以太坊菱形 -->
-    <symbol id="ic-web3" viewBox="0 0 24 24">
-      <g fill="#ffffff">
-        <path d="M12 2 L18.4 12 L12 15.6 L5.6 12 Z" fill-opacity="0.95"/>
-        <path d="M12 2 L18.4 12 L12 9.4 Z" fill-opacity="0.6"/>
-        <path d="M12 16.9 L18.4 13.2 L12 22 L5.6 13.2 Z"/>
-      </g>
-    </symbol>
-    <!-- Web Portal: 浏览器窗口 -->
-    <symbol id="ic-web" viewBox="0 0 24 24">
-      <rect x="3" y="4.5" width="18" height="15" rx="1.8" fill="none" stroke="#ffffff" stroke-width="1.6"/>
-      <path d="M3 8.6 H21" stroke="#ffffff" stroke-width="1.6"/>
-      <g fill="#ffffff"><circle cx="5.6" cy="6.5" r="0.8"/><circle cx="8" cy="6.5" r="0.8"/></g>
-    </symbol>
-    <!-- Mobile App: 手机 -->
-    <symbol id="ic-mobile" viewBox="0 0 24 24">
-      <rect x="7" y="3" width="10" height="18" rx="2.2" fill="none" stroke="#ffffff" stroke-width="1.6"/>
-      <path d="M10.4 18 h3.2" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
-    </symbol>
-    <!-- Gateway: 盾形(网关/中间件) -->
-    <symbol id="ic-gateway" viewBox="0 0 24 24">
-      <path d="M12 2.6 L20 5.4 V11 c0 5.2-3.4 8.2-8 10.4 C7.4 19.2 4 16.2 4 11 V5.4 Z" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linejoin="round"/>
-      <path d="M8.6 11.6 L11 14 L15.4 9" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-    </symbol>
-    <!-- Outbox: 发件箱(箱 + 上行箭头) -->
-    <symbol id="ic-outbox" viewBox="0 0 24 24">
-      <path d="M3.5 12 H8 l1.4 2.2 h4.2 L15 12 h5.5 V19 a1.4 1.4 0 0 1-1.4 1.4 H4.9 A1.4 1.4 0 0 1 3.5 19 Z" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linejoin="round"/>
-      <path d="M12 9.6 V2.8 m0 0 L9.4 5.4 M12 2.8 l2.6 2.6" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </symbol>
+    <!-- 阴影与发光 -->
+    <filter id="shadow" x="-10%" y="-20%" width="120%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity=".3"/></filter>
+    <filter id="glowBlue" x="-30%" y="-50%" width="160%" height="200%"><feGaussianBlur stdDeviation="9" result="b"/><feFlood flood-color="#38bdf8" flood-opacity=".55"/><feComposite in2="b" operator="in"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="glowAmber" x="-30%" y="-50%" width="160%" height="200%"><feGaussianBlur stdDeviation="9" result="b"/><feFlood flood-color="#fbbf24" flood-opacity=".5"/><feComposite in2="b" operator="in"/><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+
+    <!-- 箭头 -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#38bdf8"/></marker>
+    <marker id="arrowA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" fill="#fbbf24"/></marker>
+
+    <style>
+      .layer { fill: #ffffff; fill-opacity: .028; stroke: #ffffff; stroke-opacity: .09; stroke-width: 1; }
+      .lt { font-size: 12px; font-weight: 700; letter-spacing: 2px; fill: #94a3b8; }
+      .box { stroke: rgba(255,255,255,.15); stroke-width: 1.2; }
+      .tag { font: 500 10px 'JetBrains Mono','SF Mono',Menlo,monospace; fill: #ffffff; fill-opacity: .72; }
+      .t { font-size: 15px; font-weight: 700; fill: #ffffff; }
+      .ts { font-size: 13.5px; font-weight: 700; fill: #ffffff; }
+      .s { font-size: 11px; fill: #ffffff; fill-opacity: .8; }
+      .note { font-size: 11px; fill: #94a3b8; }
+      .sync { fill: none; stroke: #38bdf8; stroke-width: 1.8; }
+      .async { fill: none; stroke: #fbbf24; stroke-width: 1.8; stroke-dasharray: 5 5; animation: flow 1.1s linear infinite; }
+      .pulse { fill: none; stroke: #e0f2fe; stroke-width: 1.8; stroke-linecap: round; stroke-dasharray: 3 22; animation: run 1.6s linear infinite; }
+      @keyframes flow { to { stroke-dashoffset: -20; } }
+      @keyframes run { to { stroke-dashoffset: -50; } }
+      @media (prefers-reduced-motion: reduce) { .async, .pulse { animation: none; } }
+    </style>
   </defs>
 
-  <!-- ===================== Background ===================== -->
-  <rect x="0" y="0" width="1200" height="800" fill="#0d1117"/>
+  <!-- ===================== 背景 ===================== -->
+  <rect width="1500" height="1000" fill="url(#gBg)"/>
+  <rect width="1500" height="1000" fill="url(#dots)"/>
+  <circle cx="240" cy="300" r="420" fill="url(#orbA)"/>
+  <circle cx="1300" cy="560" r="380" fill="url(#orbB)"/>
 
-  <!-- ===================== Title ===================== -->
+  <!-- ===================== 标题与图例 ===================== -->
+  <text x="40" y="64" font-size="34" font-weight="800" fill="url(#gTitle)">gomall · 整体架构</text>
+  <text x="40" y="90" font-size="14" fill="#94a3b8">Gin 单体 · 业务域垂直切片 · 同步落库收钱，事件经 Outbox 旁路异步</text>
   <g>
-    <text x="48" y="46" fill="#ffffff" font-size="30" font-weight="700">gomall · 整体架构</text>
-    <text x="48" y="72" fill="rgba(255,255,255,0.55)" font-size="14" letter-spacing="0.5">Gin 单体电商 · 分域服务 + RabbitMQ 旁路 + 多存储基础设施　Client → Gateway → Services → Data</text>
-  </g>
-
-  <!-- ===================== Legend (top-right) ===================== -->
-  <g transform="translate(820,28)">
-    <rect x="0" y="0" width="332" height="56" rx="10" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <!-- sync -->
-    <line x1="16" y1="20" x2="56" y2="20" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
-    <text x="64" y="24" fill="rgba(255,255,255,0.75)" font-size="12">同步调用</text>
-    <!-- async -->
-    <line x1="150" y1="20" x2="190" y2="20" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" marker-end="url(#arrowA)"/>
-    <text x="198" y="24" fill="rgba(255,255,255,0.75)" font-size="12">异步 / MQ</text>
-    <!-- domain swatches -->
-    <rect x="16" y="36" width="11" height="11" rx="2" fill="url(#gTrade)"/>
-    <text x="31" y="45" fill="rgba(255,255,255,0.6)" font-size="11">交易</text>
-    <rect x="68" y="36" width="11" height="11" rx="2" fill="url(#gProduct)"/>
-    <text x="83" y="45" fill="rgba(255,255,255,0.6)" font-size="11">商品</text>
-    <rect x="120" y="36" width="11" height="11" rx="2" fill="url(#gPromo)"/>
-    <text x="135" y="45" fill="rgba(255,255,255,0.6)" font-size="11">营销</text>
-    <rect x="172" y="36" width="11" height="11" rx="2" fill="url(#gUser)"/>
-    <text x="187" y="45" fill="rgba(255,255,255,0.6)" font-size="11">用户</text>
-    <rect x="224" y="36" width="11" height="11" rx="2" fill="url(#gData)"/>
-    <text x="239" y="45" fill="rgba(255,255,255,0.6)" font-size="11">基础设施</text>
-    <rect x="294" y="36" width="11" height="11" rx="2" fill="url(#gMQ)"/>
-    <text x="309" y="45" fill="rgba(255,255,255,0.6)" font-size="11">MQ</text>
-  </g>
-
-  <!-- ============================================================= -->
-  <!-- Layer 1: Client (gClient)                                     -->
-  <!-- ============================================================= -->
-  <g>
-    <rect x="48" y="96" width="430" height="86" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <text x="64" y="118" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">CLIENT 客户端层</text>
-    <!-- Web Portal -->
-    <g>
-      <rect x="70" y="126" width="180" height="48" rx="8" fill="url(#gClient)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-web" x="84" y="139" width="24" height="24"/>
-      <text x="116" y="144" fill="rgba(255,255,255,0.6)" font-size="11">[Client]</text>
-      <text x="116" y="163" fill="#ffffff" font-size="16" font-weight="700">Web Portal</text>
-    </g>
-    <!-- Mobile App -->
-    <g>
-      <rect x="276" y="126" width="180" height="48" rx="8" fill="url(#gClient)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-mobile" x="290" y="139" width="24" height="24"/>
-      <text x="322" y="144" fill="rgba(255,255,255,0.6)" font-size="11">[Client]</text>
-      <text x="322" y="163" fill="#ffffff" font-size="16" font-weight="700">Mobile App</text>
+    <rect class="layer" x="1140" y="36" width="320" height="60" rx="10"/>
+    <path class="sync" d="M1160 56 H1204" marker-end="url(#arrow)"/>
+    <text x="1214" y="60" font-size="12" fill="#cbd5e1">同步调用</text>
+    <path class="async" d="M1296 56 H1340" marker-end="url(#arrowA)"/>
+    <text x="1350" y="60" font-size="12" fill="#cbd5e1">异步 / 事件</text>
+    <g font-size="11" fill="#94a3b8">
+      <rect x="1160" y="74" width="10" height="10" rx="2" fill="url(#gTrade)"/><text x="1175" y="83">交易</text>
+      <rect x="1212" y="74" width="10" height="10" rx="2" fill="url(#gProd)"/><text x="1227" y="83">商品</text>
+      <rect x="1264" y="74" width="10" height="10" rx="2" fill="url(#gPromo)"/><text x="1279" y="83">营销</text>
+      <rect x="1316" y="74" width="10" height="10" rx="2" fill="url(#gUser)"/><text x="1331" y="83">用户</text>
+      <rect x="1368" y="74" width="10" height="10" rx="2" fill="url(#gData)"/><text x="1383" y="83">存储</text>
+      <rect x="1420" y="74" width="10" height="10" rx="2" fill="url(#gExt)"/><text x="1435" y="83">外部</text>
     </g>
   </g>
 
-  <!-- ============================================================= -->
-  <!-- Layer 2: Gateway + Middleware chain (gGate)                   -->
-  <!-- ============================================================= -->
-  <g>
-    <rect x="48" y="214" width="1104" height="118" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <text x="64" y="236" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">GATEWAY 接入层 · 中间件链</text>
-
-    <!-- Gin Router (core entry, glow) -->
-    <g filter="url(#glow)">
-      <rect x="70" y="250" width="190" height="66" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2"/>
-      <use href="#ic-gateway" x="86" y="271" width="26" height="26"/>
-      <text x="120" y="272" fill="rgba(255,255,255,0.7)" font-size="11">[Entry]</text>
-      <text x="120" y="294" fill="#ffffff" font-size="17" font-weight="700">Gin Router</text>
-      <text x="120" y="310" fill="rgba(255,255,255,0.65)" font-size="11">HTTP API 网关</text>
-    </g>
-
-    <!-- Middleware chain (small boxes) -->
-    <!-- JWT -->
-    <g>
-      <rect x="290" y="258" width="128" height="50" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="302" y="280" fill="rgba(255,255,255,0.7)" font-size="10">[MW]</text>
-      <text x="302" y="297" fill="#ffffff" font-size="13" font-weight="700">JWT 鉴权</text>
-    </g>
-    <!-- RBAC -->
-    <g>
-      <rect x="430" y="258" width="128" height="50" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="442" y="280" fill="rgba(255,255,255,0.7)" font-size="10">[MW]</text>
-      <text x="442" y="297" fill="#ffffff" font-size="13" font-weight="700">RBAC 权限</text>
-    </g>
-    <!-- TokenBucket -->
-    <g>
-      <rect x="570" y="258" width="138" height="50" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="582" y="280" fill="rgba(255,255,255,0.7)" font-size="10">[MW]</text>
-      <text x="582" y="297" fill="#ffffff" font-size="13" font-weight="700">TokenBucket 限流</text>
-    </g>
-    <!-- CircuitBreaker -->
-    <g>
-      <rect x="720" y="258" width="150" height="50" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="732" y="280" fill="rgba(255,255,255,0.7)" font-size="10">[MW]</text>
-      <text x="732" y="297" fill="#ffffff" font-size="13" font-weight="700">CircuitBreaker 熔断</text>
-    </g>
-    <!-- Idempotency -->
-    <g>
-      <rect x="882" y="258" width="142" height="50" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="894" y="280" fill="rgba(255,255,255,0.7)" font-size="10">[MW]</text>
-      <text x="894" y="297" fill="#ffffff" font-size="13" font-weight="700">Idempotency 幂等</text>
-    </g>
-    <!-- CORS -->
-    <g>
-      <rect x="1036" y="258" width="100" height="50" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="1048" y="280" fill="rgba(255,255,255,0.7)" font-size="10">[MW]</text>
-      <text x="1048" y="297" fill="#ffffff" font-size="13" font-weight="700">CORS 跨域</text>
-    </g>
+  <!-- ===================== Layer 1: Client ===================== -->
+  <rect class="layer" x="40" y="112" width="1060" height="96" rx="12"/>
+  <text class="lt" x="60" y="134">CLIENT 客户端</text>
+  <g filter="url(#shadow)">
+    <rect class="box" x="64" y="146" width="300" height="46" rx="8" fill="url(#gClient)"/>
+    <rect class="box" x="388" y="146" width="300" height="46" rx="8" fill="url(#gClient)"/>
+    <rect class="box" x="712" y="146" width="300" height="46" rx="8" fill="url(#gExt)"/>
+  </g>
+  <g text-anchor="middle">
+    <text class="tag" x="214" y="163">[Web] React · Vite · Tailwind</text><text class="t" x="214" y="183">React 店面 / 接口调试台</text>
+    <text class="tag" x="538" y="163">[Client] HTTP API</text><text class="t" x="538" y="183">商家端 / 管理端 / 压测脚本</text>
+    <text class="tag" x="862" y="163">[Callback] 外部回调</text><text class="t" x="862" y="183">Stripe Webhook</text>
   </g>
 
-  <!-- ============================================================= -->
-  <!-- Layer 3: Service domains (4 group boxes)                      -->
-  <!-- ============================================================= -->
-  <!-- Trade domain (gTrade) -->
-  <g>
-    <rect x="48" y="380" width="404" height="150" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <text x="64" y="402" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">交易域 TRADE</text>
-    <!-- row 1 -->
-    <g>
-      <rect x="64" y="412" width="118" height="44" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="123" y="439" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">cart 购物车</text>
-    </g>
-    <g>
-      <rect x="194" y="412" width="118" height="44" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="253" y="439" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">order 订单</text>
-    </g>
-    <g>
-      <rect x="324" y="412" width="116" height="44" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="382" y="439" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">payment 支付</text>
-    </g>
-    <!-- row 2 -->
-    <g>
-      <rect x="64" y="468" width="118" height="44" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="123" y="495" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">refund 退款</text>
-    </g>
-    <g>
-      <rect x="194" y="468" width="246" height="44" rx="8" fill="url(#gTrade)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="317" y="490" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">money 资金台账</text>
-      <text x="317" y="505" fill="rgba(255,255,255,0.7)" font-size="10" text-anchor="middle">double-entry ledger</text>
-    </g>
+  <!-- Client → Gateway -->
+  <path class="sync" d="M214 192 V224"/>
+  <path class="sync" d="M538 192 V224"/>
+  <path class="sync" d="M862 192 V224 H174 V260" marker-end="url(#arrow)"/>
+  <path class="pulse" d="M862 192 V224 H174 V260"/>
+  <text class="note" x="880" y="229">HTTPS · JSON</text>
+
+  <!-- ===================== Layer 2: Gateway ===================== -->
+  <rect class="layer" x="40" y="240" width="1060" height="124" rx="12"/>
+  <text class="lt" x="320" y="266">GATEWAY 接入层 · 中间件链</text>
+  <path class="sync" d="M284 313 H1072"/>
+  <g filter="url(#glowBlue)">
+    <rect class="box" x="64" y="262" width="220" height="84" rx="8" fill="url(#gGate)"/>
+  </g>
+  <g text-anchor="middle">
+    <text class="tag" x="174" y="286">[Entry] routes/router.go</text>
+    <text x="174" y="313" font-size="21" font-weight="800" fill="#ffffff">Gin Router</text>
+    <text class="s" x="174" y="333">public · authed · merchant · admin</text>
+  </g>
+  <g filter="url(#shadow)">
+    <rect class="box" x="320" y="284" width="98" height="58" rx="8" fill="url(#gChip)"/>
+    <rect class="box" x="429" y="284" width="98" height="58" rx="8" fill="url(#gChip)"/>
+    <rect class="box" x="538" y="284" width="98" height="58" rx="8" fill="url(#gChip)"/>
+    <rect class="box" x="647" y="284" width="98" height="58" rx="8" fill="url(#gChip)"/>
+    <rect class="box" x="756" y="284" width="98" height="58" rx="8" fill="url(#gChip)"/>
+    <rect class="box" x="865" y="284" width="98" height="58" rx="8" fill="url(#gChip)"/>
+    <rect class="box" x="974" y="284" width="98" height="58" rx="8" fill="url(#gChip)"/>
+  </g>
+  <g text-anchor="middle">
+    <text class="tag" x="369" y="306" fill="#7dd3fc">TokenBucket</text><text class="ts" x="369" y="328">全局限流</text>
+    <text class="tag" x="478" y="306" fill="#7dd3fc">JWT</text><text class="ts" x="478" y="328">登录鉴权</text>
+    <text class="tag" x="587" y="306" fill="#7dd3fc">RBAC</text><text class="ts" x="587" y="328">角色权限</text>
+    <text class="tag" x="696" y="306" fill="#7dd3fc">SlidingWindow</text><text class="ts" x="696" y="328">滑窗限流</text>
+    <text class="tag" x="805" y="306" fill="#7dd3fc">Idempotency</text><text class="ts" x="805" y="328">幂等令牌</text>
+    <text class="tag" x="914" y="306" fill="#7dd3fc">CircuitBreaker</text><text class="ts" x="914" y="328">熔断降级</text>
+    <text class="tag" x="1023" y="306" fill="#7dd3fc">HTTPCache</text><text class="ts" x="1023" y="328">响应缓存</text>
   </g>
 
-  <!-- Product domain (gProduct) -->
-  <g>
-    <rect x="470" y="380" width="328" height="150" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <text x="486" y="402" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">商品域 PRODUCT</text>
-    <g>
-      <rect x="486" y="412" width="138" height="44" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="555" y="439" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">product 商品</text>
-    </g>
-    <g>
-      <rect x="636" y="412" width="146" height="44" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="709" y="439" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">category 分类</text>
-    </g>
-    <g>
-      <rect x="486" y="468" width="138" height="44" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="555" y="495" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">carousel 轮播</text>
-    </g>
-    <g>
-      <rect x="636" y="468" width="146" height="44" rx="8" fill="url(#gProduct)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="709" y="495" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">search 搜索</text>
-    </g>
+  <!-- Gateway → Domains：干线 + 总线，四个落点 -->
+  <path class="sync" d="M570 364 V392"/>
+  <path class="sync" d="M185 392 H999"/>
+  <path class="sync" d="M185 392 V414" marker-end="url(#arrow)"/>
+  <path class="sync" d="M461 392 V414" marker-end="url(#arrow)"/>
+  <path class="sync" d="M737 392 V414" marker-end="url(#arrow)"/>
+  <path class="sync" d="M999 392 V414" marker-end="url(#arrow)"/>
+  <path class="pulse" d="M570 364 V392 H185 V414"/>
+  <path class="pulse" d="M570 392 H999 V414"/>
+  <text class="note" x="582" y="384">按路由分组进入各业务域</text>
+
+  <!-- ===================== Layer 3: Domains ===================== -->
+  <!-- 交易域 -->
+  <rect class="layer" x="40" y="416" width="290" height="230" rx="12"/>
+  <text class="lt" x="56" y="440" fill="#93c5fd">TRADE 交易域</text>
+  <g filter="url(#shadow)" fill="url(#gTrade)">
+    <rect class="box" x="52" y="454" width="127" height="48" rx="8"/><rect class="box" x="191" y="454" width="127" height="48" rx="8"/>
+    <rect class="box" x="52" y="512" width="127" height="48" rx="8"/><rect class="box" x="191" y="512" width="127" height="48" rx="8"/>
+    <rect class="box" x="52" y="570" width="127" height="48" rx="8"/><rect class="box" x="191" y="570" width="127" height="48" rx="8"/>
+  </g>
+  <g text-anchor="middle">
+    <text class="tag" x="115" y="473">cart</text><text class="ts" x="115" y="492">购物车</text>
+    <text class="tag" x="254" y="473">order</text><text class="ts" x="254" y="492">订单 · 8 态机</text>
+    <text class="tag" x="115" y="531">payment</text><text class="ts" x="115" y="550">支付 · 4 通道</text>
+    <text class="tag" x="254" y="531">clearing</text><text class="ts" x="254" y="550">清算 · 托管</text>
+    <text class="tag" x="115" y="589">refund</text><text class="ts" x="115" y="608">退款</text>
+    <text class="tag" x="254" y="589">money</text><text class="ts" x="254" y="608">复式记账台账</text>
   </g>
 
-  <!-- Promo domain (gPromo) -->
-  <g>
-    <rect x="816" y="380" width="336" height="150" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <text x="832" y="402" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">营销域 PROMO</text>
-    <!-- row 1: 3 boxes -->
-    <g>
-      <rect x="832" y="412" width="98" height="44" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="881" y="434" fill="#ffffff" font-size="13" font-weight="700" text-anchor="middle">coupon</text>
-      <text x="881" y="448" fill="rgba(255,255,255,0.7)" font-size="10" text-anchor="middle">优惠券</text>
-    </g>
-    <g>
-      <rect x="940" y="412" width="98" height="44" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="989" y="434" fill="#ffffff" font-size="13" font-weight="700" text-anchor="middle">skill</text>
-      <text x="989" y="448" fill="rgba(255,255,255,0.7)" font-size="10" text-anchor="middle">秒杀</text>
-    </g>
-    <g>
-      <rect x="1048" y="412" width="88" height="44" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="1092" y="434" fill="#ffffff" font-size="13" font-weight="700" text-anchor="middle">redpacket</text>
-      <text x="1092" y="448" fill="rgba(255,255,255,0.7)" font-size="10" text-anchor="middle">红包</text>
-    </g>
-    <!-- row 2: 3 boxes -->
-    <g>
-      <rect x="832" y="468" width="98" height="44" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="881" y="490" fill="#ffffff" font-size="13" font-weight="700" text-anchor="middle">promo</text>
-      <text x="881" y="504" fill="rgba(255,255,255,0.7)" font-size="10" text-anchor="middle">促销</text>
-    </g>
-    <g>
-      <rect x="940" y="468" width="98" height="44" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="989" y="490" fill="#ffffff" font-size="13" font-weight="700" text-anchor="middle">groupbuy</text>
-      <text x="989" y="504" fill="rgba(255,255,255,0.7)" font-size="10" text-anchor="middle">拼团</text>
-    </g>
-    <g>
-      <rect x="1048" y="468" width="88" height="44" rx="8" fill="url(#gPromo)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="1092" y="490" fill="#ffffff" font-size="13" font-weight="700" text-anchor="middle">preorder</text>
-      <text x="1092" y="504" fill="rgba(255,255,255,0.7)" font-size="10" text-anchor="middle">预售</text>
-    </g>
+  <!-- 商品域 -->
+  <rect class="layer" x="346" y="416" width="230" height="230" rx="12"/>
+  <text class="lt" x="362" y="440" fill="#5eead4">PRODUCT 商品域</text>
+  <g filter="url(#shadow)" fill="url(#gProd)">
+    <rect class="box" x="358" y="454" width="97" height="48" rx="8"/><rect class="box" x="467" y="454" width="97" height="48" rx="8"/>
+    <rect class="box" x="358" y="512" width="97" height="48" rx="8"/><rect class="box" x="467" y="512" width="97" height="48" rx="8"/>
+    <rect class="box" x="358" y="570" width="206" height="48" rx="8"/>
+  </g>
+  <g text-anchor="middle">
+    <text class="tag" x="406" y="473">product</text><text class="ts" x="406" y="492">商品 · 库存</text>
+    <text class="tag" x="515" y="473">category</text><text class="ts" x="515" y="492">分类</text>
+    <text class="tag" x="406" y="531">carousel</text><text class="ts" x="406" y="550">轮播</text>
+    <text class="tag" x="515" y="531">favorite</text><text class="ts" x="515" y="550">收藏</text>
+    <text class="tag" x="461" y="589">service/search</text><text class="ts" x="461" y="608">搜索 · ES + Milvus 混合召回</text>
   </g>
 
-  <!-- User / Platform domain (gUser) -->
-  <g>
-    <rect x="48" y="548" width="750" height="84" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <text x="64" y="570" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">用户 / 平台域 USER</text>
-    <g>
-      <rect x="64" y="578" width="132" height="42" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="130" y="604" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">user 用户</text>
-    </g>
-    <g>
-      <rect x="208" y="578" width="132" height="42" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="274" y="604" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">address 地址</text>
-    </g>
-    <g>
-      <rect x="352" y="578" width="132" height="42" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="418" y="604" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">favorite 收藏</text>
-    </g>
-    <g>
-      <rect x="496" y="578" width="132" height="42" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="562" y="604" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">notice 通知</text>
-    </g>
-    <g>
-      <rect x="640" y="578" width="142" height="42" rx="8" fill="url(#gUser)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <text x="711" y="604" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">admin 后台</text>
-    </g>
+  <!-- 营销域 -->
+  <rect class="layer" x="592" y="416" width="290" height="230" rx="12"/>
+  <text class="lt" x="608" y="440" fill="#fdba74">PROMO 营销域</text>
+  <g filter="url(#shadow)" fill="url(#gPromo)">
+    <rect class="box" x="604" y="454" width="127" height="48" rx="8"/><rect class="box" x="743" y="454" width="127" height="48" rx="8"/>
+    <rect class="box" x="604" y="512" width="127" height="48" rx="8"/><rect class="box" x="743" y="512" width="127" height="48" rx="8"/>
+    <rect class="box" x="604" y="570" width="127" height="48" rx="8"/><rect class="box" x="743" y="570" width="127" height="48" rx="8"/>
+  </g>
+  <g text-anchor="middle">
+    <text class="tag" x="667" y="473">coupon</text><text class="ts" x="667" y="492">优惠券</text>
+    <text class="tag" x="806" y="473">skill</text><text class="ts" x="806" y="492">秒杀</text>
+    <text class="tag" x="667" y="531">redpacket</text><text class="ts" x="667" y="550">红包</text>
+    <text class="tag" x="806" y="531">promo</text><text class="ts" x="806" y="550">满减预算</text>
+    <text class="tag" x="667" y="589">groupbuy</text><text class="ts" x="667" y="608">拼团</text>
+    <text class="tag" x="806" y="589">preorder</text><text class="ts" x="806" y="608">预售定金</text>
   </g>
 
-  <!-- ============================================================= -->
-  <!-- Layer 4: Message middleware (gMQ, bypass on right)            -->
-  <!-- ============================================================= -->
-  <g>
-    <rect x="816" y="548" width="336" height="84" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <text x="832" y="570" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">消息中间件 MQ · 旁路</text>
-    <g>
-      <rect x="832" y="578" width="150" height="42" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-rabbitmq" x="840" y="588" width="22" height="22"/>
-      <text x="916" y="600" fill="#ffffff" font-size="14" font-weight="700" text-anchor="middle">RabbitMQ</text>
-      <text x="916" y="614" fill="rgba(255,255,255,0.75)" font-size="9.5" text-anchor="middle">order.delay TTL→DLX/DLQ</text>
-    </g>
-    <g>
-      <rect x="992" y="578" width="144" height="42" rx="8" fill="url(#gMQ)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-outbox" x="1000" y="588" width="22" height="22"/>
-      <text x="1074" y="600" fill="#ffffff" font-size="13" font-weight="700" text-anchor="middle">Transactional</text>
-      <text x="1074" y="614" fill="rgba(255,255,255,0.8)" font-size="11" text-anchor="middle">Outbox</text>
-    </g>
+  <!-- 用户 / 平台域 -->
+  <rect class="layer" x="898" y="416" width="202" height="230" rx="12"/>
+  <text class="lt" x="914" y="440" fill="#d8b4fe">USER 用户 / 平台</text>
+  <g filter="url(#shadow)" fill="url(#gUser)">
+    <rect class="box" x="910" y="454" width="83" height="48" rx="8"/><rect class="box" x="1005" y="454" width="83" height="48" rx="8"/>
+    <rect class="box" x="910" y="512" width="83" height="48" rx="8"/><rect class="box" x="1005" y="512" width="83" height="48" rx="8"/>
+    <rect class="box" x="910" y="570" width="178" height="48" rx="8"/>
+  </g>
+  <g text-anchor="middle">
+    <text class="tag" x="951" y="473">user</text><text class="ts" x="951" y="492">用户钱包</text>
+    <text class="tag" x="1046" y="473">address</text><text class="ts" x="1046" y="492">地址</text>
+    <text class="tag" x="951" y="531">notice</text><text class="ts" x="951" y="550">通知</text>
+    <text class="tag" x="1046" y="531">admin</text><text class="ts" x="1046" y="550">后台</text>
+    <text class="tag" x="999" y="589">idempotency</text><text class="ts" x="999" y="608">幂等令牌颁发</text>
   </g>
 
-  <!-- ============================================================= -->
-  <!-- Layer 5: Data / Infrastructure (gData)                        -->
-  <!-- ============================================================= -->
-  <g>
-    <rect x="48" y="650" width="1104" height="112" rx="14" fill="rgba(255,255,255,0.03)" stroke="rgba(255,255,255,0.08)"/>
-    <text x="64" y="672" fill="rgba(255,255,255,0.45)" font-size="13" letter-spacing="2">数据 / 基础设施 DATA &amp; INFRA</text>
-    <!-- MySQL -->
-    <g>
-      <rect x="70" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-mysql" x="84" y="702" width="24" height="24"/>
-      <text x="116" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[RDBMS]</text>
-      <text x="116" y="724" fill="#ffffff" font-size="15" font-weight="700">MySQL 主从</text>
-      <text x="116" y="739" fill="rgba(255,255,255,0.7)" font-size="10">read/write split</text>
-    </g>
-    <!-- Redis -->
-    <g>
-      <rect x="249" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-redis" x="263" y="702" width="24" height="24"/>
-      <text x="295" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Cache]</text>
-      <text x="295" y="724" fill="#ffffff" font-size="15" font-weight="700">Redis</text>
-      <text x="295" y="739" fill="rgba(255,255,255,0.7)" font-size="9.5">缓存 + Lua 扣库存</text>
-    </g>
-    <!-- ElasticSearch -->
-    <g>
-      <rect x="428" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-es" x="442" y="702" width="24" height="24"/>
-      <text x="474" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Search]</text>
-      <text x="474" y="724" fill="#ffffff" font-size="14" font-weight="700">ElasticSearch</text>
-      <text x="474" y="739" fill="rgba(255,255,255,0.7)" font-size="10">全文检索倒排</text>
-    </g>
-    <!-- Milvus -->
-    <g>
-      <rect x="607" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-milvus" x="621" y="702" width="24" height="24"/>
-      <text x="653" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Vector]</text>
-      <text x="653" y="724" fill="#ffffff" font-size="15" font-weight="700">Milvus</text>
-      <text x="653" y="739" fill="rgba(255,255,255,0.7)" font-size="9.5">向量库 · 语义召回</text>
-    </g>
-    <!-- Web3 / EVM -->
-    <g>
-      <rect x="786" y="684" width="169" height="62" rx="8" fill="url(#gData)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <use href="#ic-web3" x="800" y="702" width="24" height="24"/>
-      <text x="832" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Chain]</text>
-      <text x="832" y="724" fill="#ffffff" font-size="14" font-weight="700">Web3 / EVM</text>
-      <text x="832" y="739" fill="rgba(255,255,255,0.7)" font-size="10">链上托管 / 对账</text>
-    </g>
-    <!-- Stripe (third-party payment) -->
-    <g>
-      <rect x="965" y="684" width="169" height="62" rx="8" fill="url(#gGate)" stroke="rgba(255,255,255,0.16)" stroke-width="1.2" filter="url(#shadow)"/>
-      <!-- 银行卡 glyph (inline): 圆角卡 + 磁条色带 + 小方块 -->
-      <g transform="translate(979,701)">
-        <rect x="0" y="2" width="24" height="17" rx="2.4" fill="none" stroke="#ffffff" stroke-width="1.6"/>
-        <rect x="0" y="5.6" width="24" height="3.4" fill="#ffffff"/>
-        <rect x="3" y="12.2" width="6" height="3.6" rx="0.8" fill="#ffffff"/>
-        <path d="M13 14 h7" stroke="#ffffff" stroke-width="1.4" stroke-linecap="round" stroke-opacity="0.8"/>
-      </g>
-      <text x="1011" y="704" fill="rgba(255,255,255,0.7)" font-size="11">[Payment]</text>
-      <text x="1011" y="724" fill="#ffffff" font-size="15" font-weight="700">Stripe</text>
-      <text x="1011" y="739" fill="rgba(255,255,255,0.7)" font-size="9.5">三方支付 · Checkout</text>
-    </g>
+  <!-- Domains → Shared / Repository -->
+  <path class="sync" d="M185 646 V662" marker-end="url(#arrow)"/>
+  <path class="sync" d="M461 646 V662" marker-end="url(#arrow)"/>
+  <path class="sync" d="M737 646 V662" marker-end="url(#arrow)"/>
+  <path class="sync" d="M999 646 V662" marker-end="url(#arrow)"/>
+
+  <!-- ===================== Layer 4: Shared kernel & Repository ===================== -->
+  <g filter="url(#shadow)">
+    <rect class="box" x="40" y="664" width="522" height="30" rx="8" fill="url(#gShared)"/>
+    <rect class="box" x="578" y="664" width="522" height="30" rx="8" fill="url(#gShared)"/>
+  </g>
+  <text x="56" y="684" font-size="12" fill="#e2e8f0"><tspan font-weight="700" fill="#7dd3fc">SHARED 共享内核</tspan>　outbox · response · snowflake · 业务错误码 · AES 金额加密</text>
+  <text x="594" y="684" font-size="12" fill="#e2e8f0"><tspan font-weight="700" fill="#7dd3fc">REPOSITORY 仓储</tspan>　dao · cache（Lua 脚本）· es · milvus · rabbitmq</text>
+
+  <!-- Repository → Data -->
+  <path class="sync" d="M143 694 V714" marker-end="url(#arrow)"/>
+  <path class="sync" d="M313 694 V714" marker-end="url(#arrow)"/>
+  <path class="sync" d="M483 694 V714" marker-end="url(#arrow)"/>
+  <path class="sync" d="M653 694 V714" marker-end="url(#arrow)"/>
+  <path class="sync" d="M823 694 V714" marker-end="url(#arrow)"/>
+  <path class="sync" d="M993 694 V714" marker-end="url(#arrow)"/>
+
+  <!-- ===================== Layer 5: Data & Infra ===================== -->
+  <rect class="layer" x="40" y="716" width="1060" height="124" rx="12"/>
+  <text class="lt" x="60" y="740">DATA &amp; INFRA 数据与外部依赖</text>
+  <g filter="url(#shadow)">
+    <rect class="box" x="64" y="754" width="158" height="66" rx="8" fill="url(#gData)"/>
+    <rect class="box" x="234" y="754" width="158" height="66" rx="8" fill="url(#gData)"/>
+    <rect class="box" x="404" y="754" width="158" height="66" rx="8" fill="url(#gData)"/>
+    <rect class="box" x="574" y="754" width="158" height="66" rx="8" fill="url(#gData)"/>
+    <rect class="box" x="744" y="754" width="158" height="66" rx="8" fill="url(#gExt)"/>
+    <rect class="box" x="914" y="754" width="158" height="66" rx="8" fill="url(#gExt)"/>
+  </g>
+  <g text-anchor="middle">
+    <text class="tag" x="143" y="772">[RDBMS] 资金真相</text><text class="t" x="143" y="793">MySQL</text><text class="s" x="143" y="810">读写分离 · 行锁 · 唯一索引</text>
+    <text class="tag" x="313" y="772">[Cache]</text><text class="t" x="313" y="793">Redis</text><text class="s" x="313" y="810">Lua 原子预扣 · 限流 · 幂等</text>
+    <text class="tag" x="483" y="772">[Search]</text><text class="t" x="483" y="793">ElasticSearch</text><text class="s" x="483" y="810">倒排索引 · 增量同步</text>
+    <text class="tag" x="653" y="772">[Vector]</text><text class="t" x="653" y="793">Milvus</text><text class="s" x="653" y="810">向量召回 · 可选启用</text>
+    <text class="tag" x="823" y="772">[Chain] 外部</text><text class="t" x="823" y="793">Web3 / EVM</text><text class="s" x="823" y="810">USDC · ETH 链上支付</text>
+    <text class="tag" x="993" y="772">[Payment] 外部</text><text class="t" x="993" y="793">Stripe</text><text class="s" x="993" y="810">Checkout · 退款</text>
   </g>
 
-  <!-- ============================================================= -->
-  <!-- CONNECTIONS                                                   -->
-  <!-- ============================================================= -->
-
-  <!-- · Client → Gin Router (HTTPS, solid) · -->
-  <g>
-    <!-- Web Portal (cx 160) → Router top-left (x~120) -->
-    <path d="M160,174 L160,250" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <!-- Mobile App (cx 366) → Router top (x~210) via elbow -->
-    <path d="M366,174 L366,200 L210,200 L210,250" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <!-- HTTPS label -->
-    <g>
-      <rect x="232" y="190" width="56" height="18" rx="4" fill="#0d1117"/>
-      <text x="260" y="203" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">HTTPS</text>
-    </g>
+  <!-- ===================== 右列 A：后台驱动 ===================== -->
+  <rect class="layer" x="1140" y="240" width="320" height="176" rx="12"/>
+  <text class="lt" x="1160" y="264">BACKGROUND 后台驱动</text>
+  <g filter="url(#shadow)" fill="url(#gBack)">
+    <rect class="box" x="1164" y="278" width="272" height="56" rx="8"/>
+    <rect class="box" x="1164" y="346" width="272" height="56" rx="8"/>
   </g>
-
-  <!-- · Gin Router → Service layer (solid, after middleware chain) · -->
-  <!-- Router bottom (x~165, y316) descends to a horizontal bus at y=358, fans into 4 domains -->
-  <g>
-    <!-- vertical drop from router -->
-    <path d="M165,316 L165,358" stroke="#38bdf8" stroke-width="2" fill="none"/>
-    <!-- horizontal bus across all domains -->
-    <line x1="165" y1="358" x2="984" y2="358" stroke="#38bdf8" stroke-width="2"/>
-    <!-- down into Trade -->
-    <path d="M230,358 L230,380" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <!-- down into Product -->
-    <path d="M634,358 L634,380" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <!-- down into Promo -->
-    <path d="M984,358 L984,380" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <!-- down into User domain (longer drop on the left, routed to avoid Trade box) -->
-    <path d="M165,358 L165,548" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <!-- route label -->
-    <g>
-      <rect x="690" y="349" width="118" height="18" rx="4" fill="#0d1117"/>
-      <text x="749" y="362" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">routed via 中间件链</text>
-    </g>
+  <g text-anchor="middle">
+    <text class="tag" x="1300" y="297">[Cron] initialize/cron.go</text><text class="ts" x="1300" y="320">定时任务：对账 · 过期回收 · 补偿</text>
+    <text class="tag" x="1300" y="365">[Listener] pkg/web3</text><text class="ts" x="1300" y="388">链上监听：reorg 幂等 · 断线追块</text>
   </g>
+  <path class="async" d="M1140 392 H1003" marker-end="url(#arrowA)"/>
+  <text class="note" x="1134" y="384" text-anchor="end">后台触发</text>
 
-  <!-- · Service domains → MySQL (Read/Write, solid) · -->
-  <g>
-    <!-- Trade(order, cx253 bottom y530) → MySQL (cx165 top y684) -->
-    <path d="M150,530 L150,668 L165,668 L165,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <g>
-      <rect x="120" y="638" width="86" height="18" rx="4" fill="#0d1117"/>
-      <text x="163" y="651" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">Read/Write</text>
-    </g>
+  <!-- ===================== 右列 B：异步旁路 ===================== -->
+  <rect class="layer" x="1140" y="432" width="320" height="308" rx="12"/>
+  <text class="lt" x="1160" y="456" fill="#fcd34d">ASYNC 异步旁路</text>
+  <g filter="url(#shadow)">
+    <rect class="box" x="1164" y="466" width="272" height="46" rx="8" fill="url(#gAsync)"/>
+    <rect class="box" x="1164" y="602" width="272" height="56" rx="8" fill="url(#gAsync)"/>
+    <rect class="box" x="1164" y="678" width="272" height="44" rx="8" fill="url(#gExt)"/>
   </g>
-
-  <!-- · Service domains → Redis (Cache-Aside, solid) · -->
-  <g>
-    <!-- Product(cx555 bottom y530) → Redis (cx333 top y684) -->
-    <path d="M555,530 L555,640 L333,640 L333,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <g>
-      <rect x="340" y="631" width="92" height="18" rx="4" fill="#0d1117"/>
-      <text x="386" y="644" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">Cache-Aside</text>
-    </g>
+  <g filter="url(#glowAmber)">
+    <rect class="box" x="1164" y="532" width="272" height="50" rx="8" fill="url(#gAsync)"/>
   </g>
-
-  <!-- · search → ElasticSearch / Milvus (solid) · -->
-  <g>
-    <!-- search box cx709 bottom y456 → ES (cx512 top y684) -->
-    <path d="M695,456 L695,520 L512,520 L512,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <!-- search → Milvus (cx691 top y684) -->
-    <path d="M725,456 L725,540 L691,540 L691,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <g>
-      <rect x="566" y="511" width="78" height="18" rx="4" fill="#0d1117"/>
-      <text x="605" y="524" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">索引/检索</text>
-    </g>
+  <g text-anchor="middle" fill="#1c1917">
+    <text x="1300" y="484" font-size="15" font-weight="800">Transactional Outbox</text>
+    <text x="1300" y="502" font-size="11" fill-opacity=".85">事件与业务同事务落库 · 轮询投递</text>
+    <text x="1300" y="553" font-size="16" font-weight="800">RabbitMQ</text>
+    <text x="1300" y="571" font-size="11" fill-opacity=".85">延迟队列 TTL → DLX · 异步下单削峰</text>
+    <text x="1300" y="623" font-size="15" font-weight="800">领域消费者</text>
+    <text x="1300" y="642" font-size="11" fill-opacity=".85">关单 · 清算 · 退款 · 红包 · 拼团 · 促销 · Web3</text>
   </g>
-
-  <!-- · Service → Outbox → RabbitMQ (Pub, dashed) · -->
-  <g>
-    <!-- Promo domain bottom (cx984 y530) → Outbox (cx1064 top y578) -->
-    <path d="M1064,530 L1064,578" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
-    <!-- Outbox → RabbitMQ (within MQ box) -->
-    <path d="M992,599 L982,599" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
-    <g>
-      <rect x="1040" y="545" width="48" height="18" rx="4" fill="#0d1117"/>
-      <text x="1064" y="558" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">Pub</text>
-    </g>
+  <g text-anchor="middle">
+    <text class="ts" x="1300" y="698">DLQ 死信队列</text>
+    <text class="s" x="1300" y="714">按投递次数隔离毒消息</text>
   </g>
+  <path class="async" d="M1300 512 V530" marker-end="url(#arrowA)"/>
+  <path class="async" d="M1300 582 V600" marker-end="url(#arrowA)"/>
+  <path class="async" d="M1300 658 V676" marker-end="url(#arrowA)"/>
+  <!-- Domains → Outbox（写事件）与 Consumers → Domains（回调领域服务） -->
+  <path class="async" d="M1100 489 H1161" marker-end="url(#arrowA)"/>
+  <path class="async" d="M1164 630 H1103" marker-end="url(#arrowA)"/>
 
-  <!-- · RabbitMQ → consumer (Sub, dashed back to services) · -->
-  <g>
-    <!-- RabbitMQ (cx907 top y578) → up and left into service layer (order consumer, around x830 y530) -->
-    <path d="M907,578 L907,544 L820,544 L820,530" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
-    <g>
-      <rect x="838" y="535" width="46" height="18" rx="4" fill="#0d1117"/>
-      <text x="861" y="548" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">Sub</text>
-    </g>
+  <!-- ===================== 右列 C：可观测 ===================== -->
+  <rect class="layer" x="1140" y="756" width="320" height="84" rx="12"/>
+  <text class="lt" x="1160" y="780">OBSERVABILITY 可观测</text>
+  <g filter="url(#shadow)"><rect class="box" x="1164" y="790" width="272" height="36" rx="8" fill="url(#gShared)"/></g>
+  <text x="1300" y="813" text-anchor="middle" font-size="13" font-weight="700" fill="#e2e8f0">SkyWalking 链路追踪 · 结构化日志</text>
+
+  <!-- ===================== 底部：一笔订单的旅程 ===================== -->
+  <rect class="layer" x="40" y="868" width="1420" height="96" rx="12"/>
+  <text class="lt" x="60" y="892" fill="#7dd3fc">ORDER JOURNEY 一笔订单的旅程</text>
+  <g filter="url(#shadow)">
+    <rect class="box" x="64" y="904" width="205" height="44" rx="22" fill="url(#gGate)"/>
+    <rect class="box" x="297" y="904" width="205" height="44" rx="22" fill="url(#gData)"/>
+    <rect class="box" x="530" y="904" width="205" height="44" rx="22" fill="url(#gTrade)"/>
+    <rect class="box" x="763" y="904" width="205" height="44" rx="22" fill="url(#gAsync)"/>
+    <rect class="box" x="996" y="904" width="205" height="44" rx="22" fill="url(#gTrade)"/>
+    <rect class="box" x="1229" y="904" width="205" height="44" rx="22" fill="url(#gUser)"/>
   </g>
-
-  <!-- · payment → Web3/EVM (on-chain settle, dashed) · -->
-  <g>
-    <!-- payment box (cx382 bottom y456) → Web3 (cx870 top y684), routed along bottom right -->
-    <path d="M412,440 L412,460 L460,460 L460,556 L870,556 L870,684" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
-    <g>
-      <rect x="610" y="547" width="96" height="18" rx="4" fill="#0d1117"/>
-      <text x="658" y="560" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">链上对账</text>
-    </g>
+  <g text-anchor="middle">
+    <text class="ts" x="166" y="923">① 幂等校验</text><text class="s" x="166" y="939">Lua 三态机，同 key 只落一单</text>
+    <text class="ts" x="399" y="923">② 预扣库存</text><text class="s" x="399" y="939">available → reserved</text>
+    <text class="ts" x="632" y="923">③ 落单 + Outbox</text><text class="s" x="632" y="939">订单与事件同一事务</text>
+    <text class="ts" x="865" y="923" fill="#1c1917">④ 延迟关单</text><text x="865" y="939" font-size="11" fill="#1c1917" fill-opacity=".85">MQ TTL + Cron 双保险</text>
+    <text class="ts" x="1098" y="923">⑤ 支付清算</text><text class="s" x="1098" y="939">统一进 merchant_escrow</text>
+    <text class="ts" x="1331" y="923">⑥ 确认收货结算</text><text class="s" x="1331" y="939">order.completed 触发放款</text>
   </g>
-
-  <!-- · payment ⇄ Stripe : 平行双线(请求/回调). 仅用三处空档穿越,不压任何框:
-         A) x≈458/466 = Trade(右452)↔Product(左470) 竖直空档
-         B) y≈536/544 = 服务域底(530)↔User/MQ 带顶(548) 横向空档
-         C) x≈803/811 = User域(右798)↔MQ框(左816) 竖直空档,下穿到数据行上方 y≈636/644 走廊 · -->
-  <g>
-    <!-- payment 右侧 → Stripe 顶部 (Checkout, 同步创建会话) -->
-    <path d="M440,428 L456,428 L456,536 L803,536 L803,636 L1041,636 L1041,684" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-    <g>
-      <rect x="585" y="527" width="68" height="18" rx="4" fill="#0d1117"/>
-      <text x="619" y="540" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">Checkout</text>
-    </g>
-    <!-- Stripe 顶部 → payment 右侧 (webhook 异步回调) -->
-    <path d="M1057,684 L1057,644 L811,644 L811,544 L466,544 L466,444 L440,444" stroke="#fbbf24" stroke-width="2" stroke-dasharray="5,5" fill="none" marker-end="url(#arrowA)"/>
-    <g>
-      <rect x="864" y="635" width="62" height="18" rx="4" fill="#0d1117"/>
-      <text x="895" y="648" fill="rgba(255,255,255,0.6)" font-size="11" text-anchor="middle">webhook</text>
-    </g>
-  </g>
-
+  <path class="sync" d="M269 926 H295" marker-end="url(#arrow)"/>
+  <path class="sync" d="M502 926 H528" marker-end="url(#arrow)"/>
+  <path class="sync" d="M735 926 H761" marker-end="url(#arrow)"/>
+  <path class="sync" d="M968 926 H994" marker-end="url(#arrow)"/>
+  <path class="sync" d="M1201 926 H1227" marker-end="url(#arrow)"/>
 </svg>

@@ -34,7 +34,9 @@ Markdown 课程按这张业务全景拆开讲，统一从 [`docs/lecture/README.
 
 ### 整体架构
 
-客户端 → Gin Router + 中间件链（JWT / RBAC / 限流 / 熔断 / 幂等）→ 按域分组的服务层 → MySQL / Redis / ES / Milvus / Web3，事件经 Outbox 旁路异步散给 RabbitMQ。核心链路同步落库收钱，搜索 / 统计 / 履约走异步，主线不被下游拖慢。
+自上而下五层：客户端 → Gin Router 与中间件链（限流 / JWT / RBAC / 幂等 / 熔断 / 响应缓存）→ 四组业务域 → 共享内核与仓储 → MySQL / Redis / ES / Milvus，以及外部的 Web3 和 Stripe。
+
+右侧是两条不经过 HTTP 的路径：定时任务和链上监听直接驱动业务域；业务事件与数据同事务写入 Outbox，经 RabbitMQ 投给各域消费者，处理不了的消息进 DLQ。核心链路同步落库收钱，搜索 / 统计 / 履约走异步，主线不被下游拖慢。图底部是一笔订单从幂等校验到确认收货结算的六步。
 
 ![gomall 整体架构](docs/architecture.svg)
 
