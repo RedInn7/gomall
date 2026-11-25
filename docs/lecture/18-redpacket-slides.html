@@ -468,27 +468,6 @@ x-connector { border: none !important; }
 <p class="lead fragment" data-fragment-index="3">单号的粒度跟着“这件事发生几次”走：发包、退款各一次，用红包 ID；领包有 N 次，用每次领取自己的 ID。</p>
 </div>
 </section>
-<section id="order" data-transition="fade">
-<p class="eye">三 · 3.3 记账顺序 · internal/redpacket/settle.go:101-110</p>
-<h2>永远先改用户钱包，后记系统托管</h2>
-<div class="body">
-<div class="code">
-<p class="c"><span class="kw">func</span> settleSendTx(tx *gorm.DB, rpID, senderID uint, total int64) (wrote bool, err error) {</p>
-<p class="c i1"><span class="cm">// 第 1 腿：用户钱包（行锁 FOR UPDATE + 余额不足检查 + 幂等预检）</span></p>
-<p class="c i1">skipped, _, err := adjustWallet(tx, senderID, rpID, -total, money.BizTypeRedPacketSend)</p>
-<p class="c i1"><span class="kw">if</span> err != nil || skipped {</p>
-<p class="c i2"><span class="kw">return</span> false, err</p>
-<p class="c i1">}</p>
-<p class="c i1"><span class="cm">// 第 2 腿：钱包扣成功后，再追加系统托管账户流水</span></p>
-<p class="c i1"><span class="kw">return</span> true, adjustClearing(tx, rpID, total, money.BizTypeRedPacketSend)</p>
-<p class="c">}</p>
-</div>
-<div class="cards">
-<div class="card fragment" data-fragment-index="1"><h3>先难后易</h3><p class="t">钱包一侧要加行锁、解密余额、校验够不够扣，最容易失败。余额不够直接返回，托管表不用碰。</p></div>
-<div class="card fragment" data-fragment-index="2"><h3>幂等短路</h3><p class="t">重复调用时台账已存在，adjustWallet 返回 skipped = true，两条腿一起跳过。</p></div>
-</div>
-</div>
-</section>
 <section id="boundary" class="dark" data-transition="fade">
 <p class="tag">四 · 一致性边界</p>
 <h1>Redis 先扣，<br>DB 说了算</h1>

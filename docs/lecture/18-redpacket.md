@@ -519,30 +519,6 @@ flowchart TD
 
 ---
 
-## 3.3 记账顺序：先改用户钱包，后记系统托管
-
-`internal/redpacket/settle.go:101-110`
-
-```go
-func settleSendTx(tx *gorm.DB, rpID, senderID uint, total int64) (wrote bool, err error) {
-	if total <= 0 {
-		return false, errors.New("redpacket settle: invalid total")
-	}
-	// 第 1 腿：先操作用户个人钱包（带行锁 FOR UPDATE + 余额不足检查 + 幂等预检）
-	skipped, _, err := adjustWallet(tx, senderID, rpID, -total, money.BizTypeRedPacketSend)
-	if err != nil || skipped {
-		return false, err
-	}
-	// 第 2 腿：用户钱包扣成功后，再追加系统托管账户流水
-	return true, adjustClearing(tx, rpID, total, money.BizTypeRedPacketSend)
-}
-```
-
-- **先难后易**：钱包一侧要加行锁、解密余额、校验够不够扣，最容易失败；余额不够直接返回，托管表不用碰。
-- **幂等短路**：重复调用时 `adjustWallet` 查到台账已存在，返回 `skipped = true`，两条腿一起跳过。
-
----
-
 ## 四、一致性边界：Redis 先扣，DB 说了算
 
 ### 4.1 领取主链路与异常分支
