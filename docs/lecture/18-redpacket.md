@@ -132,7 +132,7 @@ flowchart TD
     LuaRollback -. "若回补前断电崩溃，留下孤儿标记" .-> ReconcileCron
 
     subgraph S3 ["阶段三：后台双轮兜底 (Reconcile & Expire)"]
-        ReconcileCron["每 2 分钟孤儿对账 (RunRedPacketClaimReconcile)<br/>扫描超过 1 分钟未落库的标记 → 加 :r 锁 → 自动调用 claimTx 补发到账"] --> ExpireCron["每 5 分钟过期回收 (RunRedPacketExpireCheck)<br/>先跑一遍对账补齐孤儿 → 再按 DB 算 Total - SUM(已领) → 退回发包人"]
+        ReconcileCron["每 2 分钟孤儿红包对账 (RunRedPacketClaimReconcile)<br/>扫描超过 1 分钟未落库的标记 → 加 :r 锁 → 自动调用 claimTx 补发到账"] --> ExpireCron["每 5 分钟过期回收 (RunRedPacketExpireCheck)<br/>先跑一遍对账补齐孤儿红包 → 再按 DB 算 Total - SUM(已领) → 退回发包人"]
     end
 ```
 
@@ -143,7 +143,7 @@ flowchart TD
 | 工单 | 用户看到的现象 | 底层原因 | 解决章节 |
 |---|---|---|---|
 | **A** | 点“抢”报错失败；再点提示“您已领取过该红包”，钱也没到账 | Redis 扣了份额、打了已领标记，DB 事务失败后没把标记和份额退回 Redis | **4.2、4.3**：失败先查库 + Saga 原子回补 |
-| **B** | 抢的时候转圈断开；半小时后份额没退回红包池，钱包也没收到钱（孤儿份额） | 抢完 Redis 后服务器断电重启，回补没跑成，份额卡在半空 | **5.2**：`claimed` 孤儿对账自动补领（`:r` 抢占锁） |
+| **B** | 抢的时候转圈断开；半小时后份额没退回红包池，钱包也没收到钱（孤儿红包） | 抢完 Redis 后服务器断电重启，回补没跑成，份额卡在半空 | **5.2**：`claimed` 孤儿红包对账自动补领（`:r` 抢占锁） |
 | **C** | 发包人被扣了 100 元，群里所有人点开都显示“红包已抢完” | DB 扣款事务提交成功，紧接着写 Redis 金额列表时 Redis 挂了 | **5.3**：发包失败立即逆向退款 + 份额池丢失检测提前退款 |
 
 ---
@@ -177,7 +177,7 @@ flowchart LR
         L2["amounts<br/>3000 | 5000 | 2000"]
         H2["claimed<br/>（101 的标记已删）"]
     end
-    subgraph T2b ["③b 成了孤儿，对账接手"]
+    subgraph T2b ["③b 成了孤儿红包，对账接手"]
         direction TB
         L3["amounts<br/>5000 | 2000"]
         H3["claimed<br/>101 → 3000:1730680000:r"]
@@ -190,12 +190,12 @@ flowchart LR
 抢到之后钱还要写进数据库才算到账，这一步有两种走向：
 
 - **数据库写失败**：反悔。把 30 元放回那一摞，把名单上 101 那行擦掉，他可以重新抢。
-- **服务器断电**：来不及反悔。30 元已被拿走，数据库里又没有记录，这一份卡在半空，叫**孤儿**。后台任务找到它后在名单那行末尾加 `:r`，表示“这一份我来处理”，再替用户补进数据库。
+- **服务器断电**：来不及反悔。30 元已被拿走，数据库里又没有记录，这一份卡在半空，叫**孤儿红包**。后台任务找到它后在名单那行末尾加 `:r`，表示“这一份我来处理”，再替用户补进数据库。
 
 **名单上为什么要记金额和时间，而不是只写个 1？**
 
 - **记金额**：那 30 元已从一摞里拿走，数据库里也没有，名单是唯一还记得这个数的地方，后台才知道该补多少。
-- **记时间**：不到 1 分钟的算还在写数据库，先不碰；超过 1 分钟还没到账的才当成孤儿去补。
+- **记时间**：不到 1 分钟的算还在写数据库，先不碰；超过 1 分钟还没到账的才当成孤儿红包去补。
 - 所以名单不只是防重复领，它还是断电之后找回这笔钱的唯一线索。
 
 ---
@@ -652,15 +652,15 @@ stateDiagram-v2
 
 | 防线 | 触发 | 解决 |
 |---|---|---|
-| 5.2 孤儿对账补领 | 每 2 分钟 | 工单 B：抢到了但钱没到账 |
+| 5.2 孤儿红包补领 | 每 2 分钟 | 工单 B：抢到了但钱没到账 |
 | 5.3 份额池丢失补偿 | 发包当场 + 每 2 分钟 | 工单 C：扣了钱但没人能抢 |
 | 5.4 过期回收 | 每 5 分钟 | 没领完的钱退回发包人 |
 
 ---
 
-## 5.2 工单 B：孤儿领取与对账补领
+## 5.2 工单 B：孤儿红包与对账补领
 
-**孤儿领取**：Redis Lua 抢包成功，紧接着服务器断电重启，或 DB 事务超时且回补也因网络抖动失败。
+**孤儿红包**：Redis Lua 抢包成功，紧接着服务器断电重启，或 DB 事务超时且回补也因网络抖动失败。
 
 - `LIST` 里已经没有这 30 元。
 - `red_packet_claim` 里没有用户 101 的记录，钱没进钱包。
@@ -824,7 +824,7 @@ sequenceDiagram
 
 ---
 
-## 5.4 过期回收：先补齐孤儿，再按 DB 退剩余
+## 5.4 过期回收：先补齐孤儿红包，再按 DB 退剩余
 
 `RunRedPacketExpireCheck` 每 5 分钟一次（`internal/redpacket/task.go:24-65`）：
 
@@ -842,7 +842,7 @@ flowchart TD
     F --> G(["退回发包人，状态 refunded<br/>提交后清 Redis 剩余份额"])
 ```
 
-- 顺序铁律：**必须先补孤儿，再退剩余**。
+- 顺序铁律：**必须先补孤儿红包，再退剩余**。
 - 先退了剩余，状态变成 `refunded`，抢到红包却卡在半空的孤儿用户就再也补不进去。
 - 还有在途未决的标记时最多宽限 1 小时，超时保底退回发包人。
 
@@ -894,9 +894,9 @@ go test ./internal/redpacket -run 'TestClaimTxFailureRollsBackRedis|TestClaimCom
 | **防扫号口令生成与恒定时间比对** | `internal/redpacket/service.go` | `newShareCode`、`codeMatches` |
 | **DB 条件扣减与行锁查询** | `internal/redpacket/repo.go` | `DecrRemaining`、`GetForUpdate`、`SumClaimed`、`GetExpired`、`ListActive` |
 | **三段式托管资金流复式记账** | `internal/redpacket/settle.go` | `adjustWallet`、`adjustClearing`、`settleSendTx`、`settleClaimTx`、`settleRefundTx` |
-| **过期回收与孤儿对账定时任务** | `internal/redpacket/task.go` | `RunRedPacketExpireCheck`、`refundRedPacketLeft`、`RunRedPacketClaimReconcile`、`reconcileRedPacket` |
+| **过期回收与孤儿红包对账定时任务** | `internal/redpacket/task.go` | `RunRedPacketExpireCheck`、`refundRedPacketLeft`、`RunRedPacketClaimReconcile`、`reconcileRedPacket` |
 | **台账对账消费者** | `internal/redpacket/consumer.go` | `StartSettleConsumer`、`DispatchSettleEvent`、`reportRepair` |
 | **路由与限流/幂等护栏** | `internal/redpacket/routes.go` | `RegisterRoutes` |
 | **系统托管账户定义** | `internal/money/ledger_model.go` | `AccountCodeRedPacketEscrow` |
 | **错误码定义** | `pkg/e/code.go` | `84001` ~ `84006` |
-| **单元与并发测试集** | `internal/redpacket/service_test.go`、`claim_test.go`、`repository/cache/redpacket_test.go` | 覆盖拆包、并发抢、孤儿补领与互斥 |
+| **单元与并发测试集** | `internal/redpacket/service_test.go`、`claim_test.go`、`repository/cache/redpacket_test.go` | 覆盖拆包、并发抢、孤儿红包补领与互斥 |

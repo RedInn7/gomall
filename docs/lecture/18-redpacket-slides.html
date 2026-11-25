@@ -205,7 +205,7 @@ x-connector { border: none !important; }
 <div class="cards">
 <div class="card soft"><p class="k">阶段一 · CREATE</p><h3>发红包</h3><p class="t">① 校验支付密码，二倍均值预拆 N 份</p><p class="t">② DB 事务：写主表 + 扣发包人钱包 + 记入 redpacket_escrow</p><p class="t">③ 提交后 RPUSH 金额进 Redis LIST</p><p class="t"><span class="red">写 Redis 失败</span>：当场全额退回，状态 refunded</p></div>
 <div class="card soft fragment" data-fragment-index="1"><p class="k">阶段二 · CLAIM</p><h3>抢红包</h3><p class="t">① Lua：HEXISTS 去重 → LPOP → HSET 标记</p><p class="t">② DB 事务 claimTx：INSERT claim + remaining-1 + 托管转钱包</p><p class="t">③ 事务报错：先反查 GetClaim</p><p class="t">④ 确认未落库才回补：LPUSH + HDEL</p></div>
-<div class="card soft fragment" data-fragment-index="2"><p class="k">阶段三 · RECONCILE &amp; EXPIRE</p><h3>后台兜底</h3><p class="t"><b>每 2 分钟</b> 孤儿对账：超过 1 分钟未落库的标记 → 加 :r 锁 → claimTx 补发</p><p class="t"><b>每 5 分钟</b> 过期回收：先补齐孤儿，再按 DB 算 Total − SUM(已领) 退回发包人</p></div>
+<div class="card soft fragment" data-fragment-index="2"><p class="k">阶段三 · RECONCILE &amp; EXPIRE</p><h3>后台兜底</h3><p class="t"><b>每 2 分钟</b> 孤儿红包对账：超过 1 分钟未落库的标记 → 加 :r 锁 → claimTx 补发</p><p class="t"><b>每 5 分钟</b> 过期回收：先补齐孤儿红包，再按 DB 算 Total − SUM(已领) 退回发包人</p></div>
 </div>
 </div>
 </section>
@@ -215,7 +215,7 @@ x-connector { border: none !important; }
 <div class="body">
 <div class="cards">
 <div class="card"><p class="num">A</p><h3>失败后再点，提示已领过</h3><p class="t">Redis 扣了份额、打了标记，DB 事务失败后没退回 Redis。</p><p class="k">→ 4.2、4.3 先查库 + 原子回补</p></div>
-<div class="card fragment" data-fragment-index="1"><p class="num">B</p><h3>抢到了，钱没到账</h3><p class="t">抢完 Redis 后服务器断电，回补没跑成，份额卡在半空。</p><p class="k">→ 5.2 孤儿对账补领（:r 抢占锁）</p></div>
+<div class="card fragment" data-fragment-index="1"><p class="num">B</p><h3>抢到了，钱没到账</h3><p class="t">抢完 Redis 后服务器断电，回补没跑成，份额卡在半空。</p><p class="k">→ 5.2 孤儿红包补领（:r 抢占锁）</p></div>
 <div class="card fragment" data-fragment-index="2"><p class="num">C</p><h3>扣了 100 元，却显示已抢完</h3><p class="t">DB 扣款已提交，往 Redis 写金额列表时 Redis 挂了。</p><p class="k">→ 5.3 立即逆向退款 + 池丢失提前退款</p></div>
 </div>
 </div>
@@ -231,7 +231,7 @@ x-connector { border: none !important; }
 <div class="card soft fragment" data-fragment-index="1"><p class="k">② 用户 101 抢到 3000</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000</p></div>
 <x-connector class="go fragment" data-fragment-index="2"></x-connector>
 <div class="card yes fragment" data-fragment-index="2"><p class="k">③a 数据库写失败：反悔</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">3000 | 5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">（101 那行擦掉）</p></div>
-<div class="card no fragment" data-fragment-index="3"><p class="k">③b 断电了：成了孤儿</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000:r</p></div>
+<div class="card no fragment" data-fragment-index="3"><p class="k">③b 断电了：成了孤儿红包</p><p class="t"><b>一摞红包</b></p><p class="c" style="color:#3D1F0B">5000 | 2000</p><p class="t"><b>名单</b></p><p class="c" style="color:#3D1F0B">101 → 3000:1730680000:r</p></div>
 </div>
 </div>
 </section>
@@ -243,7 +243,7 @@ x-connector { border: none !important; }
 <div class="cards">
 <div class="card no"><p class="k">如果只写</p><p class="c" style="color:#3D1F0B">101 → 1</p><p class="t">断电后，后台只知道“101 抢过”，不知道该补他多少钱，也不知道他是刚抢还是早就卡住了。</p></div>
 <div class="card yes fragment" data-fragment-index="1"><p class="k">记金额</p><h3>知道补多少</h3><p class="t">那 30 元已经从一摞里拿走，数据库里也没有。名单是唯一还记得这个数的地方。</p></div>
-<div class="card yes fragment" data-fragment-index="2"><p class="k">记时间</p><h3>分清在途和卡死</h3><p class="t">不到 1 分钟：数据库可能还在写，先不碰。</p><p class="t">超过 1 分钟还没到账：当成孤儿去补。</p></div>
+<div class="card yes fragment" data-fragment-index="2"><p class="k">记时间</p><h3>分清在途和卡死</h3><p class="t">不到 1 分钟：数据库可能还在写，先不碰。</p><p class="t">超过 1 分钟还没到账：当成孤儿红包去补。</p></div>
 </div>
 <p class="formula fragment" data-fragment-index="3">名单不只是防重复领，它还是断电之后找回这笔钱的唯一线索</p>
 </div>
@@ -543,13 +543,14 @@ x-connector { border: none !important; }
 <h2>请求死掉以后，靠后台三道防线收尾</h2>
 <div class="body">
 <div class="flow">
-<p class="box"><b>active</b><br>发包事务提交</p>
-<x-connector class="go"></x-connector>
-<p class="box end"><b>finished</b><br>领取事务中 remaining 归零</p>
-<p class="box end"><b>refunded</b><br>过期回收 / 份额池丢失 / Redis 准备失败补偿</p>
+<p class="box" style="align-self:center"><b>active</b><br>发包事务提交</p>
+<div style="flex:2;display:flex;flex-direction:column;gap:12px">
+<div class="flow"><x-connector class="go"></x-connector><p class="box end"><b>finished</b><br>领取事务中 remaining 归零</p></div>
+<div class="flow"><x-connector class="go"></x-connector><p class="box end"><b>refunded</b><br>过期回收 / 份额池丢失 / Redis 准备失败补偿</p></div>
+</div>
 </div>
 <div class="cards">
-<div class="card fragment" data-fragment-index="1"><p class="k">5.2 · 每 2 分钟</p><h3>孤儿对账补领</h3><p class="t">工单 B：抢到了但钱没到账。</p></div>
+<div class="card fragment" data-fragment-index="1"><p class="k">5.2 · 每 2 分钟</p><h3>孤儿红包补领</h3><p class="t">工单 B：抢到了但钱没到账。</p></div>
 <div class="card fragment" data-fragment-index="2"><p class="k">5.3 · 发包当场 + 每 2 分钟</p><h3>份额池丢失补偿</h3><p class="t">工单 C：扣了钱但没人能抢。</p></div>
 <div class="card fragment" data-fragment-index="3"><p class="k">5.4 · 每 5 分钟</p><h3>过期回收</h3><p class="t">没领完的钱退回发包人。</p></div>
 </div>
@@ -557,7 +558,7 @@ x-connector { border: none !important; }
 </section>
 <section id="orphan" data-transition="fade">
 <p class="eye">五 · 5.2 工单 B · internal/redpacket/task.go:197-233</p>
-<h2>孤儿领取：份额卡在半空，靠标记补发</h2>
+<h2>孤儿红包：份额卡在半空，靠标记补发</h2>
 <div class="body">
 <div class="cards">
 <div class="card no"><p class="k">Redis · amounts</p><h3>30 元已经弹走</h3><p class="t">LIST 里没有这一份了。</p></div>
@@ -650,12 +651,12 @@ x-connector { border: none !important; }
 </section>
 <section id="expire" data-transition="fade">
 <p class="eye">五 · 5.4 过期回收 · internal/redpacket/task.go:24-65</p>
-<h2>先补齐孤儿，再按 DB 退剩余</h2>
+<h2>先补齐孤儿红包，再按 DB 退剩余</h2>
 <div class="body">
 <div class="flow">
 <p class="box">每 5 分钟<br>按 id 分批扫完已过期红包</p>
 <x-connector class="go"></x-connector>
-<p class="box"><b>第 1 步</b><br>reconcileRedPacket<br>先把孤儿补发给领取人</p>
+<p class="box"><b>第 1 步</b><br>reconcileRedPacket<br>先把孤儿红包补发给领取人</p>
 <x-connector class="go fragment" data-fragment-index="1"></x-connector>
 <p class="box fragment" data-fragment-index="1">对账出错或还有在途标记？<br>过期不足 1 小时：本轮跳过<br>超过 1 小时：保底照退</p>
 <x-connector class="go fragment" data-fragment-index="2"></x-connector>
@@ -663,7 +664,7 @@ x-connector { border: none !important; }
 </div>
 <div class="cards fragment" data-fragment-index="3">
 <div class="card no"><h3>如果先退剩余</h3><p class="t">状态变成 refunded，孤儿用户的 claimTx 被拒：抢到了红包却再也补不进去。</p></div>
-<div class="card yes"><h3>先补孤儿</h3><p class="t">孤儿的金额先落库，SUM(已领) 包含这一份，只退真正没人领的钱。</p></div>
+<div class="card yes"><h3>先补孤儿红包</h3><p class="t">孤儿红包的金额先落库，SUM(已领) 包含这一份，只退真正没人领的钱。</p></div>
 </div>
 </div>
 </section>
@@ -736,12 +737,12 @@ x-connector { border: none !important; }
 <table>
 <tr class="thead"><th style="width:26%">技术点</th><th style="width:28%">文件</th><th>核心入口函数 / 脚本</th></tr>
 <tr><td>三段式托管资金流复式记账</td><td>internal/redpacket/settle.go</td><td>adjustWallet、adjustClearing、settleSendTx、settleClaimTx、settleRefundTx</td></tr>
-<tr class="alt"><td>过期回收与孤儿对账定时任务</td><td>internal/redpacket/task.go</td><td>RunRedPacketExpireCheck、refundRedPacketLeft、RunRedPacketClaimReconcile、reconcileRedPacket</td></tr>
+<tr class="alt"><td>过期回收与孤儿红包对账定时任务</td><td>internal/redpacket/task.go</td><td>RunRedPacketExpireCheck、refundRedPacketLeft、RunRedPacketClaimReconcile、reconcileRedPacket</td></tr>
 <tr><td>台账对账消费者</td><td>internal/redpacket/consumer.go</td><td>StartSettleConsumer、DispatchSettleEvent、reportRepair</td></tr>
 <tr class="alt"><td>路由与限流 / 幂等护栏</td><td>internal/redpacket/routes.go</td><td>RegisterRoutes</td></tr>
 <tr><td>系统托管账户定义</td><td>internal/money/ledger_model.go</td><td>AccountCodeRedPacketEscrow</td></tr>
 <tr class="alt"><td>错误码定义</td><td>pkg/e/code.go</td><td>84001 ~ 84006</td></tr>
-<tr><td>单元与并发测试集</td><td>internal/redpacket/service_test.go、claim_test.go；repository/cache/redpacket_test.go</td><td>覆盖拆包、并发抢、孤儿补领与互斥</td></tr>
+<tr><td>单元与并发测试集</td><td>internal/redpacket/service_test.go、claim_test.go；repository/cache/redpacket_test.go</td><td>覆盖拆包、并发抢、孤儿红包补领与互斥</td></tr>
 </table>
 </div>
 </section>
@@ -749,7 +750,7 @@ x-connector { border: none !important; }
 <p class="tag">本讲小结</p>
 <h1>两边对不上的时候，<br>永远听 MySQL 的</h1>
 <p class="sub">Redis 决定谁拿到哪一份，MySQL 决定钱有没有动</p>
-<p class="meta">A 先查库再回补 · B 孤儿对账补领 · C 立即退款 + 池丢失检测</p>
+<p class="meta">A 先查库再回补 · B 孤儿红包补领 · C 立即退款 + 池丢失检测</p>
 </section>
 </div>
 <div id="bar"></div><div id="no"></div>
