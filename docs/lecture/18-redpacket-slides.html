@@ -569,7 +569,7 @@ x-connector { border: none !important; }
 <div class="flow fragment" data-fragment-index="1">
 <p class="box">DB 里已有记录<br><b>跳过</b></p>
 <p class="box">抢到不足 1 分钟<br><b>在途，先别动</b></p>
-<p class="box">超过 1 分钟未落库<br><b>CAS 把标记追加 :r</b></p>
+<p class="box">超过 1 分钟未落库<br><b>给标记加上 :r，占住这一份</b></p>
 <x-connector class="go"></x-connector>
 <p class="box end">拿到 :r 锁<br>替用户调 claimTx 补发</p>
 </div>

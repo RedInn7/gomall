@@ -675,7 +675,7 @@ flowchart TD
     D1 -- "有" --> SKIP(["正常，跳过"])
     D1 -- "没有" --> D2{"抢到不足 1 分钟？<br/>claimOrphanGrace"}
     D2 -- "是" --> PEND(["在途，pending = true，先别动"])
-    D2 -- "否" --> LOCK{"CAS 抢占：标记追加 :r<br/>LockRedPacketClaimForRepair"}
+    D2 -- "否" --> LOCK{"抢占：给标记加上 :r<br/>LockRedPacketClaimForRepair"}
     LOCK -- "改写失败" --> GONE(["原请求刚完成回补，跳过"])
     LOCK -- "拿到 :r 锁" --> TX["替用户调同一个 claimTx<br/>把这份金额补发到钱包"]
     TX --> DONE(["repaired++"])
