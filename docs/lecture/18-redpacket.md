@@ -481,7 +481,19 @@ sequenceDiagram
 
 ## 3.2 领包的 `ref_order_id` 为什么用“领取记录 ID”？
 
+`ref_order_id`（关联单号）回答的是“这行流水是因为哪件事记的”：流水表只记钱的进出，靠它指回引发这笔钱的业务记录。
+
+| 业务 | 关联单号填什么 | 这件事会发生几次 |
+|---|---|---|
+| 发红包 | 红包 ID | 一个红包只发 1 次 |
+| 领红包 | 领取记录 ID | 一个红包被领 N 次，每次一条记录 |
+| 过期退款 | 红包 ID | 一个红包最多退 1 次 |
+
+一件事记两行、共用一个单号：B 领红包对应领取记录 501，托管账户出账 `(501, debit)`，B 的钱包入账 `(501, credit)`，靠方向区分。单号相同就是同一件事，重复记账会被拦；单号不同就是不同的事，放行。
+
 流水表防重唯一索引：`uniq_acct_tx_order_dir (ref_order_id, direction, biz_type)`，**唯一键里没有 `user_id`**。
+
+如果领包也用红包 ID，B 和 C 写入的三项完全一样，数据库分不清这是“C 的另一次领取”还是“B 那次被重复记账”，只能拒掉第二行。所以**单号的粒度要跟着“这件事发生几次”走**：发包、退款各一次，用红包 ID；领包有 N 次，用每次领取自己的 ID。
 
 ```mermaid
 %%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
