@@ -210,14 +210,13 @@ x-connector { border: none !important; }
 </div>
 </section>
 <section id="tickets" data-transition="fade">
-<p class="eye">一 · 四张客诉单</p>
-<h2>先看四张客诉单：事故都出在两边的交界处</h2>
+<p class="eye">一 · 三张客诉单</p>
+<h2>先看三张客诉单：事故都出在两边的交界处</h2>
 <div class="body">
 <div class="cards">
-<div class="card"><p class="num">A</p><h3>失败后再点，提示已领过</h3><p class="t">Redis 扣了份额、打了标记，DB 事务失败后没退回 Redis。</p><p class="k">→ 4.1、4.5 先查库 + 原子回补</p></div>
-<div class="card fragment" data-fragment-index="1"><p class="num">B</p><h3>抢到的人和发包人各拿一次</h3><p class="t">领取事务与过期退款并发，读了旧的 MVCC 快照。</p><p class="k">→ 4.3、4.4 FOR UPDATE 置于事务首行</p></div>
-<div class="card fragment" data-fragment-index="2"><p class="num">C</p><h3>抢到了，钱没到账</h3><p class="t">抢完 Redis 后服务器断电，回补没跑成，份额卡在半空。</p><p class="k">→ 5.2 孤儿对账补领（:r 抢占锁）</p></div>
-<div class="card fragment" data-fragment-index="3"><p class="num">D</p><h3>扣了 100 元，却显示已抢完</h3><p class="t">DB 扣款已提交，往 Redis 写金额列表时 Redis 挂了。</p><p class="k">→ 5.3 立即逆向退款 + 池丢失提前退款</p></div>
+<div class="card"><p class="num">A</p><h3>失败后再点，提示已领过</h3><p class="t">Redis 扣了份额、打了标记，DB 事务失败后没退回 Redis。</p><p class="k">→ 4.2、4.3 先查库 + 原子回补</p></div>
+<div class="card fragment" data-fragment-index="1"><p class="num">B</p><h3>抢到了，钱没到账</h3><p class="t">抢完 Redis 后服务器断电，回补没跑成，份额卡在半空。</p><p class="k">→ 5.2 孤儿对账补领（:r 抢占锁）</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="num">C</p><h3>扣了 100 元，却显示已抢完</h3><p class="t">DB 扣款已提交，往 Redis 写金额列表时 Redis 挂了。</p><p class="k">→ 5.3 立即逆向退款 + 池丢失提前退款</p></div>
 </div>
 </div>
 </section>
@@ -516,84 +515,8 @@ x-connector { border: none !important; }
 <p class="lead fragment" data-fragment-index="5">四个分支里<span class="hl">只有分支 4 会回补</span>。回补若返回 ErrRedPacketClaimRepairing（对账已接手），再查一次 GetClaim，落库了就按成功返回。</p>
 </div>
 </section>
-<section id="racea" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">四 · 4.3 工单 B · 情况一</p>
-<h2>抢最后一份撞上过期退款：领取事务先拿到行锁</h2>
-<div class="seq">
-<div class="row p3"><p class="who">领取事务（用户 C）</p><p class="who">red_packet 行锁</p><p class="who">过期退款事务（Cron）</p></div>
-<div class="row p3"><p class="note" style="grid-column:1/7">100 元红包 12:00:00 到期，还剩最后一份 20 元；C 抢到的同一毫秒，过期回收也扫到了它</p></div>
-<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">① INSERT claim (amount=2000)</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">② UPDATE remaining-1 WHERE status=active（拿到行锁）</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">SELECT ... FOR UPDATE（请求同一行锁）</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="2"><p class="note warn" style="grid-column:3/7">被阻塞，排队等领取事务释放锁</p></div>
-<div class="row p3 fragment" data-fragment-index="3"><div class="m" style="grid-column:2/4"><p class="lb">③ status=finished + 转账 + COMMIT</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="4"><div class="m ret" style="grid-column:4/6"><p class="lb">拿到行锁，读到最新 status = finished</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="4"><p class="note" style="grid-column:4/7">已是 finished，直接退出，退还 0 元</p></div>
-</div>
-</section>
-<section id="raceb" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">四 · 4.3 工单 B · 情况二 · internal/redpacket/task.go:73-123</p>
-<h2>反过来：退款事务先拿到行锁</h2>
-<div class="seq">
-<div class="row p3"><p class="who">领取事务（用户 C）</p><p class="who">red_packet 行锁</p><p class="who">过期退款事务（Cron）</p></div>
-<div class="row p3"><div class="m" style="grid-column:4/6"><p class="lb">SELECT ... FOR UPDATE（拿到行锁，status=active）</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">INSERT claim，UPDATE remaining-1 WHERE status=active</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="1"><p class="note warn" style="grid-column:1/5">被阻塞，等退款事务释放行锁</p></div>
-<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">SUM(已领)，left = Total − SUM</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">status=refunded + 退 left 给发包人 + COMMIT</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="3"><div class="m lost" style="grid-column:2/4"><p class="lb">RowsAffected = 0</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="3"><p class="note" style="grid-column:1/6">errRedPacketClosed，领取事务整体回滚 → 四分支的分支 3，不回补 Redis</p></div>
-<div class="row p3 fragment" data-fragment-index="4"><p class="note" style="grid-column:2/7">两种顺序都是串行：同一份钱只会走一条路</p></div>
-</div>
-</section>
-<section id="snapshot" data-transition="fade">
-<p class="eye">四 · 4.4 MVCC 快照时机</p>
-<h2>为什么 FOR UPDATE 必须是事务第一条语句</h2>
-<div class="body">
-<p class="lead">MySQL InnoDB 默认 <span class="hl">RR（可重复读）</span>隔离级别下，两种读的行为不一样：</p>
-<div class="cards">
-<div class="card soft"><h3>普通 SELECT（不加锁）</h3><p class="t">事务里<b>第一条</b>普通读执行的瞬间，建立 ReadView 快照。</p><p class="t">此后所有普通读（包括 SUM）只看得到快照时刻的数据。</p></div>
-<div class="card soft fragment" data-fragment-index="1"><h3>SELECT ... FOR UPDATE（加锁读）</h3><p class="t"><b>不建立快照。</b></p><p class="t">等行锁，读最新已提交的数据。</p></div>
-</div>
-<p class="formula fragment" data-fragment-index="2">GetForUpdate 前面不能插任何普通 SELECT：否则快照提前建立，后面的 SUM 看不到并发提交的领取</p>
-</div>
-</section>
-<section id="mvccbad" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">四 · 4.4 反面推演</p>
-<h2>首行多了一句普通 SELECT：多退 50 元</h2>
-<div class="seq">
-<div class="row p3"><p class="who">过期退款事务</p><p class="who">MySQL（RR）</p><p class="who">用户 C 领取事务</p></div>
-<div class="row p3"><p class="note" style="grid-column:1/7">红包 88：100 元 3 份，B 已领 30；到期瞬间 C 抢到 50（还剩一份，状态仍是 active）</p></div>
-<div class="row p3 fragment" data-fragment-index="1"><div class="m lost" style="grid-column:2/4"><p class="lb">① 普通 SELECT（错误地加在首行）</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="1"><p class="note warn" style="grid-column:1/5">RR 快照此刻建立：已领 SUM = 30</p></div>
-<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">② INSERT claim(50) + remaining-1 + COMMIT</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="3"><div class="m" style="grid-column:2/4"><p class="lb">③ SELECT ... FOR UPDATE（最新行仍是 active）</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/4"><p class="lb">④ SELECT SUM（普通读，复用旧快照 = 30）</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="5"><div class="m" style="grid-column:2/4"><p class="lb">⑤ left = 100 − 30 = 70，退款 + COMMIT</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="5"><p class="note warn" style="grid-column:2/7">100 元红包被领走 80 元，又退了 70 元</p></div>
-</div>
-</section>
-<section id="mvccgood" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">四 · 4.4 正确顺序</p>
-<h2>加锁读在前：快照在拿到锁之后才建</h2>
-<div class="seq">
-<div class="row p3"><p class="who">过期退款事务</p><p class="who">MySQL（RR）</p><p class="who">用户 C 领取事务</p></div>
-<div class="row p3"><div class="m" style="grid-column:4/6"><p class="lb">INSERT claim(50) + UPDATE remaining-1（持有行锁）</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">① SELECT ... FOR UPDATE（事务第一条语句）</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="1"><p class="note" style="grid-column:1/5">加锁读不建快照，排队等行锁</p></div>
-<div class="row p3 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">COMMIT</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="2"><div class="m ret" style="grid-column:2/4"><p class="lb">拿到行锁，status = active</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="3"><div class="m" style="grid-column:2/4"><p class="lb">② SELECT SUM（第一条普通读）</p><x-connector></x-connector></div></div>
-<div class="row p3 fragment" data-fragment-index="3"><p class="note" style="grid-column:1/6">快照此刻才建立，看得到 C 刚提交的 50：SUM = 80</p></div>
-<div class="row p3 fragment" data-fragment-index="4"><div class="m" style="grid-column:2/4"><p class="lb">③ left = 100 − 80 = 20，退款 + COMMIT</p><x-connector></x-connector></div></div>
-</div>
-</section>
 <section id="rollback" data-transition="fade">
-<p class="eye">四 · 4.5 工单 A · repository/cache/redpacket.go:92-99</p>
+<p class="eye">四 · 4.3 工单 A · repository/cache/redpacket.go:92-99</p>
 <h2>回补 Lua：先看标记，再决定放不放回</h2>
 <div class="body">
 <div class="cards">
@@ -626,14 +549,14 @@ x-connector { border: none !important; }
 <p class="box end"><b>refunded</b><br>过期回收 / 份额池丢失 / Redis 准备失败补偿</p>
 </div>
 <div class="cards">
-<div class="card fragment" data-fragment-index="1"><p class="k">5.2 · 每 2 分钟</p><h3>孤儿对账补领</h3><p class="t">工单 C：抢到了但钱没到账。</p></div>
-<div class="card fragment" data-fragment-index="2"><p class="k">5.3 · 发包当场 + 每 2 分钟</p><h3>份额池丢失补偿</h3><p class="t">工单 D：扣了钱但没人能抢。</p></div>
+<div class="card fragment" data-fragment-index="1"><p class="k">5.2 · 每 2 分钟</p><h3>孤儿对账补领</h3><p class="t">工单 B：抢到了但钱没到账。</p></div>
+<div class="card fragment" data-fragment-index="2"><p class="k">5.3 · 发包当场 + 每 2 分钟</p><h3>份额池丢失补偿</h3><p class="t">工单 C：扣了钱但没人能抢。</p></div>
 <div class="card fragment" data-fragment-index="3"><p class="k">5.4 · 每 5 分钟</p><h3>过期回收</h3><p class="t">没领完的钱退回发包人。</p></div>
 </div>
 </div>
 </section>
 <section id="orphan" data-transition="fade">
-<p class="eye">五 · 5.2 工单 C · internal/redpacket/task.go:197-233</p>
+<p class="eye">五 · 5.2 工单 B · internal/redpacket/task.go:197-233</p>
 <h2>孤儿领取：份额卡在半空，靠标记补发</h2>
 <div class="body">
 <div class="cards">
@@ -684,7 +607,7 @@ x-connector { border: none !important; }
 </div>
 </section>
 <section id="poollost" data-transition="fade">
-<p class="eye">五 · 5.3 工单 D</p>
+<p class="eye">五 · 5.3 工单 C</p>
 <h2>份额池丢失：amounts 这个 LIST 不存在了</h2>
 <div class="body">
 <div class="cards">
@@ -776,21 +699,6 @@ x-connector { border: none !important; }
 </div>
 </div>
 </section>
-<section id="demo3" data-transition="fade">
-<p class="eye">六 · 故障演练 · 演示 3</p>
-<h2>真 MySQL 下的行锁与 MVCC 快照时机</h2>
-<div class="body">
-<div class="code">
-<p class="c">REDPACKET_TEST_MYSQL_DSN='root@tcp(127.0.0.1:3306)/rptest?charset=utf8mb4&amp;parseTime=True&amp;loc=Local' \</p>
-<p class="c i1">go test ./internal/redpacket -run TestClaimAndRefundRaceConservesMoney -count=3 -v</p>
-</div>
-<div class="cards">
-<div class="card soft fragment" data-fragment-index="1"><p class="k">动手破坏</p><h3>插一行普通查询</h3><p class="t">internal/redpacket/task.go:81，在 txDao.GetForUpdate(rpID) 前面插入</p><p class="c" style="color:#3D1F0B">_, _ = txDao.Get(rpID)</p></div>
-<div class="card no fragment" data-fragment-index="2"><p class="k">现象</p><h3>复现双倍退钱</h3><p class="t">断言失败：</p><p class="c" style="color:#3D1F0B">claimed X + refunded Y != 2000</p></div>
-</div>
-<p class="lead fragment" data-fragment-index="3">必须连真 MySQL 跑：默认的 SQLite 没有行锁和 RR 快照，插错了也测不出来。</p>
-</div>
-</section>
 <section id="homework" data-transition="fade">
 <p class="eye">六 · 课后思考与练习</p>
 <h2>四道题</h2>
@@ -833,7 +741,7 @@ x-connector { border: none !important; }
 <tr class="alt"><td>路由与限流 / 幂等护栏</td><td>internal/redpacket/routes.go</td><td>RegisterRoutes</td></tr>
 <tr><td>系统托管账户定义</td><td>internal/money/ledger_model.go</td><td>AccountCodeRedPacketEscrow</td></tr>
 <tr class="alt"><td>错误码定义</td><td>pkg/e/code.go</td><td>84001 ~ 84006</td></tr>
-<tr><td>单元与并发测试集</td><td>internal/redpacket/service_test.go、claim_test.go；repository/cache/redpacket_test.go</td><td>覆盖拆包、并发抢、MVCC 快照竞态、孤儿补领与互斥</td></tr>
+<tr><td>单元与并发测试集</td><td>internal/redpacket/service_test.go、claim_test.go；repository/cache/redpacket_test.go</td><td>覆盖拆包、并发抢、孤儿补领与互斥</td></tr>
 </table>
 </div>
 </section>
@@ -841,7 +749,7 @@ x-connector { border: none !important; }
 <p class="tag">本讲小结</p>
 <h1>两边对不上的时候，<br>永远听 MySQL 的</h1>
 <p class="sub">Redis 决定谁拿到哪一份，MySQL 决定钱有没有动</p>
-<p class="meta">A 先查库再回补 · B FOR UPDATE 放事务首行 · C 孤儿对账补领 · D 立即退款 + 池丢失检测</p>
+<p class="meta">A 先查库再回补 · B 孤儿对账补领 · C 立即退款 + 池丢失检测</p>
 </section>
 </div>
 <div id="bar"></div><div id="no"></div>

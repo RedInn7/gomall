@@ -9,11 +9,11 @@
 | 部分 | 讲什么 | 对应工单 |
 |---|---|---|
 | 00 | 为什么要两套存储，谁说了算 | |
-| 一 | 四张客诉单与数据结构 | A B C D |
+| 一 | 三张客诉单与数据结构 | A B C |
 | 二 | 分发：发包时预拆，抢包只 `LPOP` | |
 | 三 | 资金：钱先进托管账户 | |
-| 四 | 一致性：Redis 先扣，DB 说了算 | A B |
-| 五 | 三道兜底防线 | C D |
+| 四 | 一致性：Redis 先扣，DB 说了算 | A |
+| 五 | 三道兜底防线 | B C |
 | 六 | 故障演练、课后思考、代码索引 | |
 
 ---
@@ -138,14 +138,13 @@ flowchart TD
 
 ---
 
-## 一、先看四张客诉单
+## 一、先看三张客诉单
 
 | 工单 | 用户看到的现象 | 底层原因 | 解决章节 |
 |---|---|---|---|
-| **A** | 点“抢”报错失败；再点提示“您已领取过该红包”，钱也没到账 | Redis 扣了份额、打了已领标记，DB 事务失败后没把标记和份额退回 Redis | **4.1、4.5**：失败先查库 + Saga 原子回补 |
-| **B** | 到期同一秒最后一份被抢走；抢包人拿到钱，发包人也收到这笔的过期退款，平台亏钱 | 领取事务与过期退款事务并发，读了旧的 MVCC 快照，同一份钱发两次 | **4.3、4.4**：`SELECT ... FOR UPDATE` 置于事务首行 |
-| **C** | 抢的时候转圈断开；半小时后份额没退回红包池，钱包也没收到钱（孤儿份额） | 抢完 Redis 后服务器断电重启，回补没跑成，份额卡在半空 | **5.2**：`claimed` 孤儿对账自动补领（`:r` 抢占锁） |
-| **D** | 发包人被扣了 100 元，群里所有人点开都显示“红包已抢完” | DB 扣款事务提交成功，紧接着写 Redis 金额列表时 Redis 挂了 | **5.3**：发包失败立即逆向退款 + 份额池丢失检测提前退款 |
+| **A** | 点“抢”报错失败；再点提示“您已领取过该红包”，钱也没到账 | Redis 扣了份额、打了已领标记，DB 事务失败后没把标记和份额退回 Redis | **4.2、4.3**：失败先查库 + Saga 原子回补 |
+| **B** | 抢的时候转圈断开；半小时后份额没退回红包池，钱包也没收到钱（孤儿份额） | 抢完 Redis 后服务器断电重启，回补没跑成，份额卡在半空 | **5.2**：`claimed` 孤儿对账自动补领（`:r` 抢占锁） |
+| **C** | 发包人被扣了 100 元，群里所有人点开都显示“红包已抢完” | DB 扣款事务提交成功，紧接着写 Redis 金额列表时 Redis 挂了 | **5.3**：发包失败立即逆向退款 + 份额池丢失检测提前退款 |
 
 ---
 
@@ -608,125 +607,7 @@ flowchart TD
 
 ---
 
-## 4.3 工单 B：抢最后一份与过期退款同时发生
-
-**场景**：100 元红包 `12:00:00` 到期，前两人领走 80 元，还剩最后一份 20 元。同一毫秒，用户 C 在执行 `claimTx`，过期回收任务在执行 `refundRedPacketLeft`（`internal/redpacket/task.go:73-123`）。
-
-情况一，领取事务先拿到行锁：
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant Claim as 领取事务 (用户 C 抢最后 20 元)
-    participant DB as red_packet 主表行锁
-    participant Refund as 过期退款事务 (Cron)
-
-    Claim->>DB: 1. INSERT claim (amount=2000)
-    Claim->>DB: 2. UPDATE remaining-1 WHERE status=active (拿到行锁!)
-    activate DB
-    Refund->>DB: SELECT ... FOR UPDATE (请求同一行锁)
-    Note over Refund,DB: 被阻塞！排队等待领取事务释放锁...
-    Claim->>DB: 3. 标记 status=finished + 转账 + COMMIT!
-    deactivate DB
-    DB-->>Refund: 终于拿到行锁！读到最新 status = finished
-    Refund->>Refund: 发现已是 finished，直接退出，退还 0 元！
-```
-
----
-
-## 4.3 情况二：退款事务先拿到行锁
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant Refund
-    participant DB
-    participant Claim
-    participant Service
-
-    Refund->>DB: SELECT ... FOR UPDATE (id=88)
-    activate DB
-    DB-->>Refund: (status=active，拿到行锁)
-    Claim->>DB: INSERT claim (amount=2000)
-    Claim->>DB: UPDATE remaining-1 WHERE status=active
-    Note over Claim,DB: 被阻塞，等退款事务释放行锁
-    Refund->>DB: SUM(claim.amount)，算出 left = Total - SUM
-    Refund->>DB: status=refunded + 退 left 给发包人 + COMMIT
-    deactivate DB
-    DB-->>Claim: (RowsAffected = 0)
-    Claim-->>Service: errRedPacketClosed，整个领取事务回滚
-    Note over Service: 走四分支的分支 3，不回补 Redis
-```
-
-`DecrRemaining`（`internal/redpacket/repo.go`）：
-
-```sql
-UPDATE red_packet SET remaining = remaining - 1
-WHERE id = ? AND remaining > 0 AND status = 1 /* active */
-```
-
-- 两种顺序都**串行**，同一份钱只会走一条路。
-
----
-
-## 4.4 为什么 `FOR UPDATE` 必须是事务第一条语句？
-
-MySQL InnoDB 默认 **RR（可重复读）**：
-
-- 事务里**第一条普通 `SELECT`** 执行的瞬间建立 ReadView 快照，此后所有普通读（含 `SUM`）只看得到快照时刻的数据。
-- `SELECT ... FOR UPDATE` **不建快照**，等行锁，读最新已提交数据。
-
-反面推演：红包 `88` 共 100 元 3 份，B 已领 30 元；到期瞬间 C 抢到 50 元（还剩一份，状态仍是 `active`）。
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant Refund as 过期退款事务 (错误地在首行加了普通 SELECT)
-    participant DB as MySQL (InnoDB RR 隔离级别)
-    participant Claim as 用户 C 领取事务 (抢到 50 元)
-
-    Refund->>DB: 1. SELECT * FROM red_packet WHERE id=88 (普通读)
-    Note over Refund,DB: 致命点：RR 快照在此刻建立！<br/>快照里已领金额 SUM = 30 元
-    Claim->>DB: 2. INSERT claim(50元) + UPDATE remaining-1 + COMMIT
-    Note over Claim,DB: 用户 C 成功领走 50 元！真实已领变为 80 元
-    Refund->>DB: 3. SELECT * FROM red_packet WHERE id=88 FOR UPDATE
-    Note over Refund,DB: 加锁读看到最新行：status 仍是 active，继续往下走
-    Refund->>DB: 4. SELECT SUM(amount) FROM red_packet_claim WHERE red_packet_id=88
-    Note over Refund,DB: 灾难发生：SUM 是普通读，复用第 1 步的旧快照！<br/>看不到用户 C 的 50 元，算出来 SUM 仍是 30 元！
-    Refund->>DB: 5. 算出应退 left = 100 - 30 = 70 元，退给发包人并 COMMIT！
-    Note over Refund,Claim: 资损结果：100 元红包被领走 80 元，又退了 70 元！
-```
-
----
-
-## 4.4 正确顺序：快照在拿到锁之后才建
-
-```mermaid
-%%{init: {'theme':'base','themeVariables':{'fontFamily':'PingFang SC, Microsoft YaHei, sans-serif','background':'#FFFBF5','primaryColor':'#FFE8CC','primaryBorderColor':'#E8590C','primaryTextColor':'#5C2E0E','secondaryColor':'#FFF4E6','tertiaryColor':'#FFF9F0','lineColor':'#D9480F','textColor':'#5C2E0E','clusterBkg':'#FFF9F0','clusterBorder':'#F08C00','edgeLabelBackground':'#FFF4E6','actorBkg':'#FFD8A8','actorBorder':'#E8590C','actorTextColor':'#5C2E0E','actorLineColor':'#F08C00','signalColor':'#C2410C','signalTextColor':'#5C2E0E','noteBkgColor':'#FFF3BF','noteBorderColor':'#F08C00','noteTextColor':'#5C2E0E','activationBkgColor':'#FFC078','activationBorderColor':'#E8590C','labelBoxBkgColor':'#FFE8CC','labelBoxBorderColor':'#E8590C','labelTextColor':'#5C2E0E','loopTextColor':'#5C2E0E'}}}%%
-sequenceDiagram
-    participant Refund
-    participant DB
-    participant Claim
-
-    Claim->>DB: INSERT claim (5000) + UPDATE remaining-1
-    activate DB
-    Refund->>DB: 1. SELECT ... FOR UPDATE (事务第一条语句)
-    Note over Refund,DB: 加锁读不建快照，排队等行锁
-    Claim->>DB: COMMIT
-    deactivate DB
-    DB-->>Refund: (拿到行锁，status=active)
-    Refund->>DB: 2. SELECT SUM(amount) (第一条普通读)
-    Note over Refund,DB: 快照此刻才建立，看得到 C 刚提交的 50 元
-    DB-->>Refund: (SUM = 8000)
-    Refund->>DB: 3. left = 10000 - 8000 = 2000，退给发包人 + COMMIT
-```
-
-- 拿到行锁 = 排在它前面的领取事务都已 `COMMIT`。
-- 之后的第一条普通读 `SumClaimed` 建的快照，一定包含这些领取。
-
----
-
-## 4.5 工单 A：回补 Lua 与 `:r` 补领锁
+## 4.3 工单 A：回补 Lua 与 `:r` 补领锁
 
 确认 DB 真的失败且未落库时，调 `RollbackRedPacketClaim`（`repository/cache/redpacket.go:92-99`）：
 
@@ -771,13 +652,13 @@ stateDiagram-v2
 
 | 防线 | 触发 | 解决 |
 |---|---|---|
-| 5.2 孤儿对账补领 | 每 2 分钟 | 工单 C：抢到了但钱没到账 |
-| 5.3 份额池丢失补偿 | 发包当场 + 每 2 分钟 | 工单 D：扣了钱但没人能抢 |
+| 5.2 孤儿对账补领 | 每 2 分钟 | 工单 B：抢到了但钱没到账 |
+| 5.3 份额池丢失补偿 | 发包当场 + 每 2 分钟 | 工单 C：扣了钱但没人能抢 |
 | 5.4 过期回收 | 每 5 分钟 | 没领完的钱退回发包人 |
 
 ---
 
-## 5.2 工单 C：孤儿领取与对账补领
+## 5.2 工单 B：孤儿领取与对账补领
 
 **孤儿领取**：Redis Lua 抢包成功，紧接着服务器断电重启，或 DB 事务超时且回补也因网络抖动失败。
 
@@ -857,7 +738,7 @@ sequenceDiagram
 
 ---
 
-## 5.3 工单 D：份额池丢失的两道防线
+## 5.3 工单 C：份额池丢失的两道防线
 
 `redpacket:{id}:amounts` 这个 `LIST` 不存在，别人一点开就提示“红包已抢完”。
 
@@ -990,16 +871,6 @@ go test ./internal/redpacket -run 'TestClaimTxFailureRollsBackRedis|TestClaimCom
 - 破坏：把 `repository/cache/redpacket.go:95` 回补 Lua 里的 `if string.sub(v, -2) == ':r' then return -1 end` 注释掉，再跑 `TestClaimRollbackYieldsToReconcileRepair`。
 - 现象：对账帮用户补领入账后，慢请求又把份额塞回 Redis，触发 `"redis has an extra share"` 超发断言失败。
 
-**演示 3：真 MySQL 下的行锁与 MVCC 快照时机**
-
-```bash
-REDPACKET_TEST_MYSQL_DSN='root@tcp(127.0.0.1:3306)/rptest?charset=utf8mb4&parseTime=True&loc=Local' \
-  go test ./internal/redpacket -run TestClaimAndRefundRaceConservesMoney -count=3 -v
-```
-
-- 破坏：在 `internal/redpacket/task.go:81` 的 `txDao.GetForUpdate(rpID)` 前面插入一行普通查询 `_, _ = txDao.Get(rpID)`，在真 MySQL 下重跑。
-- 现象：立刻复现 `claimed X + refunded Y != 2000` 的双倍退钱资损事故。
-
 ---
 
 ## 课后思考与练习
@@ -1028,4 +899,4 @@ REDPACKET_TEST_MYSQL_DSN='root@tcp(127.0.0.1:3306)/rptest?charset=utf8mb4&parseT
 | **路由与限流/幂等护栏** | `internal/redpacket/routes.go` | `RegisterRoutes` |
 | **系统托管账户定义** | `internal/money/ledger_model.go` | `AccountCodeRedPacketEscrow` |
 | **错误码定义** | `pkg/e/code.go` | `84001` ~ `84006` |
-| **单元与并发测试集** | `internal/redpacket/service_test.go`、`claim_test.go`、`repository/cache/redpacket_test.go` | 覆盖拆包、并发抢、MVCC 快照竞态、孤儿补领与互斥 |
+| **单元与并发测试集** | `internal/redpacket/service_test.go`、`claim_test.go`、`repository/cache/redpacket_test.go` | 覆盖拆包、并发抢、孤儿补领与互斥 |
