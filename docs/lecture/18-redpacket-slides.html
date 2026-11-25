@@ -615,7 +615,7 @@ x-connector { border: none !important; }
 </section>
 <section id="locka" data-transition="fade">
 <div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">五 · 5.2 :r 锁互斥（一）</p>
+<p class="eye">五 · 5.2 :r 锁互斥</p>
 <h2>对账先到：慢请求的回补被拒，按成功返回</h2>
 <div class="seq">
 <div class="row p4"><p class="who"><span class="ico service"></span>慢请求（要回补）</p><p class="who"><span class="ico redis"></span>Redis claimed</p><p class="who"><span class="ico cron"></span>对账（要补领）</p><p class="who"><span class="ico mysql"></span>DB</p></div>
@@ -643,36 +643,9 @@ x-connector { border: none !important; }
 <p class="lead fragment" data-fragment-index="5">这四种情况里请求都<span class="hl">没有死，只是慢</span>。它迟早会醒来走回补，而对账可能已经替它补了钱，:r 锁就是为这一刻准备的。</p>
 </div>
 </section>
-<section id="lockb" data-transition="fade">
-<div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">五 · 5.2 :r 锁互斥（二）</p>
-<h2>回补先到：对账抢占失败，跳过这一份</h2>
-<div class="seq">
-<div class="row p4"><p class="who"><span class="ico service"></span>慢请求（要回补）</p><p class="who"><span class="ico redis"></span>Redis claimed</p><p class="who"><span class="ico cron"></span>对账（要补领）</p><p class="who"><span class="ico mysql"></span>DB</p></div>
-<div class="row p4"><div class="m" style="grid-column:4/6"><p class="lb">HGETALL，读到原值</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="1"><div class="m" style="grid-column:2/4"><p class="lb">rollback Lua (101, 3000)</p><x-connector></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="1"><p class="note" style="grid-column:2/7">普通标记：LPUSH 3000 回 LIST + HDEL 101</p></div>
-<div class="row p4 fragment" data-fragment-index="1"><div class="m ret" style="grid-column:2/4"><p class="lb">1 已回补</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="2"><div class="m" style="grid-column:4/6"><p class="lb">LockForRepair Lua（带原值）</p><x-connector from="tr"></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="2"><div class="m lost" style="grid-column:4/6"><p class="lb">0 标记已不存在</p><x-connector></x-connector></div></div>
-<div class="row p4 fragment" data-fragment-index="3"><p class="note" style="grid-column:4/9">对账跳过这一份，不调 claimTx</p></div>
-<div class="row p4 fragment" data-fragment-index="4"><p class="note warn" style="grid-column:1/9">两段 Lua 都先看标记再动手：谁先改到标记，这一份就归谁处理，另一方让路</p></div>
-</div>
-</section>
-<section id="poollost" data-transition="fade">
-<p class="eye">五 · 5.3 工单 C</p>
-<h2>份额池丢失：amounts 这个 LIST 不存在了</h2>
-<div class="body">
-<div class="cards">
-<div class="card soft"><p class="k">防线 1 · service.go:141-150</p><h3>发包当场立即逆向退款</h3><p class="t">Create 里 DB 扣款事务已提交，PrepareRedPacket 写 Redis 失败。</p><p class="t">当场调 refundRedPacketLeft(ctx, rp.ID)：从 redpacket_escrow 全额退回发包人，状态置 refunded。</p></div>
-<div class="card soft fragment" data-fragment-index="1"><p class="k">防线 2 · task.go:171-252</p><h3>对账发现池丢失，提前退款</h3><p class="t">每 2 分钟对账，四个条件同时成立：</p><p class="t">① 创建已超过 1 分钟<br>② amounts LIST 不存在<br>③ 没有在途孤儿标记<br>④ DB 里仍 active 且 remaining &gt; 0</p><p class="t">不用让发包人傻等 7 天过期。</p></div>
-</div>
-<p class="lead fragment" data-fragment-index="2">防线 1 的补偿也失败，或运行中途 Redis 丢了数据，都由防线 2 接住。</p>
-</div>
-</section>
 <section id="existsok" data-transition="fade">
 <div class="lifes"><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div><div class="lane"><div class="wire"></div></div></div>
-<p class="eye">五 · 5.3 池丢失检查 · 正确顺序</p>
+<p class="eye">五 · 5.3 工单 C · 池丢失检查 · 正确顺序</p>
 <h2>先 EXISTS，后读 claimed：正常抢完不会误退</h2>
 <div class="seq">
 <div class="row p4"><p class="who"><span class="ico service"></span>Service（Z 抢包）</p><p class="who"><span class="ico redis"></span>Redis</p><p class="who"><span class="ico cron"></span>Reconcile</p><p class="who"><span class="ico mysql"></span>DB</p></div>
