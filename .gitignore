@@ -42,3 +42,6 @@ stressTest/config.json
 # 演讲者备注和幻灯片源文件只留本地
 /docs/lecture/*-script.md
 /docs/lecture/.private/
+
+# make bench 的输出（k6 日志、JSON 和 summary.md）
+stressTest/results/
