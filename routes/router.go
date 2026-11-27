@@ -33,6 +33,7 @@ import (
 	"github.com/RedInn7/gomall/internal/skill"
 	"github.com/RedInn7/gomall/internal/user"
 	"github.com/RedInn7/gomall/middleware"
+	util "github.com/RedInn7/gomall/pkg/utils/log"
 	"github.com/RedInn7/gomall/service/search"
 )
 
@@ -70,8 +71,14 @@ func NewRouter() *gin.Engine {
 		panic("TRUSTED_PROXIES 配置非法: " + err.Error())
 	}
 	store := cookie.NewStore([]byte(conf.Config.EncryptSecret.SessionSecret))
-	// 全局令牌桶：每 IP 100 RPS、突发 200，挡正常流量同时防爬虫脚本
-	r.Use(middleware.TokenBucket(rate.Limit(100), 200))
+	// 全局令牌桶：每 IP 100 RPS、突发 200，挡正常流量同时防爬虫脚本。
+	// 本机压测时 k6 所有 VU 共用 127.0.0.1 一个桶，测到的只是限流拒绝路径，
+	// 所以 make bench 启动服务时设置 DISABLE_GLOBAL_RATE_LIMIT=true 跳过它；线上不要设置。
+	if os.Getenv("DISABLE_GLOBAL_RATE_LIMIT") == "true" {
+		util.LogrusObj.Warn("DISABLE_GLOBAL_RATE_LIMIT=true：全局令牌桶已关闭，仅用于压测")
+	} else {
+		r.Use(middleware.TokenBucket(rate.Limit(100), 200))
+	}
 	r.Use(middleware.Cors())
 	r.Use(sessions.Sessions("mysession", store))
 	// Static 不列目录（StaticFS + http.Dir 会列出目录，暴露上传文件清单）
