@@ -55,6 +55,10 @@ env-down:
 	docker compose down
 	@echo "env stop success"
 
+.PHONY: bench		# 一键压测：拉起依赖、关掉全局限流启动服务、跑 k6 并汇总，见 stressTest/bench.sh
+bench:
+	@./stressTest/bench.sh
+
 .PHONY: docker-up	# 以容器形式部署项目
 docker-up:
 	docker build \
