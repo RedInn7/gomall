@@ -322,6 +322,16 @@ RMQ、ES、Web3 与 Milvus 使用独立初始化入口，同步交易链路和�
 
 数据规模：order 表 ~6M 行 / 653 MB，product 表 ~956K 行 / 364 MB。
 
+### 一键复测
+
+```bash
+make bench                                    # 默认四条读链路，约 2 分钟
+BENCH_DURATION=10s make bench                 # 每个脚本只跑 10 秒
+BENCH_SCRIPTS="baseline_ping product_show" make bench   # 只跑指定脚本
+```
+
+`make bench` 会按需用 docker compose 拉起 MySQL 和 Redis；服务没在跑就编译并带 `DISABLE_GLOBAL_RATE_LIMIT=true` 启动，跑完自动停掉；然后注册压测账号、依次跑 k6，最后打印 QPS、P50/P95/P99、HTTP 错误率和检查失败率的汇总表，写入 `stressTest/results/summary.md`。下单、领券、秒杀要准备地址或管理员权限，按 `stressTest/REPORT.md` 单独跑。
+
 ---
 
 ## 运行
@@ -371,6 +381,7 @@ make tools          # 编 SkyWalking Agent（需要先初始化子模块）
 make build-agent    # 使用 SkyWalking Agent 构建
 make env-up         # 拉起 docker-compose.yml 中的完整依赖与观测组件
 make env-down       # 关依赖
+make bench          # 一键压测并输出汇总表（见「压测数据 · 一键复测」）
 make docker-up      # 容器化拉起项目，挂载本地 config/locales/config.yaml
 make docker-down    # 关容器
 ```
@@ -409,6 +420,7 @@ make tools build-agent
 | `EMBEDDING_TEXT_VERSION` | 商品 embedding 文本拼接规则版本，默认 `product-v1` |
 | `TRUSTED_PROXIES` | 部署在反向代理或负载均衡后面时，填它们的 CIDR（逗号分隔）；不填时 ClientIP 取 TCP 对端，伪造的 `X-Forwarded-For` 绕不过按 IP 的限流 |
 | `ADMIN_BOOTSTRAP_TOKEN` | 系统里还没有管理员时，登录用户带上这个 token 调用 `POST /api/v1/admin/bootstrap` 把自己设为管理员；不设置则接口关闭 |
+| `DISABLE_GLOBAL_RATE_LIMIT=true` | 关闭每 IP 100 RPS 的全局令牌桶，只给本机压测用（`make bench` 自动设置），线上不要设置 |
 | `COUPON_ALLOW_DB_MODE=true` | 允许领券接口按 `mode=db` 走数据库悲观锁（压测对比用），默认只走 Redis Lua |
 
 Milvus 第一次启用，或模型/供应方/文本版本变化后，以管理员身份调用一次 `POST /api/v1/admin/search/backfill`，把已有商品同时灌入 ES 和当前版本的 Milvus 集合。不同 embedding 契约使用不同物理集合，避免新旧模型向量混用；回填期间关键词搜索继续可用。之后 `product.changed` Outbox 消费者会维护两份索引；前端搜索框直接调用 Hybrid Search。未配置 `EMBEDDING_API_URL` 时仅使用确定性的开发占位向量，链路可验证，但不代表真实语义质量。
